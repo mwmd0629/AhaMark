@@ -1,0 +1,57 @@
+# AhaMark 第八部分最终交接（2026-07-22）
+
+第一部分的可审计基线入口为 `PROJECT-BASELINE.md`；能力状态以 `CAPABILITY-EVIDENCE-MATRIX.md` 为准。下文“通过”只描述既有检查记录，不自动表示生产可用。
+
+## 最终结论
+
+验收等级：**C（内部演示或开发测试）**。内部合成数据演示可用；不建议受控真实教学试点；不适合生产。原因不是主观题 AI unavailable，而是全业务浏览器 E2E、完整资源隔离矩阵、异步/并发性能、完整恶意文件 fixture、MinIO 恢复仍未完成。
+
+## 真实状态
+
+- 服务：核心六服务均 healthy；可选 Nginx proxy 配置与语法通过。栈保持运行，三个命名卷保留。
+- 数据库：活动库 `0010_report_student (head)`；独立空库 upgrade、`0010→0009→0010` 通过。
+- 认证：scrypt、数据库 Session、HttpOnly/SameSite、production Secure、CSRF、撤销/过期、禁用用户、production 禁 demo 已实现并测试。
+- OCR：RapidOCR 3.9.2 available；公式 OCR unavailable。Submission OCR 链路已有自动化，未做 150–250 页吞吐。
+- Grading/Review：客观题规则评分、三栏复核、人工评分、批量资格和一致性已实现；主观题真实 AI Provider unavailable，必须人工评分。
+- Snapshot/Release：唯一成绩来源为 finalized Submission 的最新 complete Snapshot；GradeRelease 固定 Snapshot，incomplete 不发布。
+- XLSX/PDF：既有真实 Celery/MinIO 冒烟与自动化通过；本轮没有重新完成 30–50 份 PDF 容量测试。
+- Analytics：35 请求真实 HTTP 和 6 步无头 Edge 冒烟重跑通过；四类下钻、趋势、学生详情、规则 Insight 可用。
+
+## 第八部分变更
+
+- P0：修复通用文件元数据、删除、签名 URL 无认证/无 owner 校验。
+- P1：统一上传内容检查；PDF/图片/Office 安全限制；学生作业整批先验后存；存储错误回滚。
+- P1：Worker late ack、worker lost 重投、soft/hard time limit、prefetch=1。
+- 增加 Nginx 本地代理、安全响应头、上传与超时限制。
+- 增加 2×50 人幂等合成数据、精确 marker 清理和延迟脚本。
+- 增加只读 MinIO/数据库孤儿扫描。
+- 增加性能、安全、文件策略、运维和最终验收文档。
+
+## 验证汇总
+
+- 后端基线：43 passed；修改后 45 passed，1 条第三方 Starlette 弃用警告。
+- 前端：10 files / 20 tests passed；Prettier、ESLint、TypeScript 通过。
+- Next build：通过；仍有 lockfile SWC 自动修补失败警告（未阻断构建）。
+- 性能：五类同步接口 100%；P95 为 40.51–88.18 ms。仅单客户端开发冒烟。
+- 文件安全：代码加固与小型自动化通过；完整 fixture 矩阵 PARTIAL。
+- 隔离：Analytics 14 项真实跨教师拒绝 + 文件 3 类自动化拒绝；完整矩阵 PARTIAL。
+- Worker：pause 时 `/ready` degraded/0 worker；unpause 后 pong 且 healthy。
+- 代理：登录 200、缺 CSRF 403、正确退出 204、CSP/nosniff 可见。
+- PostgreSQL 恢复：独立库恢复并验证 users/classes/assignments/submissions/snapshots/releases = 3/4/5/8/8/3。
+- MinIO 恢复：NOT RUN；只读孤儿扫描发现合成 PDF 缺对象 1 条、旧 smoke 对象缺记录 1 条，未删除。
+
+## 启动、停止与恢复
+
+启动：`docker compose up --build -d`。代理：`docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d proxy`。停止且保留数据：`docker compose stop`。严禁 `down -v`。失败任务通过 API retry 创建新任务；数据库/对象恢复流程见 `docs/OPERATIONS.md`。
+
+## 生产阻塞项
+
+1. 全业务 A–H 浏览器 E2E 未建立。
+2. Class 至 TeachingInsight 的完整跨教师操作矩阵未跑完。
+3. OCR、报告、Analytics 并发/吞吐、CPU、内存、队列等待与慢 SQL未测。
+4. 恶意文件所有 fixture 与真实签名 URL 到期测试未跑完。
+5. MinIO 备份恢复、Redis/MinIO 中断恢复未验证。
+6. 开发 Compose 暴露 MinIO 端口，未提供正式 TLS/secret/监控平台配置。
+7. 仓库无任何基线提交，全部成果未跟踪，无法可靠审计变更历史。
+
+后续维护先从 `docs/FINAL-ACCEPTANCE.md` 的 NOT RUN/PARTIAL 项开始，不要扩展学生端或宣称主观题 AI 自动评分。本任务没有提交、推送或部署。

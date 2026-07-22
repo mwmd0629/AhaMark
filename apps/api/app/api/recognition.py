@@ -1,0 +1,699 @@
+import io
+import uuid
+from decimal import Decimal
+from typing import Annotated, Any, Literal
+
+from app.api.actor import Actor
+from app.api.domain import ApiProblem, audit
+from app.core.config import get_settings
+from app.db.session import get_db
+from app.models import (
+    Assignment,
+    CandidateStatus,
+    PageProcessingResult,
+    PageRecognitionStatus,
+    PaperPage,
+    PaperVersion,
+    Question,
+    QuestionCandidate,
+    QuestionCandidateRegion,
+    QuestionRegion,
+    RecognitionBlock,
+    RecognitionCorrection,
+    RecognitionJob,
+    RecognitionStatus,
+    StoredFile,
+    VersionStatus,
+    now_utc,
+)
+from app.recognition.pipeline import (
+    DefaultDocumentConverter,
+    PillowPreprocessor,
+    RecognitionError,
+    derivative_key,
+    provider_from_settings,
+    read_all,
+    store_artifact,
+)
+from app.storage.base import ObjectStorage
+from app.storage.dependencies import get_storage
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, Field, model_validator
+from sqlalchemy import delete, func, select
+from sqlalchemy.orm import Session
+
+router = APIRouter(prefix="/api/assignments/{assignment_id}/recognition", tags=["recognition"])
+Db = Annotated[Session, Depends(get_db)]
+Storage = Annotated[ObjectStorage, Depends(get_storage)]
+
+
+class StartRecognition(BaseModel):
+    paper_version_id: uuid.UUID
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+class CandidatePatch(BaseModel):
+    temporary_number: str | None = Field(None, max_length=80)
+    question_type: str | None = None
+    content_text: str | None = None
+    content_latex: str | None = None
+    suggested_score: Decimal | None = Field(None, gt=0)
+    status: Literal["accepted", "edited", "rejected"] | None = None
+
+
+class ConfirmInput(BaseModel):
+    candidate_ids: list[uuid.UUID]
+
+
+class PageAdjustment(BaseModel):
+    rotation: Literal[0, 90, 180, 270] = 0
+    crop: dict[str, float] | None = None
+
+    @model_validator(mode="after")
+    def valid_crop(self) -> "PageAdjustment":
+        if self.crop:
+            x, y = self.crop.get("x", -1), self.crop.get("y", -1)
+            w, h = self.crop.get("width", 0), self.crop.get("height", 0)
+            if x < 0 or y < 0 or w <= 0 or h <= 0 or x + w > 1 or y + h > 1:
+                raise ValueError("裁切区域必须位于 0..1 页面坐标内")
+        return self
+
+
+def context(
+    db: Session, actor_id: uuid.UUID, assignment_id: uuid.UUID
+) -> tuple[Assignment, PaperVersion]:
+    assignment = db.scalar(
+        select(Assignment).where(Assignment.id == assignment_id, Assignment.owner_id == actor_id)
+    )
+    if not assignment:
+        raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    version = (
+        db.get(PaperVersion, assignment.active_paper_version_id)
+        if assignment.active_paper_version_id
+        else None
+    )
+    if not version:
+        raise ApiProblem(409, "RECOGNITION_JOB_STATE_CONFLICT", "作业尚无试卷版本")
+    return assignment, version
+
+
+def owned_job(
+    db: Session, actor_id: uuid.UUID, assignment_id: uuid.UUID, job_id: uuid.UUID
+) -> RecognitionJob:
+    job = db.scalar(
+        select(RecognitionJob).where(
+            RecognitionJob.id == job_id,
+            RecognitionJob.owner_id == actor_id,
+            RecognitionJob.assignment_id == assignment_id,
+        )
+    )
+    if not job:
+        raise ApiProblem(404, "RECOGNITION_JOB_NOT_FOUND", "识别任务不存在")
+    return job
+
+
+def job_json(db: Session, job: RecognitionJob) -> dict[str, Any]:
+    pages = list(
+        db.scalars(
+            select(PageProcessingResult).where(PageProcessingResult.recognition_job_id == job.id)
+        ).all()
+    )
+    return {
+        "id": str(job.id),
+        "assignment_id": str(job.assignment_id),
+        "paper_version_id": str(job.paper_version_id),
+        "status": job.status,
+        "stage": job.stage,
+        "progress": job.progress,
+        "provider": job.provider,
+        "provider_version": job.provider_version,
+        "config_version": job.config_version,
+        "attempt": job.attempt,
+        "error_code": job.error_code,
+        "error_message": job.error_message,
+        "started_at": job.started_at,
+        "completed_at": job.completed_at,
+        "page_summary": {
+            "total": len(pages),
+            "completed": sum(x.status == PageRecognitionStatus.completed for x in pages),
+            "failed": sum(x.status == PageRecognitionStatus.failed for x in pages),
+            "stale": sum(x.status == PageRecognitionStatus.stale for x in pages),
+        },
+    }
+
+
+def dispatch_recognition_job(db: Session, job: RecognitionJob) -> None:
+    """Publish only the durable job identifier; DB remains the user-visible truth."""
+    try:
+        from workers.tasks.ocr import run_recognition
+
+        run_recognition.delay(str(job.id))
+    except Exception as exc:
+        job.status = RecognitionStatus.failed
+        job.error_code = "WORKER_UNAVAILABLE"
+        job.error_message = f"识别任务无法发送到 Worker：{type(exc).__name__}"
+        job.failed_at = now_utc()
+        db.commit()
+        raise ApiProblem(503, "WORKER_UNAVAILABLE", "Redis 或 Celery Worker 不可用") from exc
+
+
+def run_recognition_job(db: Session, storage: ObjectStorage, job_id: uuid.UUID) -> None:
+    settings = get_settings()
+    job = db.get(RecognitionJob, job_id)
+    if not job:
+        return
+    provider = provider_from_settings(settings)
+    available, reason = provider.available()
+    if not available:
+        job.status = RecognitionStatus.failed
+        job.error_code = "RECOGNITION_PROVIDER_UNAVAILABLE"
+        job.error_message = reason
+        job.failed_at = now_utc()
+        db.commit()
+        return
+    job.status = RecognitionStatus.running
+    job.started_at = now_utc()
+    job.attempt += 1
+    converter = DefaultDocumentConverter(settings)
+    preprocessor = PillowPreprocessor()
+    pages = list(
+        db.scalars(
+            select(PaperPage)
+            .where(PaperPage.paper_version_id == job.paper_version_id)
+            .order_by(PaperPage.page_number)
+        ).all()
+    )
+    failures = 0
+    for index, page in enumerate(pages):
+        result = db.scalar(
+            select(PageProcessingResult).where(
+                PageProcessingResult.recognition_job_id == job.id,
+                PageProcessingResult.paper_page_id == page.id,
+            )
+        )
+        if not result:
+            result = PageProcessingResult(
+                recognition_job_id=job.id,
+                paper_page_id=page.id,
+                status=PageRecognitionStatus.pending,
+            )
+            db.add(result)
+            db.flush()
+        result.status = PageRecognitionStatus.running
+        result.stage = "converting"
+        result.progress = 5
+        try:
+            source = db.get(StoredFile, page.stored_file_id)
+            if not source:
+                raise RecognitionError("PAGE_CONVERSION_FAILED", "页面原文件不存在")
+            original = converter.convert(
+                read_all(storage.get(source.storage_key)),
+                source.content_type,
+                page.source_page_number or 1,
+            )
+            rendered_key = derivative_key(job.owner_id, job.id, page.id, "rendered")
+            store_artifact(storage, rendered_key, original)
+            result.rendered_storage_key = rendered_key
+            result.original_storage_key = source.storage_key
+            result.stage = "preprocessing"
+            result.progress = 35
+            params: dict[str, object] = {"rotation": 0, "denoise": True, "contrast": True}
+            processed = preprocessor.process(original, params)
+            processed_key = derivative_key(job.owner_id, job.id, page.id, "processed")
+            store_artifact(storage, processed_key, processed)
+            thumb_image = __import__("PIL.Image", fromlist=["Image"]).open(
+                io.BytesIO(processed.content)
+            )
+            thumb_image.thumbnail((360, 480))
+            thumb_buffer = io.BytesIO()
+            thumb_image.save(thumb_buffer, "PNG")
+            from app.recognition.pipeline import PageArtifact
+
+            thumbnail = PageArtifact(thumb_buffer.getvalue(), thumb_image.width, thumb_image.height)
+            thumb_key = derivative_key(job.owner_id, job.id, page.id, "thumbnail")
+            store_artifact(storage, thumb_key, thumbnail)
+            result.processed_storage_key = processed_key
+            result.thumbnail_storage_key = thumb_key
+            result.width = processed.width
+            result.height = processed.height
+            result.processing_parameters = params
+            result.quality_score = Decimal("0.80")
+            result.blur_score = Decimal("0.50")
+            result.shadow_score = Decimal("0.50")
+            page.width = processed.width
+            page.height = processed.height
+            page.preview_storage_key = rendered_key
+            page.thumbnail_storage_key = thumb_key
+            result.stage = "text_recognition"
+            result.progress = 70
+            db.execute(
+                delete(RecognitionBlock).where(
+                    RecognitionBlock.recognition_job_id == job.id,
+                    RecognitionBlock.paper_page_id == page.id,
+                )
+            )
+            blocks = provider.recognize(processed)
+            for order, recognized_block in enumerate(blocks, 1):
+                x, y, width, height = recognized_block.region
+                db.add(
+                    RecognitionBlock(
+                        recognition_job_id=job.id,
+                        paper_page_id=page.id,
+                        block_type=recognized_block.block_type,
+                        display_order=order,
+                        text=recognized_block.text,
+                        latex=recognized_block.latex,
+                        confidence=recognized_block.confidence,
+                        language="zh-Hans",
+                        x=x,
+                        y=y,
+                        width=width,
+                        height=height,
+                        source=f"{provider.name}:{provider.version}",
+                        status=recognized_block.status,
+                    )
+                )
+            result.status = PageRecognitionStatus.completed
+            result.stage = "completed"
+            result.progress = 100
+        except RecognitionError as exc:
+            failures += 1
+            result.status = PageRecognitionStatus.failed
+            result.error_code = exc.code
+            result.error_message = str(exc)
+        except Exception:
+            failures += 1
+            result.status = PageRecognitionStatus.failed
+            result.error_code = "RECOGNITION_FAILED"
+            result.error_message = "页面识别失败，可单页重试"
+        job.progress = round((index + 1) / max(1, len(pages)) * 85)
+        db.commit()
+    job.stage = "structuring"
+    db.execute(delete(QuestionCandidate).where(QuestionCandidate.recognition_job_id == job.id))
+    for block in db.scalars(
+        select(RecognitionBlock).where(
+            RecognitionBlock.recognition_job_id == job.id,
+            RecognitionBlock.block_type == "question_number",
+        )
+    ).all():
+        candidate = QuestionCandidate(
+            recognition_job_id=job.id,
+            paper_version_id=job.paper_version_id,
+            temporary_number=str(block.display_order),
+            question_type="other",
+            content_text=block.text,
+            confidence=block.confidence,
+            source=f"{provider.name}:{provider.version}",
+        )
+        db.add(candidate)
+        db.flush()
+        db.add(
+            QuestionCandidateRegion(
+                question_candidate_id=candidate.id,
+                paper_page_id=block.paper_page_id,
+                x=block.x,
+                y=block.y,
+                width=block.width,
+                height=block.height,
+                confidence=block.confidence,
+            )
+        )
+    job.stage = "completed"
+    job.progress = 100
+    job.completed_at = now_utc()
+    job.status = (
+        RecognitionStatus.failed
+        if failures == len(pages)
+        else (RecognitionStatus.partially_completed if failures else RecognitionStatus.completed)
+    )
+    db.commit()
+
+
+@router.get("/providers")
+def providers(assignment_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
+    assignment = db.scalar(
+        select(Assignment).where(Assignment.id == assignment_id, Assignment.owner_id == actor.id)
+    )
+    if not assignment:
+        raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    provider = provider_from_settings(get_settings())
+    available, reason = provider.available()
+    return {
+        "provider": provider.name,
+        "version": provider.version,
+        "available": available,
+        "demo": provider.is_demo,
+        "reason": reason,
+        "formula": {"provider": "unavailable", "available": False, "reason": "未配置公式识别模型"},
+    }
+
+
+@router.post("/jobs", status_code=201)
+def create_job(
+    assignment_id: uuid.UUID,
+    data: StartRecognition,
+    db: Db,
+    actor: Actor,
+    storage: Storage,
+    run_now: bool = Query(False),
+) -> dict[str, Any]:
+    assignment, version = context(db, actor.id, assignment_id)
+    if version.id != data.paper_version_id or version.status not in {
+        VersionStatus.draft,
+        VersionStatus.processing,
+        VersionStatus.ready,
+    }:
+        raise ApiProblem(409, "RECOGNITION_JOB_STATE_CONFLICT", "当前试卷版本不能启动识别")
+    existing = db.scalar(
+        select(RecognitionJob).where(
+            RecognitionJob.owner_id == actor.id,
+            RecognitionJob.idempotency_key == data.idempotency_key,
+        )
+    )
+    if existing:
+        return job_json(db, existing)
+    provider = provider_from_settings(get_settings())
+    available, reason = provider.available()
+    if not available:
+        raise ApiProblem(503, "RECOGNITION_PROVIDER_UNAVAILABLE", reason or "识别器不可用")
+    job = RecognitionJob(
+        owner_id=actor.id,
+        assignment_id=assignment.id,
+        paper_version_id=version.id,
+        provider=provider.name,
+        provider_version=provider.version,
+        config_version=get_settings().recognition_config_version,
+        idempotency_key=data.idempotency_key,
+    )
+    db.add(job)
+    audit(db, actor.id, "recognition.job.create", "recognition_job", job.id)
+    db.commit()
+    if run_now:
+        run_recognition_job(db, storage, job.id)
+    else:
+        dispatch_recognition_job(db, job)
+    return job_json(db, job)
+
+
+@router.get("/jobs/{job_id}")
+def get_job(assignment_id: uuid.UUID, job_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
+    return job_json(db, owned_job(db, actor.id, assignment_id, job_id))
+
+
+@router.get("/jobs/{job_id}/pages")
+def get_pages(
+    assignment_id: uuid.UUID, job_id: uuid.UUID, db: Db, actor: Actor, storage: Storage
+) -> list[dict[str, Any]]:
+    job = owned_job(db, actor.id, assignment_id, job_id)
+    rows = db.scalars(
+        select(PageProcessingResult).where(PageProcessingResult.recognition_job_id == job.id)
+    ).all()
+    return [
+        {
+            "id": str(x.id),
+            "paper_page_id": str(x.paper_page_id),
+            "status": x.status,
+            "stage": x.stage,
+            "progress": x.progress,
+            "width": x.width,
+            "height": x.height,
+            "quality_score": str(x.quality_score) if x.quality_score is not None else None,
+            "error_code": x.error_code,
+            "error_message": x.error_message,
+            "rendered_url": storage.presigned_get(x.rendered_storage_key, 300)
+            if x.rendered_storage_key
+            else None,
+            "processed_url": storage.presigned_get(x.processed_storage_key, 300)
+            if x.processed_storage_key
+            else None,
+            "thumbnail_url": storage.presigned_get(x.thumbnail_storage_key, 300)
+            if x.thumbnail_storage_key
+            else None,
+            "processing_parameters": x.processing_parameters,
+        }
+        for x in rows
+    ]
+
+
+@router.get("/jobs/{job_id}/blocks")
+def get_blocks(
+    assignment_id: uuid.UUID,
+    job_id: uuid.UUID,
+    db: Db,
+    actor: Actor,
+    page_id: uuid.UUID | None = None,
+) -> list[dict[str, Any]]:
+    job = owned_job(db, actor.id, assignment_id, job_id)
+    query = select(RecognitionBlock).where(RecognitionBlock.recognition_job_id == job.id)
+    if page_id:
+        query = query.where(RecognitionBlock.paper_page_id == page_id)
+    return [
+        {
+            "id": str(x.id),
+            "paper_page_id": str(x.paper_page_id),
+            "block_type": x.block_type,
+            "text": x.text,
+            "latex": x.latex,
+            "confidence": str(x.confidence) if x.confidence is not None else None,
+            "region": {
+                "x": str(x.x),
+                "y": str(x.y),
+                "width": str(x.width),
+                "height": str(x.height),
+            },
+            "source": x.source,
+            "status": x.status,
+        }
+        for x in db.scalars(query.order_by(RecognitionBlock.display_order)).all()
+    ]
+
+
+def candidate_json(db: Session, x: QuestionCandidate) -> dict[str, Any]:
+    regions = db.scalars(
+        select(QuestionCandidateRegion).where(QuestionCandidateRegion.question_candidate_id == x.id)
+    ).all()
+    return {
+        "id": str(x.id),
+        "temporary_number": x.temporary_number,
+        "question_type": x.question_type,
+        "content_text": x.content_text,
+        "content_latex": x.content_latex,
+        "suggested_score": str(x.suggested_score) if x.suggested_score is not None else None,
+        "confidence": str(x.confidence) if x.confidence is not None else None,
+        "status": x.status,
+        "source": x.source,
+        "confirmed_question_id": str(x.confirmed_question_id) if x.confirmed_question_id else None,
+        "regions": [
+            {
+                "paper_page_id": str(r.paper_page_id),
+                "x": str(r.x),
+                "y": str(r.y),
+                "width": str(r.width),
+                "height": str(r.height),
+            }
+            for r in regions
+        ],
+    }
+
+
+@router.get("/jobs/{job_id}/candidates")
+def get_candidates(
+    assignment_id: uuid.UUID, job_id: uuid.UUID, db: Db, actor: Actor
+) -> list[dict[str, Any]]:
+    job = owned_job(db, actor.id, assignment_id, job_id)
+    return [
+        candidate_json(db, x)
+        for x in db.scalars(
+            select(QuestionCandidate)
+            .where(QuestionCandidate.recognition_job_id == job.id)
+            .order_by(QuestionCandidate.created_at)
+        ).all()
+    ]
+
+
+@router.patch("/jobs/{job_id}/candidates/{candidate_id}")
+def patch_candidate(
+    assignment_id: uuid.UUID,
+    job_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    data: CandidatePatch,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    job = owned_job(db, actor.id, assignment_id, job_id)
+    candidate = db.scalar(
+        select(QuestionCandidate).where(
+            QuestionCandidate.id == candidate_id, QuestionCandidate.recognition_job_id == job.id
+        )
+    )
+    if not candidate:
+        raise ApiProblem(404, "QUESTION_CANDIDATE_INVALID", "候选题目不存在")
+    for field, value in data.model_dump(exclude_unset=True).items():
+        old = getattr(candidate, field)
+        db.add(
+            RecognitionCorrection(
+                recognition_job_id=job.id,
+                target_type="candidate",
+                target_id=candidate.id,
+                field=field,
+                original_value=str(old) if old is not None else None,
+                corrected_value=str(value) if value is not None else None,
+                actor_id=actor.id,
+            )
+        )
+        setattr(candidate, field, value)
+    if data.status is None:
+        candidate.status = CandidateStatus.edited
+    audit(db, actor.id, "recognition.candidate.update", "question_candidate", candidate.id)
+    db.commit()
+    return candidate_json(db, candidate)
+
+
+@router.post("/jobs/{job_id}/confirm")
+def confirm(
+    assignment_id: uuid.UUID, job_id: uuid.UUID, data: ConfirmInput, db: Db, actor: Actor
+) -> dict[str, Any]:
+    job = owned_job(db, actor.id, assignment_id, job_id)
+    if job.status not in {RecognitionStatus.completed, RecognitionStatus.partially_completed}:
+        raise ApiProblem(409, "RECOGNITION_JOB_STATE_CONFLICT", "任务尚未完成")
+    candidates = list(
+        db.scalars(
+            select(QuestionCandidate).where(
+                QuestionCandidate.recognition_job_id == job.id,
+                QuestionCandidate.id.in_(data.candidate_ids),
+            )
+        ).all()
+    )
+    if len(candidates) != len(set(data.candidate_ids)):
+        raise ApiProblem(422, "QUESTION_CANDIDATE_INVALID", "候选题目集合无效")
+    existing_order = (
+        db.scalar(
+            select(func.max(Question.display_order)).where(
+                Question.paper_version_id == job.paper_version_id
+            )
+        )
+        or 0
+    )
+    created = []
+    for offset, candidate in enumerate(candidates, 1):
+        if candidate.confirmed_question_id:
+            created.append(str(candidate.confirmed_question_id))
+            continue
+        if candidate.status == CandidateStatus.rejected:
+            continue
+        question = Question(
+            paper_version_id=job.paper_version_id,
+            question_number=candidate.temporary_number,
+            display_order=existing_order + offset,
+            question_type=candidate.question_type,
+            content_text=candidate.content_text,
+            content_latex=candidate.content_latex,
+            max_score=candidate.suggested_score,
+            source="ocr",
+        )
+        db.add(question)
+        db.flush()
+        for region in db.scalars(
+            select(QuestionCandidateRegion).where(
+                QuestionCandidateRegion.question_candidate_id == candidate.id
+            )
+        ).all():
+            db.add(
+                QuestionRegion(
+                    question_id=question.id,
+                    paper_page_id=region.paper_page_id,
+                    x=region.x,
+                    y=region.y,
+                    width=region.width,
+                    height=region.height,
+                    source="ocr",
+                    confidence=region.confidence,
+                )
+            )
+        candidate.confirmed_question_id = question.id
+        candidate.status = CandidateStatus.accepted
+        created.append(str(question.id))
+    audit(
+        db,
+        actor.id,
+        "recognition.candidates.confirm",
+        "recognition_job",
+        job.id,
+        {"created_question_ids": created},
+    )
+    db.commit()
+    return {"created_question_ids": created}
+
+
+@router.post("/jobs/{job_id}/retry")
+def retry_job(
+    assignment_id: uuid.UUID, job_id: uuid.UUID, db: Db, actor: Actor, storage: Storage
+) -> dict[str, Any]:
+    job = owned_job(db, actor.id, assignment_id, job_id)
+    if job.status in {RecognitionStatus.running, RecognitionStatus.queued}:
+        raise ApiProblem(409, "RECOGNITION_JOB_ALREADY_RUNNING", "识别任务正在运行")
+    job.status = RecognitionStatus.queued
+    job.error_code = None
+    job.error_message = None
+    db.commit()
+    dispatch_recognition_job(db, job)
+    return job_json(db, job)
+
+
+@router.post("/jobs/{job_id}/pages/{page_id}/retry")
+def retry_page(
+    assignment_id: uuid.UUID,
+    job_id: uuid.UUID,
+    page_id: uuid.UUID,
+    db: Db,
+    actor: Actor,
+    storage: Storage,
+) -> dict[str, Any]:
+    job = owned_job(db, actor.id, assignment_id, job_id)
+    result = db.scalar(
+        select(PageProcessingResult).where(
+            PageProcessingResult.recognition_job_id == job.id,
+            PageProcessingResult.paper_page_id == page_id,
+        )
+    )
+    if not result:
+        raise ApiProblem(404, "PAGE_CONVERSION_FAILED", "页面处理记录不存在")
+    result.status = PageRecognitionStatus.pending
+    db.commit()
+    dispatch_recognition_job(db, job)
+    return job_json(db, job)
+
+
+@router.post("/jobs/{job_id}/pages/{page_id}/adjust")
+def adjust_page(
+    assignment_id: uuid.UUID,
+    job_id: uuid.UUID,
+    page_id: uuid.UUID,
+    data: PageAdjustment,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    job = owned_job(db, actor.id, assignment_id, job_id)
+    result = db.scalar(
+        select(PageProcessingResult).where(
+            PageProcessingResult.recognition_job_id == job.id,
+            PageProcessingResult.paper_page_id == page_id,
+        )
+    )
+    if not result:
+        raise ApiProblem(404, "PAGE_CONVERSION_FAILED", "页面处理记录不存在")
+    result.applied_rotation = data.rotation
+    result.crop_region = data.crop
+    result.processing_parameters = {
+        **result.processing_parameters,
+        "rotation": data.rotation,
+        "crop": data.crop,
+    }
+    result.status = PageRecognitionStatus.stale
+    audit(db, actor.id, "recognition.page.adjust", "paper_page", page_id)
+    db.commit()
+    return {
+        "paper_page_id": str(page_id),
+        "status": result.status,
+        "processing_parameters": result.processing_parameters,
+    }

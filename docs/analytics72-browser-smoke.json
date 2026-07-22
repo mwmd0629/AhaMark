@@ -1,0 +1,11 @@
+{
+  "result": "passed",
+  "steps": [
+    "teacher_a_login",
+    "analytics_loaded",
+    "score_band_drilldown",
+    "insight_edit_confirm",
+    "student_and_knowledge_trends",
+    "teacher_b_denied"
+  ]
+}

@@ -1,0 +1,577 @@
+{
+  "result": "passed",
+  "assertions": {
+    "release_participants": [
+      3,
+      2,
+      3
+    ],
+    "missing_assignment_not_zero": true,
+    "cross_teacher_hidden": true
+  },
+  "requests": [
+    {
+      "method": "POST",
+      "path": "/auth/login",
+      "status": 200,
+      "request_id": "4ba4c692-a96b-4a65-9aee-a83f8de9516b",
+      "schema": [
+        "display_name",
+        "email",
+        "id"
+      ],
+      "core": {
+        "id": "1653571d-39f5-5f6f-a7c9-dcfc4f30e2d1"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/analytics/f9ab59b6-ea57-575d-8d92-e5db16877a1e/score-bands/90-100/students?page=1&page_size=1&sort=student_number",
+      "status": 200,
+      "request_id": "aa8a9b00-030f-429c-a075-aad8aab0e1f3",
+      "schema": [
+        "items",
+        "page",
+        "page_size",
+        "pages",
+        "total"
+      ],
+      "core": {
+        "total": 2,
+        "pages": 2
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/analytics/f9ab59b6-ea57-575d-8d92-e5db16877a1e/score-bands/90-100/students?page=2&page_size=1&sort=student_number",
+      "status": 200,
+      "request_id": "0e2b05f0-cf69-4aa8-880f-bb9636f3316b",
+      "schema": [
+        "items",
+        "page",
+        "page_size",
+        "pages",
+        "total"
+      ],
+      "core": {
+        "total": 2,
+        "pages": 2
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/analytics/f9ab59b6-ea57-575d-8d92-e5db16877a1e/questions/183ebcbf-507f-525e-97c3-a6c074e062da/students?score_filter=full",
+      "status": 200,
+      "request_id": "a235da2e-4745-460b-98f7-357b5e31a58e",
+      "schema": [
+        "items",
+        "page",
+        "page_size",
+        "pages",
+        "total"
+      ],
+      "core": {
+        "total": 3,
+        "pages": 1
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/analytics/f9ab59b6-ea57-575d-8d92-e5db16877a1e/knowledge-points/ccf39fc1-c70b-5aaf-ae1e-c9d29d2642ef",
+      "status": 200,
+      "request_id": "76170658-e026-4718-9987-b32c1f5218c3",
+      "schema": [
+        "grade_release_id",
+        "items",
+        "knowledge_point_id",
+        "knowledge_point_name",
+        "page",
+        "page_size",
+        "pages",
+        "questions",
+        "sample_warning",
+        "scoring_rule",
+        "total"
+      ],
+      "core": {
+        "total": 3,
+        "pages": 1
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/analytics/f9ab59b6-ea57-575d-8d92-e5db16877a1e/errors/calculation",
+      "status": 200,
+      "request_id": "75c2ba9f-25a3-449f-800b-83141c74a020",
+      "schema": [
+        "items",
+        "page",
+        "page_size",
+        "pages",
+        "total"
+      ],
+      "core": {
+        "total": 3,
+        "pages": 1
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/classes/00fd28cd-204d-5c73-9e98-a683418ded19/analytics/trends",
+      "status": 200,
+      "request_id": "cb4e3241-5807-40e0-a602-2a981196b266",
+      "schema": [
+        "items",
+        "page",
+        "page_size",
+        "pages",
+        "total"
+      ],
+      "core": {
+        "total": 3,
+        "pages": 1
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/students/abfc3ff8-7529-542d-864d-7581051b832e/analytics/trends",
+      "status": 200,
+      "request_id": "07b04e12-e1d9-4d2e-8b5c-134cd27eb898",
+      "schema": [
+        "items",
+        "page",
+        "page_size",
+        "pages",
+        "total"
+      ],
+      "core": {
+        "total": 2,
+        "pages": 1
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/classes/00fd28cd-204d-5c73-9e98-a683418ded19/knowledge-points/ec2403e5-bfee-56f1-9d48-0cd6c32eea3c/trend",
+      "status": 200,
+      "request_id": "9566b6ed-40ac-4dd1-b6bb-17cbcc030b67",
+      "schema": [
+        "items",
+        "scoring_rule"
+      ],
+      "core": {}
+    },
+    {
+      "method": "GET",
+      "path": "/api/students/69467579-5a9e-522d-9b02-ff5814690fd2/knowledge-points/ec2403e5-bfee-56f1-9d48-0cd6c32eea3c/trend",
+      "status": 200,
+      "request_id": "c5ae763f-21ad-4faa-9f73-5d5788ec62db",
+      "schema": [
+        "items",
+        "scoring_rule"
+      ],
+      "core": {}
+    },
+    {
+      "method": "GET",
+      "path": "/api/students/69467579-5a9e-522d-9b02-ff5814690fd2/analytics",
+      "status": 200,
+      "request_id": "ba4e258b-51f3-4a10-a1c5-45f61235217e",
+      "schema": [
+        "current",
+        "history",
+        "questions",
+        "report_jobs",
+        "score_revisions",
+        "student",
+        "teacher_comments"
+      ],
+      "core": {}
+    },
+    {
+      "method": "GET",
+      "path": "/api/students/69467579-5a9e-522d-9b02-ff5814690fd2/report-jobs",
+      "status": 200,
+      "request_id": "fda61964-80a3-44ff-aaf2-7f1e02f66fb5",
+      "schema": "list",
+      "core": {
+        "count": 6
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/report-jobs/fb36a969-fb31-5e2b-b886-dc3123639517/retry",
+      "status": 201,
+      "request_id": "a82421f3-bcb9-4835-b42f-6cff5615ced5",
+      "schema": [
+        "completed_at",
+        "created_at",
+        "error_code",
+        "error_message",
+        "expires_at",
+        "grade_release_id",
+        "id",
+        "progress",
+        "report_type",
+        "started_at",
+        "status",
+        "stored_file_id",
+        "student_id"
+      ],
+      "core": {
+        "status": "queued",
+        "id": "eb010f63-c719-42c9-800c-2806882f1415"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/analytics/f9ab59b6-ea57-575d-8d92-e5db16877a1e/insights",
+      "status": 201,
+      "request_id": "594ea371-0d72-46c5-84c2-cb8c4551f29d",
+      "schema": [
+        "content",
+        "evidence",
+        "id",
+        "provider",
+        "status"
+      ],
+      "core": {
+        "status": "generated",
+        "id": "6c2bfdec-5fb1-4e12-9c65-edd8184d5107"
+      }
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/teaching-insights/6c2bfdec-5fb1-4e12-9c65-edd8184d5107",
+      "status": 200,
+      "request_id": "355e231b-5f0f-4e40-870f-37d6beb35dac",
+      "schema": [
+        "analytics_snapshot_id",
+        "content",
+        "created_at",
+        "evidence",
+        "id",
+        "provider",
+        "provider_label",
+        "status",
+        "updated_at"
+      ],
+      "core": {
+        "status": "draft",
+        "id": "6c2bfdec-5fb1-4e12-9c65-edd8184d5107"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/teaching-insights/6c2bfdec-5fb1-4e12-9c65-edd8184d5107/confirm",
+      "status": 200,
+      "request_id": "f5a681d7-021d-466e-ba35-1f6ec10047f9",
+      "schema": [
+        "analytics_snapshot_id",
+        "content",
+        "created_at",
+        "evidence",
+        "id",
+        "provider",
+        "provider_label",
+        "status",
+        "updated_at"
+      ],
+      "core": {
+        "status": "confirmed",
+        "id": "6c2bfdec-5fb1-4e12-9c65-edd8184d5107"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/teaching-insights/6c2bfdec-5fb1-4e12-9c65-edd8184d5107/regenerate",
+      "status": 201,
+      "request_id": "f1d029f0-e87d-4688-a354-4c6715d52218",
+      "schema": [
+        "content",
+        "evidence",
+        "id",
+        "provider",
+        "status"
+      ],
+      "core": {
+        "status": "generated",
+        "id": "c450e2b7-8f90-4086-aa46-b0ef87a1831a"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/teaching-insights/c450e2b7-8f90-4086-aa46-b0ef87a1831a/invalidate",
+      "status": 200,
+      "request_id": "3a17e6a4-3319-4a43-b425-6e626addc38e",
+      "schema": [
+        "analytics_snapshot_id",
+        "content",
+        "created_at",
+        "evidence",
+        "id",
+        "provider",
+        "provider_label",
+        "status",
+        "updated_at"
+      ],
+      "core": {
+        "status": "invalid",
+        "id": "c450e2b7-8f90-4086-aa46-b0ef87a1831a"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/analytics/7f870af5-2eab-47f9-bf89-7333db675ddf/score-bands/90-100/students",
+      "status": 404,
+      "request_id": "e94e37a8-a688-4aac-b38f-072dae7adabd",
+      "schema": [
+        "code",
+        "details",
+        "message",
+        "request_id"
+      ],
+      "core": {
+        "code": "ANALYTICS_SNAPSHOT_NOT_FOUND"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/analytics/f9ab59b6-ea57-575d-8d92-e5db16877a1e/score-bands/90-100/students?page=0",
+      "status": 422,
+      "request_id": "cf2ce069-d3f5-4588-8689-4c48a93c3ef5",
+      "schema": [
+        "code",
+        "details",
+        "message",
+        "request_id"
+      ],
+      "core": {
+        "code": "ANALYTICS_DRILLDOWN_INVALID"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/auth/login",
+      "status": 200,
+      "request_id": "739a0d3e-900d-4453-a804-5dde38a4931b",
+      "schema": [
+        "display_name",
+        "email",
+        "id"
+      ],
+      "core": {
+        "id": "7d4fa068-3f53-5143-a535-2b811cf656b2"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/analytics/f9ab59b6-ea57-575d-8d92-e5db16877a1e/score-bands/90-100/students",
+      "status": 404,
+      "request_id": "e7d97788-d273-48d1-b846-aafd35a845b8",
+      "schema": [
+        "code",
+        "details",
+        "message",
+        "request_id"
+      ],
+      "core": {
+        "code": "ANALYTICS_SNAPSHOT_NOT_FOUND"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/analytics/f9ab59b6-ea57-575d-8d92-e5db16877a1e/questions/183ebcbf-507f-525e-97c3-a6c074e062da/students",
+      "status": 404,
+      "request_id": "cab4f34d-0858-4283-a059-939ea123afef",
+      "schema": [
+        "code",
+        "details",
+        "message",
+        "request_id"
+      ],
+      "core": {
+        "code": "ANALYTICS_SNAPSHOT_NOT_FOUND"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/analytics/f9ab59b6-ea57-575d-8d92-e5db16877a1e/knowledge-points/ccf39fc1-c70b-5aaf-ae1e-c9d29d2642ef",
+      "status": 404,
+      "request_id": "8780ccd0-a6ac-47e0-ae18-2b4d4cd37021",
+      "schema": [
+        "code",
+        "details",
+        "message",
+        "request_id"
+      ],
+      "core": {
+        "code": "ANALYTICS_SNAPSHOT_NOT_FOUND"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/analytics/f9ab59b6-ea57-575d-8d92-e5db16877a1e/errors/calculation",
+      "status": 404,
+      "request_id": "fd891f04-7256-4351-baf6-958198235a31",
+      "schema": [
+        "code",
+        "details",
+        "message",
+        "request_id"
+      ],
+      "core": {
+        "code": "ANALYTICS_SNAPSHOT_NOT_FOUND"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/classes/00fd28cd-204d-5c73-9e98-a683418ded19/analytics/trends",
+      "status": 404,
+      "request_id": "e47ed6bc-0e7f-4594-9e76-86e3563d972f",
+      "schema": [
+        "code",
+        "details",
+        "message",
+        "request_id"
+      ],
+      "core": {
+        "code": "ANALYTICS_TREND_NOT_AVAILABLE"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/students/69467579-5a9e-522d-9b02-ff5814690fd2/analytics/trends",
+      "status": 404,
+      "request_id": "08e0da55-84cc-4e4e-a1ca-0d5c2bdd1626",
+      "schema": [
+        "code",
+        "details",
+        "message",
+        "request_id"
+      ],
+      "core": {
+        "code": "STUDENT_ANALYTICS_NOT_FOUND"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/students/69467579-5a9e-522d-9b02-ff5814690fd2/analytics",
+      "status": 404,
+      "request_id": "108db71f-b1b8-4bff-b708-c417cc7df0ca",
+      "schema": [
+        "code",
+        "details",
+        "message",
+        "request_id"
+      ],
+      "core": {
+        "code": "STUDENT_ANALYTICS_NOT_FOUND"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/students/69467579-5a9e-522d-9b02-ff5814690fd2/report-jobs",
+      "status": 404,
+      "request_id": "ae166786-15c7-40d4-9310-469a46f33bb5",
+      "schema": [
+        "code",
+        "details",
+        "message",
+        "request_id"
+      ],
+      "core": {
+        "code": "STUDENT_ANALYTICS_NOT_FOUND"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/report-jobs/5ffd9dfc-be73-5b75-adf8-3e914d0ce7ef",
+      "status": 404,
+      "request_id": "2c54e425-de3a-463e-b1ab-b6310c9aab8b",
+      "schema": [
+        "code",
+        "details",
+        "message",
+        "request_id"
+      ],
+      "core": {
+        "code": "REPORT_JOB_NOT_FOUND"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/report-jobs/5ffd9dfc-be73-5b75-adf8-3e914d0ce7ef/download",
+      "status": 404,
+      "request_id": "eec12242-521f-4400-ae79-1f16a729eaf9",
+      "schema": [
+        "code",
+        "details",
+        "message",
+        "request_id"
+      ],
+      "core": {
+        "code": "REPORT_FILE_NOT_FOUND"
+      }
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/teaching-insights/d5050a87-577a-5540-a3c8-41221623c3c1",
+      "status": 404,
+      "request_id": "0f6c75b8-b97b-474a-b820-d8e74e5f8ca4",
+      "schema": [
+        "code",
+        "details",
+        "message",
+        "request_id"
+      ],
+      "core": {
+        "code": "TEACHING_INSIGHT_NOT_FOUND"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/teaching-insights/d5050a87-577a-5540-a3c8-41221623c3c1/confirm",
+      "status": 404,
+      "request_id": "606f3123-1568-4a28-b206-c4e72e61f527",
+      "schema": [
+        "code",
+        "details",
+        "message",
+        "request_id"
+      ],
+      "core": {
+        "code": "TEACHING_INSIGHT_NOT_FOUND"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/teaching-insights/d5050a87-577a-5540-a3c8-41221623c3c1/regenerate",
+      "status": 404,
+      "request_id": "cd2bd2b2-78d9-4410-a953-352852d5e65d",
+      "schema": [
+        "code",
+        "details",
+        "message",
+        "request_id"
+      ],
+      "core": {
+        "code": "TEACHING_INSIGHT_NOT_FOUND"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/report-jobs/fb36a969-fb31-5e2b-b886-dc3123639517/retry",
+      "status": 404,
+      "request_id": "d66975d1-647e-4455-b614-ee8536ba0b47",
+      "schema": [
+        "code",
+        "details",
+        "message",
+        "request_id"
+      ],
+      "core": {
+        "code": "REPORT_JOB_NOT_FOUND"
+      }
+    }
+  ]
+}

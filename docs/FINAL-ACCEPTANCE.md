@@ -1,0 +1,52 @@
+# AhaMark 最终验收报告
+
+版本 `0.1.0`；日期 2026-07-22；分支 `master`；仓库无基线提交，全部项目文件未跟踪。
+
+本报告中的 `PASS` 仅表示对应验收检查在记录范围内通过，不等于整项能力已完成真实环境验证或达到生产可用。统一能力状态、数据边界和产品措辞以 `PROJECT-BASELINE.md`、`CAPABILITY-EVIDENCE-MATRIX.md`、`DATA-SECURITY-BOUNDARIES.md` 和 `PRODUCT-CAPABILITY-STATEMENTS.md` 为准。
+
+## 最终结论
+
+**等级 C：内部演示或开发测试。** 适合使用纯合成数据内部演示；不适合受控真实教学试点；不适合生产。没有已知未修 P0，但关键 E2E、安全矩阵、异步容量和对象恢复证据不完整。
+
+## 验收矩阵
+
+| 项目 | 状态 | 证据/说明 |
+|---|---|---|
+| 六核心服务 | PASS | web/api/worker/PostgreSQL/Redis/MinIO healthy；栈保持运行 |
+| 数据库迁移 | PASS | 活动库 0010；独立空库 upgrade；0010→0009→0010 |
+| 后端测试 | PASS | 修改前 43 passed；修改后 45 passed，1 条第三方警告 |
+| 前端测试 | PASS | 10 files / 20 tests |
+| 前端格式/lint/type | PASS | Prettier、ESLint、TypeScript |
+| Next production build | PASS | 构建成功；SWC lockfile 修补警告 |
+| Analytics HTTP | PASS | 35 请求，含 14 项 Teacher B 隔离 |
+| Analytics 浏览器 | PASS | 6 步无头 Edge 冒烟 |
+| 全业务浏览器 A–H | NOT RUN | 尚无完整 Playwright 教师闭环 |
+| 全链路 API 集成 | PARTIAL | Analytics 真实 HTTP；其余主要为 TestClient/既有冒烟 |
+| 完整权限矩阵 | PARTIAL | Analytics 与文件隔离通过；全部资源/动作未覆盖 |
+| 成绩正确性 | PASS | complete Snapshot 唯一来源的自动化与既有验证通过 |
+| XLSX/中文 PDF | PASS | 既有自动化与真实 Celery/MinIO 冒烟；本轮未跑容量 |
+| 30–50 人性能 | PARTIAL | 2×50、2×20 题的 5 类同步 API；异步与并发未测 |
+| MIME/恶意文件 | PARTIAL | 统一内容检查和小型回归；完整 fixture 未跑 |
+| Auth/Session/CSRF | PASS | 登录、错误、Cookie、CSRF、过期、撤销、production 边界 |
+| MinIO/签名 URL | PARTIAL | owner 隔离自动化；孤儿扫描 1+1；真实到期和恢复未跑 |
+| Worker 故障 | PARTIAL | pause/unpause 与 ready/pong 通过；Redis 中断/超时任务未跑 |
+| 反向代理 | PASS | nginx -t、health、登录、Cookie、CSRF、安全头 |
+| PostgreSQL 备份恢复 | PASS | 独立库恢复计数 3/4/5/8/8/3 |
+| MinIO 备份恢复 | NOT RUN | 只读孤儿扫描工具已提供 |
+| 可用性/可访问性逐页 | NOT RUN | Analytics 冒烟不能替代完整巡检 |
+| 真实主观题 AI | NOT APPLICABLE | Provider unavailable；主观题人工评分；production 禁 fake |
+
+## 性能摘要
+
+单客户端成功率均 100%。P50/P95：登录 45.48/82.33 ms；班级列表 13.24/40.51 ms；50 人列表 48.73/69.82 ms；作业列表 65.07/88.18 ms；20 题详情 39.02/63.10 ms。没有采集 Worker 总时长、队列等待、查询数、慢 SQL、CPU、峰值内存和大文件大小。
+
+## 修复与风险
+
+- P0 已修：任意对象键可未认证读取元数据、签名或删除。
+- P1 已修：学生作业缺少真实内容/页数/像素检查且解析前写对象。
+- P1 已加固：Worker 崩溃重投和超时配置。
+- P2 未修：Next.js 构建的 SWC lockfile 自动修补警告；构建仍成功。
+
+外部依赖：RapidOCR 可用但不保证手写/公式；公式 OCR unavailable；真实主观题 AI unavailable。发布含义是教师确认版本，不是已发送学生端。
+
+README、HANDOFF、FINAL-ACCEPTANCE 已更新/创建。本任务没有 git add、提交、推送、PR 或部署；没有删除 Volume；Docker 栈保持运行。仓库没有基线提交是高风险：无法区分历史成果与本轮变更，应由用户审阅后建立首个受控基线。

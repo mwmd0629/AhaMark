@@ -1,0 +1,1 @@
+"""Replaceable document-recognition pipeline."""

@@ -1,0 +1,52 @@
+{
+  "result": "passed",
+  "scope": "single-client development latency smoke; async throughput not measured",
+  "fixture": {
+    "classes": 2,
+    "students_per_class": 50,
+    "assignments": 2,
+    "questions_per_assignment": 20
+  },
+  "results": {
+    "login": {
+      "requests": 5,
+      "success_rate": 1.0,
+      "p50_ms": 45.48,
+      "p95_ms": 82.33,
+      "max_ms": 82.33,
+      "request_ids_present": true
+    },
+    "class_list": {
+      "requests": 30,
+      "success_rate": 1.0,
+      "p50_ms": 13.24,
+      "p95_ms": 40.51,
+      "max_ms": 51.56,
+      "request_ids_present": true
+    },
+    "student_list_50": {
+      "requests": 30,
+      "success_rate": 1.0,
+      "p50_ms": 48.73,
+      "p95_ms": 69.82,
+      "max_ms": 160.69,
+      "request_ids_present": true
+    },
+    "assignment_list": {
+      "requests": 30,
+      "success_rate": 1.0,
+      "p50_ms": 65.07,
+      "p95_ms": 88.18,
+      "max_ms": 94.67,
+      "request_ids_present": true
+    },
+    "assignment_detail_20_questions": {
+      "requests": 30,
+      "success_rate": 1.0,
+      "p50_ms": 39.02,
+      "p95_ms": 63.1,
+      "max_ms": 66.84,
+      "request_ids_present": true
+    }
+  }
+}

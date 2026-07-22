@@ -1,0 +1,13 @@
+{
+  "mode": "read_only",
+  "bucket": "ahamark-blocker-test",
+  "database_records": 6,
+  "objects": 6,
+  "database_missing_object": [
+    "synthetic/analytics72.synthetic.invalid/report.pdf"
+  ],
+  "object_missing_database": [
+    "integration/smoke.txt"
+  ],
+  "automatic_deletion": false
+}
