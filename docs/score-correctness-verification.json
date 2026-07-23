@@ -1,0 +1,163 @@
+{
+  "result": "PASS",
+  "code_version": "78123719bb9cb04628ed2d2ba211cd9be5af1415+score-correctness-working-tree",
+  "environment": {
+    "database": "isolated business-e2e",
+    "app_env": "test",
+    "browser": "Microsoft Edge"
+  },
+  "synthetic_marker": "score-correctness.synthetic.invalid",
+  "golden_dataset_id": "score-correctness.synthetic.invalid/20260723T080000Z",
+  "snapshot_results": {
+    "v1_complete_count": 4,
+    "v2_complete_count": 1,
+    "unfinalized_student_id": "bb43460c-2f6c-554f-9690-e574d5ddbdb9",
+    "v1_v2_snapshot_fixed": true
+  },
+  "release_results": {
+    "v1_id": "7ec2fc5f-bb65-57bb-8e3e-1740165eaa99",
+    "v2_id": "6cdf2917-5833-5010-80c0-9124843cff80",
+    "v1_items": [
+      "248bb963-66e8-50ca-8442-ac80e7c32640",
+      "ea6e6284-f117-54ef-a792-6e6a5b6b8bf0",
+      "dd9fc9df-10e8-5bc0-a35d-5cd98556e6da",
+      "681ef465-7b6c-5110-a722-c143264d576f"
+    ],
+    "v2_regrade_snapshot_id": "e42c5055-111e-5247-86bd-1143a46b062a"
+  },
+  "report_results": {
+    "xlsx_v1_rows": 4,
+    "xlsx_v2_rows": 4,
+    "pdf_v1_contains_v1_score": true,
+    "pdf_v2_contains_v2_score": true
+  },
+  "analytics_results": {
+    "v1_id": "5aaa39ee-5b75-452a-a216-14ffd4f7c18e",
+    "v2_id": "42843c9e-c63c-457f-b835-77f59437d898"
+  },
+  "expected_metrics": {
+    "v1": {
+      "participant_count": 4,
+      "average_score": 34.5,
+      "highest_score": 48,
+      "lowest_score": 18,
+      "median_score": 36.0,
+      "score_distribution": {
+        "0-59": 1,
+        "60-69": 1,
+        "70-79": 0,
+        "80-89": 1,
+        "90-100": 1
+      },
+      "student_layers": {
+        "A": 1,
+        "B": 1,
+        "C": 1,
+        "D": 1
+      }
+    },
+    "v2": {
+      "participant_count": 4,
+      "average_score": 35.75,
+      "highest_score": 48,
+      "lowest_score": 18,
+      "median_score": 38.5,
+      "score_distribution": {
+        "0-59": 1,
+        "60-69": 1,
+        "70-79": 0,
+        "80-89": 0,
+        "90-100": 2
+      },
+      "student_layers": {
+        "A": 2,
+        "B": 0,
+        "C": 1,
+        "D": 1
+      }
+    }
+  },
+  "actual_metrics": {
+    "v1": {
+      "participant_count": 4,
+      "average_score": 34.5,
+      "highest_score": 48.0,
+      "lowest_score": 18.0,
+      "median_score": 36.0,
+      "objective_error_count": 3,
+      "subjective_error_count": 4
+    },
+    "v2": {
+      "participant_count": 4,
+      "average_score": 35.75,
+      "highest_score": 48.0,
+      "lowest_score": 18.0,
+      "median_score": 38.5,
+      "objective_error_count": 3,
+      "subjective_error_count": 4
+    }
+  },
+  "drilldown_results": {
+    "participant_count_v1": 4,
+    "participant_count_v2": 4,
+    "knowledge_point_sample_counts": [
+      4,
+      4
+    ]
+  },
+  "insight_results": {
+    "analytics_snapshot_id": "5aaa39ee-5b75-452a-a216-14ffd4f7c18e",
+    "generation_method": "rule_based"
+  },
+  "error_drilldown_browser_verified": true,
+  "error_type": "客观题错误",
+  "expected_error_count": 3,
+  "actual_error_count": 3,
+  "secondary_error_type": "主观题人工评分错误",
+  "secondary_expected_error_count": 4,
+  "secondary_actual_error_count": 4,
+  "class_trend_browser_verified": true,
+  "class_trend_expected": {
+    "point_count": 1,
+    "participant_count": 4,
+    "average_score_rate": 0.715,
+    "release_version": 2
+  },
+  "class_trend_actual": {
+    "point_count": 1,
+    "participant_count": 4,
+    "average_score_rate": 0.715,
+    "release_id": "6cdf2917-5833-5010-80c0-9124843cff80"
+  },
+  "student_trend_browser_verified": true,
+  "student_id": "3a813f82-3bb0-5a39-9a49-8f4ce64f41ea",
+  "student_trend_expected": {
+    "point_count": 1,
+    "total_score": 45,
+    "max_score": 50,
+    "score_rate": 0.9,
+    "release_version": 2
+  },
+  "student_trend_actual": {
+    "point_count": 1,
+    "total_score": 45,
+    "max_score": 50,
+    "score_rate": 0.9,
+    "release_id": "6cdf2917-5833-5010-80c0-9124843cff80"
+  },
+  "reconciliation_passed": true,
+  "historical_version_unchanged": true,
+  "missing_student_not_zero": true,
+  "prettier_check_passed": true,
+  "browser_result": "PASS",
+  "browser_steps_passed": 12,
+  "frontend_results": {
+    "target_test": "3 passed",
+    "vitest": "12 files, 26 passed",
+    "prettier": "PASS",
+    "eslint": "PASS",
+    "typescript": "PASS"
+  },
+  "started_at": "2026-07-23T07:51:36.499665+00:00",
+  "completed_at": "2026-07-23T08:09:13.4538301Z"
+}

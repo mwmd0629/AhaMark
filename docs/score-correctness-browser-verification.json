@@ -1,0 +1,61 @@
+{
+  "result": "PASS",
+  "browser": "Microsoft Edge",
+  "synthetic_marker": "score-correctness.synthetic.invalid",
+  "golden_dataset_id": "score-correctness.synthetic.invalid/20260723T080000Z",
+  "steps": [
+    "login",
+    "release_v1_average_34.5",
+    "release_v2_metrics_and_participants",
+    "class_trend_latest_release_71.5_percent",
+    "score_band_drilldown_2",
+    "student_detail_v2_score_45",
+    "student_trend_latest_release_90_percent",
+    "question_drilldown_4",
+    "knowledge_point_drilldown_4",
+    "objective_error_drilldown_3",
+    "subjective_error_drilldown_4",
+    "rule_based_insight"
+  ],
+  "error_drilldown_browser_verified": true,
+  "error_type": "客观题错误",
+  "expected_error_count": 3,
+  "actual_error_count": 3,
+  "class_trend_browser_verified": true,
+  "class_trend_expected": {
+    "point_count": 1,
+    "assignment": "成绩正确性金标准作业 20260723T080000Z",
+    "participant_count": 4,
+    "average_score_rate": 0.715,
+    "release_version": 2
+  },
+  "class_trend_actual": {
+    "point_count": 1,
+    "assignment": "成绩正确性金标准作业 20260723T080000Z",
+    "participant_count": 4,
+    "average_score_rate": 0.715,
+    "release_id": "6cdf2917-5833-5010-80c0-9124843cff80"
+  },
+  "student_trend_browser_verified": true,
+  "student_id": "3a813f82-3bb0-5a39-9a49-8f4ce64f41ea",
+  "student_trend_expected": {
+    "point_count": 1,
+    "total_score": 45,
+    "max_score": 50,
+    "score_rate": 0.9,
+    "release_version": 2
+  },
+  "student_trend_actual": {
+    "point_count": 1,
+    "total_score": 45,
+    "max_score": 50,
+    "score_rate": 0.9,
+    "release_id": "6cdf2917-5833-5010-80c0-9124843cff80"
+  },
+  "missing_student_not_zero": true,
+  "historical_version_unchanged": true,
+  "prettier_check_passed": true,
+  "browser_result": "PASS",
+  "started_at": "2026-07-23T08:06:24.927Z",
+  "completed_at": "2026-07-23T08:06:27.304Z"
+}

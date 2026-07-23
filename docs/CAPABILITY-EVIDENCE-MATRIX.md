@@ -25,11 +25,11 @@
 | 客观题评分 | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 显示 objective-rule Criterion/Evidence 并由教师接受 |
 | 主观题评分 | UNAVAILABLE | 真实 Provider 不存在，必须人工评分 |
 | 教师复核 | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 覆盖客观题接受、主观题 UI 人工评分、强制项与 finalize |
-| 最终成绩 | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 从 finalize 生成 9/8 两份 complete Snapshot 并完成下游对账 |
-| GradeRelease | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 由 UI 创建并固定两份具体 Snapshot；学生送达 OUT_OF_SCOPE |
-| XLSX/PDF | IMPLEMENTED_AND_VERIFIED | 格式自动化及既有 Celery/MinIO 冒烟；容量仍未验证 |
-| Analytics | IMPLEMENTED_AND_VERIFIED | HTTP72 + BROWSER72 覆盖的范围通过 |
-| TeachingInsight | IMPLEMENTED_AND_VERIFIED | 规则型建议生命周期经 HTTP/浏览器验证 |
+| 最终成绩 | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E + 第四部分金标准 v1/v2，合法 complete Snapshot 与缺失不记零通过 |
+| GradeRelease | IMPLEMENTED_AND_VERIFIED | 第四部分验证 v1/v2 固定具体 Snapshot 且历史不漂移；学生送达 OUT_OF_SCOPE |
+| XLSX/PDF | IMPLEMENTED_AND_VERIFIED | 第四部分实际解析 v1/v2 XLSX/中文 PDF 并完成历史对账；容量仍未验证 |
+| Analytics | IMPLEMENTED_AND_VERIFIED | 第四部分 Edge 12/12 含两类错误下钻及班级/学生最新发布趋势 |
+| TeachingInsight | IMPLEMENTED_AND_VERIFIED | 第四部分验证规则型建议 evidence 固定 AnalyticsSnapshot 及历史不漂移 |
 | 文件安全 | PARTIAL | 统一检查与部分 fixture 自动化；完整恶意样本未跑 |
 | 权限隔离 | PARTIAL | Analytics 14 项真实拒绝、文件 3 类自动化；完整矩阵缺失 |
 | 性能 | PARTIAL | 单客户端同步接口冒烟；并发/异步/资源未测 |

@@ -8,6 +8,7 @@ COPY apps/api/app /app/app
 COPY apps/api/assets /app/assets
 COPY workers /app/workers
 RUN pip install --no-cache-dir ".[ocr]"
+COPY scripts /app/scripts
 COPY alembic.ini /app/
 COPY apps/api/alembic /app/apps/api/alembic
 EXPOSE 8000

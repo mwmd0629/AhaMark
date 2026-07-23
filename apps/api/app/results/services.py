@@ -30,9 +30,13 @@ from app.models import (
     GradeRelease,
     GradeReleaseItem,
     KnowledgePoint,
+    PaperVersion,
     Question,
+    RubricVersion,
+    StudentAnswer,
     Submission,
     SubmissionScoreSnapshot,
+    TeacherReview,
     now_utc,
 )
 
@@ -79,6 +83,10 @@ class SnapshotPayload(BaseModel):
 
     @model_validator(mode="after")
     def internally_consistent(self) -> SnapshotPayload:
+        if self.question_count <= 0 or not self.details:
+            raise ValueError("snapshot must contain at least one question")
+        if self.max_score <= 0:
+            raise ValueError("max_score must be positive")
         ids = [item.question_id for item in self.details]
         if len(ids) != len(set(ids)):
             raise ValueError("duplicate question_id")
@@ -113,25 +121,54 @@ class FinalScoreService:
                 Submission.status == "finalized",
             )
         ).all()
-        result: list[ValidatedScore] = []
+        latest_by_student: dict[uuid.UUID, ValidatedScore] = {}
         for submission in submissions:
-            snapshot = self.db.scalar(
+            snapshots = self.db.scalars(
                 select(SubmissionScoreSnapshot)
                 .where(
                     SubmissionScoreSnapshot.submission_id == submission.id,
                     SubmissionScoreSnapshot.status == "complete",
                 )
-                .order_by(SubmissionScoreSnapshot.version.desc())
-            )
-            if snapshot is not None:
-                result.append(self.validate(snapshot, submission))
-        return result
+                .order_by(
+                    SubmissionScoreSnapshot.version.desc(),
+                    SubmissionScoreSnapshot.generated_at.desc(),
+                    SubmissionScoreSnapshot.id.desc(),
+                )
+            ).all()
+            score: ValidatedScore | None = None
+            for snapshot in snapshots:
+                try:
+                    score = self.validate(snapshot, submission)
+                    break
+                except ValueError:
+                    continue
+            if score is None:
+                continue
+            student_id = score.payload.student_id
+            current = latest_by_student.get(student_id)
+            if current is None or (
+                score.snapshot.generated_at,
+                score.snapshot.version,
+                str(score.snapshot.id),
+            ) > (
+                current.snapshot.generated_at,
+                current.snapshot.version,
+                str(current.snapshot.id),
+            ):
+                latest_by_student[student_id] = score
+        return list(latest_by_student.values())
 
     def validate(self, snapshot: SubmissionScoreSnapshot, submission: Submission) -> ValidatedScore:
-        if submission.owner_id != self.owner_id or submission.status != "finalized":
+        if (
+            submission.owner_id != self.owner_id
+            or submission.status != "finalized"
+            or submission.finalized_at is None
+        ):
             raise ValueError("SUBMISSION_NOT_FINALIZED_OR_OWNED")
         if snapshot.status != "complete":
             raise ValueError("SNAPSHOT_NOT_COMPLETE")
+        if snapshot.generated_by != self.owner_id:
+            raise ValueError("SNAPSHOT_OWNER_MISMATCH")
         raw = {
             "schema_version": "1.0",
             "submission_id": snapshot.submission_id,
@@ -149,17 +186,80 @@ class FinalScoreService:
         except (ValidationError, InvalidOperation) as exc:
             raise ValueError(f"SNAPSHOT_SCHEMA_INVALID: {exc}") from exc
         if (
-            payload.assignment_id != submission.assignment_id
+            payload.submission_id != submission.id
+            or payload.assignment_id != submission.assignment_id
             or payload.student_id != submission.student_id
         ):
             raise ValueError("SNAPSHOT_RELATION_MISMATCH")
-        question_ids = set(
-            self.db.scalars(
-                select(Question.id).where(Question.id.in_([x.question_id for x in payload.details]))
+        paper = self.db.get(PaperVersion, payload.paper_version_id)
+        rubric = self.db.get(RubricVersion, payload.rubric_version_id)
+        if (
+            paper is None
+            or paper.assignment_id != payload.assignment_id
+            or rubric is None
+            or rubric.assignment_id != payload.assignment_id
+        ):
+            raise ValueError("SNAPSHOT_VERSION_RELATION_MISMATCH")
+        questions = {
+            question.id: question
+            for question in self.db.scalars(
+                select(Question).where(
+                    Question.id.in_([x.question_id for x in payload.details]),
+                    Question.paper_version_id == payload.paper_version_id,
+                )
             )
-        )
-        if question_ids != {x.question_id for x in payload.details}:
+        }
+        if set(questions) != {x.question_id for x in payload.details}:
             raise ValueError("SNAPSHOT_QUESTION_MISSING")
+        reviews = {
+            review.id: review
+            for review in self.db.scalars(
+                select(TeacherReview).where(
+                    TeacherReview.id.in_([x.teacher_review_id for x in payload.details])
+                )
+            )
+        }
+        answers = {
+            answer.id: answer
+            for answer in self.db.scalars(
+                select(StudentAnswer).where(
+                    StudentAnswer.id.in_([x.student_answer_id for x in reviews.values()])
+                )
+            )
+        }
+        for detail in payload.details:
+            question = questions[detail.question_id]
+            review = reviews.get(detail.teacher_review_id)
+            answer = answers.get(review.student_answer_id) if review else None
+            if (
+                question.question_number != detail.question_number
+                or question.question_type != detail.question_type
+                or question.max_score is None
+                or Decimal(question.max_score) != detail.max_score
+            ):
+                raise ValueError("SNAPSHOT_QUESTION_METADATA_MISMATCH")
+            if (
+                review is None
+                or review.confirmed_at is None
+                or answer is None
+                or answer.submission_id != submission.id
+                or answer.question_id != detail.question_id
+            ):
+                raise ValueError("SNAPSHOT_REVIEW_RELATION_MISMATCH")
+        knowledge_ids = {
+            value for detail in payload.details for value in detail.knowledge_point_ids
+        }
+        if knowledge_ids:
+            known = set(
+                self.db.scalars(
+                    select(KnowledgePoint.id).where(
+                        KnowledgePoint.id.in_(knowledge_ids),
+                        KnowledgePoint.owner_id == self.owner_id,
+                    )
+                )
+            )
+            if known != knowledge_ids:
+                raise ValueError("SNAPSHOT_KNOWLEDGE_POINT_MISMATCH")
         return ValidatedScore(snapshot, submission, payload)
 
 
@@ -168,7 +268,7 @@ def compute_metrics(scores: list[ValidatedScore]) -> dict[str, Any]:
     ratios = [float(x.payload.total_score / x.payload.max_score) for x in scores]
     questions: dict[str, dict[str, Any]] = {}
     knowledge: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {"score": 0.0, "max": 0.0, "questions": set()}
+        lambda: {"score": 0.0, "max": 0.0, "questions": set(), "participants": set()}
     )
     errors: Counter[str] = Counter()
     for row in scores:
@@ -199,6 +299,7 @@ def compute_metrics(scores: list[ValidatedScore]) -> dict[str, Any]:
                 kp["score"] += float(detail.score)
                 kp["max"] += float(detail.max_score)
                 kp["questions"].add(key)
+                kp["participants"].add(str(row.payload.student_id))
     question_rows = []
     for item in questions.values():
         count = item["participants"]
@@ -246,7 +347,7 @@ def compute_metrics(scores: list[ValidatedScore]) -> dict[str, Any]:
                 "knowledge_point_id": key,
                 "mastery_rate": value["score"] / value["max"] if value["max"] else None,
                 "question_ids": sorted(value["questions"]),
-                "sample_count": len(scores),
+                "sample_count": len(value["participants"]),
             }
             for key, value in knowledge.items()
         ],
@@ -271,7 +372,16 @@ def release_scores(db: Session, release_id: uuid.UUID) -> list[ValidatedScore]:
         )
         if snapshot is None or submission is None:
             raise ValueError("RELEASE_SOURCE_MISSING")
-        rows.append(service.validate(snapshot, submission))
+        score = service.validate(snapshot, submission)
+        if (
+            item.student_id != score.payload.student_id
+            or item.submission_id != score.payload.submission_id
+            or item.score_snapshot_id != score.snapshot.id
+            or submission.assignment_id != release.assignment_id
+            or submission.class_id != release.class_id
+        ):
+            raise ValueError("RELEASE_ITEM_RELATION_MISMATCH")
+        rows.append(score)
     return rows
 
 

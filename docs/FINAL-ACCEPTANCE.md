@@ -14,8 +14,8 @@
 |---|---|---|
 | 六核心服务 | PASS | web/api/worker/PostgreSQL/Redis/MinIO healthy；栈保持运行 |
 | 数据库迁移 | PASS | 活动库 0010；独立空库 upgrade；0010→0009→0010 |
-| 后端测试 | PASS | 完整门禁 51 passed；第三部分定向 5 passed；Ruff、mypy 通过；1 条第三方 Starlette TestClient 弃用警告 |
-| 前端测试 | PASS | 第三部分后 25 tests passed |
+| 后端测试 | PASS | 第四部分完整门禁 53 passed；Ruff、mypy 通过；1 条第三方 Starlette TestClient 弃用警告 |
+| 前端测试 | PASS | 第四部分关闭轮完整 Vitest：12 files、26 tests passed |
 | 前端格式/lint/type | PASS | Prettier、ESLint、TypeScript |
 | Next production build | PASS | 18 条路由构建成功；SWC lockfile 修补警告仍存在但未阻断 |
 | Analytics HTTP | PASS | 35 请求，含 14 项 Teacher B 隔离 |
@@ -23,7 +23,7 @@
 | 教师核心业务浏览器 A–H | PASS | 独立栈、无头 Edge、纯合成数据；8/8 阶段通过，见 BUSINESS-E2E 与机器 JSON |
 | 全链路 API 集成 | PASS | 第三部分 5 项异常/版本测试通过；failed/expired ReportJob retry 另有真实 Edge 证据 |
 | 完整权限矩阵 | PARTIAL | Analytics 与文件隔离通过；全部资源/动作未覆盖 |
-| 成绩正确性 | PASS | 浏览器 finalize 得到 9/8 两份 complete Snapshot；Release、报告、Analytics 对账一致，未完成学生不记零 |
+| 成绩正确性 | PASS | 第四部分金标准 v1/v2 全链路对账；Edge 12/12 含两类错误下钻、班级/学生趋势；未完成学生不记零 |
 | XLSX/中文 PDF | PASS | 本轮真实浏览器创建，Celery/MinIO Job 均 completed；未跑批量容量 |
 | 30–50 人性能 | PARTIAL | 2×50、2×20 题的 5 类同步 API；异步与并发未测 |
 | MIME/恶意文件 | PARTIAL | 统一内容检查和小型回归；完整 fixture 未跑 |
@@ -44,6 +44,14 @@
 Snapshot、Release 固定 snapshot、Report/Analytics 固定 release，以及同一学生只选最新
 合法 complete snapshot；未完成成绩不记零。真实 Edge bootstrap A–H 8/8，且 failed/expired
 ReportJob retry 生命周期已通过专用真实 Edge 脚本验证，第三部分该验收缺口已关闭。
+
+## 第四部分成绩正确性
+
+第四部分正式关闭。金标准 `score-correctness.synthetic.invalid/20260723T080000Z` 证明正式成绩
+只来自 finalized Submission 的合法 complete Snapshot，Release/报告/Analytics 固定版本，
+缺交和未完成不记零。真实 Edge 12/12 额外核对客观题错误 3 条、主观题人工评分错误 4 条、
+班级最新有效发布趋势 71.5%（4 人）及改分学生最新趋势 45/50（90.0%）。旧 v1 证据保持不变。
+详见 `SCORE-CORRECTNESS.md` 与两份 `score-correctness-*.json`。这不改变项目整体 C 等级。
 
 ## 性能摘要
 

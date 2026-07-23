@@ -537,6 +537,8 @@ def generate_insight(analytics_id: uuid.UUID, db: Db, actor: Actor) -> dict[str,
     ]
     content = {
         "title": "课堂讲评建议",
+        "generation_method": "rule_based",
+        "disclaimer": "这是基于固定 AnalyticsSnapshot 的规则型教学建议，不是 AI 自动评分或诊断。",
         "rules_version": "rules-v1",
         "sample_warning": snapshot.source_snapshot_count < 5,
         "recommendations": [
@@ -800,17 +802,29 @@ def latest_release_snapshots(
     )
     if class_id:
         query = query.where(AnalyticsSnapshot.class_id == class_id)
-    snapshots = db.scalars(query.order_by(AnalyticsSnapshot.generated_at.desc())).all()
+    snapshots = db.scalars(query).all()
     latest: dict[uuid.UUID, AnalyticsSnapshot] = {}
+    release_order: dict[uuid.UUID, tuple[datetime, int, datetime, str]] = {}
     for snapshot in snapshots:
-        latest.setdefault(snapshot.assignment_id, snapshot)
+        release = db.get(GradeRelease, snapshot.grade_release_id)
+        if release is None:
+            continue
+        released_at = release.released_at or release.created_at
+        order = (released_at, release.version, snapshot.generated_at, str(snapshot.id))
+        current_order = release_order.get(snapshot.assignment_id)
+        if current_order is None or order > current_order:
+            latest[snapshot.assignment_id] = snapshot
+            release_order[snapshot.assignment_id] = order
     if student_id is not None:
         latest = {
             key: value
             for key, value in latest.items()
             if any(row.payload.student_id == student_id for row in released_rows(db, value))
         }
-    return sorted(latest.values(), key=lambda x: x.generated_at)
+    return sorted(
+        latest.values(),
+        key=lambda snapshot: release_order[snapshot.assignment_id],
+    )
 
 
 @router.get("/classes/{class_id}/analytics/trends")

@@ -1,0 +1,45 @@
+{
+  "dataset_id": "score-correctness.synthetic.invalid/run-golden-v1-v2",
+  "marker": "score-correctness.synthetic.invalid",
+  "assignment_max_score": 50,
+  "students": [
+    {"student_number": "SC-001", "name": "合成高分", "state": "complete", "v1_total": 48, "v2_total": 48},
+    {"student_number": "SC-002", "name": "合成低分", "state": "complete", "v1_total": 18, "v2_total": 18},
+    {"student_number": "SC-003", "name": "合成部分得分", "state": "complete", "v1_total": 32, "v2_total": 32},
+    {"student_number": "SC-004", "name": "合成交缺", "state": "missing", "v1_total": null, "v2_total": null},
+    {"student_number": "SC-005", "name": "合成未完成", "state": "unfinalized", "v1_total": null, "v2_total": null},
+    {"student_number": "SC-006", "name": "合成改分", "state": "complete", "v1_total": 40, "v2_total": 45}
+  ],
+  "v1": {
+    "student_totals": [48, 18, 32, 40],
+    "question_scores": {
+      "1": [10, 6, 8, 8],
+      "2": [18, 8, 10, 15],
+      "3": [5, 0, 3, 4],
+      "4": [15, 4, 11, 13]
+    },
+    "question_max_scores": {"1": 10, "2": 20, "3": 5, "4": 15},
+    "knowledge_points": {"kp-algebra": ["1", "2"], "kp-reasoning": ["2", "3"]},
+    "expected_metrics": {
+      "participant_count": 4,
+      "average_score": 34.5,
+      "highest_score": 48,
+      "lowest_score": 18,
+      "median_score": 36,
+      "score_distribution": {"0-59": 1, "60-69": 1, "70-79": 0, "80-89": 1, "90-100": 1},
+      "student_layers": {"A": 1, "B": 1, "C": 1, "D": 1}
+    }
+  },
+  "v2": {
+    "student_totals": [48, 18, 32, 45],
+    "expected_metrics": {
+      "participant_count": 4,
+      "average_score": 35.75,
+      "highest_score": 48,
+      "lowest_score": 18,
+      "median_score": 38.5,
+      "score_distribution": {"0-59": 1, "60-69": 1, "70-79": 0, "80-89": 0, "90-100": 2},
+      "student_layers": {"A": 2, "B": 0, "C": 1, "D": 1}
+    }
+  }
+}

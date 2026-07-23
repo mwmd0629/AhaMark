@@ -32,6 +32,20 @@
 - 关键修复：就绪检查按学生选择最新合法 complete Snapshot；regrade 后清除答案 stale 标记；旧 Snapshot、Release、Analytics、Insight 内容保持不变。
 - 详见 `docs/BUSINESS-EXCEPTIONS-AND-VERSIONING.md` 与 `docs/business-exceptions-verification.json`。
 
+## 第四部分：成绩正确性专项
+
+- 正式关闭：纯合成金标准 `score-correctness.synthetic.invalid/20260723T080000Z` 已完成
+  Snapshot、GradeRelease、XLSX、中文 PDF、Analytics、学生详情和规则型 TeachingInsight 对账。
+- v1 成绩 48/18/32/40，v2 仅改分学生变为 45；缺交和未 finalized 学生均未记零或进入分母。
+- 旧 Snapshot、Release、报告、Analytics 和 Insight 保持不变；趋势只读取每份作业最新有效
+  Release v2。
+- 真实 Edge 12/12：含两类错误下钻（3/3、4/4）、班级趋势（1 点、4 人、71.5%）和改分学生
+  趋势（1 点、45/50、90.0%）。
+- 前端门禁：Prettier、ESLint、TypeScript、Vitest 26/26 全部通过；后端既有完整门禁
+  53 passed，Ruff 与 mypy 通过。
+- 证据：`docs/SCORE-CORRECTNESS.md`、`docs/score-correctness-verification.json` 和
+  `docs/score-correctness-browser-verification.json`。
+
 ## 第八部分变更
 
 - P0：修复通用文件元数据、删除、签名 URL 无认证/无 owner 校验。
@@ -44,8 +58,8 @@
 
 ## 验证汇总
 
-- 后端：第三部分定向 5 passed；此前完整门禁 51 passed，1 条第三方 Starlette TestClient 弃用警告；Ruff 与 mypy 通过。
-- 前端：第三部分组件测试后 25 tests passed；Prettier、ESLint、TypeScript 通过。
+- 后端：第四部分完整门禁 53 passed，1 条第三方 Starlette TestClient 弃用警告；Ruff 与 mypy 通过。
+- 前端：第四部分关闭轮 26 tests passed；Prettier、ESLint、TypeScript 通过。
 - Next build：18 条路由构建通过；仍有 lockfile SWC 自动修补失败警告（未阻断构建）。
 - 性能：五类同步接口 100%；P95 为 40.51–88.18 ms。仅单客户端开发冒烟。
 - 文件安全：代码加固与小型自动化通过；完整 fixture 矩阵 PARTIAL。

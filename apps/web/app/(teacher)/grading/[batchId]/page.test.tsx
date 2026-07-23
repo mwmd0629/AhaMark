@@ -230,7 +230,5 @@ it("creates a replacement report job once and keeps the failed job terminal", as
   expect(
     screen.getByText(/student_report_pdf · queued · 0%/),
   ).toBeInTheDocument();
-  expect(
-    screen.getByRole("button", { name: "已创建重试任务" }),
-  ).toBeDisabled();
+  expect(screen.getByRole("button", { name: "已创建重试任务" })).toBeDisabled();
 });
