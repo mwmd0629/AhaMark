@@ -471,6 +471,7 @@ export type GradingBatch = {
   description?: string;
   status:
     | "draft"
+    | "collecting"
     | "queued"
     | "running"
     | "grading"
@@ -503,6 +504,8 @@ export const gradingApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  getBatch: (batchId: string) =>
+    request<GradingBatch>(`/api/grading-batches/${batchId}`),
   upload: (batchId: string, files: File[]) => {
     const body = new FormData();
     files.forEach((file) => body.append("files", file));
@@ -512,7 +515,24 @@ export const gradingApi = {
     );
   },
   submissions: (batchId: string) =>
-    request<unknown[]>(`/api/grading-batches/${batchId}/submissions`),
+    request<SubmissionRecord[]>(`/api/grading-batches/${batchId}/submissions`),
+  startRecognition: (submissionId: string) =>
+    request<SubmissionRecognitionJob>(
+      `/api/submissions/${submissionId}/recognition-jobs`,
+      {
+        method: "POST",
+        body: JSON.stringify({ idempotency_key: crypto.randomUUID() }),
+      },
+    ),
+  recognition: (submissionId: string, jobId: string) =>
+    request<SubmissionRecognitionJob>(
+      `/api/submissions/${submissionId}/recognition-jobs/${jobId}`,
+    ),
+  reorderPages: (submissionId: string, pageIds: string[]) =>
+    request<{ submission_id: string; page_ids: string[] }>(
+      `/api/submissions/${submissionId}/pages/order`,
+      { method: "PUT", body: JSON.stringify({ page_ids: pageIds }) },
+    ),
   correctAnswer: (
     answerId: string,
     data: { corrected_text?: string; corrected_latex?: string },
@@ -536,6 +556,31 @@ export const gradingApi = {
     request<ReviewWorkspace>(
       `/api/grading-batches/${batchId}/review-workspace`,
     ),
+};
+
+export type SubmissionRecord = {
+  id: string;
+  student_id?: string;
+  status: string;
+  attempt_number: number;
+  page_count: number;
+};
+export type SubmissionRecognitionJob = {
+  id: string;
+  submission_id: string;
+  status: "queued" | "running" | "completed" | "partially_completed" | "failed";
+  provider: string;
+  provider_version: string;
+  error_code?: string;
+  error_message?: string;
+  pages: Array<{
+    id: string;
+    page_number: number;
+    status: string;
+    rendered_storage_key?: string;
+    processed_storage_key?: string;
+    thumbnail_storage_key?: string;
+  }>;
 };
 
 export type ReviewWorkspace = {
@@ -618,13 +663,35 @@ export type GradeRelease = {
     score_snapshot_id: string;
   }>;
 };
+export type GradeReadiness = {
+  releasable_count: number;
+  unreleasable_count: number;
+  ready: Array<{
+    student_id: string;
+    submission_id: string;
+    score_snapshot_id: string;
+  }>;
+  errors: Array<Record<string, unknown>>;
+  missing_student_ids: string[];
+};
+export type ReportJob = {
+  id: string;
+  report_type:
+    "gradebook_xlsx" | "student_report_pdf" | "batch_student_reports";
+  student_id?: string;
+  status: string;
+  progress: number;
+  stored_file_id?: string;
+  error_code?: string;
+  grade_release_id: string;
+};
 export const analyticsApi = {
   releases: (assignmentId: string) =>
     request<GradeRelease[]>(
       `/api/grade-releases?assignment_id=${assignmentId}`,
     ),
   readiness: (assignmentId: string, classId: string) =>
-    request(
+    request<GradeReadiness>(
       `/api/assignments/${assignmentId}/classes/${classId}/grade-readiness`,
     ),
   createRelease: (data: Record<string, unknown>) =>
@@ -632,6 +699,22 @@ export const analyticsApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  createReport: (
+    releaseId: string,
+    reportType: ReportJob["report_type"],
+    studentId?: string,
+  ) => {
+    const params = new URLSearchParams({
+      report_type: reportType,
+      idempotency_key: crypto.randomUUID(),
+    });
+    if (studentId) params.set("student_id", studentId);
+    return request<ReportJob>(
+      `/api/grade-releases/${releaseId}/reports?${params}`,
+      { method: "POST" },
+    );
+  },
+  report: (jobId: string) => request<ReportJob>(`/api/report-jobs/${jobId}`),
   generate: (releaseId: string) =>
     request<{ id: string; metrics: Record<string, unknown> }>(
       `/api/grade-releases/${releaseId}/analytics`,

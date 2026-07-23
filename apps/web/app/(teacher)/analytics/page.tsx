@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { analyticsApi, assignmentsApi, GradeRelease } from "@/lib/api";
 import {
   Card,
@@ -69,7 +70,7 @@ export default function AnalyticsPage() {
 
   useEffect(() => {
     assignmentsApi
-      .list("status=completed")
+      .list("page_size=100")
       .then((page) => setAssignments(page.items))
       .catch(() => setError("无法加载作业，请检查 API 服务。"))
       .finally(() => setLoading(false));
@@ -179,7 +180,12 @@ export default function AnalyticsPage() {
               样本量仅 {metrics.participant_count}，请谨慎解释结果。
             </Card>
           )}
-          <div className="grid gap-4 md:grid-cols-5">
+          <div
+            className="grid gap-4 md:grid-cols-5"
+            data-testid="analytics-metrics"
+            data-snapshot-id={snapshotId}
+            data-release-id={releaseId}
+          >
             {[
               ["参与人数", metrics.participant_count],
               ["平均分", metrics.average_score],
@@ -322,9 +328,26 @@ export default function AnalyticsPage() {
                   关闭
                 </button>
               </div>
-              <pre className="max-h-96 overflow-auto whitespace-pre-wrap text-xs">
-                {JSON.stringify(drilldown.rows, null, 2)}
-              </pre>
+              <div className="max-h-96 space-y-2 overflow-auto text-xs">
+                {drilldown.rows.map((row, index) => (
+                  <div
+                    className="rounded border p-2"
+                    key={String(row.student_id ?? index)}
+                  >
+                    {row.student_id ? (
+                      <Link
+                        className="font-medium text-blue-700 underline"
+                        href={`/analytics/students/${String(row.student_id)}`}
+                      >
+                        查看学生详情
+                      </Link>
+                    ) : null}
+                    <pre className="mt-1 whitespace-pre-wrap">
+                      {JSON.stringify(row, null, 2)}
+                    </pre>
+                  </div>
+                ))}
+              </div>
             </Card>
           )}
         </>

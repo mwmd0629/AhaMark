@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
+import Link from "next/link";
 import { gradingApi, type ReviewWorkspace } from "@/lib/api";
 
 type Decision = "accepted" | "modified" | "rejected" | "manual_scored";
@@ -18,6 +19,14 @@ export default function ReviewPage() {
   const [processed, setProcessed] = useState(true);
   const [zoom, setZoom] = useState(1);
   const [activeEvidence, setActiveEvidence] = useState<string>();
+  const [snapshots, setSnapshots] = useState<
+    Array<{
+      id: string;
+      submission_id: string;
+      status: string;
+      total_score?: string;
+    }>
+  >([]);
 
   const load = async () => setData(await gradingApi.reviewWorkspace(batchId));
   useEffect(() => {
@@ -68,6 +77,32 @@ export default function ReviewPage() {
     }
   }
 
+  async function finalizeAll() {
+    if (!data || saving) return;
+    setSaving(true);
+    setMessage("");
+    try {
+      const values = [];
+      for (const item of data.items) {
+        values.push(
+          (await gradingApi.finalize(item.submission_id)) as {
+            id: string;
+            submission_id: string;
+            status: string;
+            total_score?: string;
+          },
+        );
+      }
+      setSnapshots(values);
+      await load();
+      setMessage("全部 Submission 已 finalize，并生成 complete ScoreSnapshot");
+    } catch {
+      setMessage("finalize 失败：仍有题目未完成教师复核");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   if (error)
     return (
       <div role="alert" className="rounded-xl bg-red-50 p-4 text-red-700">
@@ -83,10 +118,48 @@ export default function ReviewPage() {
           <h1 className="text-xl font-bold">教师评分复核</h1>
           <p className="text-sm text-slate-500">{data.provider_notice}</p>
         </div>
-        <div className="text-sm font-medium">
-          进度 {data.progress.reviewed}/{data.progress.total}
+        <div className="flex items-center gap-3 text-sm font-medium">
+          <span>
+            进度 {data.progress.reviewed}/{data.progress.total}
+          </span>
+          <button
+            className="rounded bg-indigo-700 px-3 py-2 text-white disabled:opacity-50"
+            disabled={
+              saving ||
+              data.progress.reviewed !== data.progress.total ||
+              data.progress.total === 0
+            }
+            onClick={() => void finalizeAll()}
+          >
+            完成全部 finalize
+          </button>
+          <Link
+            className="rounded border px-3 py-2"
+            href={`/grading/${batchId}`}
+          >
+            返回批次工作台
+          </Link>
         </div>
       </header>
+      {snapshots.length > 0 && (
+        <div
+          className="rounded-xl border border-emerald-300 bg-emerald-50 p-4"
+          data-testid="score-snapshots"
+        >
+          {snapshots.map((snapshot) => (
+            <p
+              key={snapshot.id}
+              data-testid="score-snapshot"
+              data-snapshot-id={snapshot.id}
+              data-submission-id={snapshot.submission_id}
+              data-status={snapshot.status}
+              data-total-score={snapshot.total_score}
+            >
+              complete Snapshot {snapshot.id} · 总分 {snapshot.total_score}
+            </p>
+          ))}
+        </div>
+      )}
       <div className="grid min-h-[70vh] gap-4 xl:grid-cols-[minmax(0,1.4fr)_220px_minmax(320px,1fr)]">
         <section
           aria-label="原卷与证据"
@@ -189,6 +262,12 @@ export default function ReviewPage() {
         </nav>
         <section
           aria-label="评分复核详情"
+          data-testid="review-answer"
+          data-answer-id={answer?.id}
+          data-question-type={answer?.question.type}
+          data-provider={answer?.result?.provider ?? "manual"}
+          data-suggested-score={answer?.result?.score}
+          data-final-score={answer?.review?.final_score}
           className="space-y-4 overflow-auto rounded-xl border bg-white p-4"
         >
           {answer ? (

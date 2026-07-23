@@ -1,21 +1,29 @@
-# AhaMark 第八部分最终交接（2026-07-22）
+# AhaMark 教师核心业务浏览器闭环交接（2026-07-23）
 
 第一部分的可审计基线入口为 `PROJECT-BASELINE.md`；能力状态以 `CAPABILITY-EVIDENCE-MATRIX.md` 为准。下文“通过”只描述既有检查记录，不自动表示生产可用。
 
 ## 最终结论
 
-验收等级：**C（内部演示或开发测试）**。内部合成数据演示可用；不建议受控真实教学试点；不适合生产。原因不是主观题 AI unavailable，而是全业务浏览器 E2E、完整资源隔离矩阵、异步/并发性能、完整恶意文件 fixture、MinIO 恢复仍未完成。
+验收等级仍为 **C（内部演示或开发测试）**。第二部分“教师核心业务浏览器闭环”已关闭：独立栈中以纯合成数据通过 A–H 8/8。整个项目不因此升级到 B；完整资源隔离矩阵、异步/并发性能、完整恶意文件 fixture 和 MinIO 恢复仍未完成。
 
 ## 真实状态
 
 - 服务：核心六服务均 healthy；可选 Nginx proxy 配置与语法通过。栈保持运行，三个命名卷保留。
 - 数据库：活动库 `0010_report_student (head)`；独立空库 upgrade、`0010→0009→0010` 通过。
 - 认证：scrypt、数据库 Session、HttpOnly/SameSite、production Secure、CSRF、撤销/过期、禁用用户、production 禁 demo 已实现并测试。
-- OCR：RapidOCR 3.9.2 available；公式 OCR unavailable。Submission OCR 链路已有自动化，未做 150–250 页吞吐。
+- OCR：第二部分使用 test-only Fake OCR 工作流适配器，只证明 UI/编排；不证明 RapidOCR。RapidOCR 3.9.2 印刷体窄范围 available，公式 OCR unavailable。
 - Grading/Review：客观题规则评分、三栏复核、人工评分、批量资格和一致性已实现；主观题真实 AI Provider unavailable，必须人工评分。
 - Snapshot/Release：唯一成绩来源为 finalized Submission 的最新 complete Snapshot；GradeRelease 固定 Snapshot，incomplete 不发布。
 - XLSX/PDF：既有真实 Celery/MinIO 冒烟与自动化通过；本轮没有重新完成 30–50 份 PDF 容量测试。
-- Analytics：35 请求真实 HTTP 和 6 步无头 Edge 冒烟重跑通过；四类下钻、趋势、学生详情、规则 Insight 可用。
+- Analytics：除既有 35 请求和 6 步冒烟外，A–H 闭环已从固定 GradeRelease 验证参与人数、平均分、分布、学生详情、知识点、趋势和规则 Insight。
+
+## 第二部分浏览器证据
+
+- 最终轮次：`business-e2e-20260722164927325.business-e2e.synthetic.invalid`，A–H 8/8 PASS。
+- complete Snapshot：`32cfff83-75f5-40e0-a7f5-223ea549add7` = 9，`b8a01797-790a-49d8-b1f3-d70f2d6f2295` = 8。
+- GradeRelease：`c68f7259-3f6a-44dc-8f59-df6833b1e67f`，固定上述两个 ID。
+- 报告：XLSX 与中文个人 PDF Job 均 completed；Analytics 参与 2 人、平均 8.5；第 3 名未完成学生不记零。
+- 人类报告：`docs/BUSINESS-E2E.md`；机器证据：`docs/business-e2e-verification.json`。
 
 ## 第八部分变更
 
@@ -29,9 +37,9 @@
 
 ## 验证汇总
 
-- 后端基线：43 passed；修改后 45 passed，1 条第三方 Starlette 弃用警告。
+- 后端：46 passed，1 条第三方 Starlette TestClient 弃用警告；Ruff 与 mypy 通过。
 - 前端：10 files / 20 tests passed；Prettier、ESLint、TypeScript 通过。
-- Next build：通过；仍有 lockfile SWC 自动修补失败警告（未阻断构建）。
+- Next build：18 条路由构建通过；仍有 lockfile SWC 自动修补失败警告（未阻断构建）。
 - 性能：五类同步接口 100%；P95 为 40.51–88.18 ms。仅单客户端开发冒烟。
 - 文件安全：代码加固与小型自动化通过；完整 fixture 矩阵 PARTIAL。
 - 隔离：Analytics 14 项真实跨教师拒绝 + 文件 3 类自动化拒绝；完整矩阵 PARTIAL。
@@ -46,12 +54,11 @@
 
 ## 生产阻塞项
 
-1. 全业务 A–H 浏览器 E2E 未建立。
-2. Class 至 TeachingInsight 的完整跨教师操作矩阵未跑完。
-3. OCR、报告、Analytics 并发/吞吐、CPU、内存、队列等待与慢 SQL未测。
-4. 恶意文件所有 fixture 与真实签名 URL 到期测试未跑完。
-5. MinIO 备份恢复、Redis/MinIO 中断恢复未验证。
-6. 开发 Compose 暴露 MinIO 端口，未提供正式 TLS/secret/监控平台配置。
-7. 仓库无任何基线提交，全部成果未跟踪，无法可靠审计变更历史。
+1. Class 至 TeachingInsight 的完整跨教师操作矩阵未跑完。
+2. OCR、报告、Analytics 并发/吞吐、CPU、内存、队列等待与慢 SQL 未测。
+3. 恶意文件所有 fixture 与真实签名 URL 到期测试未跑完。
+4. MinIO 备份恢复、Redis/MinIO 中断恢复未验证。
+5. 开发 Compose 暴露 MinIO 端口，未提供正式 TLS/secret/监控平台配置。
+6. 第二部分修改尚未提交；当前可审计比较基线为 `f7783f0073592140c1400d6e7f41ffb17638c64e`。
 
 后续维护先从 `docs/FINAL-ACCEPTANCE.md` 的 NOT RUN/PARTIAL 项开始，不要扩展学生端或宣称主观题 AI 自动评分。本任务没有提交、推送或部署。

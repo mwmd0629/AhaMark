@@ -1,124 +1,151 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { gradingApi, type GradingBatch } from "@/lib/api";
-import { Badge, Card, PageHeader, SectionHeader } from "@/components/ui";
+import Link from "next/link";
+import { useEffect, useMemo, useState } from "react";
+import {
+  ApiError,
+  assignmentsApi,
+  gradingApi,
+  type AssignmentRecord,
+  type GradingBatch,
+} from "@/lib/api";
+import { Button, Card, Input, PageHeader, Select } from "@/components/ui";
 
 export default function GradingPage() {
+  const [assignments, setAssignments] = useState<AssignmentRecord[]>([]);
   const [assignmentId, setAssignmentId] = useState("");
   const [items, setItems] = useState<GradingBatch[]>([]);
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const assignment = useMemo(
+    () => assignments.find((item) => item.id === assignmentId),
+    [assignments, assignmentId],
+  );
 
-  async function load() {
-    if (!assignmentId.trim()) return;
+  useEffect(() => {
+    assignmentsApi
+      .list("page_size=100")
+      .then((page) =>
+        setAssignments(page.items.filter((item) => item.status !== "draft")),
+      )
+      .catch(() => setError("无法加载已发布作业"))
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (!assignmentId) {
+      setItems([]);
+      return;
+    }
+    setLoading(true);
+    gradingApi
+      .batches(assignmentId)
+      .then((page) => setItems(page.items))
+      .catch((reason) =>
+        setError(reason instanceof Error ? reason.message : "加载批次失败"),
+      )
+      .finally(() => setLoading(false));
+  }, [assignmentId]);
+
+  async function createBatch(form: FormData) {
+    if (!assignmentId) return;
     setLoading(true);
     setError("");
     try {
-      setItems((await gradingApi.batches(assignmentId.trim())).items);
+      const batch = await gradingApi.createBatch(assignmentId, {
+        class_id: String(form.get("class_id")),
+        name: String(form.get("name")),
+      });
+      setItems((old) => [batch, ...old]);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "加载失败");
+      setError(reason instanceof ApiError ? reason.message : "创建批次失败");
     } finally {
       setLoading(false);
     }
   }
 
-  useEffect(() => {
-    const saved = window.localStorage.getItem("ahamark-grading-assignment");
-    if (saved) setAssignmentId(saved);
-  }, []);
-
   return (
     <div className="space-y-6">
       <PageHeader
         title="作业批改"
-        description="批量收集学生作业，完成 OCR、规则初批和教师最终复核。主观题 Provider 不可用时不会生成虚假分数。"
+        description="从已发布作业创建批次，经页面整理、工作流测试 OCR、规则初批和教师复核形成最终成绩。"
       />
-      <Card className="p-5">
-        <SectionHeader
-          title="批改批次"
-          description="输入作业 ID 查看真实批次；选择批次后可进入匹配、按学生或按题复核。"
-        />
-        <form
-          className="mt-4 flex gap-3"
-          onSubmit={(event) => {
-            event.preventDefault();
-            window.localStorage.setItem(
-              "ahamark-grading-assignment",
-              assignmentId,
-            );
-            void load();
-          }}
+      <Card className="space-y-4 p-5">
+        <Select
+          label="已发布作业"
+          value={assignmentId}
+          onChange={(event) => setAssignmentId(event.target.value)}
         >
-          <label className="sr-only" htmlFor="assignment-id">
-            作业 ID
-          </label>
-          <input
-            id="assignment-id"
-            className="min-w-0 flex-1 rounded-lg border px-3 py-2"
-            value={assignmentId}
-            onChange={(event) => setAssignmentId(event.target.value)}
-            placeholder="作业 ID"
-          />
-          <button
-            className="rounded-lg bg-[var(--brand-600)] px-4 py-2 font-semibold text-white"
-            type="submit"
-          >
-            {loading ? "加载中…" : "加载"}
-          </button>
-        </form>
+          <option value="">请选择作业</option>
+          {assignments.map((item) => (
+            <option key={item.id} value={item.id}>
+              {item.title}
+            </option>
+          ))}
+        </Select>
+        {assignment && (
+          <form action={createBatch} className="grid gap-3 md:grid-cols-3">
+            <Select name="class_id" label="班级" required defaultValue="">
+              <option value="" disabled>
+                请选择班级
+              </option>
+              {assignment.classes.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name}
+                </option>
+              ))}
+            </Select>
+            <Input name="name" label="批次名称" required />
+            <Button className="mt-6" loading={loading}>
+              创建批改批次
+            </Button>
+          </form>
+        )}
         {error && (
-          <p role="alert" className="mt-3 text-sm text-red-700">
+          <p role="alert" className="text-sm text-red-700">
             {error}
           </p>
         )}
-        {!loading && !error && items.length === 0 && (
-          <p className="mt-4 text-sm text-[var(--text-secondary)]">
-            暂无批次。请先通过作业详情创建批改批次。
-          </p>
-        )}
-        <div className="mt-4 grid gap-3">
-          {items.map((batch) => (
-            <article key={batch.id} className="rounded-xl border p-4">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <strong>{batch.name || "未命名批次"}</strong>
-                  <p className="mt-1 text-xs text-[var(--text-secondary)]">
-                    提交 {batch.submission_count} · 已识别{" "}
-                    {batch.recognized_count} · 已复核 {batch.reviewed_count}
-                  </p>
-                </div>
-                <Badge status={batch.status} />
-              </div>
-              <div className="mt-3 flex flex-wrap gap-2 text-xs">
-                <span>未匹配 {batch.matching.unmatched}</span>
-                <span>冲突 {batch.matching.ambiguous}</span>
-                <span>
-                  已确认 {batch.matching.confirmed}/{batch.matching.total}
-                </span>
-              </div>
-              <div className="mt-4 flex gap-2">
-                <button className="rounded-lg border px-3 py-2">
-                  按学生复核
-                </button>
-                <button className="rounded-lg border px-3 py-2">
-                  按题目横向比较
-                </button>
-                <button className="rounded-lg border px-3 py-2">
-                  上传作业
-                </button>
-              </div>
-            </article>
-          ))}
-        </div>
       </Card>
-      <Card className="p-5">
-        <strong>最终成绩边界</strong>
-        <p className="mt-2 text-sm leading-6 text-[var(--text-secondary)]">
-          AI/规则结果只是建议。低置信度、OCR 异常、公式内容、Provider
-          unavailable 和过期 Rubric 均强制人工复核；只有教师确认后生成的
-          complete 快照可供成绩与学情分析使用。
-        </p>
+      <div className="grid gap-3">
+        {items.map((batch) => (
+          <Card
+            key={batch.id}
+            className="p-5"
+            data-testid="grading-batch"
+            data-batch-id={batch.id}
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <strong>{batch.name || "未命名批次"}</strong>
+                <p className="mt-1 text-xs text-slate-500">
+                  提交 {batch.submission_count} · 已识别{" "}
+                  {batch.recognized_count} · 已复核 {batch.reviewed_count}
+                </p>
+              </div>
+              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs">
+                {batch.status}
+              </span>
+            </div>
+            <p className="mt-3 text-xs">
+              匹配：已确认 {batch.matching.confirmed}/{batch.matching.total} ·
+              待匹配 {batch.matching.unmatched}
+            </p>
+            <Link href={`/grading/${batch.id}`}>
+              <Button className="mt-4">进入批次工作台</Button>
+            </Link>
+          </Card>
+        ))}
+      </div>
+      {!loading && assignmentId && items.length === 0 && (
+        <Card className="p-5 text-sm text-slate-500">
+          暂无批次，请通过上方表单创建。
+        </Card>
+      )}
+      <Card className="p-5 text-sm leading-6 text-slate-600">
+        <strong className="text-slate-900">最终成绩边界：</strong>
+        GradingResult 只是建议；只有教师逐题确认、Submission finalize
+        后生成的最新 complete ScoreSnapshot 才是正式成绩。
       </Card>
     </div>
   );

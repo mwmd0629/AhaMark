@@ -1,0 +1,141 @@
+{
+  "result": "passed",
+  "code_version": "f7783f0073592140c1400d6e7f41ffb17638c64e",
+  "environment": {
+    "kind": "isolated_compose",
+    "compose_project": "ahamark-business-e2e",
+    "web_origin": "http://localhost:3300",
+    "data_policy": "synthetic_only"
+  },
+  "synthetic_marker": "business-e2e-20260722164927325.business-e2e.synthetic.invalid",
+  "started_at": "2026-07-22T16:49:27.405Z",
+  "completed_at": "2026-07-22T16:49:47.546Z",
+  "stages": {
+    "A": {
+      "status": "passed",
+      "ui_steps": [
+        "login_form_submit",
+        "protected_dashboard_after_refresh",
+        "local_storage_credential_key_check"
+      ]
+    },
+    "B": {
+      "status": "passed",
+      "ui_steps": [
+        "create_class",
+        "csv_preview_and_confirm",
+        "leading_zero_and_three_students_visible"
+      ]
+    },
+    "C": {
+      "status": "passed",
+      "ui_steps": [
+        "six_step_wizard_basics_and_real_class",
+        "runtime_synthetic_png_upload_and_paper_page_created"
+      ]
+    },
+    "D": {
+      "status": "passed",
+      "ui_steps": [
+        "paper_ocr_job_and_candidate_visible",
+        "candidate_manually_corrected_and_confirmed",
+        "objective_and_subjective_questions_with_positive_scores",
+        "rubric_items_knowledge_point_publish_check_and_publish"
+      ]
+    },
+    "E": {
+      "status": "passed",
+      "ui_steps": [
+        "create_batch_and_upload_four_synthetic_pages",
+        "automatic_filename_matching_two_submissions",
+        "submission_ocr_student_answers_and_page_order_ui"
+      ]
+    },
+    "F": {
+      "status": "passed",
+      "ui_steps": [
+        "objective_rule_result_and_unavailable_subjective_visible",
+        "teacher_accepted_objective_and_manually_scored_subjective",
+        "all_mandatory_reviews_then_finalize_complete_snapshots"
+      ]
+    },
+    "G": {
+      "status": "passed",
+      "ui_steps": [
+        "readiness_excludes_one_unfinished_student",
+        "release_pins_complete_snapshot_ids",
+        "xlsx_and_chinese_pdf_completed_and_signed_download_requested"
+      ]
+    },
+    "H": {
+      "status": "passed",
+      "ui_steps": [
+        "score_band_drilldown_and_student_detail",
+        "knowledge_point_drilldown_and_class_trend",
+        "fixed_release_metrics_distribution_questions_knowledge_points_trend",
+        "rule_based_insight_edit_and_confirm"
+      ]
+    }
+  },
+  "objects": {
+    "class_id": "f0e65587-4393-4830-8375-b146aa8a1dcd",
+    "assignment_id": "5e6c63fe-2730-4b7b-924d-67dc6f61fb60",
+    "paper_recognition_job_id": "51faba8c-cf09-4048-ae54-3421dc4885a7",
+    "grading_batch_id": "3dd2d5c9-a54c-4167-920c-05ba3b301cbd",
+    "submission_recognition_job_ids": [
+      "978c8f69-ad73-40ac-ac80-8fdf4ebde2c5",
+      "8a22d18c-e6e5-43d9-99d1-533dad0bc054"
+    ],
+    "submission_ids": [
+      "9d13f17e-4dcd-42b6-b1bc-0ef9a8f604aa",
+      "2f2c4d23-8548-4a3f-ad34-8e882ac84cb0"
+    ],
+    "student_ids": [
+      "1b1a5b26-3583-461d-905a-5450bdde56f1",
+      "e636d44d-578c-4252-af59-d0c74666429e"
+    ],
+    "complete_snapshot_ids": [
+      "32cfff83-75f5-40e0-a7f5-223ea549add7",
+      "b8a01797-790a-49d8-b1f3-d70f2d6f2295"
+    ],
+    "grade_release_id": "c68f7259-3f6a-44dc-8f59-df6833b1e67f",
+    "report_jobs": [
+      {
+        "id": "74566c96-098e-47d3-aaa3-14bd797ee022",
+        "type": "gradebook_xlsx",
+        "status": "completed"
+      },
+      {
+        "id": "4f009a35-62b9-4fc5-806b-d45682d72c80",
+        "type": "student_report_pdf",
+        "status": "completed"
+      }
+    ],
+    "analytics_snapshot_id": "a27a7854-a040-41d3-97b5-6937775573bd"
+  },
+  "reconciliation": {
+    "snapshot_scores": [
+      9,
+      8
+    ],
+    "release_snapshot_ids": [
+      "32cfff83-75f5-40e0-a7f5-223ea549add7",
+      "b8a01797-790a-49d8-b1f3-d70f2d6f2295"
+    ],
+    "participant_count": 2,
+    "unfinished_student_count": 1,
+    "unfinished_counted_as_zero": false,
+    "analytics_average": 8.5,
+    "reports_source_grade_release_id": "c68f7259-3f6a-44dc-8f59-df6833b1e67f",
+    "analytics_source_grade_release_id": "c68f7259-3f6a-44dc-8f59-df6833b1e67f",
+    "consistent": true
+  },
+  "ocr": {
+    "provider": "fake",
+    "meaning": "non-production workflow test adapter",
+    "proves": "browser UI and durable workflow orchestration only",
+    "does_not_prove": "RapidOCR accuracy, handwriting OCR, formula OCR, or LaTeX reliability"
+  },
+  "subjective_scoring": "teacher_manual_ui",
+  "failure": null
+}

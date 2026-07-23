@@ -1,12 +1,12 @@
 # AhaMark 最终验收报告
 
-版本 `0.1.0`；日期 2026-07-22；分支 `master`；仓库无基线提交，全部项目文件未跟踪。
+版本 `0.1.0`；更新日期 2026-07-23；分支 `master`；比较基线为 `f7783f0073592140c1400d6e7f41ffb17638c64e`。
 
 本报告中的 `PASS` 仅表示对应验收检查在记录范围内通过，不等于整项能力已完成真实环境验证或达到生产可用。统一能力状态、数据边界和产品措辞以 `PROJECT-BASELINE.md`、`CAPABILITY-EVIDENCE-MATRIX.md`、`DATA-SECURITY-BOUNDARIES.md` 和 `PRODUCT-CAPABILITY-STATEMENTS.md` 为准。
 
 ## 最终结论
 
-**等级 C：内部演示或开发测试。** 适合使用纯合成数据内部演示；不适合受控真实教学试点；不适合生产。没有已知未修 P0，但关键 E2E、安全矩阵、异步容量和对象恢复证据不完整。
+**等级 C：内部演示或开发测试。** 教师核心业务 A–H 已以纯合成数据通过真实浏览器闭环，但这不自动升级整个项目等级。完整权限矩阵、异步容量、恶意文件矩阵和对象恢复证据仍不完整，不适合受控真实教学试点或生产。
 
 ## 验收矩阵
 
@@ -14,17 +14,17 @@
 |---|---|---|
 | 六核心服务 | PASS | web/api/worker/PostgreSQL/Redis/MinIO healthy；栈保持运行 |
 | 数据库迁移 | PASS | 活动库 0010；独立空库 upgrade；0010→0009→0010 |
-| 后端测试 | PASS | 修改前 43 passed；修改后 45 passed，1 条第三方警告 |
+| 后端测试 | PASS | 46 passed；Ruff、mypy 通过；1 条第三方 Starlette TestClient 弃用警告 |
 | 前端测试 | PASS | 10 files / 20 tests |
 | 前端格式/lint/type | PASS | Prettier、ESLint、TypeScript |
-| Next production build | PASS | 构建成功；SWC lockfile 修补警告 |
+| Next production build | PASS | 18 条路由构建成功；SWC lockfile 修补警告仍存在但未阻断 |
 | Analytics HTTP | PASS | 35 请求，含 14 项 Teacher B 隔离 |
 | Analytics 浏览器 | PASS | 6 步无头 Edge 冒烟 |
-| 全业务浏览器 A–H | NOT RUN | 尚无完整 Playwright 教师闭环 |
-| 全链路 API 集成 | PARTIAL | Analytics 真实 HTTP；其余主要为 TestClient/既有冒烟 |
+| 教师核心业务浏览器 A–H | PASS | 独立栈、无头 Edge、纯合成数据；8/8 阶段通过，见 BUSINESS-E2E 与机器 JSON |
+| 全链路 API 集成 | PARTIAL | 教师正常主路径已有真实浏览器链；异常矩阵与其他范围仍不完整 |
 | 完整权限矩阵 | PARTIAL | Analytics 与文件隔离通过；全部资源/动作未覆盖 |
-| 成绩正确性 | PASS | complete Snapshot 唯一来源的自动化与既有验证通过 |
-| XLSX/中文 PDF | PASS | 既有自动化与真实 Celery/MinIO 冒烟；本轮未跑容量 |
+| 成绩正确性 | PASS | 浏览器 finalize 得到 9/8 两份 complete Snapshot；Release、报告、Analytics 对账一致，未完成学生不记零 |
+| XLSX/中文 PDF | PASS | 本轮真实浏览器创建，Celery/MinIO Job 均 completed；未跑批量容量 |
 | 30–50 人性能 | PARTIAL | 2×50、2×20 题的 5 类同步 API；异步与并发未测 |
 | MIME/恶意文件 | PARTIAL | 统一内容检查和小型回归；完整 fixture 未跑 |
 | Auth/Session/CSRF | PASS | 登录、错误、Cookie、CSRF、过期、撤销、production 边界 |
@@ -49,4 +49,4 @@
 
 外部依赖：RapidOCR 可用但不保证手写/公式；公式 OCR unavailable；真实主观题 AI unavailable。发布含义是教师确认版本，不是已发送学生端。
 
-README、HANDOFF、FINAL-ACCEPTANCE 已更新/创建。本任务没有 git add、提交、推送、PR 或部署；没有删除 Volume；Docker 栈保持运行。仓库没有基线提交是高风险：无法区分历史成果与本轮变更，应由用户审阅后建立首个受控基线。
+第二部分新增 BUSINESS-E2E 与机器证据，并更新 HANDOFF、FINAL-ACCEPTANCE 和能力矩阵。本任务没有 git add、提交、推送、PR 或部署；没有删除 Volume；独立 E2E 栈和证据数据保持运行/保留，等待用户决定。

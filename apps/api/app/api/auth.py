@@ -12,7 +12,7 @@ from app.core.config import get_settings
 from app.db.session import get_db
 from app.models import Status, User, UserSession, now_utc
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, TypeAdapter, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -23,8 +23,18 @@ _attempt_lock = threading.Lock()
 
 
 class LoginInput(BaseModel):
-    email: EmailStr
+    email: str
     password: str = Field(min_length=8, max_length=256)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        normalized = value.lower().strip()
+        if normalized.endswith(".synthetic.invalid") and "@" in normalized:
+            local, domain = normalized.rsplit("@", 1)
+            if local and domain.endswith(".synthetic.invalid"):
+                return normalized
+        return str(TypeAdapter(EmailStr).validate_python(normalized))
 
 
 def hash_password(password: str) -> str:

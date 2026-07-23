@@ -14,10 +14,13 @@ class Settings(BaseSettings):
     celery_result_backend: str = "redis://localhost:6379/1"
     cors_origins: list[str] = ["http://localhost:3000"]
     minio_endpoint: str = "localhost:9000"
+    minio_public_endpoint: str | None = None
     minio_access_key: str = "ahamark-local"
     minio_secret_key: str = "change-me-in-production"
     minio_bucket: str = "ahamark-files"
+    minio_region: str = "us-east-1"
     minio_secure: bool = False
+    minio_public_secure: bool = False
     max_upload_bytes: int = 10 * 1024 * 1024
     allowed_upload_types: list[str] = ["application/pdf", "image/jpeg", "image/png"]
     demo_actor_enabled: bool = True

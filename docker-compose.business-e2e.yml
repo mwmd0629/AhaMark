@@ -1,0 +1,103 @@
+name: ahamark-business-e2e
+
+x-app-env: &app-env
+  APP_ENV: test
+  DATABASE_URL: postgresql+psycopg://ahamark_e2e:business-e2e-only@postgres:5432/ahamark_business_e2e
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/1
+  CORS_ORIGINS: '["http://localhost:3300"]'
+  MINIO_ENDPOINT: minio:9000
+  MINIO_PUBLIC_ENDPOINT: localhost:9900
+  MINIO_ACCESS_KEY: ahamark-business-e2e
+  MINIO_SECRET_KEY: business-e2e-storage-only
+  MINIO_BUCKET: ahamark-business-e2e
+  MINIO_SECURE: "false"
+  MINIO_PUBLIC_SECURE: "false"
+  DEMO_ACTOR_ENABLED: "false"
+  AUTH_COOKIE_SECURE: "false"
+  RECOGNITION_PROVIDER: fake
+  GRADING_PROVIDER: unavailable
+  BUSINESS_E2E_TEACHER_PASSWORD: Synthetic-Business-E2E-Only!
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ahamark_business_e2e
+      POSTGRES_USER: ahamark_e2e
+      POSTGRES_PASSWORD: business-e2e-only
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ahamark_e2e -d ahamark_business_e2e"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ahamark-business-e2e
+      MINIO_ROOT_PASSWORD: business-e2e-storage-only
+    ports: ["9900:9000", "9901:9001"]
+    volumes: [minio_data:/data]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  api:
+    build: {context: ., dockerfile: apps/api/Dockerfile}
+    environment: *app-env
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports: ["8800:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      minio: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  worker:
+    build: {context: ., dockerfile: apps/api/Dockerfile}
+    environment: *app-env
+    command: celery -A workers.celery_app:celery_app worker --loglevel=INFO
+    depends_on:
+      redis: {condition: service_healthy}
+      api: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A workers.celery_app:celery_app inspect ping -d celery@$${HOSTNAME}"]
+      interval: 10s
+      timeout: 8s
+      retries: 10
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args: {NEXT_PUBLIC_API_URL: "http://localhost:8800"}
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8800
+      HOSTNAME: 0.0.0.0
+    ports: ["3300:3000"]
+    depends_on: {api: {condition: service_healthy}}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  postgres_data: {}
+  redis_data: {}
+  minio_data: {}

@@ -57,12 +57,17 @@ export function RecognitionWorkspace({
     pages.find((item) => item.paper_page_id === region?.paper_page_id) ??
     pages[0];
   return (
-    <Card className="space-y-4 p-6">
+    <Card
+      className="space-y-4 p-6"
+      data-testid="recognition-workspace"
+      data-provider={provider?.provider}
+    >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="font-bold">图片处理与 OCR</h2>
           <p className="text-sm text-slate-600">
-            原图、处理图和候选数据分离保存；候选确认前不会修改正式题目。
+            原图、处理图和候选数据分离保存；候选确认前不会修改正式题目。fake
+            仅是非 production 工作流测试适配器。
           </p>
         </div>
         <Button
@@ -107,6 +112,9 @@ export function RecognitionWorkspace({
       {job && (
         <div
           aria-label="识别任务进度"
+          data-testid="recognition-job"
+          data-job-id={job.id}
+          data-status={job.status}
           className="space-y-2 rounded-xl bg-slate-50 p-3"
         >
           <div className="flex justify-between">
@@ -208,7 +216,11 @@ export function RecognitionWorkspace({
               )}
             </div>
           </section>
-          <aside className="space-y-3">
+          <aside
+            className="space-y-3"
+            data-testid="recognition-candidate"
+            data-candidate-id={current?.id}
+          >
             <h3 className="font-semibold">候选题目</h3>
             <select
               aria-label="候选题目"

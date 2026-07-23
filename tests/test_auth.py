@@ -86,3 +86,13 @@ def test_admin_can_initialize_teacher_without_storing_plaintext() -> None:
     assert user.email == "new@example.com"
     assert user.password_hash != "not-plain-password"
     assert user.password_hash.startswith("scrypt$")
+
+
+def test_login_input_accepts_reserved_synthetic_fixture_domain() -> None:
+    from app.api.auth import LoginInput
+
+    payload = LoginInput(
+        email="Teacher@business-e2e.synthetic.invalid",
+        password="synthetic-only-password",
+    )
+    assert payload.email == "teacher@business-e2e.synthetic.invalid"

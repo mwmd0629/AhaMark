@@ -11,22 +11,22 @@
 - `UNAVAILABLE`：没有可用正式实现或 Provider。
 - `OUT_OF_SCOPE`：当前版本明确不做。
 
-真实证据简称：`HTTP72` = `analytics72-http-verification.json`；`BROWSER72` = `analytics72-browser-smoke.json`；`PERF` = `performance-results.json`；`DOC-EVIDENCE` = HANDOFF/FINAL-ACCEPTANCE 中记录但本次未重跑的环境验证。
+真实证据简称：`BUSINESS-E2E` = `business-e2e-verification.json` + `BUSINESS-E2E.md`；`HTTP72` = `analytics72-http-verification.json`；`BROWSER72` = `analytics72-browser-smoke.json`；`PERF` = `performance-results.json`；`DOC-EVIDENCE` = HANDOFF/FINAL-ACCEPTANCE 中记录的环境验证。
 
 ## 摘要
 
 | 模块 | 状态 | 结论 |
 |---|---|---|
 | 认证 | IMPLEMENTED_AND_VERIFIED | 真实登录/CSRF 会话用于 HTTP72 与 BROWSER72；多实例限速等仍有限制 |
-| 班级与学生 | PARTIAL | CRUD/导入自动化；真实环境只覆盖列表读取 |
-| 作业和 Rubric | PARTIAL | CRUD/发布自动化；真实环境只覆盖列表/详情读取 |
+| 班级与学生 | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 覆盖真实浏览器创建、CSV 预览/确认、前导零与列表 |
+| 作业和 Rubric | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 覆盖六步向导、题目/题区/知识点/Rubric/发布正常主路径 |
 | 试卷 OCR | PARTIAL | RapidOCR 印刷体窄范围真实验证；公式/手写/DOCX 有缺口 |
-| 学生作业 OCR | IMPLEMENTED_AUTOMATED_ONLY | Submission 专用链路和持久化有自动化，无可定位真实异步闭环证据 |
-| 客观题评分 | IMPLEMENTED_AUTOMATED_ONLY | 确定性规范化精确匹配有自动化 |
+| 学生作业 OCR | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 在隔离 test-only Fake OCR 下验证异步 UI/持久化编排，不证明真实 OCR 能力 |
+| 客观题评分 | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 显示 objective-rule Criterion/Evidence 并由教师接受 |
 | 主观题评分 | UNAVAILABLE | 真实 Provider 不存在，必须人工评分 |
-| 教师复核 | IMPLEMENTED_AUTOMATED_ONLY | 复核、修改、Revision、finalize guard 有自动化 |
-| 最终成绩 | IMPLEMENTED_AUTOMATED_ONLY | 唯一来源不变量已实现并测试，未真实走通完整 finalize 链路 |
-| GradeRelease | IMPLEMENTED_AUTOMATED_ONLY | 固定 Snapshot 已实现，学生送达 OUT_OF_SCOPE |
+| 教师复核 | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 覆盖客观题接受、主观题 UI 人工评分、强制项与 finalize |
+| 最终成绩 | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 从 finalize 生成 9/8 两份 complete Snapshot 并完成下游对账 |
+| GradeRelease | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 由 UI 创建并固定两份具体 Snapshot；学生送达 OUT_OF_SCOPE |
 | XLSX/PDF | IMPLEMENTED_AND_VERIFIED | 格式自动化及既有 Celery/MinIO 冒烟；容量仍未验证 |
 | Analytics | IMPLEMENTED_AND_VERIFIED | HTTP72 + BROWSER72 覆盖的范围通过 |
 | TeachingInsight | IMPLEMENTED_AND_VERIFIED | 规则型建议生命周期经 HTTP/浏览器验证 |
@@ -49,27 +49,27 @@
 - 禁止说：企业级 IAM、完整 SSO/MFA、多实例防爆破或生产认证已验收。
 - 后续验收条件：完整会话攻击用例、多副本 Redis 限速、全资源权限矩阵和生产 TLS/secret 配置。
 
-### 2. 班级与学生 — `PARTIAL`
+### 2. 班级与学生 — `IMPLEMENTED_AND_VERIFIED`
 
 - 实现位置：`apps/api/app/api/domain.py`，前端 classes 页面，CSV/XLSX 两阶段导入。
 - 模型/迁移：Class、Student、ClassStudent、Group、ImportJob/Row/Error；`0002_classes_students_imports`。
 - 自动化证据：`tests/test_classes.py` 覆盖 CRUD、归档、成员、分组、CSV/XLSX preview/confirm/idempotency；前端 classes tests。
-- 真实证据：PERF 仅覆盖班级列表和 50 人学生列表；未覆盖真实 CRUD/导入浏览器闭环。
+- 真实证据：BUSINESS-E2E 覆盖创建唯一合成班级、CSV 预览/确认、3 人列表和前导零学号；PERF 覆盖 50 人列表。
 - 限制：完整跨教师 create/update/archive/import 矩阵未跑；真实学生数据禁止使用。
 - 可以说：教师端班级/学生管理和合成数据导入流程已实现。
 - 禁止说：已通过真实学校数据验证、可做正式学籍管理。
-- 后续验收条件：合成数据真实 HTTP/浏览器 CRUD、导入失败/幂等、跨教师全动作验证。
+- 后续验收条件：异常/冲突导入、归档/分组及跨教师全动作仍待后续矩阵验证。
 
-### 3. 作业和 Rubric — `PARTIAL`
+### 3. 作业和 Rubric — `IMPLEMENTED_AND_VERIFIED`
 
 - 实现位置：`apps/api/app/api/assignments.py`、AssignmentWizard、作业/编辑/Rubric 页面。
 - 模型/迁移：Assignment、PaperVersion、Question/Region、RubricVersion/Item、KnowledgePoint；`0003`、`0005`。
 - 自动化证据：`tests/test_assignments.py` 覆盖 CRUD、文件/页面/题目/区域、Rubric、发布检查、拒绝上传。
-- 真实证据：PERF 只验证作业列表和 20 题详情读取。
-- 限制：完整教师浏览器创建至发布闭环未运行；未知分值必须阻止 Rubric/发布。
+- 真实证据：BUSINESS-E2E 覆盖创建、合成 PNG、页面、OCR 候选人工修正、一主观一客观题、正分值、题区、知识点、Rubric、完整性检查与发布；PERF 另覆盖列表/详情读取。
+- 限制：只验证正常主路径；未知分值和其他发布错误分支仍主要由自动化覆盖。
 - 可以说：作业、题目、版本化 Rubric 与发布前完整性检查已实现。
-- 禁止说：完整作业制作流程已做真实 E2E 验收。
-- 后续验收条件：真实 HTTP/浏览器覆盖创建、文件、题区、Rubric、发布及错误路径。
+- 禁止说：异常路径、真实试卷内容或所有文件格式已完整验收。
+- 后续验收条件：发布错误路径、PDF/JPEG/DOCX 组合和跨教师动作矩阵。
 
 ### 4. 试卷 OCR — `PARTIAL`
 
@@ -82,23 +82,23 @@
 - 禁止说：可靠公式/手写识别、高准确率、适合真实答卷自动评分。
 - 后续验收条件：可审计真实异步流程、代表性合成样本、错误/重试、准确率口径；公式/手写需独立 Provider 与证据。
 
-### 5. 学生作业 OCR — `IMPLEMENTED_AUTOMATED_ONLY`
+### 5. 学生作业 OCR — `IMPLEMENTED_AND_VERIFIED`
 
 - 实现位置：`apps/api/app/recognition/submission.py`、`apps/api/app/api/grading.py`、Submission OCR Worker。
 - 模型/迁移：SubmissionRecognitionJob/Block、SubmissionPage、StudentAnswer/Region；`0006`、`0009`。
 - 自动化证据：`tests/test_submission_workflow.py` 覆盖 Worker 幂等、答案写入、页面结构与 finalize guard。
-- 真实证据：无可定位的学生作业 OCR 真实 HTTP/浏览器闭环；既有文档也仅明确自动化链路。
-- 限制：多页归并、匹配异常、低置信、公式、重试和 Celery/MinIO 组合未形成完整真实证据。
-- 可以说：学生作业 OCR 工程链路已实现并有自动化测试。
-- 禁止说：学生答卷异步 OCR 已在真实环境完整验收。
+- 真实证据：BUSINESS-E2E 经浏览器上传 4 张运行时合成图片，自动匹配两份 Submission，启动/等待 Celery Submission OCR，显示 StudentAnswer 并保存页面顺序。
+- 限制：使用隔离 `APP_ENV=test` 的 Fake OCR 工作流适配器；只证明异步编排/持久化，不证明 RapidOCR、手写或公式能力。拆分/合并、匹配异常、低置信和重试未覆盖。
+- 可以说：学生作业 OCR 的浏览器 UI 与异步工程链路在隔离合成环境闭环通过。
+- 禁止说：RapidOCR 学生答卷准确率通过，或真实答卷 OCR 已验收。
 - 后续验收条件：纯合成 PDF/图片经上传、匹配、异步 OCR、修正、重试到答案持久化的可审计验证。
 
-### 6. 客观题评分 — `IMPLEMENTED_AUTOMATED_ONLY`
+### 6. 客观题评分 — `IMPLEMENTED_AND_VERIFIED`
 
 - 实现位置：`apps/api/app/grading/providers.py`、`apps/api/app/api/grading.py`。
 - 模型/迁移：GradingJob/Result、StudentAnswer、Rubric；`0006`。
 - 自动化证据：`tests/test_grading.py` 验证大小写/空格规范化精确匹配；submission workflow 覆盖后续复核。
-- 真实证据：无独立真实 HTTP/浏览器评分闭环。
+- 真实证据：BUSINESS-E2E 显示 `objective-rule/v1`、Criterion、Evidence 与 5 分建议，教师在复核 UI 接受后进入最终快照。
 - 限制：只适用于答案及可接受答案明确的题型；单位、精度、等价表达、歧义和 OCR 异常需人工复核。
 - 可以说：明确答案客观题可由确定性规则给出初批建议。
 - 禁止说：语义等价自动判断、所有客观题无需人工复核。
@@ -115,34 +115,34 @@
 - 禁止说：主观题 AI 已可用、准确率、全自动主观题批改。
 - 后续验收条件：正式 Provider、安全/隐私设计、数据集与评价协议、人工复核门槛和真实环境证据；在此前保持 unavailable。
 
-### 8. 教师复核 — `IMPLEMENTED_AUTOMATED_ONLY`
+### 8. 教师复核 — `IMPLEMENTED_AND_VERIFIED`
 
 - 实现位置：`apps/api/app/api/grading.py`、review 页面。
 - 模型/迁移：TeacherReview、ScoreRevision、GradingEvidence/CriterionResult；`0006`。
 - 自动化证据：复核决策、手动分数、批量资格、一致性、修改留痕、finalize guard。
-- 真实证据：无完整浏览器复核闭环。
+- 真实证据：BUSINESS-E2E 在三栏工作台处理两份提交×两题；客观题接受，主观题 Provider unavailable 后分别人工输入 4/3 分，进度 4/4 后 finalize。
 - 限制：低置信、异常、主观题、`score=null`、修正答案和 Rubric 变化必须复核；不能无条件批量接受。
 - 可以说：教师可接受、修改、拒绝、手动评分并保留修订记录。
 - 禁止说：AI 建议会自动成为最终成绩。
 - 后续验收条件：浏览器逐题/批量资格、并发修改、审计与失败恢复验证。
 
-### 9. 最终成绩 — `IMPLEMENTED_AUTOMATED_ONLY`
+### 9. 最终成绩 — `IMPLEMENTED_AND_VERIFIED`
 
 - 实现位置：`apps/api/app/results/services.py` 的 FinalScoreService、`apps/api/app/api/grading.py` 的 `POST /submissions/{id}/finalize`。
 - 模型/迁移：SubmissionScoreSnapshot、Submission.finalized；`0006`、`0007` details schema。
 - 自动化证据：snapshot schema、分值范围、重复题目、合计、finalize guard 和模型分层测试。
-- 真实证据：Analytics 的 seeded complete Snapshot 被读取，但没有从上传/评分/复核到 finalize 的完整真实链路证据。
+- 真实证据：BUSINESS-E2E 从上传、规则初批、人工复核到 finalize 生成两份最新 complete Snapshot（9、8），并与 Release/报告/Analytics 对账。
 - 限制：仅 finalized + 最新 complete；旧 schema 或不完整 details 拒绝；缺失不是零分。
 - 可以说：正式成绩来源规则已实现并由自动化保护。
 - 禁止说：GradingResult/建议分/临时复核是正式成绩，或未完成等于零分。
 - 后续验收条件：合成数据真实 HTTP 从复核到多版本 Snapshot、旧/不完整 Snapshot 拒绝及审计验证。
 
-### 10. GradeRelease — `IMPLEMENTED_AUTOMATED_ONLY`
+### 10. GradeRelease — `IMPLEMENTED_AND_VERIFIED`
 
 - 实现位置：`apps/api/app/api/results.py`、`apps/api/app/results/services.py`。
 - 模型/迁移：GradeRelease、GradeReleaseItem.score_snapshot_id；`0007`。
 - 自动化证据：Release 从 FinalScoreService 建项、固定 Snapshot、报告/Analytics 服务读取固定 Release。
-- 真实证据：HTTP72 使用已 seed 的固定 Release，但未真实创建发布；无学生端或通知。
+- 真实证据：BUSINESS-E2E 的 readiness 显示 2 可发布、1 未完成，由 UI 创建 Release 并固定两份具体 complete Snapshot；HTTP72 另验证既有固定 Release 读取。无学生端或通知。
 - 限制：`released` 仅为教师确认数据；后续改分需新 Snapshot 与新 Release 版本。
 - 可以说：发布版本固定具体成绩快照，可追溯且旧版不变。
 - 禁止说：学生已收到、学生端已上线或已通知送达。
@@ -153,8 +153,8 @@
 - 实现位置：`apps/api/app/results/services.py`、`apps/api/app/results/jobs.py`、Report Worker；仓库内 Noto Sans SC。
 - 模型/迁移：ReportJob、StoredFile、ReportJobStudentScope；`0007`、`0010`。
 - 自动化证据：XLSX sheet/文本学号/公式防护，中文 PDF 字体与解析，Worker 只收 Job ID 且幂等。
-- 真实证据：DOC-EVIDENCE 记录真实 Celery/MinIO 报告冒烟；HTTP72 验证报告列表与失败任务 retry 创建新 Job。
-- 限制：本轮未重跑；30–50 份 PDF、ZIP、大文件、到期下载与并发容量未验证。
+- 真实证据：BUSINESS-E2E 由 UI 创建 XLSX 和中文个人 PDF，真实 Celery/MinIO Job 均 completed，并从页面请求新的短期签名地址；HTTP72 另验证失败任务 retry。
+- 限制：30–50 份 PDF、ZIP、大文件、签名地址实际到期等待与并发容量未验证。
 - 可以说：固定 GradeRelease 的真实 XLSX/中文 PDF 生成链路在开发环境做过冒烟。
 - 禁止说：大批量报告容量或生产下载链路已验收。
 - 后续验收条件：可重复异步容量、对象恢复、到期 URL、失败重试与敏感导出控制验证。
@@ -164,7 +164,7 @@
 - 实现位置：`apps/api/app/results/services.py`、`apps/api/app/api/results.py`、Analytics 页面与学生详情。
 - 模型/迁移：AnalyticsSnapshot 固定 GradeRelease；`0007`。
 - 自动化证据：metrics 公式、分布、错误、知识点、主观题不宣称正确率、分页稳定性和前端状态。
-- 真实证据：HTTP72 覆盖四类下钻、三类趋势、学生详情、缺交不记零及错误输入；BROWSER72 覆盖加载、下钻和趋势。
+- 真实证据：HTTP72 覆盖四类下钻、三类趋势、学生详情、缺交不记零及错误输入；BROWSER72 覆盖加载、下钻和趋势；BUSINESS-E2E 从同一固定 Release 对账 2 人、平均 8.5，并走分数段、学生、知识点和趋势页面。
 - 限制：证据基于小型固定合成数据；未覆盖全业务、并发、大数据量或教学效果。
 - 可以说：固定发布版本的统计、下钻和趋势已在合成开发环境真实验证。
 - 禁止说：AI 学情诊断、真实教学效果、生产规模分析。

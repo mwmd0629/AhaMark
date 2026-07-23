@@ -7,8 +7,9 @@ from minio import Minio
 
 
 class MinioStorage:
-    def __init__(self, client: Minio, bucket: str):
+    def __init__(self, client: Minio, bucket: str, public_client: Minio | None = None):
         self.client, self.bucket = client, bucket
+        self.public_client = public_client or client
 
     def ensure_bucket(self) -> None:
         if not self.client.bucket_exists(self.bucket):
@@ -35,6 +36,6 @@ class MinioStorage:
         self.client.remove_object(self.bucket, key)
 
     def presigned_get(self, key: str, expires_seconds: int = 900) -> str:
-        return self.client.presigned_get_object(
+        return self.public_client.presigned_get_object(
             self.bucket, key, expires=timedelta(seconds=expires_seconds)
         )
