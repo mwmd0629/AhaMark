@@ -129,18 +129,26 @@ async def upload_file(
 
     key = f"uploads/{actor.id}/{uuid.uuid4().hex}.{inspection.kind}"
     content_type = file.content_type or "application/octet-stream"
-    meta = storage.put(key, io.BytesIO(content), len(content), content_type)
-    stored = StoredFile(
-        owner_id=actor.id,
-        storage_key=key,
-        original_name=name,
-        content_type=content_type,
-        size=len(content),
-        checksum=hashlib.sha256(content).hexdigest(),
-        status=FileStatus.ready,
-    )
-    db.add(stored)
-    db.commit()
+    try:
+        meta = storage.put(key, io.BytesIO(content), len(content), content_type)
+        stored = StoredFile(
+            owner_id=actor.id,
+            storage_key=key,
+            original_name=name,
+            content_type=content_type,
+            size=len(content),
+            checksum=hashlib.sha256(content).hexdigest(),
+            status=FileStatus.ready,
+        )
+        db.add(stored)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        try:
+            storage.delete(key)
+        except Exception:
+            pass
+        raise HTTPException(503, "文件保存失败，未保留对象或数据库记录") from exc
     return {
         "key": meta.key,
         "id": str(stored.id),
@@ -185,7 +193,7 @@ def signed_url(
     storage: Annotated[ObjectStorage, Depends(get_storage)],
 ) -> dict[str, str]:
     owned_file(db, actor, key)
-    return {"url": storage.presigned_get(key)}
+    return {"url": storage.presigned_get(key, get_settings().signed_url_expiry_seconds)}
 
 
 def owned_file(db: Session, actor: Actor, key: str) -> StoredFile:

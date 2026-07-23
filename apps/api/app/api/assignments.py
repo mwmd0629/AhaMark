@@ -792,6 +792,10 @@ async def upload(
         storage.put(key, io.BytesIO(content), len(content), MIMES[ext])
     except Exception as exc:
         db.rollback()
+        try:
+            storage.delete(key)
+        except Exception:
+            pass
         raise ApiProblem(503, "STORAGE_UNAVAILABLE", "对象存储不可用，文件未保存") from exc
     sf.status = FileStatus.ready
     existing = (
@@ -822,7 +826,15 @@ async def upload(
         item.id,
         {"stored_file_id": str(sf.id), "pages": page_count},
     )
-    db.commit()
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        try:
+            storage.delete(key)
+        except Exception:
+            pass
+        raise ApiProblem(503, "FILE_SAVE_FAILED", "文件保存失败，未保留半成品") from exc
     return {
         "id": str(sf.id),
         "name": sf.original_name,

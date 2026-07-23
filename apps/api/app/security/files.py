@@ -2,6 +2,7 @@ import io
 import zipfile
 from dataclasses import dataclass
 from pathlib import PurePath, PurePosixPath
+from xml.etree import ElementTree
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pypdf import PdfReader
@@ -76,8 +77,17 @@ def inspect_docx(content: bytes) -> FileInspection:
         if any(name.endswith("vbaproject.bin") for name in names):
             raise UnsafeFile("OFFICE_MACRO_FORBIDDEN", "不接受包含宏的 Office 文件")
         for info in archive.infolist():
+            if info.filename.lower().endswith(".xml"):
+                try:
+                    ElementTree.fromstring(archive.read(info))
+                except ElementTree.ParseError as exc:
+                    raise UnsafeFile("OFFICE_XML_INVALID", "Office 文件包含损坏的 XML") from exc
             if info.filename.lower().endswith(".rels"):
                 data = archive.read(info)
+                try:
+                    ElementTree.fromstring(data)
+                except ElementTree.ParseError as exc:
+                    raise UnsafeFile("OFFICE_XML_INVALID", "Office 文件包含损坏的 XML") from exc
                 if b'TargetMode="External"' in data or b"TargetMode='External'" in data:
                     raise UnsafeFile(
                         "OFFICE_EXTERNAL_LINK_FORBIDDEN", "不接受包含外部链接的 Office 文件"
@@ -98,8 +108,17 @@ def inspect_xlsx_archive(content: bytes) -> None:
         if any(name.endswith("vbaproject.bin") for name in names):
             raise UnsafeFile("OFFICE_MACRO_FORBIDDEN", "不接受包含宏的 Office 文件")
         for info in archive.infolist():
+            if info.filename.lower().endswith(".xml"):
+                try:
+                    ElementTree.fromstring(archive.read(info))
+                except ElementTree.ParseError as exc:
+                    raise UnsafeFile("OFFICE_XML_INVALID", "Office 文件包含损坏的 XML") from exc
             if info.filename.lower().endswith(".rels"):
                 data = archive.read(info)
+                try:
+                    ElementTree.fromstring(data)
+                except ElementTree.ParseError as exc:
+                    raise UnsafeFile("OFFICE_XML_INVALID", "Office 文件包含损坏的 XML") from exc
                 if b'TargetMode="External"' in data or b"TargetMode='External'" in data:
                     raise UnsafeFile(
                         "OFFICE_EXTERNAL_LINK_FORBIDDEN", "不接受包含外部链接的 Office 文件"
@@ -137,12 +156,19 @@ def inspect_upload(
             if reader.is_encrypted:
                 raise UnsafeFile("PDF_ENCRYPTED", "PDF 已加密，请先解除密码")
             pages = len(reader.pages)
+            has_effective_page = any(
+                page.get_contents() is not None
+                or bool((page.get("/Resources") or {}).get("/XObject"))
+                for page in reader.pages
+            )
         except UnsafeFile:
             raise
         except Exception as exc:
             raise UnsafeFile("PDF_INVALID", "PDF 损坏或无法读取") from exc
         if pages < 1:
             raise UnsafeFile("PDF_INVALID", "PDF 不包含页面")
+        if not has_effective_page:
+            raise UnsafeFile("PDF_EMPTY", "PDF 不包含有效页面内容")
         if pages > max_pdf_pages:
             raise UnsafeFile("PDF_TOO_MANY_PAGES", f"PDF 不能超过 {max_pdf_pages} 页")
         return FileInspection(ext, pages)

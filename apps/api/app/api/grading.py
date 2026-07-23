@@ -369,6 +369,7 @@ async def upload_submissions(
     created: list[dict[str, Any]] = []
     total = 0
     inspected: list[tuple[UploadFile, bytes, str, str, int]] = []
+    seen_checksums: set[str] = set()
     for upload in files:
         content = await upload.read(settings.assignment_max_file_bytes + 1)
         total += len(content)
@@ -393,6 +394,8 @@ async def upload_submissions(
         suffix = f".{inspection.kind}"
         mime = upload.content_type or "application/octet-stream"
         checksum = hashlib.sha256(content).hexdigest()
+        if checksum in seen_checksums:
+            raise ApiProblem(409, "DUPLICATE_SUBMISSION_FILE", "批次中已存在相同文件")
         duplicate = db.scalar(
             select(StoredFile)
             .join(SubmissionFileMatch, SubmissionFileMatch.stored_file_id == StoredFile.id)
@@ -402,101 +405,111 @@ async def upload_submissions(
         )
         if duplicate:
             raise ApiProblem(409, "DUPLICATE_SUBMISSION_FILE", "批次中已存在相同文件")
+        seen_checksums.add(checksum)
         inspected.append((upload, content, suffix, mime, inspection.page_count))
-    for upload, content, suffix, mime, page_count in inspected:
-        checksum = hashlib.sha256(content).hexdigest()
-        key = f"submissions/{actor.id}/{batch.id}/{uuid.uuid4().hex}{suffix}"
-        try:
+    written_keys: list[str] = []
+    try:
+        for upload, content, suffix, mime, page_count in inspected:
+            checksum = hashlib.sha256(content).hexdigest()
+            key = f"submissions/{actor.id}/{batch.id}/{uuid.uuid4().hex}{suffix}"
+            written_keys.append(key)
             storage.put(key, io.BytesIO(content), len(content), mime)
-        except Exception as exc:
-            db.rollback()
-            raise ApiProblem(503, "STORAGE_UNAVAILABLE", "对象存储不可用，文件未保存") from exc
-        stored = StoredFile(
-            owner_id=actor.id,
-            storage_key=key,
-            original_name=safe_filename(upload.filename),
-            content_type=mime,
-            size=len(content),
-            checksum=checksum,
-            status=FileStatus.ready,
-        )
-        db.add(stored)
-        db.flush()
-        student, method, confidence, reason = match_student(db, batch, stored.original_name)
-        match = SubmissionFileMatch(
-            grading_batch_id=batch.id,
-            stored_file_id=stored.id,
-            suggested_student_id=student.id if student else None,
-            confirmed_student_id=student.id
-            if student and confidence >= Decimal(str(settings.submission_match_threshold))
-            else None,
-            match_method=method,
-            confidence=confidence,
-            status="confirmed"
-            if student and confidence >= Decimal(str(settings.submission_match_threshold))
-            else "pending",
-            reason=reason,
-            confirmed_by=actor.id
-            if student and confidence >= Decimal(str(settings.submission_match_threshold))
-            else None,
-            confirmed_at=now_utc()
-            if student and confidence >= Decimal(str(settings.submission_match_threshold))
-            else None,
-        )
-        db.add(match)
-        db.flush()
-        submission = None
-        if match.confirmed_student_id:
-            submission = db.scalar(
-                select(Submission).where(
-                    Submission.grading_batch_id == batch.id,
-                    Submission.student_id == match.confirmed_student_id,
-                    Submission.attempt_number == 1,
-                )
+            stored = StoredFile(
+                owner_id=actor.id,
+                storage_key=key,
+                original_name=safe_filename(upload.filename),
+                content_type=mime,
+                size=len(content),
+                checksum=checksum,
+                status=FileStatus.ready,
             )
-            if submission is None:
-                submission = Submission(
-                    owner_id=actor.id,
-                    grading_batch_id=batch.id,
-                    assignment_id=batch.assignment_id,
-                    class_id=batch.class_id,
-                    student_id=match.confirmed_student_id,
-                    status="matched",
-                )
-                db.add(submission)
-                db.flush()
-                batch.submission_count += 1
-            next_page = (
-                db.scalar(
-                    select(func.max(SubmissionPage.page_number)).where(
-                        SubmissionPage.submission_id == submission.id
+            db.add(stored)
+            db.flush()
+            student, method, confidence, reason = match_student(db, batch, stored.original_name)
+            match = SubmissionFileMatch(
+                grading_batch_id=batch.id,
+                stored_file_id=stored.id,
+                suggested_student_id=student.id if student else None,
+                confirmed_student_id=student.id
+                if student and confidence >= Decimal(str(settings.submission_match_threshold))
+                else None,
+                match_method=method,
+                confidence=confidence,
+                status="confirmed"
+                if student and confidence >= Decimal(str(settings.submission_match_threshold))
+                else "pending",
+                reason=reason,
+                confirmed_by=actor.id
+                if student and confidence >= Decimal(str(settings.submission_match_threshold))
+                else None,
+                confirmed_at=now_utc()
+                if student and confidence >= Decimal(str(settings.submission_match_threshold))
+                else None,
+            )
+            db.add(match)
+            db.flush()
+            submission = None
+            if match.confirmed_student_id:
+                submission = db.scalar(
+                    select(Submission).where(
+                        Submission.grading_batch_id == batch.id,
+                        Submission.student_id == match.confirmed_student_id,
+                        Submission.attempt_number == 1,
                     )
                 )
-                or 0
-            ) + 1
-            for source_page in range(1, page_count + 1):
-                db.add(
-                    SubmissionPage(
-                        submission_id=submission.id,
-                        stored_file_id=stored.id,
-                        page_number=next_page + source_page - 1,
-                        source_page_number=source_page,
-                        status="ready",
+                if submission is None:
+                    submission = Submission(
+                        owner_id=actor.id,
+                        grading_batch_id=batch.id,
+                        assignment_id=batch.assignment_id,
+                        class_id=batch.class_id,
+                        student_id=match.confirmed_student_id,
+                        status="matched",
                     )
-                )
-        created.append(
-            {
-                "match_id": str(match.id),
-                "file_id": str(stored.id),
-                "filename": stored.original_name,
-                "method": method,
-                "confidence": str(confidence),
-                "status": match.status,
-                "suggested_student_id": str(student.id) if student else None,
-                "submission_id": str(submission.id) if submission else None,
-            }
-        )
-    db.commit()
+                    db.add(submission)
+                    db.flush()
+                    batch.submission_count += 1
+                next_page = (
+                    db.scalar(
+                        select(func.max(SubmissionPage.page_number)).where(
+                            SubmissionPage.submission_id == submission.id
+                        )
+                    )
+                    or 0
+                ) + 1
+                for source_page in range(1, page_count + 1):
+                    db.add(
+                        SubmissionPage(
+                            submission_id=submission.id,
+                            stored_file_id=stored.id,
+                            page_number=next_page + source_page - 1,
+                            source_page_number=source_page,
+                            status="ready",
+                        )
+                    )
+            created.append(
+                {
+                    "match_id": str(match.id),
+                    "file_id": str(stored.id),
+                    "filename": stored.original_name,
+                    "method": method,
+                    "confidence": str(confidence),
+                    "status": match.status,
+                    "suggested_student_id": str(student.id) if student else None,
+                    "submission_id": str(submission.id) if submission else None,
+                }
+            )
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        for key in written_keys:
+            try:
+                storage.delete(key)
+            except Exception:
+                pass
+        if isinstance(exc, ApiProblem):
+            raise
+        raise ApiProblem(503, "STORAGE_UNAVAILABLE", "文件批次保存失败，未保留半成品") from exc
     return {"items": created, "count": len(created)}
 
 

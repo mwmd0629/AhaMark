@@ -28,6 +28,7 @@ def run_report_job(db: Session, storage: ObjectStorage, job_id: uuid.UUID) -> No
         return
     job.status, job.started_at, job.progress = "running", now_utc(), 5
     db.commit()
+    written_key: str | None = None
     try:
         release = db.get(GradeRelease, job.grade_release_id)
         if release is None:
@@ -78,6 +79,7 @@ def run_report_job(db: Session, storage: ObjectStorage, job_id: uuid.UUID) -> No
             f"reports/{job.owner_id}/{release.id}/"
             f"{job.report_type}-v{release.version}-{job.id}{extension}"
         )
+        written_key = key
         storage.put(
             key,
             io.BytesIO(content),
@@ -103,19 +105,38 @@ def run_report_job(db: Session, storage: ObjectStorage, job_id: uuid.UUID) -> No
         )
         if job.status == "completed":
             job.error_code = job.error_message = None
+        db.add(
+            AuditLog(
+                actor_id=job.owner_id,
+                action="report.worker.complete",
+                resource_type="report_job",
+                resource_id=str(job.id),
+                metadata_={"type": job.report_type, "status": job.status},
+            )
+        )
+        db.commit()
     except Exception as exc:
+        db.rollback()
+        if written_key is not None:
+            try:
+                storage.delete(written_key)
+            except Exception:
+                pass
+        job = db.get(ReportJob, job_id)
+        if job is None:
+            return
         job.status, job.error_code, job.error_message = (
             "failed",
             "REPORT_GENERATION_FAILED",
             type(exc).__name__,
         )
-    db.add(
-        AuditLog(
-            actor_id=job.owner_id,
-            action="report.worker.complete",
-            resource_type="report_job",
-            resource_id=str(job.id),
-            metadata_={"type": job.report_type, "status": job.status},
+        db.add(
+            AuditLog(
+                actor_id=job.owner_id,
+                action="report.worker.complete",
+                resource_type="report_job",
+                resource_id=str(job.id),
+                metadata_={"type": job.report_type, "status": job.status},
+            )
         )
-    )
-    db.commit()
+        db.commit()

@@ -1,6 +1,6 @@
 # AhaMark
 
-AhaMark 是面向教师的 AI 作业批改与学情分析平台。当前已实现数据库会话认证、Submission OCR 工程链路、教师评分复核、不可变成绩发布、异步 Excel/中文 PDF 报告和版本化学情统计。RapidOCR 是真实本地印刷体 OCR；当前没有真实主观题 AI Provider，主观题必须人工评分。第八部分已完成文件越权修复、上传内容加固、2×50 人同步接口延迟冒烟、Nginx 本地验证、PostgreSQL 迁移与恢复验证；但全业务浏览器闭环、完整资源隔离矩阵、异步容量和 MinIO 恢复仍未完成，因此验收等级为 **C（内部演示或开发测试）**，不适合真实教学试点或生产。
+AhaMark 是面向教师的 AI 作业批改与学情分析平台。当前已实现数据库会话认证、Submission OCR 工程链路、教师评分复核、不可变成绩发布、异步 Excel/中文 PDF 报告和版本化学情统计。RapidOCR 是真实本地印刷体 OCR；当前没有真实主观题 AI Provider，主观题必须人工评分。第五部分已完成 27 类资源权限矩阵和运行时文件安全 fixture；但异步容量、MinIO 恢复和正式生产运维仍未完成，因此验收等级为 **C（内部演示或开发测试）**，不适合真实教学试点或生产。
 
 第一部分基线入口：`docs/PROJECT-BASELINE.md`。能力证据、数据安全边界和统一产品措辞分别见 `docs/CAPABILITY-EVIDENCE-MATRIX.md`、`docs/DATA-SECURITY-BOUNDARIES.md`、`docs/PRODUCT-CAPABILITY-STATEMENTS.md`。这些文档严格区分实现、自动化验证、真实环境证据和生产可用性。
 
@@ -47,7 +47,10 @@ Analytics 7.1 新增 API：
 
 所有下钻使用 CurrentUser，并校验 AnalyticsSnapshot、Assignment、Class 与固定 GradeRelease 的所有权；列表默认 20 条、最多 100 条并稳定排序。教学建议明确标记为“规则型教学建议”，保留原始内容及编辑历史，确认后不可静默修改，evidence 数字在确认时与固定 AnalyticsSnapshot 再校验。前端未引入图表库，使用原生 HTML/CSS，因此无新增许可证和锁文件变化。
 
-第八部分接手条件：先保证全套测试和生产构建通过、Docker 六服务健康，再进行浏览器关键闭环 E2E、30–50 人性能测试、MIME/压缩炸弹专项、反向代理和完整隔离矩阵。当前仍没有真实主观题 AI Provider，主观题必须教师人工评分；这不是进入第八部分的硬阻塞。
+历史上的第八部分接手条件包含浏览器闭环、性能、安全专项、代理和隔离矩阵；其中
+第五部分现已完成定义范围内的权限与文件安全矩阵。异步/并发容量、Redis/MinIO
+故障恢复、MinIO 备份恢复和生产运维仍待后续。当前仍没有真实主观题 AI Provider，
+主观题必须教师人工评分。
 
 ## 第八部分交付入口
 
@@ -96,7 +99,10 @@ docker compose exec -T api python -m app.cli.cleanup_analytics_demo --confirm-ma
 
 Analytics UI 现提供规则建议查看、evidence、编辑、草稿、确认、重新生成、失效、状态、loading/disabled 和成功/错误提示；明确标记为规则型建议。学生详情提供 0–100% 学生得分率折线图、按 KnowledgePoint ID 的掌握率折线图及等价表格。failed、expired、partially_completed 报告按钮调用 `POST /api/report-jobs/{id}/retry` 创建新 ReportJob；不是恢复原任务。completed 报告每次重新请求短期签名 URL。
 
-Analytics 范围的无头 Edge 冒烟覆盖 Teacher A 登录、选择真实发布、分数段下钻、Insight 编辑确认、学生和知识点趋势，以及 Teacher B 学生详情拒绝。完整业务浏览器 E2E、30–50 人性能、安全专项和部署验收仍属于第八部分。
+Analytics 范围的无头 Edge 冒烟覆盖 Teacher A 登录、选择真实发布、分数段下钻、
+Insight 编辑确认、学生和知识点趋势，以及 Teacher B 学生详情拒绝。完整业务浏览器
+E2E 和第五部分定义的安全专项现已完成；30–50 人异步/并发容量、故障恢复和生产部署
+验收仍属于后续范围。
 
 ## 学生作业与批改流程
 

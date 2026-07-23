@@ -1,0 +1,30 @@
+{
+  "result": "PASS",
+  "code_version": "828a494e2d3df598ab7c9223f0e17703b3b553aa+security-worktree",
+  "tested_tree": "uncommitted fifth-part worktree",
+  "environment": ["sqlite automated integration", "docker-compose.business-e2e HTTP"],
+  "synthetic_marker": "security-matrix.synthetic.invalid",
+  "resource_count": 27,
+  "operation_count": 29,
+  "resource_operation_cell_count": 783,
+  "applicable_case_count": 117,
+  "identity_result_count": 702,
+  "passed_case_count": 702,
+  "failed_case_count": 0,
+  "not_applicable_count": 666,
+  "not_applicable_rule": "For every resource, every operation in the 29-operation universe not listed in tests/test_authorization_matrix.py::RESOURCE_OPERATIONS is explicitly not_applicable.",
+  "unauthenticated_results": {"result": "PASS", "expected": 401},
+  "cross_teacher_results": {"result": "PASS", "expected": "404 or owner-filtered list"},
+  "csrf_results": {"result": "PASS", "missing": 403, "invalid": 403, "read_only_required": false},
+  "invalid_session_results": {"disabled": 401, "expired": 401, "revoked": 401},
+  "indirect_reference_results": {
+    "result": "PASS",
+    "boundaries": ["parent-child ownership", "foreign IDs on create", "split/merge", "release-report", "snapshot-release", "analytics-insight", "student trends", "submission finalize/regrade"]
+  },
+  "route_boundary_results": {"result": "PASS", "public_allowlist": ["/health", "/ready", "/auth/login"]},
+  "http_results": {"result": "PASS", "passed": 16, "failed": 0},
+  "browser_smoke_results": {"result": "PASS", "basis": "existing Analytics Teacher B Edge smoke; no new UI code"},
+  "warnings": ["Shared dependency and owned-query results are matrix-level security controls; this is not external penetration testing."],
+  "started_at": "2026-07-23T08:24:00+08:00",
+  "completed_at": "2026-07-23T16:56:00+08:00"
+}

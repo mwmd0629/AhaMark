@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     minio_public_secure: bool = False
     max_upload_bytes: int = 10 * 1024 * 1024
     allowed_upload_types: list[str] = ["application/pdf", "image/jpeg", "image/png"]
+    signed_url_expiry_seconds: int = 900
     demo_actor_enabled: bool = True
     demo_actor_email: str = "demo-teacher@ahamark.local"
     auth_cookie_name: str = "ahamark_session"

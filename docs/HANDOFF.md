@@ -4,7 +4,9 @@
 
 ## 最终结论
 
-验收等级仍为 **C（内部演示或开发测试）**。第二部分“教师核心业务浏览器闭环”已关闭：独立栈中以纯合成数据通过 A–H 8/8。整个项目不因此升级到 B；完整资源隔离矩阵、异步/并发性能、完整恶意文件 fixture 和 MinIO 恢复仍未完成。
+验收等级仍为 **C（内部演示或开发测试）**。第二部分教师核心业务浏览器闭环和
+第五部分权限与文件安全均已关闭。第五部分通过不自动升级到 B；异步/并发性能、
+Redis/MinIO 故障恢复、MinIO 备份恢复和生产运维仍未完成。
 
 ## 真实状态
 
@@ -58,12 +60,14 @@
 
 ## 验证汇总
 
-- 后端：第四部分完整门禁 53 passed，1 条第三方 Starlette TestClient 弃用警告；Ruff 与 mypy 通过。
+- 后端：第五部分完整门禁 87 passed，1 条第三方 Starlette TestClient 弃用警告；Ruff 与 mypy 通过。
 - 前端：第四部分关闭轮 26 tests passed；Prettier、ESLint、TypeScript 通过。
 - Next build：18 条路由构建通过；仍有 lockfile SWC 自动修补失败警告（未阻断构建）。
 - 性能：五类同步接口 100%；P95 为 40.51–88.18 ms。仅单客户端开发冒烟。
-- 文件安全：代码加固与小型自动化通过；完整 fixture 矩阵 PARTIAL。
-- 隔离：Analytics 14 项真实跨教师拒绝 + 文件 3 类自动化拒绝；完整矩阵 PARTIAL。
+- 文件安全：第五部分 41/41 个运行时结构 fixture 通过，批次原子性、对象补偿和真实
+  MinIO 短期 URL 到期/重签已验证；不代表外部渗透或生产安全认证。
+- 隔离：第五部分 27×29 矩阵、702/702 身份结果与隔离 HTTP 16/16 通过；多实例限速、
+  Cookie 重放和完整多会话管理仍属后续。
 - Worker：pause 时 `/ready` degraded/0 worker；unpause 后 pong 且 healthy。
 - 代理：登录 200、缺 CSRF 403、正确退出 204、CSP/nosniff 可见。
 - PostgreSQL 恢复：独立库恢复并验证 users/classes/assignments/submissions/snapshots/releases = 3/4/5/8/8/3。
@@ -75,11 +79,18 @@
 
 ## 生产阻塞项
 
-1. Class 至 TeachingInsight 的完整跨教师操作矩阵未跑完。
-2. OCR、报告、Analytics 并发/吞吐、CPU、内存、队列等待与慢 SQL 未测。
-3. 恶意文件所有 fixture 与真实签名 URL 到期测试未跑完。
-4. MinIO 备份恢复、Redis/MinIO 中断恢复未验证。
-5. 开发 Compose 暴露 MinIO 端口，未提供正式 TLS/secret/监控平台配置。
-6. 第二部分修改尚未提交；当前可审计比较基线为 `f7783f0073592140c1400d6e7f41ffb17638c64e`。
+1. OCR、报告、Analytics 并发/吞吐、CPU、内存、队列等待与慢 SQL 未测。
+2. MinIO 备份恢复、Redis/MinIO 中断恢复未验证。
+3. 开发 Compose 暴露 MinIO 端口，未提供正式 TLS/secret/监控平台配置。
+4. 第五部分修改尚未提交；起始提交为 `828a494e2d3df598ab7c9223f0e17703b3b553aa`。
+
+## 第五部分：权限与文件安全
+
+- 5A：27 资源×29 操作，117 适用、666 N/A，六身份 702/702 PASS；真实 HTTP 16/16。
+- 5B：41 个运行时结构 fixture 符合预期；PDF/图片/Office/公式注入、批次全有或全无、
+  重复校验值、存储与数据库失败补偿通过。
+- StoredFile：Teacher B metadata/签名/删除 404；test-only 2 秒 URL 到期 403，重签通过。
+- 无未修 P0/P1；全局孤儿扫描含既有 recognition 派生对象口径噪声，未自动删除。
+- 证据：`AUTHORIZATION-MATRIX.md`、`FILE-SECURITY-VERIFICATION.md` 及对应 JSON。
 
 后续维护先从 `docs/FINAL-ACCEPTANCE.md` 的 NOT RUN/PARTIAL 项开始，不要扩展学生端或宣称主观题 AI 自动评分。本任务没有提交、推送或部署。

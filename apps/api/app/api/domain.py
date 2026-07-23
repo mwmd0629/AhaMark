@@ -558,7 +558,8 @@ HEADERS = {
 
 
 @router.get("/import-template")
-def import_template(format: Literal["xlsx", "csv"] = "xlsx") -> Response:
+def import_template(actor: Actor, format: Literal["xlsx", "csv"] = "xlsx") -> Response:
+    del actor
     headers = ["姓名", "学号", "分组", "性别", "邮箱", "联系方式"]
     if format == "csv":
         stream = io.StringIO()
@@ -595,7 +596,7 @@ def parse_upload(name: str, content: bytes) -> list[list[str]]:
             text = content.decode("utf-8-sig")
         except UnicodeDecodeError as exc:
             raise ApiProblem(422, "IMPORT_FILE_INVALID", "CSV 必须使用 UTF-8 编码") from exc
-        return [[str(v).strip() for v in row] for row in csv.reader(io.StringIO(text))]
+        return [[str(v) for v in row] for row in csv.reader(io.StringIO(text))]
     if suffix == "xlsx":
         try:
             inspect_xlsx_archive(content)
@@ -607,7 +608,7 @@ def parse_upload(name: str, content: bytes) -> list[list[str]]:
                     raise ApiProblem(422, "IMPORT_FORMULA_FORBIDDEN", "导入表不得包含公式")
             sheet = load_workbook(io.BytesIO(content), read_only=True, data_only=True).active
             return [
-                ["" if v is None else str(v).strip() for v in row]
+                ["" if v is None else str(v) for v in row]
                 for row in sheet.iter_rows(values_only=True)
             ]
         except ApiProblem:
@@ -658,18 +659,15 @@ async def preview_import(
         db.scalars(select(StudentGroup.name).where(StudentGroup.class_id == class_id)).all()
     )
     for row_no, cells in enumerate(data_rows, 2):
-        normalized = {
-            key: (cells[i].strip() if i < len(cells) else "") for i, key in enumerate(mapped) if key
+        raw_values = {
+            key: (cells[i] if i < len(cells) else "") for i, key in enumerate(mapped) if key
         }
+        normalized = {key: value.strip() for key, value in raw_values.items()}
         dangerous = [
             key
-            for key, value in normalized.items()
-            if value.lstrip().startswith(("=", "+", "@"))
-            or (
-                value.lstrip().startswith("-")
-                and len(value.lstrip()) > 1
-                and value.lstrip()[1] in "=@+"
-            )
+            for key, value in raw_values.items()
+            if value.startswith(("\t", "\r", "\n"))
+            or value.lstrip().startswith(("=", "+", "-", "@"))
         ]
         errors: list[tuple[str, str, str]] = []
         errors.extend(

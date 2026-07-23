@@ -1,0 +1,18 @@
+{
+  "result": "PASS",
+  "fixture_count": 41,
+  "accepted_count": 7,
+  "rejected_count": 34,
+  "unexpected_results": [],
+  "pdf_results": {"result": "PASS", "accepted": ["single_page", "multi_page"], "rejected": ["empty_bytes", "fake", "corrupt", "truncated", "encrypted", "zero_page", "blank_page", "too_many_pages", "mime_mismatch", "extension_mismatch"]},
+  "image_results": {"result": "PASS", "accepted": ["png", "jpeg"], "rejected": ["fake", "truncated", "too_many_pixels", "mime_mismatch", "magic_mismatch", "invalid_decode"]},
+  "office_results": {"result": "PASS", "accepted": ["docx", "xlsx"], "rejected": ["fake_zip", "path_traversal", "too_many_entries", "extreme_ratio", "macro", "external_relationship", "missing_core", "broken_xml", "xlsx_formula", "formula_injection_prefix"]},
+  "batch_atomicity_results": {"result": "PASS", "prevalidate_all": true, "duplicate_checksum": "rejected", "partial_submission_delta": 0, "partial_page_delta": 0, "partial_stored_file_delta": 0},
+  "storage_rollback_results": {"result": "PASS", "storage_failure_after_write": "compensated", "second_batch_write_failure": "all exact keys compensated", "database_commit_failure": "exact key compensated"},
+  "signed_url_results": {"result": "PASS", "owner_isolation": true, "test_expiry_seconds": 2, "expired_status": 403, "reissue": "PASS", "production_default_seconds": 900},
+  "orphan_delta": 0,
+  "orphan_scope": "objects created by security-matrix run",
+  "warnings": ["Global scanner also lists recognition derivative objects that intentionally have no StoredFile row; no automatic deletion performed."],
+  "started_at": "2026-07-23T08:24:00+08:00",
+  "completed_at": "2026-07-23T16:56:00+08:00"
+}

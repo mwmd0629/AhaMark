@@ -11,6 +11,7 @@ from app.storage.base import ObjectMetadata
 from app.storage.dependencies import get_storage
 from fastapi.testclient import TestClient
 from PIL import Image
+from sqlalchemy.orm import Session
 
 
 class MemoryStorage:
@@ -35,6 +36,12 @@ class MemoryStorage:
 
     def presigned_get(self, key: str, expires_seconds: int = 900) -> str:
         return f"https://signed.invalid/{key}?expires={expires_seconds}"
+
+
+class PartialFailureStorage(MemoryStorage):
+    def put(self, key: str, data: io.BytesIO, size: int, content_type: str) -> ObjectMetadata:
+        super().put(key, data, size, content_type)
+        raise OSError("synthetic storage failure after write")
 
 
 def png_bytes(size: tuple[int, int] = (2, 2)) -> bytes:
@@ -121,5 +128,48 @@ def test_generic_file_routes_require_owner_and_hide_other_teacher() -> None:
         assert signed.status_code == 200 and signed.json()["url"].startswith(
             "https://signed.invalid/"
         )
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_generic_upload_removes_object_when_storage_reports_failure_after_write() -> None:
+    storage = PartialFailureStorage()
+    app.dependency_overrides[get_storage] = lambda: storage
+    try:
+        create_user("rollback@security-matrix.synthetic.invalid")
+        client = login("rollback@security-matrix.synthetic.invalid")
+        csrf = client.cookies.get("ahamark_csrf") or ""
+        response = client.post(
+            "/files",
+            headers={"x-csrf-token": csrf},
+            files={"file": ("page.png", png_bytes(), "image/png")},
+        )
+        assert response.status_code == 503
+        assert storage.data == {}
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_generic_upload_removes_object_when_database_commit_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = MemoryStorage()
+    app.dependency_overrides[get_storage] = lambda: storage
+    try:
+        create_user("db-rollback@security-matrix.synthetic.invalid")
+        client = login("db-rollback@security-matrix.synthetic.invalid")
+        csrf = client.cookies.get("ahamark_csrf") or ""
+
+        def fail_commit(_session: Session) -> None:
+            raise OSError("synthetic database commit failure")
+
+        monkeypatch.setattr(Session, "commit", fail_commit)
+        response = client.post(
+            "/files",
+            headers={"x-csrf-token": csrf},
+            files={"file": ("page.png", png_bytes(), "image/png")},
+        )
+        assert response.status_code == 503
+        assert storage.data == {}
     finally:
         app.dependency_overrides.pop(get_storage, None)

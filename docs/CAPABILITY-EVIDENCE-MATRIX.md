@@ -11,7 +11,7 @@
 - `UNAVAILABLE`：没有可用正式实现或 Provider。
 - `OUT_OF_SCOPE`：当前版本明确不做。
 
-真实证据简称：`BUSINESS-E2E` = `business-e2e-verification.json` + `BUSINESS-E2E.md`；`HTTP72` = `analytics72-http-verification.json`；`BROWSER72` = `analytics72-browser-smoke.json`；`PERF` = `performance-results.json`；`DOC-EVIDENCE` = HANDOFF/FINAL-ACCEPTANCE 中记录的环境验证。
+真实证据简称：`BUSINESS-E2E` = `business-e2e-verification.json` + `BUSINESS-E2E.md`；`HTTP72` = `analytics72-http-verification.json`；`BROWSER72` = `analytics72-browser-smoke.json`；`PERF` = `performance-results.json`；`AUTH-MATRIX` = `AUTHORIZATION-MATRIX.md` + `authorization-matrix-verification.json` + `authorization-http-verification.json`；`FILE-MATRIX` = `FILE-SECURITY-VERIFICATION.md` + `file-security-verification.json`；`DOC-EVIDENCE` = HANDOFF/FINAL-ACCEPTANCE 中记录的环境验证。
 
 ## 摘要
 
@@ -30,8 +30,8 @@
 | XLSX/PDF | IMPLEMENTED_AND_VERIFIED | 第四部分实际解析 v1/v2 XLSX/中文 PDF 并完成历史对账；容量仍未验证 |
 | Analytics | IMPLEMENTED_AND_VERIFIED | 第四部分 Edge 12/12 含两类错误下钻及班级/学生最新发布趋势 |
 | TeachingInsight | IMPLEMENTED_AND_VERIFIED | 第四部分验证规则型建议 evidence 固定 AnalyticsSnapshot 及历史不漂移 |
-| 文件安全 | PARTIAL | 统一检查与部分 fixture 自动化；完整恶意样本未跑 |
-| 权限隔离 | PARTIAL | Analytics 14 项真实拒绝、文件 3 类自动化；完整矩阵缺失 |
+| 文件安全 | IMPLEMENTED_AND_VERIFIED | 41/41 结构 fixture、故障补偿及真实 URL 到期通过 |
+| 权限隔离 | IMPLEMENTED_AND_VERIFIED | 27×29、702/702、全路由边界及 HTTP 16/16 通过 |
 | 性能 | PARTIAL | 单客户端同步接口冒烟；并发/异步/资源未测 |
 | 备份恢复 | PARTIAL | PostgreSQL 既有恢复记录；MinIO 未运行 |
 | 生产部署 | UNAVAILABLE | 当前仅等级 C，开发 Compose 不能直接生产使用 |
@@ -55,10 +55,10 @@
 - 模型/迁移：Class、Student、ClassStudent、Group、ImportJob/Row/Error；`0002_classes_students_imports`。
 - 自动化证据：`tests/test_classes.py` 覆盖 CRUD、归档、成员、分组、CSV/XLSX preview/confirm/idempotency；前端 classes tests。
 - 真实证据：BUSINESS-E2E 覆盖创建唯一合成班级、CSV 预览/确认、3 人列表和前导零学号；PERF 覆盖 50 人列表。
-- 限制：完整跨教师 create/update/archive/import 矩阵未跑；真实学生数据禁止使用。
+- 第五部分证据：Class/Student/Group/Import 的适用操作已纳入 `AUTH-MATRIX`；真实学生数据仍禁止使用。
 - 可以说：教师端班级/学生管理和合成数据导入流程已实现。
 - 禁止说：已通过真实学校数据验证、可做正式学籍管理。
-- 后续验收条件：异常/冲突导入、归档/分组及跨教师全动作仍待后续矩阵验证。
+- 后续验收条件：第五部分矩阵已完成；后续仅持续回归异常/冲突导入、归档和分组边界。
 
 ### 3. 作业和 Rubric — `IMPLEMENTED_AND_VERIFIED`
 
@@ -181,27 +181,27 @@
 - 禁止说：真实 AI 深度分析、大模型自主教学诊断。
 - 后续验收条件：规则版本、解释性、边界样本和教师确认审计持续回归。
 
-### 14. 文件安全 — `PARTIAL`
+### 14. 文件安全 — `IMPLEMENTED_AND_VERIFIED`
 
 - 实现位置：`apps/api/app/security/files.py`、各上传入口、通用文件路由。
 - 模型/迁移：StoredFile.owner/status；`0001`。
-- 自动化证据：假 PDF、扩展名/MIME 不一致、超像素、ZIP 穿越、路径文件名和跨教师文件路由拒绝。
-- 真实证据：DOC-EVIDENCE 记录 Nginx/签名 URL/上传加固的局部验证；完整 fixture 无证据。
-- 限制：加密/超页 PDF、异常 EXIF、宏、外链、ZIP 条目/极端压缩比、真实 URL 到期为 NOT RUN。
-- 可以说：已实现统一内容检查和若干关键回归。
-- 禁止说：恶意文件专项完整通过、文件上传生产安全。
-- 后续验收条件：完整运行时 fixture 矩阵、资源限制、代理限制、对象回滚和签名 URL 到期验证。
+- 自动化证据：`FILE-MATRIX` 记录 41/41 个运行时小型结构 fixture，覆盖 PDF、PNG/JPEG、DOCX/XLSX、公式注入、首/中/末非法批次全有或全无、同批重复校验值、存储写失败补偿和数据库提交失败补偿；本轮安全 marker 的孤儿增量为 0。
+- 真实证据：test-only 有效期 2 秒的真实 MinIO 签名 URL 到期后返回 403；重新鉴权签发成功，旧 URL 不恢复有效。隔离 HTTP 同时验证 StoredFile metadata、signed URL 和 delete 的 owner 边界。
+- 限制：fixture 是运行时生成的小型结构输入，不是外部攻击者渗透、真实恶意软件执行、无限文件类型覆盖或解析器模糊测试。Redis/MinIO 故障恢复、MinIO 备份恢复、生产容量与运维仍未完成。
+- 可以说：第五部分所列结构化文件安全 fixture 已通过；上传前内容校验、批次原子性、对象补偿、StoredFile owner 隔离和短期签名 URL 到期已验证。
+- 禁止说：已抵御所有恶意文件、文件上传绝对安全、已通过外部渗透或生产安全认证、MinIO 灾备恢复已完成。
+- 后续验收条件：生产前仍需独立完成外部安全评估、容量与资源约束验证、Redis/MinIO 故障恢复和 MinIO 备份恢复；不得把这些后续项反写为第五部分未完成。
 
-### 15. 权限隔离 — `PARTIAL`
+### 15. 权限隔离 — `IMPLEMENTED_AND_VERIFIED`
 
 - 实现位置：CurrentActor、各 owned 查询、StoredFile owner 校验。
 - 模型/迁移：主要资源 owner_id/关联所有权散布于 0001–0010。
-- 自动化证据：认证教师隔离、文件 3 类跨教师 404、多个业务测试。
-- 真实证据：HTTP72 记录 Analytics/学生/报告/Insight 共 14 项 Teacher B 隐藏。
-- 限制：Class 至 TeachingInsight 的 list/get/create/update/archive/retry/download/confirm/finalize 完整矩阵未执行。
-- 可以说：Analytics 范围有真实跨教师拒绝，通用文件有自动化 owner 回归。
-- 禁止说：全平台租户隔离已完整验收。
-- 后续验收条件：按资源×动作建立完整矩阵，含错误信息不泄漏、间接 ID 与签名 URL。
+- 自动化证据：`AUTH-MATRIX` 包含 27 类资源、29 类操作、783 个资源×操作格，其中 117 个适用、666 个明确 `not_applicable`；六种身份共 702 个结果全部通过，并枚举全部业务路由的 Session/CSRF 边界。
+- 真实证据：隔离栈 HTTP 16/16，覆盖未认证拒绝、缺失/错误 CSRF、Teacher B 跨教师隐藏和 StoredFile owner 隔离；既有 HTTP72 与 BROWSER72 继续提供 Analytics Teacher B HTTP/Edge 证据。
+- 限制：结论只适用于第五部分定义的矩阵和间接引用范围，不是外部渗透测试，也不证明不存在任何越权漏洞。多实例登录限速、Cookie 重放专项、完整多会话管理、生产部署和故障恢复仍未完成。
+- 可以说：第五部分定义的资源×操作权限矩阵已通过；跨教师 owner 隔离、Session/CSRF、矩阵覆盖的间接引用和文件访问边界已验证。
+- 禁止说：已通过外部渗透、已证明不存在任何越权漏洞、已完成生产级 IAM 认证、多实例限速或 Cookie 重放专项。
+- 后续验收条件：生产前仍需外部安全评估、多实例限速、Cookie/多会话专项以及生产部署与故障恢复；不得把这些后续项描述成第五部分矩阵未执行。
 
 ### 16. 性能 — `PARTIAL`
 

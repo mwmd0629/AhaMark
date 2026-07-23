@@ -1,0 +1,192 @@
+{
+  "result": "PASS",
+  "environment": "docker-compose.business-e2e",
+  "synthetic_marker": "security-matrix.synthetic.invalid",
+  "run_id": "20260723T084458Z",
+  "started_at": "2026-07-23T08:44:58.290649+00:00",
+  "completed_at": "2026-07-23T08:45:01.828143+00:00",
+  "passed_case_count": 16,
+  "failed_case_count": 0,
+  "results": [
+    {
+      "method": "GET",
+      "path_template": "/api/classes",
+      "actor": "unauthenticated",
+      "expected_status": 401,
+      "actual_status": 401,
+      "error_code": "HTTP_401",
+      "request_id": "bf639c58-bce3-40b6-a48d-635d1a3286c0",
+      "resource_type": "Class",
+      "operation": "list",
+      "passed": true
+    },
+    {
+      "method": "POST",
+      "path_template": "/auth/login",
+      "actor": "teacher_a",
+      "expected_status": 200,
+      "actual_status": 200,
+      "error_code": null,
+      "request_id": "0ee5fe61-59da-4f21-a300-6f139c8779fc",
+      "resource_type": "Session/User",
+      "operation": "create",
+      "passed": true
+    },
+    {
+      "method": "POST",
+      "path_template": "/auth/login",
+      "actor": "teacher_b",
+      "expected_status": 200,
+      "actual_status": 200,
+      "error_code": null,
+      "request_id": "37342269-7432-453f-8247-ef1f6aa043d6",
+      "resource_type": "Session/User",
+      "operation": "create",
+      "passed": true
+    },
+    {
+      "method": "POST",
+      "path_template": "/api/classes",
+      "actor": "teacher_a_missing_csrf",
+      "expected_status": 403,
+      "actual_status": 403,
+      "error_code": "HTTP_403",
+      "request_id": "2b7969c9-998e-4ad8-aea9-aee0f0baae1c",
+      "resource_type": "Class",
+      "operation": "create",
+      "passed": true
+    },
+    {
+      "method": "POST",
+      "path_template": "/api/classes",
+      "actor": "teacher_a_invalid_csrf",
+      "expected_status": 403,
+      "actual_status": 403,
+      "error_code": "HTTP_403",
+      "request_id": "8f391cbe-823e-4061-b9fb-1c1dc6d0f2da",
+      "resource_type": "Class",
+      "operation": "create",
+      "passed": true
+    },
+    {
+      "method": "POST",
+      "path_template": "/api/classes",
+      "actor": "teacher_a",
+      "expected_status": 201,
+      "actual_status": 201,
+      "error_code": null,
+      "request_id": "ac521966-572c-4eb1-b564-5e028069d89d",
+      "resource_type": "Class",
+      "operation": "create",
+      "passed": true
+    },
+    {
+      "method": "GET",
+      "path_template": "/api/classes/{class_id}",
+      "actor": "teacher_b",
+      "expected_status": 404,
+      "actual_status": 404,
+      "error_code": "CLASS_NOT_FOUND",
+      "request_id": "c11d9c4a-aed0-48e9-90c6-10d484fedfa3",
+      "resource_type": "Class",
+      "operation": "get",
+      "passed": true
+    },
+    {
+      "method": "GET",
+      "path_template": "/api/classes",
+      "actor": "teacher_b",
+      "expected_status": 200,
+      "actual_status": 200,
+      "error_code": null,
+      "request_id": "5a9269b4-c51f-4cae-bcd8-5caca0533fa7",
+      "resource_type": "Class",
+      "operation": "list",
+      "passed": true
+    },
+    {
+      "method": "POST",
+      "path_template": "/files",
+      "actor": "teacher_a",
+      "expected_status": 201,
+      "actual_status": 201,
+      "error_code": null,
+      "request_id": "e58f1031-b317-4dde-9a14-49d31a64ad92",
+      "resource_type": "StoredFile",
+      "operation": "upload",
+      "passed": true
+    },
+    {
+      "method": "GET",
+      "path_template": "/files/{key}/metadata",
+      "actor": "teacher_b",
+      "expected_status": 404,
+      "actual_status": 404,
+      "error_code": "HTTP_404",
+      "request_id": "3bb865f9-0765-492c-ab37-9d1d74cff68d",
+      "resource_type": "StoredFile",
+      "operation": "metadata",
+      "passed": true
+    },
+    {
+      "method": "POST",
+      "path_template": "/files/{key}/signed-url",
+      "actor": "teacher_b",
+      "expected_status": 404,
+      "actual_status": 404,
+      "error_code": "HTTP_404",
+      "request_id": "48b34c31-a623-4b40-819b-ae1397b6a76e",
+      "resource_type": "StoredFile",
+      "operation": "signed_url",
+      "passed": true
+    },
+    {
+      "method": "DELETE",
+      "path_template": "/files/{key}",
+      "actor": "teacher_b",
+      "expected_status": 404,
+      "actual_status": 404,
+      "error_code": "HTTP_404",
+      "request_id": "4be93bc8-9d75-4756-b9c1-ea39dd312c96",
+      "resource_type": "StoredFile",
+      "operation": "delete",
+      "passed": true
+    },
+    {
+      "method": "POST",
+      "path_template": "/files/{key}/signed-url",
+      "actor": "teacher_a",
+      "expected_status": 200,
+      "actual_status": 200,
+      "error_code": null,
+      "request_id": "1646ad67-ed3e-4372-afb5-9d0a86697438",
+      "resource_type": "StoredFile",
+      "operation": "signed_url",
+      "passed": true
+    },
+    {
+      "resource_type": "StoredFile",
+      "operation": "signed_url_before_expiry",
+      "actor": "teacher_a",
+      "expected_status": 200,
+      "actual_status": 200,
+      "passed": true
+    },
+    {
+      "resource_type": "StoredFile",
+      "operation": "signed_url_after_expiry",
+      "actor": "expired_url",
+      "expected_status": 403,
+      "actual_status": 403,
+      "passed": true
+    },
+    {
+      "resource_type": "StoredFile",
+      "operation": "signed_url_reissue",
+      "actor": "teacher_a",
+      "expected_status": 200,
+      "actual_status": 200,
+      "passed": true
+    }
+  ]
+}
