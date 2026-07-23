@@ -387,6 +387,57 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
                 <h3 className="font-bold">
                   为第 {selected.question_number} 题添加页面区域
                 </h3>
+                {selected.max_score == null && (
+                  <div
+                    className="my-3 rounded border border-amber-300 bg-amber-50 p-3"
+                    data-testid="missing-question-score"
+                  >
+                    <p className="text-sm">
+                      当前题目分值未知，Rubric 保存和发布会被阻止。
+                    </p>
+                    <Button
+                      className="mt-2"
+                      variant="outline"
+                      onClick={async () => {
+                        const value = window.prompt(
+                          `请输入第 ${selected.question_number} 题的正数分值`,
+                          "",
+                        );
+                        if (value === null) return;
+                        const score = Number(value);
+                        if (!Number.isFinite(score) || score <= 0) {
+                          toast("分值必须为正数", "error");
+                          return;
+                        }
+                        try {
+                          await assignmentsApi.updateQuestion(
+                            item.id,
+                            selected.id,
+                            {
+                              question_number: selected.question_number,
+                              question_type: selected.question_type,
+                              max_score: score,
+                              content_text: selected.content_text,
+                              difficulty: selected.difficulty,
+                              knowledge_points: selected.knowledge_points.map(
+                                (point) => point.name,
+                              ),
+                            },
+                          );
+                          await load();
+                          toast("题目分值已补齐，可以继续设置 Rubric");
+                        } catch (e) {
+                          toast(
+                            e instanceof ApiError ? e.message : "保存分值失败",
+                            "error",
+                          );
+                        }
+                      }}
+                    >
+                      补齐所选题目分值
+                    </Button>
+                  </div>
+                )}
                 <p className="my-2 text-xs text-slate-500">
                   左上角原点、相对原始页面方向，所有值为
                   0–1；页面旋转仅影响显示。
@@ -468,10 +519,62 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
           </Select>
           {selected && (
             <>
+              {selected.max_score == null && (
+                <div
+                  className="rounded border border-amber-300 bg-amber-50 p-3"
+                  data-testid="missing-question-score"
+                >
+                  <p className="text-sm">
+                    当前题目分值未知，Rubric 保存和发布会被阻止。
+                  </p>
+                  <Button
+                    className="mt-2"
+                    variant="outline"
+                    onClick={async () => {
+                      const value = window.prompt(
+                        `请输入第 ${selected.question_number} 题的正数分值`,
+                        "",
+                      );
+                      if (value === null) return;
+                      const score = Number(value);
+                      if (!Number.isFinite(score) || score <= 0) {
+                        toast("分值必须为正数", "error");
+                        return;
+                      }
+                      try {
+                        await assignmentsApi.updateQuestion(
+                          item.id,
+                          selected.id,
+                          {
+                            question_number: selected.question_number,
+                            question_type: selected.question_type,
+                            max_score: score,
+                            content_text: selected.content_text,
+                            difficulty: selected.difficulty,
+                            knowledge_points: selected.knowledge_points.map(
+                              (point) => point.name,
+                            ),
+                          },
+                        );
+                        await load();
+                        toast("题目分值已补齐，可以继续设置 Rubric");
+                      } catch (e) {
+                        toast(
+                          e instanceof ApiError ? e.message : "保存分值失败",
+                          "error",
+                        );
+                      }
+                    }}
+                  >
+                    补齐所选题目分值
+                  </Button>
+                </div>
+              )}
               <label className="grid gap-1 text-sm font-medium">
                 标准答案
                 <textarea
                   className="min-h-28 rounded-xl border p-3"
+                  data-question-id={selected.id}
                   value={answer}
                   onChange={(e) => setAnswer(e.target.value)}
                 />
@@ -481,11 +584,19 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
                 API 完整保留。
               </p>
               <Button
-                onClick={async () => {
+                key={`save-rubric-${selected.id}`}
+                data-question-id={selected.id}
+                onClick={async (event) => {
                   try {
+                    const questionId = event.currentTarget.dataset.questionId;
+                    const currentQuestion = item.paper_version?.questions.find(
+                      (candidate) => candidate.id === questionId,
+                    );
+                    if (!questionId || !currentQuestion)
+                      throw new Error("当前题目状态已变化，请重试");
                     const next = await assignmentsApi.rubric(
                       item.id,
-                      selected.id,
+                      questionId,
                       {
                         standard_answer: answer,
                         alternative_answers: [],
@@ -494,7 +605,7 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
                         items: [
                           {
                             title: "答案与过程正确",
-                            points: Number(selected.max_score),
+                            points: Number(currentQuestion.max_score),
                             item_type: "step",
                             required: true,
                           },

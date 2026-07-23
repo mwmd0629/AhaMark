@@ -153,7 +153,7 @@
 - 实现位置：`apps/api/app/results/services.py`、`apps/api/app/results/jobs.py`、Report Worker；仓库内 Noto Sans SC。
 - 模型/迁移：ReportJob、StoredFile、ReportJobStudentScope；`0007`、`0010`。
 - 自动化证据：XLSX sheet/文本学号/公式防护，中文 PDF 字体与解析，Worker 只收 Job ID 且幂等。
-- 真实证据：BUSINESS-E2E 由 UI 创建 XLSX 和中文个人 PDF，真实 Celery/MinIO Job 均 completed，并从页面请求新的短期签名地址；HTTP72 另验证失败任务 retry。
+- 真实证据：BUSINESS-E2E 由 UI 创建 XLSX 和中文个人 PDF，真实 Celery/MinIO Job 均 completed，并从页面请求新的短期签名地址；`business-report-retry-verification.json` 通过真实 Edge 验证 failed/expired Job 的 retry 新旧生命周期、Release/学生范围和刷新对账。
 - 限制：30–50 份 PDF、ZIP、大文件、签名地址实际到期等待与并发容量未验证。
 - 可以说：固定 GradeRelease 的真实 XLSX/中文 PDF 生成链路在开发环境做过冒烟。
 - 禁止说：大批量报告容量或生产下载链路已验收。

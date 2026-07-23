@@ -811,6 +811,16 @@ def confirm_import(import_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]
         raise ApiProblem(410, "IMPORT_EXPIRED", "导入预览已过期")
     if job.status not in {ImportStatus.preview_ready, ImportStatus.validation_failed}:
         raise ApiProblem(409, "IMPORT_NOT_READY", "导入任务尚未准备好")
+    if job.invalid_rows or job.duplicate_rows:
+        raise ApiProblem(
+            409,
+            "IMPORT_VALIDATION_FAILED",
+            "导入预览包含错误或重复行，未写入任何学生；请修正文件后重新预览",
+            {
+                "invalid_rows": job.invalid_rows,
+                "duplicate_rows": job.duplicate_rows,
+            },
+        )
     created = joined = assigned = 0
     for row in db.scalars(
         select(ImportRow).where(

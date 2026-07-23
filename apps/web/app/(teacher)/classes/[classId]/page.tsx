@@ -128,7 +128,14 @@ export default function ClassDetailPage({
       toast("有效学生已导入");
       await load();
     } catch (e) {
-      toast(e instanceof Error ? e.message : "确认导入失败", "error");
+      toast(
+        e instanceof ApiError
+          ? e.body.message
+          : e instanceof Error
+            ? e.message
+            : "确认导入失败",
+        "error",
+      );
     } finally {
       setSaving(false);
     }
@@ -282,13 +289,28 @@ export default function ClassDetailPage({
                         {preview.result.skipped ?? 0}。
                       </p>
                     ) : (
-                      <Button
-                        loading={saving}
-                        disabled={preview.valid_rows === 0}
-                        onClick={() => void confirm()}
-                      >
-                        确认导入有效行
-                      </Button>
+                      <>
+                        {(preview.invalid_rows > 0 ||
+                          preview.duplicate_rows > 0) && (
+                          <p
+                            className="rounded border border-amber-300 bg-amber-50 p-3 text-sm"
+                            role="alert"
+                          >
+                            当前预览包含错误或重复行，整批不会写入。请修正文件后重新上传预览。
+                          </p>
+                        )}
+                        <Button
+                          loading={saving}
+                          disabled={
+                            preview.valid_rows === 0 ||
+                            preview.invalid_rows > 0 ||
+                            preview.duplicate_rows > 0
+                          }
+                          onClick={() => void confirm()}
+                        >
+                          确认导入整批合法数据
+                        </Button>
+                      </>
                     )}
                   </div>
                 )}

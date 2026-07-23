@@ -30,8 +30,15 @@ export default function GradingBatchPage({
   );
   const [workspace, setWorkspace] = useState<ReviewWorkspace>();
   const [readiness, setReadiness] = useState<GradeReadiness>();
+  const [releases, setReleases] = useState<GradeRelease[]>([]);
   const [release, setRelease] = useState<GradeRelease>();
+  const [matchSelections, setMatchSelections] = useState<
+    Record<string, string>
+  >({});
   const [reports, setReports] = useState<ReportJob[]>([]);
+  const [retriedReportIds, setRetriedReportIds] = useState<Set<string>>(
+    new Set(),
+  );
   const [download, setDownload] = useState<{ jobId: string; url: string }>();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -45,7 +52,17 @@ export default function GradingBatchPage({
     ]);
     setBatch(nextBatch);
     setSubmissions(nextSubmissions);
-    setRelease(releases.find((item) => item.class_id === nextBatch.class_id));
+    const classReleases = releases.filter(
+      (item) => item.class_id === nextBatch.class_id,
+    );
+    setReleases(classReleases);
+    setRelease((current) => {
+      if (current) {
+        const same = classReleases.find((item) => item.id === current.id);
+        if (same) return same;
+      }
+      return classReleases[0];
+    });
     if (nextSubmissions.length) {
       setWorkspace(await gradingApi.reviewWorkspace(batchId));
     }
@@ -54,6 +71,17 @@ export default function GradingBatchPage({
   useEffect(() => {
     load().catch(() => setError("无法加载批次工作台"));
   }, [load]);
+
+  useEffect(() => {
+    if (!release) {
+      setReports([]);
+      return;
+    }
+    analyticsApi
+      .reports(release.id)
+      .then(setReports)
+      .catch(() => setError("无法加载该发布版本的报告历史"));
+  }, [release]);
 
   async function upload(form: FormData) {
     const files = form
@@ -92,6 +120,39 @@ export default function GradingBatchPage({
     });
   }
 
+  async function confirmMatch(matchId: string) {
+    const studentId = matchSelections[matchId];
+    if (!studentId) {
+      setError("请选择要匹配的班级学生");
+      return;
+    }
+    await act("匹配已由教师通过 UI 明确确认", async () => {
+      await gradingApi.confirmMatch(batchId, matchId, studentId);
+      await load();
+    });
+  }
+
+  async function reversePages(submissionId: string, pageIds: string[]) {
+    await act("页面已重排，OCR 与评分状态已标记为 stale", async () => {
+      await gradingApi.reorderPages(submissionId, [...pageIds].reverse());
+      await load();
+    });
+  }
+
+  async function splitSubmission(submissionId: string, pageId: string) {
+    await act("Submission 已拆分且原始上传文件保持不变", async () => {
+      await gradingApi.splitSubmission(submissionId, [pageId]);
+      await load();
+    });
+  }
+
+  async function mergeSubmission(targetId: string, sourceId: string) {
+    await act("Submission 已合并且页码重新连续编号", async () => {
+      await gradingApi.mergeSubmission(targetId, sourceId);
+      await load();
+    });
+  }
+
   async function gradeAll() {
     await act(
       "客观题规则初批完成；主观题保持 Provider unavailable，等待教师人工评分",
@@ -126,6 +187,10 @@ export default function GradingBatchPage({
           idempotency_key: crypto.randomUUID(),
         });
         setRelease(value);
+        setReleases((old) => [
+          value,
+          ...old.filter((item) => item.id !== value.id),
+        ]);
       },
     );
   }
@@ -153,6 +218,17 @@ export default function GradingBatchPage({
     await act("已通过 UI 获取新的 15 分钟短期签名下载地址", async () => {
       const value = await analyticsApi.reportDownload(job.id);
       setDownload({ jobId: job.id, url: value.url });
+    });
+  }
+
+  async function retryReport(job: ReportJob) {
+    await act("已创建新的 ReportJob；旧任务终态保持不变", async () => {
+      const replacement = (await analyticsApi.retryReport(job.id)) as ReportJob;
+      setReports((old) => [
+        replacement,
+        ...old.filter((item) => item.id !== replacement.id),
+      ]);
+      setRetriedReportIds((old) => new Set(old).add(job.id));
     });
   }
 
@@ -232,6 +308,52 @@ export default function GradingBatchPage({
                 <p className="text-xs text-slate-500">
                   页面 {item.page_count} · Submission {item.id}
                 </p>
+                {(() => {
+                  const pageIds =
+                    workspace?.items
+                      .find((candidate) => candidate.submission_id === item.id)
+                      ?.pages.map((page) => page.id) ?? [];
+                  const primary = submissions.find(
+                    (candidate) => candidate.attempt_number === 1,
+                  );
+                  return (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {pageIds.length > 1 && (
+                        <>
+                          <Button
+                            variant="outline"
+                            onClick={() => void reversePages(item.id, pageIds)}
+                          >
+                            反转页面顺序
+                          </Button>
+                          <Button
+                            variant="outline"
+                            onClick={() =>
+                              void splitSubmission(
+                                item.id,
+                                pageIds[pageIds.length - 1],
+                              )
+                            }
+                          >
+                            拆出末页
+                          </Button>
+                        </>
+                      )}
+                      {item.attempt_number > 1 &&
+                        primary &&
+                        item.status !== "merged" && (
+                          <Button
+                            variant="outline"
+                            onClick={() =>
+                              void mergeSubmission(primary.id, item.id)
+                            }
+                          >
+                            合并回首次 Submission
+                          </Button>
+                        )}
+                    </div>
+                  );
+                })()}
                 {job && (
                   <div
                     className="mt-2 text-sm"
@@ -267,6 +389,52 @@ export default function GradingBatchPage({
             );
           })}
         </div>
+        {batch.matching.items.some((item) => item.status === "pending") && (
+          <div
+            className="space-y-3 rounded-xl border border-amber-300 bg-amber-50 p-4"
+            data-testid="pending-matches"
+          >
+            <h3 className="font-semibold">需要教师确认的歧义/未知匹配</h3>
+            {batch.matching.items
+              .filter((item) => item.status === "pending")
+              .map((item) => (
+                <div
+                  key={item.id}
+                  className="flex flex-wrap items-end gap-2"
+                  data-testid="pending-match"
+                  data-match-id={item.id}
+                  data-match-method={item.method}
+                >
+                  <label className="grid gap-1 text-sm">
+                    {item.filename} · {item.reason}
+                    <select
+                      aria-label={`为 ${item.filename} 选择学生`}
+                      value={matchSelections[item.id] ?? ""}
+                      onChange={(event) =>
+                        setMatchSelections((old) => ({
+                          ...old,
+                          [item.id]: event.target.value,
+                        }))
+                      }
+                    >
+                      <option value="">请选择学生</option>
+                      {batch.matching.student_options.map((student) => (
+                        <option key={student.id} value={student.id}>
+                          {student.student_number} · {student.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <Button
+                    variant="outline"
+                    onClick={() => void confirmMatch(item.id)}
+                  >
+                    人工确认匹配
+                  </Button>
+                </div>
+              ))}
+          </div>
+        )}
         <Button
           disabled={!submissions.length || busy}
           onClick={() => void startOcr()}
@@ -296,6 +464,18 @@ export default function GradingBatchPage({
         >
           运行确定性初批
         </Button>{" "}
+        <Button
+          variant="outline"
+          disabled={busy}
+          onClick={() =>
+            void act("已为 stale 答案创建新的评分结果", async () => {
+              await gradingApi.regrade(batch.id, true);
+              setWorkspace(await gradingApi.reviewWorkspace(batch.id));
+            })
+          }
+        >
+          仅重新批改 stale 答案
+        </Button>{" "}
         <Link href={`/grading/${batch.id}/review`}>
           <Button variant="secondary">进入三栏教师复核</Button>
         </Link>
@@ -313,9 +493,9 @@ export default function GradingBatchPage({
           </Button>
           <Button
             onClick={() => void createRelease()}
-            disabled={!readiness?.releasable_count || Boolean(release) || busy}
+            disabled={!readiness?.releasable_count || busy}
           >
-            创建 GradeRelease
+            创建新的 GradeRelease 版本
           </Button>
         </div>
         {readiness && (
@@ -323,6 +503,31 @@ export default function GradingBatchPage({
             可发布 {readiness.releasable_count} · 未完成{" "}
             {readiness.unreleasable_count}（未完成不会记零分）
           </p>
+        )}
+        {releases.length > 0 && (
+          <div className="space-y-2" data-testid="grade-release-versions">
+            <h3 className="font-semibold">历史发布版本（固定 Snapshot）</h3>
+            {releases.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={`block w-full rounded border p-3 text-left ${
+                  item.id === release?.id
+                    ? "border-indigo-500 bg-indigo-50"
+                    : ""
+                }`}
+                data-testid="grade-release-version"
+                data-release-id={item.id}
+                data-release-version={item.version}
+                onClick={() => setRelease(item)}
+              >
+                v{item.version} · {item.status} · Snapshot{" "}
+                {item.items
+                  .map((releaseItem) => releaseItem.score_snapshot_id)
+                  .join("，")}
+              </button>
+            ))}
+          </div>
         )}
         {release && (
           <div
@@ -363,15 +568,37 @@ export default function GradingBatchPage({
             data-report-id={job.id}
             data-report-type={job.report_type}
             data-report-status={job.status}
+            data-report-release-id={job.grade_release_id}
+            data-report-student-id={job.student_id ?? ""}
+            data-report-error-code={job.error_code ?? ""}
+            data-report-created-at={job.created_at ?? ""}
+            data-report-assignment-id={batch.assignment_id}
+            data-report-class-id={batch.class_id}
           >
             {job.report_type} · {job.status} · {job.progress}%
-            <Button
-              className="ml-3"
-              variant="outline"
-              onClick={() => void requestDownload(job)}
-            >
-              请求短期下载地址
-            </Button>
+            {["failed", "expired", "partially_completed"].includes(
+              job.status,
+            ) ? (
+              <Button
+                className="ml-3"
+                variant="outline"
+                disabled={busy || retriedReportIds.has(job.id)}
+                onClick={() => void retryReport(job)}
+              >
+                {retriedReportIds.has(job.id)
+                  ? "已创建重试任务"
+                  : "创建新任务重试"}
+              </Button>
+            ) : (
+              <Button
+                className="ml-3"
+                variant="outline"
+                disabled={job.status !== "completed"}
+                onClick={() => void requestDownload(job)}
+              >
+                请求短期下载地址
+              </Button>
+            )}
           </div>
         ))}
         {download && (

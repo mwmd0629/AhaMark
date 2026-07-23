@@ -25,6 +25,7 @@ export default function ReviewPage() {
       submission_id: string;
       status: string;
       total_score?: string;
+      problems?: Array<{ code: string; question_id: string }>;
     }>
   >([]);
 
@@ -90,14 +91,57 @@ export default function ReviewPage() {
             submission_id: string;
             status: string;
             total_score?: string;
+            problems?: Array<{ code: string; question_id: string }>;
           },
         );
       }
       setSnapshots(values);
       await load();
-      setMessage("全部 Submission 已 finalize，并生成 complete ScoreSnapshot");
+      const blocked = values.filter((item) => item.status !== "complete");
+      setMessage(
+        blocked.length
+          ? `finalize 已阻止 ${blocked.length} 份未完成 Submission：${blocked
+              .flatMap(
+                (item) => item.problems?.map((problem) => problem.code) ?? [],
+              )
+              .join("、")}`
+          : "全部 Submission 已 finalize，并生成新的 complete ScoreSnapshot 版本",
+      );
     } catch {
       setMessage("finalize 失败：仍有题目未完成教师复核");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function correctCurrentAnswer() {
+    if (!answer || saving) return;
+    const corrected = window.prompt(
+      "请输入教师修正后的答案",
+      answer.corrected_text ?? answer.recognized_text ?? "",
+    );
+    if (corrected === null) return;
+    setSaving(true);
+    try {
+      await gradingApi.correctAnswer(answer.id, { corrected_text: corrected });
+      await load();
+      setMessage("答案已修正；旧评分建议已失效，请重新批改或人工评分");
+    } catch {
+      setMessage("答案修正失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function regradeCurrentAnswer() {
+    if (!answer || saving) return;
+    setSaving(true);
+    try {
+      await gradingApi.grade(answer.id);
+      await load();
+      setMessage("已创建新的评分 Job/Result；旧结果保持 superseded/stale");
+    } catch {
+      setMessage("重新批改失败，请检查当前 Rubric 是否完整");
     } finally {
       setSaving(false);
     }
@@ -155,7 +199,11 @@ export default function ReviewPage() {
               data-status={snapshot.status}
               data-total-score={snapshot.total_score}
             >
-              complete Snapshot {snapshot.id} · 总分 {snapshot.total_score}
+              {snapshot.status} Snapshot {snapshot.id} · 总分{" "}
+              {snapshot.total_score ?? "未生成"}{" "}
+              {snapshot.problems?.length
+                ? `· 阻塞 ${snapshot.problems.map((item) => item.code).join("、")}`
+                : ""}
             </p>
           ))}
         </div>
@@ -242,6 +290,7 @@ export default function ReviewPage() {
           {submission?.answers.map((item, index) => (
             <button
               key={item.id}
+              data-answer-id={item.id}
               onClick={() => setAnswerIndex(index)}
               className={`mb-1 block w-full rounded p-2 text-left text-sm ${index === answerIndex ? "bg-amber-50" : ""}`}
             >
@@ -264,8 +313,11 @@ export default function ReviewPage() {
           aria-label="评分复核详情"
           data-testid="review-answer"
           data-answer-id={answer?.id}
+          data-answer-status={answer?.status}
           data-question-type={answer?.question.type}
           data-provider={answer?.result?.provider ?? "manual"}
+          data-result-status={answer?.result?.status}
+          data-rubric-version-id={answer?.result?.rubric_version_id}
           data-suggested-score={answer?.result?.score}
           data-final-score={answer?.review?.final_score}
           className="space-y-4 overflow-auto rounded-xl border bg-white p-4"
@@ -296,7 +348,19 @@ export default function ReviewPage() {
                   label="状态"
                   value={answer.requires_review ? "强制复核" : answer.status}
                 />
+                <Info label="评分结果状态" value={answer.result?.status} />
               </div>
+              {(answer.status === "stale" ||
+                answer.result?.status === "stale") && (
+                <div
+                  role="alert"
+                  className="rounded border border-amber-300 bg-amber-50 p-3 text-sm"
+                  data-testid="regrade-required"
+                >
+                  答案或 Rubric
+                  已变化，旧建议不能继续接受。请重新批改或由教师重新人工评分。
+                </div>
+              )}
               <div>
                 <h3 className="font-semibold">Criterion</h3>
                 {answer.criteria.map((item) => (
@@ -334,10 +398,20 @@ export default function ReviewPage() {
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <Action
+                  label="修正 OCR 答案"
+                  onClick={() => void correctCurrentAnswer()}
+                  disabled={saving}
+                />
+                <Action
+                  label="重新批改"
+                  onClick={() => void regradeCurrentAnswer()}
+                  disabled={saving}
+                />
+                <Action
                   label="接受"
                   primary
                   onClick={() => submitReview("accepted")}
-                  disabled={saving}
+                  disabled={saving || answer.result?.status !== "suggested"}
                 />
                 <Action
                   label="修改"

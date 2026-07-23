@@ -1,0 +1,54 @@
+{
+  "result": "failed",
+  "environment": "isolated APP_ENV=test six-service stack and real Edge",
+  "synthetic_marker": "business-exceptions-20260723053618406.business-exceptions.synthetic.invalid",
+  "started_at": "2026-07-23T05:36:17.126Z",
+  "completed_at": "2026-07-23T05:37:08.222Z",
+  "stages": {
+    "A": {
+      "status": "passed",
+      "source": "bootstrap_real_edge",
+      "checks": [
+        "null score preserved",
+        "rubric blocked",
+        "teacher repaired score"
+      ]
+    },
+    "D": {
+      "status": "passed",
+      "source": "bootstrap_real_edge",
+      "checks": [
+        "split",
+        "merge",
+        "OCR/review/finalize continued"
+      ]
+    },
+    "login": {
+      "status": "passed"
+    },
+    "C": {
+      "status": "passed"
+    },
+    "E_F": {
+      "status": "failed"
+    }
+  },
+  "objects": {
+    "snapshot_v1_ids": [
+      "16f03f54-12f5-438a-a247-0053d0331584",
+      "33c9f832-ab62-402b-b643-cd1fb79de344"
+    ],
+    "release_v1_id": "0f428154-7c54-46b9-a4cb-f9a35fb4f02b",
+    "analytics_v1_id": "67833a31-d6c8-44bd-9820-48dd9fb39c9c",
+    "finalize_ui_gate": true,
+    "regrade_progress": "进度 2/4"
+  },
+  "limitations": [
+    "failed/expired ReportJob cannot be produced naturally in a short browser run; retry is API integration plus UI component tested"
+  ],
+  "failure": {
+    "stage": "E_F",
+    "code": "locator.click: Timeout 30000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByRole('button', { name: '完成全部 finalize' })\u001b[22m\n\u001b[2m    - locator resolved to <button disabled class=\"rounded bg-indigo-700 px-3 py-2 text-white disabled:opacity-50\"",
+    "url": "http://localhost:3300/grading/b8f99bf1-b8c1-4feb-8cb1-6131f496f96c/review"
+  }
+}

@@ -14,14 +14,14 @@
 |---|---|---|
 | 六核心服务 | PASS | web/api/worker/PostgreSQL/Redis/MinIO healthy；栈保持运行 |
 | 数据库迁移 | PASS | 活动库 0010；独立空库 upgrade；0010→0009→0010 |
-| 后端测试 | PASS | 46 passed；Ruff、mypy 通过；1 条第三方 Starlette TestClient 弃用警告 |
-| 前端测试 | PASS | 10 files / 20 tests |
+| 后端测试 | PASS | 完整门禁 51 passed；第三部分定向 5 passed；Ruff、mypy 通过；1 条第三方 Starlette TestClient 弃用警告 |
+| 前端测试 | PASS | 第三部分后 25 tests passed |
 | 前端格式/lint/type | PASS | Prettier、ESLint、TypeScript |
 | Next production build | PASS | 18 条路由构建成功；SWC lockfile 修补警告仍存在但未阻断 |
 | Analytics HTTP | PASS | 35 请求，含 14 项 Teacher B 隔离 |
 | Analytics 浏览器 | PASS | 6 步无头 Edge 冒烟 |
 | 教师核心业务浏览器 A–H | PASS | 独立栈、无头 Edge、纯合成数据；8/8 阶段通过，见 BUSINESS-E2E 与机器 JSON |
-| 全链路 API 集成 | PARTIAL | 教师正常主路径已有真实浏览器链；异常矩阵与其他范围仍不完整 |
+| 全链路 API 集成 | PASS | 第三部分 5 项异常/版本测试通过；failed/expired ReportJob retry 另有真实 Edge 证据 |
 | 完整权限矩阵 | PARTIAL | Analytics 与文件隔离通过；全部资源/动作未覆盖 |
 | 成绩正确性 | PASS | 浏览器 finalize 得到 9/8 两份 complete Snapshot；Release、报告、Analytics 对账一致，未完成学生不记零 |
 | XLSX/中文 PDF | PASS | 本轮真实浏览器创建，Celery/MinIO Job 均 completed；未跑批量容量 |
@@ -35,6 +35,15 @@
 | MinIO 备份恢复 | NOT RUN | 只读孤儿扫描工具已提供 |
 | 可用性/可访问性逐页 | NOT RUN | Analytics 冒烟不能替代完整巡检 |
 | 真实主观题 AI | NOT APPLICABLE | Provider unavailable；主观题人工评分；production 禁 fake |
+
+## 第三部分异常与版本一致性
+
+实现与机器证据见 `docs/BUSINESS-EXCEPTIONS-AND-VERSIONING.md`、
+`docs/business-exceptions-verification.json` 和
+`docs/business-report-retry-verification.json`。核心不变量是 immutable complete
+Snapshot、Release 固定 snapshot、Report/Analytics 固定 release，以及同一学生只选最新
+合法 complete snapshot；未完成成绩不记零。真实 Edge bootstrap A–H 8/8，且 failed/expired
+ReportJob retry 生命周期已通过专用真实 Edge 脚本验证，第三部分该验收缺口已关闭。
 
 ## 性能摘要
 

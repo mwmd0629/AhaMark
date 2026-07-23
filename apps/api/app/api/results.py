@@ -108,6 +108,13 @@ def owned_release(db: Session, actor_id: uuid.UUID, release_id: uuid.UUID) -> Gr
     return release
 
 
+def released_release(db: Session, actor_id: uuid.UUID, release_id: uuid.UUID) -> GradeRelease:
+    release = owned_release(db, actor_id, release_id)
+    if release.status != "released":
+        raise ApiProblem(409, "GRADE_RELEASE_NOT_ACTIVE", "只有已发布版本可生成报告或分析")
+    return release
+
+
 @router.get("/assignments/{assignment_id}/classes/{class_id}/grade-readiness")
 def readiness(
     assignment_id: uuid.UUID, class_id: uuid.UUID, db: Db, actor: Actor
@@ -139,38 +146,53 @@ def readiness(
             Submission.class_id == class_id,
         )
     ).all()
-    by_student = {x.student_id: x for x in submissions if x.student_id}
+    submissions_by_student: dict[uuid.UUID, list[Submission]] = {}
+    for submission in submissions:
+        if submission.student_id in student_ids:
+            submissions_by_student.setdefault(submission.student_id, []).append(submission)
     valid, invalid = [], []
     service = FinalScoreService(db, actor.id)
-    for student_id, submission in by_student.items():
+    latest_complete_by_student: dict[uuid.UUID, Any] = {}
+    for score_row in service.latest(assignment_id, class_id):
+        student_id = score_row.payload.student_id
+        if student_id not in student_ids:
+            continue
+        current = latest_complete_by_student.get(student_id)
+        if current is None or (
+            score_row.snapshot.generated_at,
+            score_row.snapshot.version,
+            str(score_row.snapshot.id),
+        ) > (
+            current.snapshot.generated_at,
+            current.snapshot.version,
+            str(current.snapshot.id),
+        ):
+            latest_complete_by_student[student_id] = score_row
+    for student_id, student_submissions in submissions_by_student.items():
+        row = latest_complete_by_student.get(student_id)
         try:
-            row = next(
-                (
-                    x
-                    for x in service.latest(assignment_id, class_id)
-                    if x.submission.id == submission.id
-                ),
-                None,
-            )
             if row is None:
                 raise ValueError("COMPLETE_SNAPSHOT_MISSING")
             valid.append(
                 {
                     "student_id": str(student_id),
-                    "submission_id": str(submission.id),
+                    "submission_id": str(row.submission.id),
                     "score_snapshot_id": str(row.snapshot.id),
                 }
             )
         except ValueError as exc:
+            latest_submission = max(
+                student_submissions, key=lambda item: (item.created_at, str(item.id))
+            )
             invalid.append(
                 {
                     "code": str(exc).split(":", 1)[0],
                     "student_id": str(student_id),
-                    "submission_id": str(submission.id),
+                    "submission_id": str(latest_submission.id),
                     "reason": str(exc),
                 }
             )
-    missing = sorted(str(x) for x in student_ids - set(by_student))
+    missing = sorted(str(x) for x in student_ids - set(submissions_by_student))
     audit(
         db,
         actor.id,
@@ -311,7 +333,7 @@ def create_report(
     actor: Actor,
     student_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
-    release = owned_release(db, actor.id, release_id)
+    release = released_release(db, actor.id, release_id)
     existing = db.scalar(
         select(ReportJob).where(
             ReportJob.owner_id == actor.id, ReportJob.idempotency_key == idempotency_key
@@ -365,13 +387,34 @@ def create_report(
     return report_view(db, job)
 
 
+@router.get("/grade-releases/{release_id}/reports")
+def list_reports(release_id: uuid.UUID, db: Db, actor: Actor) -> list[dict[str, Any]]:
+    release = released_release(db, actor.id, release_id)
+    jobs = db.scalars(
+        select(ReportJob)
+        .where(
+            ReportJob.owner_id == actor.id,
+            ReportJob.grade_release_id == release.id,
+        )
+        .order_by(ReportJob.created_at.desc())
+    ).all()
+    return [report_view(db, job) for job in jobs]
+
+
+def report_is_expired(job: ReportJob) -> bool:
+    if job.expires_at is None:
+        return False
+    current = now_utc()
+    if job.expires_at.tzinfo is None:
+        current = current.replace(tzinfo=None)
+    return job.expires_at <= current
+
+
 def report_view(db: Session, job: ReportJob) -> dict[str, Any]:
     scope = db.get(ReportJobStudentScope, job.id)
     effective_status = (
         "expired"
-        if job.status in {"completed", "partially_completed"}
-        and job.expires_at is not None
-        and job.expires_at <= now_utc()
+        if job.status in {"completed", "partially_completed"} and report_is_expired(job)
         else job.status
     )
     return {
@@ -444,6 +487,8 @@ def download_report(job_id: uuid.UUID, db: Db, actor: Actor, storage: Storage) -
     if stored is None:
         raise ApiProblem(404, "REPORT_FILE_NOT_FOUND", "报告文件不存在")
     assert job is not None
+    if report_is_expired(job):
+        raise ApiProblem(409, "REPORT_JOB_EXPIRED", "报告任务已过期，请创建新的重试任务")
     audit(db, actor.id, "report.download", "report_job", job.id, {})
     db.commit()
     return {"url": storage.presigned_get(stored.storage_key, 900)}
@@ -451,7 +496,7 @@ def download_report(job_id: uuid.UUID, db: Db, actor: Actor, storage: Storage) -
 
 @router.post("/grade-releases/{release_id}/analytics", status_code=201)
 def generate_analytics(release_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
-    release = owned_release(db, actor.id, release_id)
+    release = released_release(db, actor.id, release_id)
     snapshot = create_analytics(db, release)
     audit(
         db,
@@ -476,15 +521,7 @@ def generate_analytics(release_id: uuid.UUID, db: Db, actor: Actor) -> dict[str,
 
 @router.post("/analytics/{analytics_id}/insights", status_code=201)
 def generate_insight(analytics_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
-    from app.models import AnalyticsSnapshot
-
-    snapshot = db.scalar(
-        select(AnalyticsSnapshot).where(
-            AnalyticsSnapshot.id == analytics_id, AnalyticsSnapshot.owner_id == actor.id
-        )
-    )
-    if snapshot is None:
-        raise ApiProblem(404, "ANALYTICS_NOT_FOUND", "分析快照不存在")
+    snapshot = owned_analytics(db, actor.id, analytics_id)
     questions = sorted(
         snapshot.metrics.get("questions", []),
         key=lambda x: x.get("score_rate") if x.get("score_rate") is not None else 2,

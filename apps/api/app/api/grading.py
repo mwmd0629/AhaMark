@@ -27,6 +27,7 @@ from app.models import (
     QuestionRubric,
     QuestionStatus,
     RubricItem,
+    RubricVersion,
     SchoolClass,
     ScoreRevision,
     StoredFile,
@@ -153,6 +154,16 @@ def batch_json(db: Session, x: GradingBatch) -> dict[str, Any]:
     matches = db.scalars(
         select(SubmissionFileMatch).where(SubmissionFileMatch.grading_batch_id == x.id)
     ).all()
+    members = db.scalars(
+        select(Student)
+        .join(ClassStudent, ClassStudent.student_id == Student.id)
+        .where(
+            ClassStudent.class_id == x.class_id,
+            ClassStudent.status == MembershipStatus.active,
+            Student.owner_id == x.owner_id,
+        )
+        .order_by(Student.student_number, Student.id)
+    ).all()
     return {
         "id": str(x.id),
         "assignment_id": str(x.assignment_id),
@@ -170,6 +181,34 @@ def batch_json(db: Session, x: GradingBatch) -> dict[str, Any]:
             "confirmed": sum(m.status == "confirmed" for m in matches),
             "ambiguous": sum(m.match_method == "ambiguous" for m in matches),
             "unmatched": sum(m.match_method == "unmatched" for m in matches),
+            "items": [
+                {
+                    "id": str(match.id),
+                    "filename": (
+                        stored.original_name
+                        if (stored := db.get(StoredFile, match.stored_file_id))
+                        else "unknown"
+                    ),
+                    "status": match.status,
+                    "method": match.match_method,
+                    "reason": match.reason,
+                    "suggested_student_id": (
+                        str(match.suggested_student_id) if match.suggested_student_id else None
+                    ),
+                    "confirmed_student_id": (
+                        str(match.confirmed_student_id) if match.confirmed_student_id else None
+                    ),
+                }
+                for match in matches
+            ],
+            "student_options": [
+                {
+                    "id": str(student.id),
+                    "student_number": student.student_number,
+                    "name": student.name,
+                }
+                for student in members
+            ],
         },
         "actions": ["upload", "review_matches", "grade", "archive"]
         if x.status != "archived"
@@ -483,6 +522,21 @@ def confirm_match(
     )
     if match is None or student is None:
         raise ApiProblem(404, "MATCH_OR_STUDENT_NOT_FOUND", "匹配记录或班级学生不存在")
+    if match.status == "confirmed":
+        if match.confirmed_student_id != student.id:
+            raise ApiProblem(409, "MATCH_ALREADY_CONFIRMED", "已确认匹配不能改到其他学生")
+        existing_submission = db.scalar(
+            select(Submission)
+            .join(SubmissionPage, SubmissionPage.submission_id == Submission.id)
+            .where(
+                Submission.grading_batch_id == batch.id,
+                Submission.student_id == student.id,
+                SubmissionPage.stored_file_id == match.stored_file_id,
+            )
+        )
+        if existing_submission is None:
+            raise ApiProblem(409, "MATCH_CONFIRMATION_INCONSISTENT", "已确认匹配缺少提交页面")
+        return {"submission_id": str(existing_submission.id), "status": "confirmed"}
     submission = db.scalar(
         select(Submission).where(
             Submission.grading_batch_id == batch.id,
@@ -802,6 +856,21 @@ def split_submission(
     submission_id: uuid.UUID, data: SplitSubmissionInput, db: Db, actor: Actor
 ) -> dict[str, Any]:
     source = _editable_submission(db, actor.id, submission_id)
+    pages = db.scalars(
+        select(SubmissionPage).where(
+            SubmissionPage.submission_id == source.id, SubmissionPage.id.in_(data.page_ids)
+        )
+    ).all()
+    source_count = (
+        db.scalar(
+            select(func.count())
+            .select_from(SubmissionPage)
+            .where(SubmissionPage.submission_id == source.id)
+        )
+        or 0
+    )
+    if len(pages) != len(set(data.page_ids)) or len(pages) >= source_count:
+        raise ApiProblem(422, "SUBMISSION_SPLIT_INVALID", "拆分页不存在或不能拆出全部页面")
     attempt = (
         db.scalar(
             select(func.max(Submission.attempt_number)).where(
@@ -823,21 +892,6 @@ def split_submission(
     )
     db.add(target)
     db.flush()
-    pages = db.scalars(
-        select(SubmissionPage).where(
-            SubmissionPage.submission_id == source.id, SubmissionPage.id.in_(data.page_ids)
-        )
-    ).all()
-    source_count = (
-        db.scalar(
-            select(func.count())
-            .select_from(SubmissionPage)
-            .where(SubmissionPage.submission_id == source.id)
-        )
-        or 0
-    )
-    if len(pages) != len(set(data.page_ids)) or len(pages) >= source_count:
-        raise ApiProblem(422, "SUBMISSION_SPLIT_INVALID", "拆分页不存在或不能拆出全部页面")
     for index, page in enumerate(pages, 1):
         page.submission_id, page.page_number = target.id, index
     db.flush()
@@ -865,7 +919,12 @@ def merge_submission(
     pages = db.scalars(
         select(SubmissionPage).where(SubmissionPage.submission_id == source.id)
     ).all()
-    if source.grading_batch_id != target.grading_batch_id or source.id == target.id:
+    if (
+        source.grading_batch_id != target.grading_batch_id
+        or source.assignment_id != target.assignment_id
+        or source.class_id != target.class_id
+        or source.id == target.id
+    ):
         raise ApiProblem(409, "SUBMISSION_MERGE_INVALID", "只能合并同一批次的不同提交")
     next_page = (
         db.scalar(
@@ -1085,6 +1144,9 @@ def grade_answer(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
         status="suggested",
     )
     db.add(result)
+    # A successful regrade creates a fresh result under the active Rubric.
+    # Clear the answer-level stale marker so the teacher can review/accept it.
+    answer.status = "graded"
     db.flush()
     rubric_items = db.scalars(
         select(RubricItem)
@@ -1171,12 +1233,31 @@ def review_answer(answer_id: uuid.UUID, data: ReviewInput, db: Db, actor: Actor)
     )
     if answer is None:
         raise ApiProblem(404, "ANSWER_NOT_FOUND", "答案不存在")
+    submission = owned_submission(db, actor.id, answer.submission_id)
+    assignment = owned_assignment(db, actor.id, submission.assignment_id)
     question = db.get(Question, answer.question_id)
     result = db.scalar(
         select(GradingResult)
         .where(GradingResult.student_answer_id == answer.id, GradingResult.status != "superseded")
         .order_by(GradingResult.created_at.desc())
     )
+    if data.decision == "accepted":
+        effective = (
+            answer.corrected_text
+            if answer.corrected_text is not None
+            else (answer.recognized_text or "")
+        )
+        if (
+            result is None
+            or result.status != "suggested"
+            or result.rubric_version_id != assignment.active_rubric_version_id
+            or result.recognized_answer_snapshot != effective
+        ):
+            raise ApiProblem(
+                409,
+                "GRADING_RESULT_STALE",
+                "答案或 Rubric 已变化，旧建议不能接受；请重新批改或人工评分",
+            )
     score = (
         data.final_score
         if data.final_score is not None
@@ -1214,13 +1295,20 @@ def review_answer(answer_id: uuid.UUID, data: ReviewInput, db: Db, actor: Actor)
                 )
             )
         review.decision, review.final_score = data.decision, score
+    review.grading_result_id = (
+        result.id
+        if result
+        and result.status == "suggested"
+        and result.rubric_version_id == assignment.active_rubric_version_id
+        else None
+    )
     review.final_feedback, review.final_error_type, review.review_notes, review.confirmed_at = (
         data.final_feedback,
         data.final_error_type,
         data.review_notes,
         now_utc(),
     )
-    if result:
+    if result and result.status == "suggested":
         result.status = (
             "accepted"
             if data.decision == "accepted"
@@ -1246,12 +1334,14 @@ def acceptance_eligibility(
         select(GradingResult)
         .where(
             GradingResult.student_answer_id == answer.id,
-            GradingResult.status == "suggested",
+            GradingResult.status != "superseded",
         )
         .order_by(GradingResult.created_at.desc())
     )
     if result is None:
         return ["RESULT_MISSING"], None
+    if result.status != "suggested":
+        reasons.append("RESULT_NOT_SUGGESTED")
     if result.score is None or result.score < 0 or result.score > result.max_score:
         reasons.append("SCORE_INVALID")
     if answer.status == "stale" or result.status == "stale":
@@ -1422,6 +1512,8 @@ def review_workspace(
                     },
                     "result": {
                         "id": str(result.id),
+                        "status": result.status,
+                        "rubric_version_id": str(result.rubric_version_id),
                         "score": str(result.score) if result.score is not None else None,
                         "provider": result.provider,
                         "provider_version": result.provider_version,
@@ -1499,7 +1591,13 @@ def review_workspace(
         )
     total_answers = sum(len(item["answers"]) for item in items)
     reviewed_answers = sum(
-        sum(answer["review"] is not None for answer in item["answers"]) for item in items
+        sum(
+            answer["review"] is not None
+            and answer["review"]["final_score"] is not None
+            and not answer["requires_review"]
+            for answer in item["answers"]
+        )
+        for item in items
     )
     return {
         "batch": batch_json(db, batch),
@@ -1665,8 +1763,18 @@ def finalize_submission(submission_id: uuid.UUID, db: Db, actor: Actor) -> dict[
     details: list[dict[str, Any]] = []
     total = Decimal("0")
     maximum = Decimal("0")
+    active_rubric = (
+        db.get(RubricVersion, assignment.active_rubric_version_id)
+        if assignment.active_rubric_version_id
+        else None
+    )
+    if active_rubric is None or active_rubric.status != "confirmed":
+        problems.append({"code": "RUBRIC_VERSION_NOT_CONFIRMED", "question_id": ""})
     for q in questions:
-        maximum += Decimal(q.max_score or 0)
+        if q.max_score is None or Decimal(q.max_score) <= 0:
+            problems.append({"code": "QUESTION_SCORE_REQUIRED", "question_id": str(q.id)})
+            continue
+        maximum += Decimal(q.max_score)
         answer = by_q.get(q.id)
         if answer is None:
             problems.append({"code": "ANSWER_MISSING", "question_id": str(q.id)})
@@ -1676,6 +1784,42 @@ def finalize_submission(submission_id: uuid.UUID, db: Db, actor: Actor) -> dict[
         )
         if review is None or review.final_score is None or answer.requires_review:
             problems.append({"code": "REVIEW_REQUIRED", "question_id": str(q.id)})
+            continue
+        if review.final_score < 0 or review.final_score > Decimal(q.max_score):
+            problems.append({"code": "SCORE_OUT_OF_RANGE", "question_id": str(q.id)})
+            continue
+        current_question_rubric = db.scalar(
+            select(QuestionRubric).where(
+                QuestionRubric.rubric_version_id == assignment.active_rubric_version_id,
+                QuestionRubric.question_id == q.id,
+            )
+        )
+        if current_question_rubric is None:
+            problems.append({"code": "RUBRIC_INCOMPLETE", "question_id": str(q.id)})
+            continue
+        latest_result = db.scalar(
+            select(GradingResult)
+            .where(
+                GradingResult.student_answer_id == answer.id,
+                GradingResult.status != "superseded",
+            )
+            .order_by(GradingResult.created_at.desc())
+        )
+        manually_reconfirmed = (
+            review.decision in {"modified", "manual_scored"}
+            and review.confirmed_at is not None
+            and active_rubric is not None
+            and review.confirmed_at >= active_rubric.created_at
+        )
+        if (
+            latest_result
+            and (
+                latest_result.status == "stale"
+                or latest_result.rubric_version_id != assignment.active_rubric_version_id
+            )
+            and not manually_reconfirmed
+        ):
+            problems.append({"code": "STALE_RUBRIC", "question_id": str(q.id)})
             continue
         active_result = db.scalar(
             select(GradingResult)

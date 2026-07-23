@@ -1,0 +1,57 @@
+{
+  "result": "passed",
+  "code_version": "fee4ba3b2546625e25b9e75ef5c51499f71af9c5",
+  "environment": "isolated APP_ENV=test six-service stack and real Edge",
+  "synthetic_marker": "report-retry-20260723060950786.report-retry-e2e.synthetic.invalid",
+  "failed_job_id": "c0b9a130-14d0-440f-b0cb-27546656fc84",
+  "expired_job_id": "871deb6d-3464-48c9-88aa-7bfbc2a5ecac",
+  "retried_failed_job_id": "8b4d4aa8-352d-4d85-a0cf-b7c29374ec98",
+  "retried_expired_job_id": "9d9b2a06-836e-4efb-b8ba-f555c0a56db5",
+  "release_id": "80446c15-7f33-41b7-802b-1dcd894feb01",
+  "assignment_id": "0e8ecad6-ab08-465b-9d2d-0ef1d7205484",
+  "class_id": "cf0dcf15-34b6-4f8d-97f5-f8e105c1df95",
+  "student_id": "0d43c79b-62c7-4360-b273-7c0a1c9c2b1b",
+  "old_failed_status": "failed",
+  "old_expired_status": "expired",
+  "old_failed_error_code": "SYNTHETIC_PROVIDER_FAILURE",
+  "old_created_at_unchanged": true,
+  "new_job_status": {
+    "failed": {
+      "initial": "queued",
+      "observed": "queued"
+    },
+    "expired": {
+      "initial": "queued",
+      "observed": "queued"
+    }
+  },
+  "old_job_unchanged": true,
+  "release_id_consistent": true,
+  "assignment_id_consistent": true,
+  "class_id_consistent": true,
+  "student_scope_consistent": true,
+  "report_type_consistent": true,
+  "duplicate_guard_verified": true,
+  "refresh_reconciliation_verified": true,
+  "browser_verified": [
+    "synthetic teacher login and report list",
+    "failed and expired terminal jobs visible",
+    "failed retry clicked",
+    "failed replacement observed",
+    "expired retry clicked",
+    "expired replacement observed",
+    "old and replacement jobs reconciled after refresh"
+  ],
+  "api_verified": [
+    "retry response status 201 observed from browser action",
+    "replacement identifiers and inherited fields read from browser response"
+  ],
+  "ui_component_verified": [
+    "terminal status rendering",
+    "retry action and duplicate-click guard"
+  ],
+  "download_expired_verified": "not_applicable_ui_exposes_retry_directly",
+  "started_at": "2026-07-23T06:09:50.786Z",
+  "completed_at": "2026-07-23T06:10:09.084Z",
+  "failure": null
+}

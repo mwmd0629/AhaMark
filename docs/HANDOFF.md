@@ -25,6 +25,13 @@
 - 报告：XLSX 与中文个人 PDF Job 均 completed；Analytics 参与 2 人、平均 8.5；第 3 名未完成学生不记零。
 - 人类报告：`docs/BUSINESS-E2E.md`；机器证据：`docs/business-e2e-verification.json`。
 
+## 第三部分：异常业务与版本一致性
+
+- 已实现 A–H 异常边界：OCR null/低置信度/公式不可用、歧义匹配幂等确认、导入全有或全无、拆分合并校验、Rubric stale/regrade、incomplete finalize、release/report/analytics/Insight 版本固定。
+- 新增 `tests/test_exception_versioning.py`（5 项）；真实 Edge 异常 bootstrap 多轮 A–H 8/8；专用 retry 脚本已覆盖 failed/expired ReportJob 的新旧 Job、Release、学生范围、报告类型和刷新对账。
+- 关键修复：就绪检查按学生选择最新合法 complete Snapshot；regrade 后清除答案 stale 标记；旧 Snapshot、Release、Analytics、Insight 内容保持不变。
+- 详见 `docs/BUSINESS-EXCEPTIONS-AND-VERSIONING.md` 与 `docs/business-exceptions-verification.json`。
+
 ## 第八部分变更
 
 - P0：修复通用文件元数据、删除、签名 URL 无认证/无 owner 校验。
@@ -37,8 +44,8 @@
 
 ## 验证汇总
 
-- 后端：46 passed，1 条第三方 Starlette TestClient 弃用警告；Ruff 与 mypy 通过。
-- 前端：10 files / 20 tests passed；Prettier、ESLint、TypeScript 通过。
+- 后端：第三部分定向 5 passed；此前完整门禁 51 passed，1 条第三方 Starlette TestClient 弃用警告；Ruff 与 mypy 通过。
+- 前端：第三部分组件测试后 25 tests passed；Prettier、ESLint、TypeScript 通过。
 - Next build：18 条路由构建通过；仍有 lockfile SWC 自动修补失败警告（未阻断构建）。
 - 性能：五类同步接口 100%；P95 为 40.51–88.18 ms。仅单客户端开发冒烟。
 - 文件安全：代码加固与小型自动化通过；完整 fixture 矩阵 PARTIAL。

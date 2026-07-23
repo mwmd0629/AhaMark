@@ -162,6 +162,11 @@ def run_submission_recognition_job(
                     )
                     db.add(answer)
                     db.flush()
+                previous_effective = (
+                    answer.corrected_text
+                    if answer.corrected_text is not None
+                    else answer.recognized_text
+                )
                 answer.recognized_text = text or None
                 answer.recognized_latex = None
                 answer.recognition_confidence = confidence
@@ -169,11 +174,29 @@ def run_submission_recognition_job(
                 answer.recognition_provider_version = provider.version
                 answer.is_blank = not blocks
                 answer.status = "blank" if not blocks else "recognized"
-                answer.requires_review = (
+                recognized_requires_review = (
                     not blocks
                     or confidence is None
                     or confidence < Decimal(str(settings.recognition_high_confidence))
                 )
+                current_effective = (
+                    answer.corrected_text
+                    if answer.corrected_text is not None
+                    else answer.recognized_text
+                )
+                answer_changed = (
+                    previous_effective is not None and previous_effective != current_effective
+                )
+                answer.requires_review = recognized_requires_review or answer_changed
+                if answer_changed:
+                    answer.status = "stale"
+                    for result in db.scalars(
+                        select(GradingResult).where(
+                            GradingResult.student_answer_id == answer.id,
+                            GradingResult.status.in_(["suggested", "accepted", "modified"]),
+                        )
+                    ).all():
+                        result.status = "stale"
                 db.execute(
                     delete(StudentAnswerRegion).where(
                         StudentAnswerRegion.student_answer_id == answer.id

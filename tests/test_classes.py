@@ -76,8 +76,24 @@ def test_csv_preview_confirm_errors_and_idempotency() -> None:
     assert data["total_rows"] == 3 and data["valid_rows"] == 1 and data["invalid_rows"] == 2
     with SessionLocal() as db:
         assert db.scalar(select(func.count()).select_from(Student)) == 0
-    first = client.post(f"/api/imports/{data['id']}/confirm").json()
-    second = client.post(f"/api/imports/{data['id']}/confirm").json()
+    blocked = client.post(f"/api/imports/{data['id']}/confirm")
+    assert blocked.status_code == 409
+    assert blocked.json()["code"] == "IMPORT_VALIDATION_FAILED"
+    with SessionLocal() as db:
+        assert db.scalar(select(func.count()).select_from(Student)) == 0
+
+    corrected = client.post(
+        f"/api/classes/{item['id']}/imports",
+        files={
+            "file": (
+                "students-corrected.csv",
+                "\ufeff姓名,学号\n张同学,0001\n".encode(),
+                "text/csv",
+            )
+        },
+    ).json()
+    first = client.post(f"/api/imports/{corrected['id']}/confirm").json()
+    second = client.post(f"/api/imports/{corrected['id']}/confirm").json()
     assert first["status"] == second["status"] == "confirmed"
     with SessionLocal() as db:
         assert db.scalar(select(func.count()).select_from(Student)) == 1

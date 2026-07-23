@@ -321,6 +321,15 @@ export const assignmentsApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  updateQuestion: (
+    id: string,
+    questionId: string,
+    data: Record<string, unknown>,
+  ) =>
+    request<QuestionRecord>(`/api/assignments/${id}/questions/${questionId}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
   region: (id: string, questionId: string, data: Record<string, unknown>) =>
     request<RegionRecord>(
       `/api/assignments/${id}/questions/${questionId}/regions`,
@@ -488,6 +497,20 @@ export type GradingBatch = {
     confirmed: number;
     ambiguous: number;
     unmatched: number;
+    items: Array<{
+      id: string;
+      filename: string;
+      status: string;
+      method: string;
+      reason?: string;
+      suggested_student_id?: string;
+      confirmed_student_id?: string;
+    }>;
+    student_options: Array<{
+      id: string;
+      student_number: string;
+      name: string;
+    }>;
   };
   actions: string[];
 };
@@ -516,6 +539,14 @@ export const gradingApi = {
   },
   submissions: (batchId: string) =>
     request<SubmissionRecord[]>(`/api/grading-batches/${batchId}/submissions`),
+  confirmMatch: (batchId: string, matchId: string, studentId: string) =>
+    request<{ submission_id: string; status: string }>(
+      `/api/grading-batches/${batchId}/matches/${matchId}/confirm`,
+      {
+        method: "POST",
+        body: JSON.stringify({ student_id: studentId }),
+      },
+    ),
   startRecognition: (submissionId: string) =>
     request<SubmissionRecognitionJob>(
       `/api/submissions/${submissionId}/recognition-jobs`,
@@ -532,6 +563,28 @@ export const gradingApi = {
     request<{ submission_id: string; page_ids: string[] }>(
       `/api/submissions/${submissionId}/pages/order`,
       { method: "PUT", body: JSON.stringify({ page_ids: pageIds }) },
+    ),
+  splitSubmission: (submissionId: string, pageIds: string[]) =>
+    request<{ source_submission_id: string; new_submission_id: string }>(
+      `/api/submissions/${submissionId}/split`,
+      { method: "POST", body: JSON.stringify({ page_ids: pageIds }) },
+    ),
+  mergeSubmission: (targetSubmissionId: string, sourceSubmissionId: string) =>
+    request<{
+      target_submission_id: string;
+      source_submission_id: string;
+      page_count: number;
+    }>(`/api/submissions/${targetSubmissionId}/merge`, {
+      method: "POST",
+      body: JSON.stringify({ source_submission_id: sourceSubmissionId }),
+    }),
+  regrade: (batchId: string, onlyStale = false) =>
+    request<{ count: number; grading_result_ids: string[] }>(
+      `/api/grading-batches/${batchId}/regrade`,
+      {
+        method: "POST",
+        body: JSON.stringify({ only_stale: onlyStale }),
+      },
     ),
   correctAnswer: (
     answerId: string,
@@ -616,6 +669,8 @@ export type ReviewWorkspace = {
       };
       result?: {
         id: string;
+        status: string;
+        rubric_version_id: string;
         score?: string;
         provider: string;
         provider_version: string;
@@ -684,6 +739,7 @@ export type ReportJob = {
   stored_file_id?: string;
   error_code?: string;
   grade_release_id: string;
+  created_at?: string;
 };
 export const analyticsApi = {
   releases: (assignmentId: string) =>
@@ -714,6 +770,8 @@ export const analyticsApi = {
       { method: "POST" },
     );
   },
+  reports: (releaseId: string) =>
+    request<ReportJob[]>(`/api/grade-releases/${releaseId}/reports`),
   report: (jobId: string) => request<ReportJob>(`/api/report-jobs/${jobId}`),
   generate: (releaseId: string) =>
     request<{ id: string; metrics: Record<string, unknown> }>(

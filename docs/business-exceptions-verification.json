@@ -1,0 +1,31 @@
+{
+  "result": "passed",
+  "scope": "第三部分：异常业务与版本一致性",
+  "environment": "isolated APP_ENV=test six-service stack and real Edge",
+  "synthetic_marker": "business-exceptions.synthetic.invalid",
+  "api_tests": {
+    "file": "tests/test_exception_versioning.py",
+    "passed": 5,
+    "failed": 0
+  },
+  "browser": {
+    "normal_teacher_flow": "docs/business-e2e-verification.json",
+    "bootstrap_real_edge_stages": "A-H 8/8 on multiple synthetic runs",
+    "exception_wrapper": "bootstrap A-H 8/8 plus dedicated ReportJob retry browser flow",
+    "report_retry_browser": "docs/business-report-retry-verification.json: passed"
+  },
+  "invariants": [
+    "complete snapshots are immutable",
+    "release items pin snapshot IDs",
+    "reports and analytics pin released release IDs",
+    "incomplete students are not counted as zero",
+    "latest legal complete snapshot wins per student",
+    "stale or mismatched results cannot be accepted"
+  ],
+  "git_policy": {
+    "staged": false,
+    "committed": false,
+    "pushed": false,
+    "deployed": false
+  }
+}

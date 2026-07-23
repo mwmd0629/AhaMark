@@ -15,6 +15,7 @@ from app.models import (
     AssignmentClass,
     AssignmentStatus,
     FileStatus,
+    GradingResult,
     KnowledgePoint,
     PaperPage,
     PaperVersion,
@@ -27,6 +28,8 @@ from app.models import (
     RubricVersion,
     SchoolClass,
     StoredFile,
+    StudentAnswer,
+    Submission,
     VersionStatus,
     now_utc,
 )
@@ -175,6 +178,74 @@ def rubric(db: Session, item: Assignment) -> RubricVersion | None:
         if item.active_rubric_version_id
         else None
     )
+
+
+def clone_rubric_version(db: Session, source: RubricVersion, actor_id: uuid.UUID) -> RubricVersion:
+    target = RubricVersion(
+        assignment_id=source.assignment_id,
+        version=source.version + 1,
+        created_by=actor_id,
+        notes=f"由 RubricVersion v{source.version} 创建的新草稿",
+    )
+    db.add(target)
+    db.flush()
+    for old_rubric in db.scalars(
+        select(QuestionRubric).where(QuestionRubric.rubric_version_id == source.id)
+    ).all():
+        new_rubric = QuestionRubric(
+            rubric_version_id=target.id,
+            question_id=old_rubric.question_id,
+            standard_answer=old_rubric.standard_answer,
+            alternative_answers=list(old_rubric.alternative_answers or []),
+            scoring_notes=old_rubric.scoring_notes,
+            allow_step_score=old_rubric.allow_step_score,
+            unit_requirement=old_rubric.unit_requirement,
+            format_requirement=old_rubric.format_requirement,
+            precision_requirement=old_rubric.precision_requirement,
+        )
+        db.add(new_rubric)
+        db.flush()
+        for old_item in db.scalars(
+            select(RubricItem)
+            .where(RubricItem.question_rubric_id == old_rubric.id)
+            .order_by(RubricItem.display_order)
+        ).all():
+            db.add(
+                RubricItem(
+                    question_rubric_id=new_rubric.id,
+                    display_order=old_item.display_order,
+                    title=old_item.title,
+                    description=old_item.description,
+                    points=old_item.points,
+                    item_type=old_item.item_type,
+                    required=old_item.required,
+                    deduction_rule=old_item.deduction_rule,
+                )
+            )
+    db.flush()
+    return target
+
+
+def invalidate_grading_for_rubric_change(db: Session, assignment_id: uuid.UUID) -> int:
+    results = db.scalars(
+        select(GradingResult)
+        .join(StudentAnswer, StudentAnswer.id == GradingResult.student_answer_id)
+        .join(Submission, Submission.id == StudentAnswer.submission_id)
+        .where(
+            Submission.assignment_id == assignment_id,
+            GradingResult.status.in_(["suggested", "accepted", "modified"]),
+        )
+    ).all()
+    answer_ids: set[uuid.UUID] = set()
+    for result in results:
+        result.status = "stale"
+        answer_ids.add(result.student_answer_id)
+    if answer_ids:
+        for answer in db.scalars(
+            select(StudentAnswer).where(StudentAnswer.id.in_(answer_ids))
+        ).all():
+            answer.status, answer.requires_review = "stale", True
+    return len(results)
 
 
 def question_json(db: Session, q: Question) -> dict[str, Any]:
@@ -1008,9 +1079,7 @@ def put_rubric(
         )
     rv = rubric(db, item)
     if rv and rv.status == VersionStatus.confirmed:
-        rv = RubricVersion(assignment_id=item.id, version=rv.version + 1, created_by=actor.id)
-        db.add(rv)
-        db.flush()
+        rv = clone_rubric_version(db, rv, actor.id)
         item.active_rubric_version_id = rv.id
     elif not rv:
         rv = RubricVersion(assignment_id=item.id, version=1, created_by=actor.id)
@@ -1047,7 +1116,15 @@ def put_rubric(
                 deduction_rule=raw.get("deduction_rule"),
             )
         )
-    audit(db, actor.id, "rubric.update", "rubric_version", rv.id)
+    invalidated = invalidate_grading_for_rubric_change(db, item.id)
+    audit(
+        db,
+        actor.id,
+        "rubric.update",
+        "rubric_version",
+        rv.id,
+        {"invalidated_grading_results": invalidated},
+    )
     db.commit()
     return detail(db, item)
 
@@ -1062,12 +1139,19 @@ def check_publish(assignment_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, A
 @router.post("/{assignment_id}/publish")
 def publish_assignment(assignment_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
     item = owned(db, actor.id, assignment_id)
-    if item.status == AssignmentStatus.published:
+    current_paper, current_rubric = paper(db, item), rubric(db, item)
+    if (
+        item.status == AssignmentStatus.published
+        and current_paper is not None
+        and current_rubric is not None
+        and current_paper.status == VersionStatus.confirmed
+        and current_rubric.status == VersionStatus.confirmed
+    ):
         return detail(db, item)
     issues = publish_issues(db, item)
     if issues:
         raise ApiProblem(422, "ASSIGNMENT_INCOMPLETE", "作业尚未满足发布条件", {"issues": issues})
-    pv, rv = paper(db, item), rubric(db, item)
+    pv, rv = current_paper, current_rubric
     assert pv is not None and rv is not None
     pv.status = VersionStatus.confirmed
     pv.confirmed_at = now_utc()

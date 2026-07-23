@@ -1,15 +1,15 @@
 {
   "result": "passed",
-  "code_version": "f7783f0073592140c1400d6e7f41ffb17638c64e",
+  "code_version": "fee4ba3b2546625e25b9e75ef5c51499f71af9c5",
   "environment": {
     "kind": "isolated_compose",
     "compose_project": "ahamark-business-e2e",
     "web_origin": "http://localhost:3300",
     "data_policy": "synthetic_only"
   },
-  "synthetic_marker": "business-e2e-20260722164927325.business-e2e.synthetic.invalid",
-  "started_at": "2026-07-22T16:49:27.405Z",
-  "completed_at": "2026-07-22T16:49:47.546Z",
+  "synthetic_marker": "business-e2e-20260723040740295.business-e2e.synthetic.invalid",
+  "started_at": "2026-07-23T04:07:40.340Z",
+  "completed_at": "2026-07-23T04:07:55.244Z",
   "stages": {
     "A": {
       "status": "passed",
@@ -78,40 +78,40 @@
     }
   },
   "objects": {
-    "class_id": "f0e65587-4393-4830-8375-b146aa8a1dcd",
-    "assignment_id": "5e6c63fe-2730-4b7b-924d-67dc6f61fb60",
-    "paper_recognition_job_id": "51faba8c-cf09-4048-ae54-3421dc4885a7",
-    "grading_batch_id": "3dd2d5c9-a54c-4167-920c-05ba3b301cbd",
+    "class_id": "fdb2665c-91e2-4d66-a1cd-5486ab578a56",
+    "assignment_id": "b18887b3-fb45-4db5-91c7-2a5858f15845",
+    "paper_recognition_job_id": "b1125a17-c228-4302-ae27-32d25a330f87",
+    "grading_batch_id": "2b3beedc-bad1-485c-99fa-7a9224722ae5",
     "submission_recognition_job_ids": [
-      "978c8f69-ad73-40ac-ac80-8fdf4ebde2c5",
-      "8a22d18c-e6e5-43d9-99d1-533dad0bc054"
+      "24698894-7c6e-442a-91d7-cb07ef904e2d",
+      "e6027446-94da-4ca6-bdc0-74ba90751ade"
     ],
     "submission_ids": [
-      "9d13f17e-4dcd-42b6-b1bc-0ef9a8f604aa",
-      "2f2c4d23-8548-4a3f-ad34-8e882ac84cb0"
+      "dfa6546b-e0f6-4c02-b76c-ab6e5004c3fd",
+      "30a555a0-f9c2-44af-9746-730758d3359f"
     ],
     "student_ids": [
-      "1b1a5b26-3583-461d-905a-5450bdde56f1",
-      "e636d44d-578c-4252-af59-d0c74666429e"
+      "15266c1a-52e2-457d-9152-aa2e70a83792",
+      "acbb517e-250e-4609-9f91-c11d9f4a4785"
     ],
     "complete_snapshot_ids": [
-      "32cfff83-75f5-40e0-a7f5-223ea549add7",
-      "b8a01797-790a-49d8-b1f3-d70f2d6f2295"
+      "fc29e725-6ea7-4d0c-bca3-09920834da6c",
+      "40ed5215-5ba1-4b99-8922-5d86c6b502be"
     ],
-    "grade_release_id": "c68f7259-3f6a-44dc-8f59-df6833b1e67f",
+    "grade_release_id": "321acc11-2cd1-4b8a-88d8-4d889b96754f",
     "report_jobs": [
       {
-        "id": "74566c96-098e-47d3-aaa3-14bd797ee022",
+        "id": "bf7acd83-2a82-4889-b334-8095bbb7fc1b",
         "type": "gradebook_xlsx",
         "status": "completed"
       },
       {
-        "id": "4f009a35-62b9-4fc5-806b-d45682d72c80",
+        "id": "b3b32dfa-fef5-463a-8dfc-39a00b217449",
         "type": "student_report_pdf",
         "status": "completed"
       }
     ],
-    "analytics_snapshot_id": "a27a7854-a040-41d3-97b5-6937775573bd"
+    "analytics_snapshot_id": "3f25406c-0625-4ba1-98a7-b813b8b96f35"
   },
   "reconciliation": {
     "snapshot_scores": [
@@ -119,15 +119,15 @@
       8
     ],
     "release_snapshot_ids": [
-      "32cfff83-75f5-40e0-a7f5-223ea549add7",
-      "b8a01797-790a-49d8-b1f3-d70f2d6f2295"
+      "fc29e725-6ea7-4d0c-bca3-09920834da6c",
+      "40ed5215-5ba1-4b99-8922-5d86c6b502be"
     ],
     "participant_count": 2,
     "unfinished_student_count": 1,
     "unfinished_counted_as_zero": false,
     "analytics_average": 8.5,
-    "reports_source_grade_release_id": "c68f7259-3f6a-44dc-8f59-df6833b1e67f",
-    "analytics_source_grade_release_id": "c68f7259-3f6a-44dc-8f59-df6833b1e67f",
+    "reports_source_grade_release_id": "321acc11-2cd1-4b8a-88d8-4d889b96754f",
+    "analytics_source_grade_release_id": "321acc11-2cd1-4b8a-88d8-4d889b96754f",
     "consistent": true
   },
   "ocr": {
