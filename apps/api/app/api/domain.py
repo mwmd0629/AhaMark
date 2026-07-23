@@ -255,16 +255,21 @@ def restore_class(class_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
 
 
 def student_json(
-    db: Session, student: Student, membership: ClassStudent | None = None
+    db: Session,
+    student: Student,
+    membership: ClassStudent | None = None,
+    groups: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
-    groups = db.execute(
-        select(StudentGroup.id, StudentGroup.name)
-        .join(StudentGroupMember, StudentGroupMember.group_id == StudentGroup.id)
-        .where(
-            StudentGroupMember.student_id == student.id,
-            *([StudentGroup.class_id == membership.class_id] if membership else []),
-        )
-    ).all()
+    if groups is None:
+        group_rows = db.execute(
+            select(StudentGroup.id, StudentGroup.name)
+            .join(StudentGroupMember, StudentGroupMember.group_id == StudentGroup.id)
+            .where(
+                StudentGroupMember.student_id == student.id,
+                *([StudentGroup.class_id == membership.class_id] if membership else []),
+            )
+        ).all()
+        groups = [{"id": str(group.id), "name": group.name} for group in group_rows]
     return {
         "id": str(student.id),
         "name": student.name,
@@ -275,7 +280,7 @@ def student_json(
         "status": student.status,
         "membership_status": membership.status if membership else None,
         "joined_at": membership.joined_at if membership else None,
-        "groups": [{"id": str(g.id), "name": g.name} for g in groups],
+        "groups": groups,
         "assignment_history": [],
     }
 
@@ -320,8 +325,26 @@ def list_students(
         else ClassStudent.joined_at.desc()
     )
     rows = db.execute(q.order_by(order).offset((page - 1) * page_size).limit(page_size)).all()
+    student_ids = [student.id for student, _ in rows]
+    groups_by_student: dict[uuid.UUID, list[dict[str, str]]] = {
+        student_id: [] for student_id in student_ids
+    }
+    if student_ids:
+        group_rows = db.execute(
+            select(StudentGroupMember.student_id, StudentGroup.id, StudentGroup.name)
+            .join(StudentGroup, StudentGroup.id == StudentGroupMember.group_id)
+            .where(
+                StudentGroupMember.student_id.in_(student_ids),
+                StudentGroup.class_id == class_id,
+            )
+        ).all()
+        for student_id, group_id, group_name in group_rows:
+            groups_by_student[student_id].append({"id": str(group_id), "name": group_name})
     return {
-        "items": [student_json(db, s, m) for s, m in rows],
+        "items": [
+            student_json(db, student, membership, groups_by_student[student.id])
+            for student, membership in rows
+        ],
         "page": page,
         "page_size": page_size,
         "total": count,

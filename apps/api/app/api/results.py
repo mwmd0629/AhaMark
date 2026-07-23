@@ -496,7 +496,32 @@ def download_report(job_id: uuid.UUID, db: Db, actor: Actor, storage: Storage) -
 
 @router.post("/grade-releases/{release_id}/analytics", status_code=201)
 def generate_analytics(release_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
-    release = released_release(db, actor.id, release_id)
+    released_release(db, actor.id, release_id)
+    release = db.scalar(
+        select(GradeRelease)
+        .where(
+            GradeRelease.id == release_id,
+            GradeRelease.owner_id == actor.id,
+            GradeRelease.status == "released",
+        )
+        .with_for_update()
+    )
+    if release is None:
+        raise ApiProblem(404, "GRADE_RELEASE_NOT_FOUND", "成绩发布不存在")
+    existing = db.scalar(
+        select(AnalyticsSnapshot)
+        .where(
+            AnalyticsSnapshot.owner_id == actor.id,
+            AnalyticsSnapshot.grade_release_id == release.id,
+            AnalyticsSnapshot.schema_version == "1.0",
+            AnalyticsSnapshot.status == "complete",
+        )
+        .order_by(AnalyticsSnapshot.created_at.asc(), AnalyticsSnapshot.id.asc())
+        .limit(1)
+    )
+    if existing is not None:
+        db.commit()
+        return analytics_view(existing)
     snapshot = create_analytics(db, release)
     audit(
         db,
@@ -508,9 +533,13 @@ def generate_analytics(release_id: uuid.UUID, db: Db, actor: Actor) -> dict[str,
     )
     db.commit()
     db.refresh(snapshot)
+    return analytics_view(snapshot)
+
+
+def analytics_view(snapshot: AnalyticsSnapshot) -> dict[str, Any]:
     return {
         "id": str(snapshot.id),
-        "grade_release_id": str(release.id),
+        "grade_release_id": str(snapshot.grade_release_id),
         "schema_version": snapshot.schema_version,
         "status": snapshot.status,
         "source_snapshot_count": snapshot.source_snapshot_count,

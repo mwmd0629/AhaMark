@@ -176,6 +176,19 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
         metrics_v1 = copy.deepcopy(analytics_v1.json()["metrics"])
         assert metrics_v1["participant_count"] == 1
         assert metrics_v1["average_score"] == 10
+        analytics_v1_repeat = client.post(
+            f"/api/grade-releases/{release_v1.json()['id']}/analytics"
+        )
+        assert analytics_v1_repeat.status_code == 201
+        assert analytics_v1_repeat.json()["id"] == analytics_v1.json()["id"]
+        assert (
+            db.scalar(
+                select(func.count())
+                .select_from(AnalyticsSnapshot)
+                .where(AnalyticsSnapshot.grade_release_id == uuid.UUID(release_v1.json()["id"]))
+            )
+            == 1
+        )
 
         insight_v1 = client.post(f"/api/analytics/{analytics_v1.json()['id']}/insights")
         assert insight_v1.status_code == 201

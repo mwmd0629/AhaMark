@@ -20,19 +20,19 @@
 | 认证 | IMPLEMENTED_AND_VERIFIED | 真实登录/CSRF 会话用于 HTTP72 与 BROWSER72；多实例限速等仍有限制 |
 | 班级与学生 | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 覆盖真实浏览器创建、CSV 预览/确认、前导零与列表 |
 | 作业和 Rubric | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 覆盖六步向导、题目/题区/知识点/Rubric/发布正常主路径 |
-| 试卷 OCR | PARTIAL | RapidOCR 印刷体窄范围真实验证；公式/手写/DOCX 有缺口 |
+| 试卷 OCR | PARTIAL | Fake 编排 150/200/250 页、真实 RapidOCR 清晰印刷体 100/150/250 页完成；准确率、公式/手写/DOCX 仍有缺口 |
 | 学生作业 OCR | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 在隔离 test-only Fake OCR 下验证异步 UI/持久化编排，不证明真实 OCR 能力 |
 | 客观题评分 | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 显示 objective-rule Criterion/Evidence 并由教师接受 |
 | 主观题评分 | UNAVAILABLE | 真实 Provider 不存在，必须人工评分 |
 | 教师复核 | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 覆盖客观题接受、主观题 UI 人工评分、强制项与 finalize |
 | 最终成绩 | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E + 第四部分金标准 v1/v2，合法 complete Snapshot 与缺失不记零通过 |
 | GradeRelease | IMPLEMENTED_AND_VERIFIED | 第四部分验证 v1/v2 固定具体 Snapshot 且历史不漂移；学生送达 OUT_OF_SCOPE |
-| XLSX/PDF | IMPLEMENTED_AND_VERIFIED | 第四部分实际解析 v1/v2 XLSX/中文 PDF 并完成历史对账；容量仍未验证 |
-| Analytics | IMPLEMENTED_AND_VERIFIED | 第四部分 Edge 12/12 含两类错误下钻及班级/学生最新发布趋势 |
+| XLSX/PDF | IMPLEMENTED_AND_VERIFIED | 固定 Release 的 50 名不同学生、50 PDF、50 行 XLSX、50 PDF ZIP；52/52 Job completed |
+| Analytics | IMPLEMENTED_AND_VERIFIED | 50/100/200 人、20/50/100 题及同 Release 顺序/20 路并发幂等通过；最大规模学生读取约 8 秒 |
 | TeachingInsight | IMPLEMENTED_AND_VERIFIED | 第四部分验证规则型建议 evidence 固定 AnalyticsSnapshot 及历史不漂移 |
 | 文件安全 | IMPLEMENTED_AND_VERIFIED | 41/41 结构 fixture、故障补偿及真实 URL 到期通过 |
 | 权限隔离 | IMPLEMENTED_AND_VERIFIED | 27×29、702/702、全路由边界及 HTTP 16/16 通过 |
-| 性能 | PARTIAL | 单客户端同步接口冒烟；并发/异步/资源未测 |
+| 性能 | PARTIAL | 第六部分开发机有界容量 PASS；PARTIAL 仅指生产容量、SLA、多实例与故障条件尚未建立 |
 | 备份恢复 | PARTIAL | PostgreSQL 既有恢复记录；MinIO 未运行 |
 | 生产部署 | UNAVAILABLE | 当前仅等级 C，开发 Compose 不能直接生产使用 |
 
@@ -76,11 +76,17 @@
 - 实现位置：`apps/api/app/recognition/pipeline.py`、`apps/api/app/api/recognition.py`、RecognitionWorkspace、OCR Worker。
 - 模型/迁移：RecognitionJob、PageProcessingResult、RecognitionBlock、Candidate/Correction；`0003`、`0004`。
 - 自动化证据：`tests/test_recognition.py` 覆盖转换/预处理、fake/unavailable、RapidOCR 小型印刷体、Block 持久化。
-- 真实证据：DOC-EVIDENCE 记录本地 RapidOCR 3.9.2 小样本与 Celery/MinIO 冒烟；未形成独立 HTTP/浏览器产物。
-- 限制：样本极小、无 CER/WER；手写数学未经充分验证；公式 Provider unavailable；LaTeX 不可靠；DOCX 缺 LibreOffice 时 unavailable；fake 仅测试。
-- 可以说：本地印刷体文字 OCR 输出文本、坐标、置信度，支持状态与人工修正。
+- 真实证据：`ocr-orchestration-capacity.json` 记录 Fake OCR 150/200/250 页完整编排；
+  `ocr-capacity-results.json` 记录 RapidOCR 3.9.2 清晰印刷体 100/150/250 页独立阶梯，
+  250 页 756.412 秒、峰值 RSS 约 878 MiB。
+- 限制：Fake 结果只证明 API/Redis/Celery/PostgreSQL/MinIO 编排，不是 RapidOCR 吞吐；
+  RapidOCR 结果只适用于指定开发机和运行时生成的清晰印刷体，无 CER/WER；手写数学未经
+  验证；公式 Provider unavailable；LaTeX 不可靠；DOCX 缺 LibreOffice 时 unavailable。
+- 可以说：Fake OCR 编排完成至 250 页；指定开发机的 RapidOCR 清晰印刷体吞吐完成至
+  250 页，并输出文本、坐标、置信度。250 页是本轮测试上限，不是系统绝对上限。
 - 禁止说：可靠公式/手写识别、高准确率、适合真实答卷自动评分。
-- 后续验收条件：可审计真实异步流程、代表性合成样本、错误/重试、准确率口径；公式/手写需独立 Provider 与证据。
+- 后续验收条件：代表性数据集和准确率口径；公式/手写需独立 Provider 与证据；生产拓扑
+  仍需重新进行吞吐、资源和故障恢复验证。
 
 ### 5. 学生作业 OCR — `IMPLEMENTED_AND_VERIFIED`
 
@@ -153,22 +159,29 @@
 - 实现位置：`apps/api/app/results/services.py`、`apps/api/app/results/jobs.py`、Report Worker；仓库内 Noto Sans SC。
 - 模型/迁移：ReportJob、StoredFile、ReportJobStudentScope；`0007`、`0010`。
 - 自动化证据：XLSX sheet/文本学号/公式防护，中文 PDF 字体与解析，Worker 只收 Job ID 且幂等。
-- 真实证据：BUSINESS-E2E 由 UI 创建 XLSX 和中文个人 PDF，真实 Celery/MinIO Job 均 completed，并从页面请求新的短期签名地址；`business-report-retry-verification.json` 通过真实 Edge 验证 failed/expired Job 的 retry 新旧生命周期、Release/学生范围和刷新对账。
-- 限制：30–50 份 PDF、ZIP、大文件、签名地址实际到期等待与并发容量未验证。
-- 可以说：固定 GradeRelease 的真实 XLSX/中文 PDF 生成链路在开发环境做过冒烟。
-- 禁止说：大批量报告容量或生产下载链路已验收。
-- 后续验收条件：可重复异步容量、对象恢复、到期 URL、失败重试与敏感导出控制验证。
+- 真实证据：除 BUSINESS-E2E 和 retry 证据外，`async-capacity-results.json` 记录固定
+  GradeRelease 的 50 名不同学生、50 个个人中文 PDF、1 个 50 行 XLSX 和包含 50 份
+  不同学生 PDF 的 ZIP；52/52 真实 Celery/MinIO Job completed。
+- 限制：只适用于记录的单 Worker 开发机与 50 人合成规模；更大规模、生产 SLA、对象恢复、
+  故障条件和敏感导出控制未建立。
+- 可以说：固定 GradeRelease 的 50 名不同学生报告、XLSX 和 ZIP 在开发环境真实完成。
+- 禁止说：生产报告容量、生产下载 SLA 或任意更大规模已经验收。
+- 后续验收条件：按生产拓扑扩展容量，并完成对象恢复、故障条件和敏感导出控制验证。
 
 ### 12. Analytics — `IMPLEMENTED_AND_VERIFIED`
 
 - 实现位置：`apps/api/app/results/services.py`、`apps/api/app/api/results.py`、Analytics 页面与学生详情。
 - 模型/迁移：AnalyticsSnapshot 固定 GradeRelease；`0007`。
 - 自动化证据：metrics 公式、分布、错误、知识点、主观题不宣称正确率、分页稳定性和前端状态。
-- 真实证据：HTTP72 覆盖四类下钻、三类趋势、学生详情、缺交不记零及错误输入；BROWSER72 覆盖加载、下钻和趋势；BUSINESS-E2E 从同一固定 Release 对账 2 人、平均 8.5，并走分数段、学生、知识点和趋势页面。
-- 限制：证据基于小型固定合成数据；未覆盖全业务、并发、大数据量或教学效果。
-- 可以说：固定发布版本的统计、下钻和趋势已在合成开发环境真实验证。
+- 真实证据：除 HTTP72/BROWSER72/BUSINESS-E2E 外，`analytics-capacity-results.json`
+  覆盖 50/100/200 名学生与 20/50/100 题；同 Release 顺序重复和 20 路并发创建均复用
+  同一 Snapshot，不同 Release 创建独立 Snapshot。
+- 限制：最大规模学生趋势/详情约 7.7–7.9 秒，存在明显扩展边界；只证明单 API 开发机的
+  功能与一致性，不证明生产容量、SLA、教学效果或多实例性能。
+- 可以说：固定发布版本的统计、下钻、趋势和 Analytics 创建幂等在 200 人/100 题合成
+  开发规模通过。
 - 禁止说：AI 学情诊断、真实教学效果、生产规模分析。
-- 后续验收条件：保持计算口径回归，并对更大合成规模、并发、查询数与所有页面状态验证。
+- 后续验收条件：保持计算口径回归，并在生产拓扑下验证查询计划、更多实例、SLA 和故障条件。
 
 ### 13. TeachingInsight — `IMPLEMENTED_AND_VERIFIED`
 
@@ -207,12 +220,18 @@
 
 - 实现位置：`scripts/performance_smoke.py`、`PERFORMANCE.md`。
 - 模型/迁移：不适用；fixture 使用合成 2×50 人、2×20 题。
-- 自动化证据：无独立性能门禁。
+- 自动化证据：`scripts/sync_concurrency_test.py`、`scripts/fake_ocr_capacity_test.py`、
+  `scripts/ocr_capacity_test.py`、`scripts/report_capacity_test.py`、
+  `scripts/analytics_capacity_test.py`；同步容量保留原始和中间 failed 证据，最终
+  `sync-capacity-optimized.json` 为 passed；完整机器 JSON 定位见
+  `PERFORMANCE-CAPACITY.md`。
 - 真实证据：PERF 中五类同步接口 100% 成功，单客户端 P95 40.51–88.18 ms。
-- 限制：非并发；未测 OCR/报告/Analytics 异步吞吐、150–250 页、队列等待、SQL 数、CPU/内存和慢查询。
-- 可以说：开发环境单客户端同步接口延迟冒烟通过。
-- 禁止说：支持 50 人并发、容量达标、生产性能通过。
-- 后续验收条件：只有在单独授权的后续验收中补齐并发、异步和资源指标；本基线不实施。
+- 限制：结论仅适用于记录的单 API/单 Worker 开发机；最大规模 Analytics 学生读取约
+  8 秒，未证明多实例、生产数据分布、SLA 或故障恢复。
+- 可以说：第六部分开发机有界容量通过；详情并发门槛、250 页 Fake/真实 OCR、50 名
+  不同学生报告及 200 人/100 题 Analytics 已有机器证据。
+- 禁止说：已证明生产容量、OCR 准确率、手写/公式能力或生产 SLA。
+- 后续验收条件：生产前按正式部署拓扑、真实脱敏分布、监控和 SLA 重新压测。
 
 ### 17. 备份恢复 — `PARTIAL`
 

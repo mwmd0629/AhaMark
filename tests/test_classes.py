@@ -1,11 +1,11 @@
 import io
 
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, engine
 from app.main import app
 from app.models import AuditLog, ClassStudent, Student
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 
 client = TestClient(app)
 
@@ -57,6 +57,49 @@ def test_group_rejects_student_from_other_class() -> None:
         f"/api/groups/{group['id']}/members", json={"student_ids": [student["id"]]}
     )
     assert response.status_code == 409 and response.json()["code"] == "STUDENT_NOT_IN_CLASS"
+
+
+def test_student_list_prefetches_groups_without_n_plus_one() -> None:
+    school_class = create_class("容量查询班")
+    student_ids = []
+    for index in range(10):
+        student = client.post(
+            f"/api/classes/{school_class['id']}/students",
+            json={"name": f"合成学生{index}", "student_number": f"CAP{index:03d}"},
+        ).json()
+        student_ids.append(student["id"])
+    group = client.post(
+        f"/api/classes/{school_class['id']}/groups", json={"name": "合成容量组"}
+    ).json()
+    assert (
+        client.put(
+            f"/api/groups/{group['id']}/members", json={"student_ids": student_ids}
+        ).status_code
+        == 200
+    )
+    statements: list[str] = []
+
+    def record_statement(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record_statement)
+    try:
+        response = client.get(
+            f"/api/classes/{school_class['id']}/students?page_size=10&sort=number_asc"
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", record_statement)
+    assert response.status_code == 200
+    assert len(response.json()["items"]) == 10
+    assert all(item["groups"][0]["name"] == "合成容量组" for item in response.json()["items"])
+    assert len(statements) <= 6
 
 
 def test_csv_preview_confirm_errors_and_idempotency() -> None:

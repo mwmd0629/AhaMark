@@ -159,8 +159,14 @@ def dispatch_recognition_job(db: Session, job: RecognitionJob) -> None:
 
 def run_recognition_job(db: Session, storage: ObjectStorage, job_id: uuid.UUID) -> None:
     settings = get_settings()
-    job = db.get(RecognitionJob, job_id)
+    job = db.scalar(select(RecognitionJob).where(RecognitionJob.id == job_id).with_for_update())
     if not job:
+        return
+    if job.status in {
+        RecognitionStatus.running,
+        RecognitionStatus.completed,
+        RecognitionStatus.partially_completed,
+    }:
         return
     provider = provider_from_settings(settings)
     available, reason = provider.available()
@@ -290,16 +296,21 @@ def run_recognition_job(db: Session, storage: ObjectStorage, job_id: uuid.UUID) 
         db.commit()
     job.stage = "structuring"
     db.execute(delete(QuestionCandidate).where(QuestionCandidate.recognition_job_id == job.id))
-    for block in db.scalars(
-        select(RecognitionBlock).where(
-            RecognitionBlock.recognition_job_id == job.id,
-            RecognitionBlock.block_type == "question_number",
-        )
-    ).all():
+    for candidate_order, block in enumerate(
+        db.scalars(
+            select(RecognitionBlock)
+            .where(
+                RecognitionBlock.recognition_job_id == job.id,
+                RecognitionBlock.block_type == "question_number",
+            )
+            .order_by(RecognitionBlock.paper_page_id, RecognitionBlock.display_order)
+        ).all(),
+        1,
+    ):
         candidate = QuestionCandidate(
             recognition_job_id=job.id,
             paper_version_id=job.paper_version_id,
-            temporary_number=str(block.display_order),
+            temporary_number=str(candidate_order),
             question_type="other",
             content_text=block.text,
             confidence=block.confidence,

@@ -101,14 +101,16 @@ Analytics UI 现提供规则建议查看、evidence、编辑、草稿、确认�
 
 Analytics 范围的无头 Edge 冒烟覆盖 Teacher A 登录、选择真实发布、分数段下钻、
 Insight 编辑确认、学生和知识点趋势，以及 Teacher B 学生详情拒绝。完整业务浏览器
-E2E 和第五部分定义的安全专项现已完成；30–50 人异步/并发容量、故障恢复和生产部署
+E2E、第五部分安全专项和第六部分开发机有界容量现已完成。第六部分在单 API/单 Worker
+合成环境覆盖 50 名不同学生报告、Fake/RapidOCR 至 250 页及 200 人/100 题 Analytics；
+最大规模 Analytics 学生读取约 8 秒。生产容量、SLA、多实例扩展、故障恢复和生产部署
 验收仍属于后续范围。
 
 ## 学生作业与批改流程
 
 教师为已发布且 PaperVersion/RubricVersion 完整的作业创建 GradingBatch，上传 PDF/PNG/JPG/JPEG。后端使用随机对象键保存文件，学号精确匹配优先，其次是班级内唯一姓名；重名、多个标识或无标识只生成待确认记录。一个学生的多张图片或 PDF 页面按文件顺序归并为同一 Submission，原文件和 SubmissionPage 均保留，不静默覆盖重复校验值。
 
-Submission OCR 数据与试卷 RecognitionJob/PaperPage 隔离：学生域使用 SubmissionRecognitionJob、SubmissionPage、StudentAnswer 和 StudentAnswerRegion，坐标仍为未旋转原始页左上角 0–1。`recognized_*` 永久保留原始值，`corrected_*` 有值时评分优先读取修正值。空白、低置信、公式不可用和失败是不同状态。现有 RapidOCR 转换/预处理组件可复用于学生页，但本机尚未完成 Celery/MinIO 异步联调。
+Submission OCR 数据与试卷 RecognitionJob/PaperPage 隔离：学生域使用 SubmissionRecognitionJob、SubmissionPage、StudentAnswer 和 StudentAnswerRegion，坐标仍为未旋转原始页左上角 0–1。`recognized_*` 永久保留原始值，`corrected_*` 有值时评分优先读取修正值。空白、低置信、公式不可用和失败是不同状态。现有 RapidOCR 转换/预处理组件可复用于学生页；第六部分已完成 Fake OCR 的 Celery/MinIO 150/200/250 页编排和独立 RapidOCR 清晰印刷体 100/150/250 页吞吐阶梯，但二者不能互相替代，也不证明真实学生答卷准确率、手写或公式能力。
 
 客观题 `single_choice`、`multiple_choice`、`true_false`、`fill_blank` 采用大小写与空格规范化后的确定性精确匹配，使用标准答案及可接受答案。单位/精度等无法由明确规则判断时应进入人工复核。主观题使用统一 GradingProvider；默认 UnavailableProvider 返回 `score=null`。FakeGradingProvider 只允许非 production 自动化测试，production 配置 fake 会安全降级为 unavailable，绝不能作为真实 AI 成绩。
 

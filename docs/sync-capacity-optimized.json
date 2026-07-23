@@ -1,0 +1,742 @@
+{
+  "schema_version": 1,
+  "result": "passed",
+  "scope": "isolated single-API development capacity; not production capacity",
+  "thresholds": {
+    "success_rate_min": 0.99,
+    "read_p95_ms_max": 500,
+    "unexplained_5xx_max": 0
+  },
+  "started_at": "2026-07-23T18:34:09+0800",
+  "finished_at": "2026-07-23T18:34:28+0800",
+  "requests_per_level": 40,
+  "concurrency_levels": [
+    1,
+    5,
+    10,
+    20
+  ],
+  "unexplained_5xx": 0,
+  "results": [
+    {
+      "scenario": "auth_me",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 1,
+      "success_rate": 1.0,
+      "p50_ms": 7.5,
+      "p95_ms": 30.88,
+      "p99_ms": 31.7,
+      "max_ms": 31.7,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 66.96,
+      "response_bytes_mean": 177.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "auth_me",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 5,
+      "success_rate": 1.0,
+      "p50_ms": 21.52,
+      "p95_ms": 32.57,
+      "p99_ms": 35.13,
+      "max_ms": 35.13,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 226.22,
+      "response_bytes_mean": 177.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "auth_me",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 10,
+      "success_rate": 1.0,
+      "p50_ms": 24.74,
+      "p95_ms": 43.03,
+      "p99_ms": 65.32,
+      "max_ms": 65.32,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 330.02,
+      "response_bytes_mean": 177.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "auth_me",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 20,
+      "success_rate": 1.0,
+      "p50_ms": 43.83,
+      "p95_ms": 71.2,
+      "p99_ms": 76.62,
+      "max_ms": 76.62,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 357.04,
+      "response_bytes_mean": 177.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "class_list_s1",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 1,
+      "success_rate": 1.0,
+      "p50_ms": 11.86,
+      "p95_ms": 33.4,
+      "p99_ms": 34.63,
+      "max_ms": 34.63,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 61.79,
+      "response_bytes_mean": 391.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "class_list_s1",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 5,
+      "success_rate": 1.0,
+      "p50_ms": 29.33,
+      "p95_ms": 46.04,
+      "p99_ms": 48.41,
+      "max_ms": 48.41,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 149.74,
+      "response_bytes_mean": 391.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "class_list_s1",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 10,
+      "success_rate": 1.0,
+      "p50_ms": 64.1,
+      "p95_ms": 192.59,
+      "p99_ms": 209.78,
+      "max_ms": 209.78,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 107.01,
+      "response_bytes_mean": 391.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "class_list_s1",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 20,
+      "success_rate": 1.0,
+      "p50_ms": 80.64,
+      "p95_ms": 146.1,
+      "p99_ms": 168.78,
+      "max_ms": 168.78,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 197.09,
+      "response_bytes_mean": 391.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "students_50",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 1,
+      "success_rate": 1.0,
+      "p50_ms": 14.18,
+      "p95_ms": 35.12,
+      "p99_ms": 35.79,
+      "max_ms": 35.79,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 53.87,
+      "response_bytes_mean": 13856.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "students_50",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 5,
+      "success_rate": 1.0,
+      "p50_ms": 29.61,
+      "p95_ms": 51.29,
+      "p99_ms": 60.77,
+      "max_ms": 60.77,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 144.56,
+      "response_bytes_mean": 13856.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "students_50",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 10,
+      "success_rate": 1.0,
+      "p50_ms": 71.53,
+      "p95_ms": 147.87,
+      "p99_ms": 184.69,
+      "max_ms": 184.69,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 109.4,
+      "response_bytes_mean": 13856.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "students_50",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 20,
+      "success_rate": 1.0,
+      "p50_ms": 114.09,
+      "p95_ms": 146.19,
+      "p99_ms": 176.17,
+      "max_ms": 176.17,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 152.49,
+      "response_bytes_mean": 13856.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "assignment_20_questions",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 1,
+      "success_rate": 1.0,
+      "p50_ms": 18.02,
+      "p95_ms": 42.19,
+      "p99_ms": 44.2,
+      "max_ms": 44.2,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 43.4,
+      "response_bytes_mean": 6764.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "assignment_20_questions",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 5,
+      "success_rate": 1.0,
+      "p50_ms": 50.19,
+      "p95_ms": 65.6,
+      "p99_ms": 86.01,
+      "max_ms": 86.01,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 94.38,
+      "response_bytes_mean": 6764.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "assignment_20_questions",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 10,
+      "success_rate": 1.0,
+      "p50_ms": 67.89,
+      "p95_ms": 96.68,
+      "p99_ms": 109.93,
+      "max_ms": 109.93,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 132.24,
+      "response_bytes_mean": 6764.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "assignment_20_questions",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 20,
+      "success_rate": 1.0,
+      "p50_ms": 118.09,
+      "p95_ms": 184.78,
+      "p99_ms": 212.93,
+      "max_ms": 212.93,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 141.56,
+      "response_bytes_mean": 6764.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "students_100",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 1,
+      "success_rate": 1.0,
+      "p50_ms": 17.45,
+      "p95_ms": 36.86,
+      "p99_ms": 114.89,
+      "max_ms": 114.89,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 44.44,
+      "response_bytes_mean": 28258.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "students_100",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 5,
+      "success_rate": 1.0,
+      "p50_ms": 42.19,
+      "p95_ms": 142.59,
+      "p99_ms": 155.14,
+      "max_ms": 155.14,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 88.2,
+      "response_bytes_mean": 28258.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "students_100",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 10,
+      "success_rate": 1.0,
+      "p50_ms": 71.85,
+      "p95_ms": 169.76,
+      "p99_ms": 177.64,
+      "max_ms": 177.64,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 101.48,
+      "response_bytes_mean": 28258.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "students_100",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 20,
+      "success_rate": 1.0,
+      "p50_ms": 148.8,
+      "p95_ms": 245.38,
+      "p99_ms": 279.15,
+      "max_ms": 279.15,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 108.17,
+      "response_bytes_mean": 28258.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "assignment_50_questions",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 1,
+      "success_rate": 1.0,
+      "p50_ms": 18.69,
+      "p95_ms": 37.67,
+      "p99_ms": 40.08,
+      "max_ms": 40.08,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 41.49,
+      "response_bytes_mean": 15927.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "assignment_50_questions",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 5,
+      "success_rate": 1.0,
+      "p50_ms": 59.24,
+      "p95_ms": 165.19,
+      "p99_ms": 166.01,
+      "max_ms": 166.01,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 67.19,
+      "response_bytes_mean": 15927.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "assignment_50_questions",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 10,
+      "success_rate": 1.0,
+      "p50_ms": 84.45,
+      "p95_ms": 118.8,
+      "p99_ms": 134.29,
+      "max_ms": 134.29,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 112.17,
+      "response_bytes_mean": 15927.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "assignment_50_questions",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 20,
+      "success_rate": 1.0,
+      "p50_ms": 135.02,
+      "p95_ms": 199.72,
+      "p99_ms": 232.69,
+      "max_ms": 232.69,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 123.41,
+      "response_bytes_mean": 15927.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "students_200_page_1",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 1,
+      "success_rate": 1.0,
+      "p50_ms": 15.37,
+      "p95_ms": 38.45,
+      "p99_ms": 97.64,
+      "max_ms": 97.64,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 44.64,
+      "response_bytes_mean": 27958.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "students_200_page_1",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 5,
+      "success_rate": 1.0,
+      "p50_ms": 42.34,
+      "p95_ms": 67.21,
+      "p99_ms": 70.72,
+      "max_ms": 70.72,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 108.23,
+      "response_bytes_mean": 27958.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "students_200_page_1",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 10,
+      "success_rate": 1.0,
+      "p50_ms": 116.17,
+      "p95_ms": 209.01,
+      "p99_ms": 236.49,
+      "max_ms": 236.49,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 71.27,
+      "response_bytes_mean": 27958.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "students_200_page_1",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 20,
+      "success_rate": 1.0,
+      "p50_ms": 213.56,
+      "p95_ms": 325.69,
+      "p99_ms": 359.47,
+      "max_ms": 359.47,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 85.74,
+      "response_bytes_mean": 27958.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "students_200_page_2",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 1,
+      "success_rate": 1.0,
+      "p50_ms": 21.18,
+      "p95_ms": 35.18,
+      "p99_ms": 37.44,
+      "max_ms": 37.44,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 44.66,
+      "response_bytes_mean": 27958.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "students_200_page_2",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 5,
+      "success_rate": 1.0,
+      "p50_ms": 43.01,
+      "p95_ms": 138.38,
+      "p99_ms": 159.66,
+      "max_ms": 159.66,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 92.16,
+      "response_bytes_mean": 27958.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "students_200_page_2",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 10,
+      "success_rate": 1.0,
+      "p50_ms": 91.91,
+      "p95_ms": 185.22,
+      "p99_ms": 245.93,
+      "max_ms": 245.93,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 87.62,
+      "response_bytes_mean": 27958.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "students_200_page_2",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 20,
+      "success_rate": 1.0,
+      "p50_ms": 229.38,
+      "p95_ms": 391.03,
+      "p99_ms": 442.94,
+      "max_ms": 442.94,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 74.0,
+      "response_bytes_mean": 27958.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "assignment_100_questions",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 1,
+      "success_rate": 1.0,
+      "p50_ms": 24.72,
+      "p95_ms": 47.67,
+      "p99_ms": 146.07,
+      "max_ms": 146.07,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 32.15,
+      "response_bytes_mean": 31176.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "assignment_100_questions",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 5,
+      "success_rate": 1.0,
+      "p50_ms": 46.09,
+      "p95_ms": 65.72,
+      "p99_ms": 82.04,
+      "max_ms": 82.04,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 103.32,
+      "response_bytes_mean": 31176.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "assignment_100_questions",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 10,
+      "success_rate": 1.0,
+      "p50_ms": 103.16,
+      "p95_ms": 135.41,
+      "p99_ms": 142.48,
+      "max_ms": 142.48,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 92.05,
+      "response_bytes_mean": 31176.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "assignment_100_questions",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 20,
+      "success_rate": 1.0,
+      "p50_ms": 217.83,
+      "p95_ms": 348.81,
+      "p99_ms": 404.45,
+      "max_ms": 404.45,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 80.22,
+      "response_bytes_mean": 31176.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "publish_check_100",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 1,
+      "success_rate": 1.0,
+      "p50_ms": 13.38,
+      "p95_ms": 35.05,
+      "p99_ms": 35.64,
+      "max_ms": 35.64,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 61.47,
+      "response_bytes_mean": 90.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "publish_check_100",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 5,
+      "success_rate": 1.0,
+      "p50_ms": 40.21,
+      "p95_ms": 59.33,
+      "p99_ms": 73.9,
+      "max_ms": 73.9,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 118.65,
+      "response_bytes_mean": 90.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "publish_check_100",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 10,
+      "success_rate": 1.0,
+      "p50_ms": 59.74,
+      "p95_ms": 81.9,
+      "p99_ms": 86.92,
+      "max_ms": 86.92,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 154.08,
+      "response_bytes_mean": 90.0,
+      "request_ids_present": true
+    },
+    {
+      "scenario": "publish_check_100",
+      "kind": "read",
+      "requests": 40,
+      "concurrency": 20,
+      "success_rate": 1.0,
+      "p50_ms": 150.39,
+      "p95_ms": 254.31,
+      "p99_ms": 257.8,
+      "max_ms": 257.8,
+      "timeouts": 0,
+      "status_counts": {
+        "200": 40
+      },
+      "throughput_rps": 115.16,
+      "response_bytes_mean": 90.0,
+      "request_ids_present": true
+    }
+  ]
+}

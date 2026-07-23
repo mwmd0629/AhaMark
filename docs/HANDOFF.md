@@ -4,20 +4,24 @@
 
 ## 最终结论
 
-验收等级仍为 **C（内部演示或开发测试）**。第二部分教师核心业务浏览器闭环和
-第五部分权限与文件安全均已关闭。第五部分通过不自动升级到 B；异步/并发性能、
-Redis/MinIO 故障恢复、MinIO 备份恢复和生产运维仍未完成。
+验收等级仍为 **C（内部演示或开发测试）**。第二部分教师核心业务浏览器闭环、
+第五部分权限与文件安全以及第六部分开发机有界容量均已关闭。第六部分通过不自动升级到
+B；生产容量与 SLA、多实例扩展、Redis/MinIO 故障恢复、MinIO 备份恢复和生产运维仍未完成。
 
 ## 真实状态
 
 - 服务：核心六服务均 healthy；可选 Nginx proxy 配置与语法通过。栈保持运行，三个命名卷保留。
 - 数据库：活动库 `0010_report_student (head)`；独立空库 upgrade、`0010→0009→0010` 通过。
 - 认证：scrypt、数据库 Session、HttpOnly/SameSite、production Secure、CSRF、撤销/过期、禁用用户、production 禁 demo 已实现并测试。
-- OCR：第二部分使用 test-only Fake OCR 工作流适配器，只证明 UI/编排；不证明 RapidOCR。RapidOCR 3.9.2 印刷体窄范围 available，公式 OCR unavailable。
+- OCR：第二部分 UI 闭环使用 test-only Fake OCR；第六部分另行完成 Fake 编排
+  150/200/250 页和 RapidOCR 3.9.2 清晰印刷体 100/150/250 页吞吐阶梯。Fake 与真实
+  吞吐证据不能互换，也不证明准确率、手写或公式能力；公式 OCR unavailable。
 - Grading/Review：客观题规则评分、三栏复核、人工评分、批量资格和一致性已实现；主观题真实 AI Provider unavailable，必须人工评分。
 - Snapshot/Release：唯一成绩来源为 finalized Submission 的最新 complete Snapshot；GradeRelease 固定 Snapshot，incomplete 不发布。
-- XLSX/PDF：既有真实 Celery/MinIO 冒烟与自动化通过；本轮没有重新完成 30–50 份 PDF 容量测试。
-- Analytics：除既有 35 请求和 6 步冒烟外，A–H 闭环已从固定 GradeRelease 验证参与人数、平均分、分布、学生详情、知识点、趋势和规则 Insight。
+- XLSX/PDF：第六部分固定 Release 的 50 名不同学生已完成 50 PDF、50 行 XLSX 和
+  包含 50 份不同学生 PDF 的 ZIP；52/52 Celery/MinIO Job completed。
+- Analytics：除既有 35 请求、6 步冒烟和 A–H 闭环外，第六部分已覆盖 50/100/200 人、
+  20/50/100 题以及同 Release 顺序/20 路并发幂等；最大规模学生读取约 8 秒。
 
 ## 第二部分浏览器证据
 
@@ -79,10 +83,12 @@ Redis/MinIO 故障恢复、MinIO 备份恢复和生产运维仍未完成。
 
 ## 生产阻塞项
 
-1. OCR、报告、Analytics 并发/吞吐、CPU、内存、队列等待与慢 SQL 未测。
+1. 第六部分开发机有界容量已通过，但最大规模 Analytics 学生趋势/详情约 7.7–7.9 秒；
+   生产容量、SLA、多实例扩展、故障条件和生产数据分布尚未建立。
 2. MinIO 备份恢复、Redis/MinIO 中断恢复未验证。
 3. 开发 Compose 暴露 MinIO 端口，未提供正式 TLS/secret/监控平台配置。
-4. 第五部分修改尚未提交；起始提交为 `828a494e2d3df598ab7c9223f0e17703b3b553aa`。
+4. 第五部分已提交为 `8ba3a413c4d7864506294ce728fa4f4dffeefce2`；第六部分工作树
+   修改仍全部未暂存、未提交、未推送、未部署。
 
 ## 第五部分：权限与文件安全
 
@@ -93,4 +99,24 @@ Redis/MinIO 故障恢复、MinIO 备份恢复和生产运维仍未完成。
 - 无未修 P0/P1；全局孤儿扫描含既有 recognition 派生对象口径噪声，未自动删除。
 - 证据：`AUTHORIZATION-MATRIX.md`、`FILE-SECURITY-VERIFICATION.md` 及对应 JSON。
 
-后续维护先从 `docs/FINAL-ACCEPTANCE.md` 的 NOT RUN/PARTIAL 项开始，不要扩展学生端或宣称主观题 AI 自动评分。本任务没有提交、推送或部署。
+后续维护先从 `docs/FINAL-ACCEPTANCE.md` 中生产容量/SLA、故障恢复、备份恢复和生产运维
+等 NOT RUN/PARTIAL 项开始；第六部分不再是未完成项。不要扩展学生端或宣称主观题 AI
+自动评分。本轮第六部分工作树尚未提交、推送或部署。
+
+## 第六部分容量交接（2026-07-23）
+
+- 6A PASS：最终 `sync-capacity-optimized.json` 为 passed，同步矩阵 1600/1600；原始
+  `sync-capacity-baseline.json` 与中间 `sync-capacity-results.json` 均为应保留的
+  failed 历史问题证据。学生列表和详情 N+1 已修复，最终轮次 20/50/100 题详情并发 20
+  P95 为 184.78/199.72/348.81 ms。
+- 6B PASS：Fake OCR 150/200/250 页编排和真实 RapidOCR 100/150/250 页均完成。
+- 固定 Release 的 50 名不同学生：50 PDF、50 行 XLSX、含 50 个 PDF 的 ZIP 全部核验。
+- 50/100/200 人、20/50/100 题 Analytics 完成；顺序与 20 路并发重复创建均复用同一
+  Snapshot。最大规模学生读取约 8 秒，属于开发机容量边界。
+- 后端门禁 87 passed、2 skipped；Ruff 与 mypy 通过；无前端改动、无迁移。
+- 证据入口：`PERFORMANCE-CAPACITY.md`、`sync-capacity-baseline.json`（原始 failed）、
+  `sync-capacity-results.json`（中间 failed）、`sync-capacity-optimized.json`（最终 passed）、
+  `ocr-orchestration-capacity.json`、`ocr-capacity-results.json`、
+  `async-capacity-results.json`、`analytics-capacity-results.json`。
+- 适用边界：仅证明指定开发机、单 API/单 Worker 和合成数据；250 页是本轮测试上限，
+  不证明系统绝对上限、OCR 准确率、手写/公式能力、生产容量或生产 SLA。

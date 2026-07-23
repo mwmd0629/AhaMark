@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "result": "passed",
+  "scope": "Fake OCR orchestration only; not OCR performance or accuracy",
+  "stages": [
+    {
+      "pages": 150,
+      "assignment_id": "c9f13a8d-8fee-5da8-87d4-302a3c2fba70",
+      "paper_version_id": "1fafe801-8150-5831-815e-232f964c4343",
+      "job_id": "13934e24-b345-4944-b26f-cb0190372457",
+      "create_api_ms": 95.8,
+      "queue_wait_ms": 239.62,
+      "total_ms": 8488.19,
+      "per_page_average_ms": 56.59,
+      "status": "completed",
+      "page_summary": {
+        "total": 150,
+        "completed": 150,
+        "failed": 0,
+        "stale": 0
+      },
+      "page_result_count": 150
+    },
+    {
+      "pages": 200,
+      "assignment_id": "6fcb2932-9392-5f21-a95a-6d59513006c5",
+      "paper_version_id": "114e1d33-59fc-5beb-b761-1732d5396f14",
+      "job_id": "75d3a6a1-5d78-4eec-98da-fc943c9b3c18",
+      "create_api_ms": 14.65,
+      "queue_wait_ms": 229.74,
+      "total_ms": 11383.05,
+      "per_page_average_ms": 56.92,
+      "status": "completed",
+      "page_summary": {
+        "total": 200,
+        "completed": 200,
+        "failed": 0,
+        "stale": 0
+      },
+      "page_result_count": 200
+    },
+    {
+      "pages": 250,
+      "assignment_id": "268c8184-df02-5df6-ab3a-7d542c048544",
+      "paper_version_id": "ad6c1e7c-9596-5116-afc9-a22c1cf58511",
+      "job_id": "b1d36efc-7fed-457c-a3fb-47f1712ea4ee",
+      "create_api_ms": 17.79,
+      "queue_wait_ms": 220.77,
+      "total_ms": 16163.35,
+      "per_page_average_ms": 64.65,
+      "status": "completed",
+      "page_summary": {
+        "total": 250,
+        "completed": 250,
+        "failed": 0,
+        "stale": 0
+      },
+      "page_result_count": 250
+    }
+  ]
+}

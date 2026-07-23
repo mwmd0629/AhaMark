@@ -1,0 +1,265 @@
+{
+  "schema_version": 1,
+  "result": "passed",
+  "scope": "50/100/200 distinct released students with 20/50/100 questions",
+  "scales": [
+    {
+      "scale": "s1",
+      "students": 50,
+      "questions": 20,
+      "release_id": "bac90387-096c-5420-be36-3339f4680515",
+      "snapshot_id": "c0de4494-4402-41ae-ba58-9330dfc81760",
+      "source_snapshot_count": 50,
+      "generation_attempts": 5,
+      "unique_snapshot_ids": 1,
+      "generation_statuses": [
+        201,
+        201,
+        201,
+        201,
+        201
+      ],
+      "generation_p50_ms": 28.62,
+      "generation_max_ms": 31.61,
+      "drills": [
+        {
+          "method": "GET",
+          "path": "/api/analytics/c0de4494-4402-41ae-ba58-9330dfc81760/score-bands/90-100/students",
+          "status": 200,
+          "elapsed_ms": 594.05,
+          "bytes": 86
+        },
+        {
+          "method": "GET",
+          "path": "/api/analytics/c0de4494-4402-41ae-ba58-9330dfc81760/questions/16954c49-720d-5112-9cc9-23e1011fe2aa/students",
+          "status": 200,
+          "elapsed_ms": 541.42,
+          "bytes": 8081
+        },
+        {
+          "method": "GET",
+          "path": "/api/analytics/c0de4494-4402-41ae-ba58-9330dfc81760/knowledge-points/4fcf61c6-532e-56f6-be5d-2b262386cc5a",
+          "status": 200,
+          "elapsed_ms": 575.96,
+          "bytes": 4762
+        },
+        {
+          "method": "GET",
+          "path": "/api/analytics/c0de4494-4402-41ae-ba58-9330dfc81760/errors/concept",
+          "status": 200,
+          "elapsed_ms": 667.86,
+          "bytes": 8778
+        },
+        {
+          "method": "GET",
+          "path": "/api/classes/9127e1ba-31c3-5551-91f8-54b1520c05b7/analytics/trends",
+          "status": 200,
+          "elapsed_ms": 501.14,
+          "bytes": 558
+        },
+        {
+          "method": "GET",
+          "path": "/api/students/9c97ae64-03aa-54ba-a899-14106a063543/analytics/trends",
+          "status": 200,
+          "elapsed_ms": 1021.61,
+          "bytes": 605
+        },
+        {
+          "method": "GET",
+          "path": "/api/students/9c97ae64-03aa-54ba-a899-14106a063543/analytics",
+          "status": 200,
+          "elapsed_ms": 1177.8,
+          "bytes": 10940
+        },
+        {
+          "method": "POST",
+          "path": "/api/analytics/c0de4494-4402-41ae-ba58-9330dfc81760/insights",
+          "status": 201,
+          "elapsed_ms": 26.0,
+          "bytes": 1222
+        }
+      ]
+    },
+    {
+      "scale": "s2-t1-c1",
+      "students": 100,
+      "questions": 50,
+      "release_id": "ca04463e-4307-5a57-bbcb-cd5585f96914",
+      "snapshot_id": "3e6fd16b-2a17-414f-a9f3-b35aaa507eec",
+      "source_snapshot_count": 100,
+      "generation_attempts": 5,
+      "unique_snapshot_ids": 1,
+      "generation_statuses": [
+        201,
+        201,
+        201,
+        201,
+        201
+      ],
+      "generation_p50_ms": 20.2,
+      "generation_max_ms": 23.67,
+      "drills": [
+        {
+          "method": "GET",
+          "path": "/api/analytics/3e6fd16b-2a17-414f-a9f3-b35aaa507eec/score-bands/90-100/students",
+          "status": 200,
+          "elapsed_ms": 1359.14,
+          "bytes": 86
+        },
+        {
+          "method": "GET",
+          "path": "/api/analytics/3e6fd16b-2a17-414f-a9f3-b35aaa507eec/questions/fd4a593a-ec95-5a58-844e-5a088449ee94/students",
+          "status": 200,
+          "elapsed_ms": 1307.4,
+          "bytes": 8202
+        },
+        {
+          "method": "GET",
+          "path": "/api/analytics/3e6fd16b-2a17-414f-a9f3-b35aaa507eec/knowledge-points/a4b4e7d5-3e3e-59df-bcc7-2b712ccbfea1",
+          "status": 200,
+          "elapsed_ms": 1381.12,
+          "bytes": 5709
+        },
+        {
+          "method": "GET",
+          "path": "/api/analytics/3e6fd16b-2a17-414f-a9f3-b35aaa507eec/errors/concept",
+          "status": 200,
+          "elapsed_ms": 1485.85,
+          "bytes": 8905
+        },
+        {
+          "method": "GET",
+          "path": "/api/classes/6a0c0040-f3ac-5b0d-bfee-9f8a3e334998/analytics/trends",
+          "status": 200,
+          "elapsed_ms": 1447.75,
+          "bytes": 563
+        },
+        {
+          "method": "GET",
+          "path": "/api/students/dcc66739-74f8-5be8-8dc2-beaf73ac17c3/analytics/trends",
+          "status": 200,
+          "elapsed_ms": 2564.63,
+          "bytes": 618
+        },
+        {
+          "method": "GET",
+          "path": "/api/students/dcc66739-74f8-5be8-8dc2-beaf73ac17c3/analytics",
+          "status": 200,
+          "elapsed_ms": 2746.83,
+          "bytes": 24032
+        },
+        {
+          "method": "POST",
+          "path": "/api/analytics/3e6fd16b-2a17-414f-a9f3-b35aaa507eec/insights",
+          "status": 201,
+          "elapsed_ms": 41.52,
+          "bytes": 1230
+        }
+      ]
+    },
+    {
+      "scale": "s3-t1",
+      "students": 200,
+      "questions": 100,
+      "release_id": "cb21fc6c-c58a-535a-b809-a47611d80d6c",
+      "snapshot_id": "1356ff6c-a56c-4449-af45-288b94db9674",
+      "source_snapshot_count": 200,
+      "generation_attempts": 5,
+      "unique_snapshot_ids": 1,
+      "generation_statuses": [
+        201,
+        201,
+        201,
+        201,
+        201
+      ],
+      "generation_p50_ms": 29.22,
+      "generation_max_ms": 38.53,
+      "drills": [
+        {
+          "method": "GET",
+          "path": "/api/analytics/1356ff6c-a56c-4449-af45-288b94db9674/score-bands/90-100/students",
+          "status": 200,
+          "elapsed_ms": 3989.73,
+          "bytes": 86
+        },
+        {
+          "method": "GET",
+          "path": "/api/analytics/1356ff6c-a56c-4449-af45-288b94db9674/questions/d43c8473-8a59-5fda-9901-82a6cb5f7747/students",
+          "status": 200,
+          "elapsed_ms": 3629.41,
+          "bytes": 8143
+        },
+        {
+          "method": "GET",
+          "path": "/api/analytics/1356ff6c-a56c-4449-af45-288b94db9674/knowledge-points/9f999110-36a3-50f2-a270-0de86fafe0e4",
+          "status": 200,
+          "elapsed_ms": 3594.51,
+          "bytes": 7100
+        },
+        {
+          "method": "GET",
+          "path": "/api/analytics/1356ff6c-a56c-4449-af45-288b94db9674/errors/concept",
+          "status": 200,
+          "elapsed_ms": 4070.47,
+          "bytes": 8847
+        },
+        {
+          "method": "GET",
+          "path": "/api/classes/cbde2751-09c9-552a-b747-d05ecc8dd045/analytics/trends",
+          "status": 200,
+          "elapsed_ms": 4134.43,
+          "bytes": 563
+        },
+        {
+          "method": "GET",
+          "path": "/api/students/7b063f72-2e5c-5dba-ab5e-86b42d35e16d/analytics/trends",
+          "status": 200,
+          "elapsed_ms": 7746.61,
+          "bytes": 615
+        },
+        {
+          "method": "GET",
+          "path": "/api/students/7b063f72-2e5c-5dba-ab5e-86b42d35e16d/analytics",
+          "status": 200,
+          "elapsed_ms": 7926.99,
+          "bytes": 46699
+        },
+        {
+          "method": "POST",
+          "path": "/api/analytics/1356ff6c-a56c-4449-af45-288b94db9674/insights",
+          "status": 201,
+          "elapsed_ms": 56.28,
+          "bytes": 1231
+        }
+      ]
+    }
+  ],
+  "concurrent_idempotency": {
+    "attempts": 20,
+    "statuses": [
+      201,
+      201,
+      201,
+      201,
+      201,
+      201,
+      201,
+      201,
+      201,
+      201,
+      201,
+      201,
+      201,
+      201,
+      201,
+      201,
+      201,
+      201,
+      201,
+      201
+    ],
+    "unique_snapshot_ids": 1,
+    "snapshot_id": "1356ff6c-a56c-4449-af45-288b94db9674"
+  }
+}

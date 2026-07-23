@@ -1,6 +1,7 @@
 import hashlib
 import io
 import uuid
+from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
@@ -248,13 +249,23 @@ def invalidate_grading_for_rubric_change(db: Session, assignment_id: uuid.UUID) 
     return len(results)
 
 
-def question_json(db: Session, q: Question) -> dict[str, Any]:
-    regions = db.scalars(select(QuestionRegion).where(QuestionRegion.question_id == q.id)).all()
-    kps = db.execute(
-        select(KnowledgePoint.id, KnowledgePoint.name)
-        .join(QuestionKnowledgePoint)
-        .where(QuestionKnowledgePoint.question_id == q.id)
-    ).all()
+def question_json(
+    db: Session,
+    q: Question,
+    regions: list[QuestionRegion] | None = None,
+    knowledge_points: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    if regions is None:
+        regions = list(db.scalars(select(QuestionRegion).where(QuestionRegion.question_id == q.id)))
+    if knowledge_points is None:
+        knowledge_points = [
+            {"id": str(row.id), "name": row.name}
+            for row in db.execute(
+                select(KnowledgePoint.id, KnowledgePoint.name)
+                .join(QuestionKnowledgePoint)
+                .where(QuestionKnowledgePoint.question_id == q.id)
+            )
+        ]
     return {
         "id": str(q.id),
         "question_number": q.question_number,
@@ -266,7 +277,7 @@ def question_json(db: Session, q: Question) -> dict[str, Any]:
         "difficulty": q.difficulty,
         "parent_question_id": str(q.parent_question_id) if q.parent_question_id else None,
         "source": q.source,
-        "knowledge_points": [{"id": str(x.id), "name": x.name} for x in kps],
+        "knowledge_points": knowledge_points,
         "regions": [
             {
                 "id": str(r.id),
@@ -308,16 +319,50 @@ def detail(db: Session, item: Assignment) -> dict[str, Any]:
         if pv
         else []
     )
+    question_ids = [question.id for question in qs]
+    regions_by_question: dict[uuid.UUID, list[QuestionRegion]] = {
+        question_id: [] for question_id in question_ids
+    }
+    knowledge_points_by_question: dict[uuid.UUID, list[dict[str, str]]] = {
+        question_id: [] for question_id in question_ids
+    }
+    if question_ids:
+        for region in db.scalars(
+            select(QuestionRegion).where(QuestionRegion.question_id.in_(question_ids))
+        ):
+            regions_by_question[region.question_id].append(region)
+        for question_id, knowledge_point_id, knowledge_point_name in db.execute(
+            select(
+                QuestionKnowledgePoint.question_id,
+                KnowledgePoint.id,
+                KnowledgePoint.name,
+            )
+            .join(
+                KnowledgePoint,
+                KnowledgePoint.id == QuestionKnowledgePoint.knowledge_point_id,
+            )
+            .where(QuestionKnowledgePoint.question_id.in_(question_ids))
+        ):
+            knowledge_points_by_question[question_id].append(
+                {"id": str(knowledge_point_id), "name": knowledge_point_name}
+            )
     rubrics: list[dict[str, Any]] = []
+    question_rubrics: list[QuestionRubric] = []
     if rv:
-        for qr in db.scalars(
-            select(QuestionRubric).where(QuestionRubric.rubric_version_id == rv.id)
-        ).all():
-            ris = db.scalars(
+        question_rubrics = list(
+            db.scalars(select(QuestionRubric).where(QuestionRubric.rubric_version_id == rv.id))
+        )
+        rubric_items_by_rubric: dict[uuid.UUID, list[RubricItem]] = {
+            question_rubric.id: [] for question_rubric in question_rubrics
+        }
+        if rubric_items_by_rubric:
+            for rubric_item in db.scalars(
                 select(RubricItem)
-                .where(RubricItem.question_rubric_id == qr.id)
-                .order_by(RubricItem.display_order)
-            ).all()
+                .where(RubricItem.question_rubric_id.in_(rubric_items_by_rubric))
+                .order_by(RubricItem.question_rubric_id, RubricItem.display_order)
+            ):
+                rubric_items_by_rubric[rubric_item.question_rubric_id].append(rubric_item)
+        for qr in question_rubrics:
             rubrics.append(
                 {
                     "id": str(qr.id),
@@ -339,11 +384,18 @@ def detail(db: Session, item: Assignment) -> dict[str, Any]:
                             "required": x.required,
                             "deduction_rule": x.deduction_rule,
                         }
-                        for x in ris
+                        for x in rubric_items_by_rubric[qr.id]
                     ],
                 }
             )
-    issues = publish_issues(db, item)
+    issues = publish_issues(
+        db,
+        item,
+        preloaded_paper=pv,
+        preloaded_rubric=rv,
+        preloaded_questions=qs,
+        preloaded_question_rubrics=question_rubrics,
+    )
     return {
         "id": str(item.id),
         "title": item.title,
@@ -376,7 +428,15 @@ def detail(db: Session, item: Assignment) -> dict[str, Any]:
                     }
                     for x in pages
                 ],
-                "questions": [question_json(db, q) for q in qs],
+                "questions": [
+                    question_json(
+                        db,
+                        question,
+                        regions_by_question[question.id],
+                        knowledge_points_by_question[question.id],
+                    )
+                    for question in qs
+                ],
             }
             if pv
             else None
@@ -399,7 +459,15 @@ def detail(db: Session, item: Assignment) -> dict[str, Any]:
     }
 
 
-def publish_issues(db: Session, item: Assignment) -> list[dict[str, Any]]:
+def publish_issues(
+    db: Session,
+    item: Assignment,
+    *,
+    preloaded_paper: PaperVersion | None = None,
+    preloaded_rubric: RubricVersion | None = None,
+    preloaded_questions: Sequence[Question] | None = None,
+    preloaded_question_rubrics: list[QuestionRubric] | None = None,
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     links = db.scalars(
         select(AssignmentClass).where(AssignmentClass.assignment_id == item.id)
@@ -411,15 +479,19 @@ def publish_issues(db: Session, item: Assignment) -> list[dict[str, Any]]:
         for cls in (db.get(SchoolClass, x.class_id) for x in links)
     ):
         out.append({"code": "CLASS_NOT_ACTIVE", "message": "关联班级已归档", "step": 1})
-    pv = paper(db, item)
+    pv = preloaded_paper if preloaded_questions is not None else paper(db, item)
     qs = (
-        db.scalars(
-            select(Question).where(
-                Question.paper_version_id == pv.id, Question.status == QuestionStatus.active
-            )
-        ).all()
-        if pv
-        else []
+        preloaded_questions
+        if preloaded_questions is not None
+        else (
+            db.scalars(
+                select(Question).where(
+                    Question.paper_version_id == pv.id, Question.status == QuestionStatus.active
+                )
+            ).all()
+            if pv
+            else []
+        )
     )
     if not pv or not qs:
         out.append({"code": "NO_QUESTIONS", "message": "请上传试卷并创建题目", "step": 4})
@@ -448,16 +520,48 @@ def publish_issues(db: Session, item: Assignment) -> list[dict[str, Any]]:
         out.append(
             {"code": "TOTAL_SCORE_MISMATCH", "message": "题目分值合计必须等于作业总分", "step": 4}
         )
-    rv = rubric(db, item)
+    rv = preloaded_rubric if preloaded_questions is not None else rubric(db, item)
     if not rv:
         out.append({"code": "NO_RUBRIC", "message": "请设置评分标准", "step": 5})
     else:
+        question_rubric_by_question = (
+            {
+                question_rubric.question_id: question_rubric
+                for question_rubric in preloaded_question_rubrics
+            }
+            if preloaded_question_rubrics is not None
+            else {}
+        )
+        rubric_points = (
+            {
+                question_rubric_id: Decimal(points or 0)
+                for question_rubric_id, points in db.execute(
+                    select(RubricItem.question_rubric_id, func.sum(RubricItem.points))
+                    .where(
+                        RubricItem.question_rubric_id.in_(
+                            [
+                                question_rubric.id
+                                for question_rubric in preloaded_question_rubrics or []
+                            ]
+                        )
+                    )
+                    .group_by(RubricItem.question_rubric_id)
+                )
+            }
+            if preloaded_question_rubrics is not None
+            else {}
+        )
         for q in qs:
             if q.max_score is None:
                 continue
-            qr = db.scalar(
-                select(QuestionRubric).where(
-                    QuestionRubric.rubric_version_id == rv.id, QuestionRubric.question_id == q.id
+            qr = (
+                question_rubric_by_question.get(q.id)
+                if preloaded_question_rubrics is not None
+                else db.scalar(
+                    select(QuestionRubric).where(
+                        QuestionRubric.rubric_version_id == rv.id,
+                        QuestionRubric.question_id == q.id,
+                    )
                 )
             )
             if not qr or not qr.standard_answer:
@@ -471,12 +575,16 @@ def publish_issues(db: Session, item: Assignment) -> list[dict[str, Any]]:
                 )
                 continue
             pts = (
-                db.scalar(
-                    select(func.sum(RubricItem.points)).where(
-                        RubricItem.question_rubric_id == qr.id
+                rubric_points.get(qr.id, Decimal(0))
+                if preloaded_question_rubrics is not None
+                else (
+                    db.scalar(
+                        select(func.sum(RubricItem.points)).where(
+                            RubricItem.question_rubric_id == qr.id
+                        )
                     )
+                    or 0
                 )
-                or 0
             )
             if Decimal(pts) != Decimal(q.max_score):
                 out.append(

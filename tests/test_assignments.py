@@ -1,12 +1,23 @@
 import io
+from decimal import Decimal
 
-from app.db.session import SessionLocal
+from app.api.assignments import detail
+from app.db.session import SessionLocal, engine
 from app.main import app
-from app.models import ArchiveStatus, AuditLog, SchoolClass, User
+from app.models import (
+    ArchiveStatus,
+    Assignment,
+    AssignmentClass,
+    AuditLog,
+    PaperVersion,
+    Question,
+    SchoolClass,
+    User,
+)
 from app.storage.base import ObjectMetadata
 from fastapi.testclient import TestClient
 from PIL import Image
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 client = TestClient(app)
 
@@ -206,3 +217,57 @@ def test_upload_rejections():
         == 415
     )
     app.dependency_overrides.pop(get_storage, None)
+
+
+def test_large_assignment_detail_uses_bounded_query_count() -> None:
+    actor, db = actor_and_db()
+    school_class = active_class(db, actor.id, "容量详情班")
+    assignment = Assignment(
+        owner_id=actor.id,
+        title="100题容量作业",
+        total_score=Decimal("100"),
+    )
+    db.add(assignment)
+    db.flush()
+    db.add(AssignmentClass(assignment_id=assignment.id, class_id=school_class.id))
+    paper = PaperVersion(
+        assignment_id=assignment.id,
+        version=1,
+        created_by=actor.id,
+    )
+    db.add(paper)
+    db.flush()
+    assignment.active_paper_version_id = paper.id
+    db.add_all(
+        [
+            Question(
+                paper_version_id=paper.id,
+                question_number=str(index),
+                display_order=index,
+                question_type="single_choice",
+                content_text=f"合成容量题 {index}",
+                max_score=Decimal("1"),
+            )
+            for index in range(1, 101)
+        ]
+    )
+    db.commit()
+    statements: list[str] = []
+
+    def record_statement(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record_statement)
+    try:
+        response = detail(db, assignment)
+    finally:
+        event.remove(engine, "before_cursor_execute", record_statement)
+    assert len(response["paper_version"]["questions"]) == 100
+    assert len(statements) <= 12

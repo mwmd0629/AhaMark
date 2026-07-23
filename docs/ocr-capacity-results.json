@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "result": "passed",
+  "scope": "standalone real RapidOCR staircase on clear printed synthetic PNG pages; not workflow orchestration and not an accuracy claim",
+  "provider": "rapidocr",
+  "results": [
+    {
+      "pages": 25,
+      "files": 25,
+      "total_seconds": 79.558,
+      "cpu_seconds": 1880.472,
+      "page_p50_ms": 3059.68,
+      "page_p95_ms": 3909.06,
+      "successful_pages": 25,
+      "blank_pages": 0,
+      "failed_pages": 0,
+      "worker_peak_rss_kib": 831592
+    },
+    {
+      "pages": 50,
+      "files": 50,
+      "total_seconds": 141.24,
+      "cpu_seconds": 3343.029,
+      "page_p50_ms": 2806.58,
+      "page_p95_ms": 3234.92,
+      "successful_pages": 50,
+      "blank_pages": 0,
+      "failed_pages": 0,
+      "worker_peak_rss_kib": 901100
+    },
+    {
+      "pages": 100,
+      "files": 100,
+      "total_seconds": 307.984,
+      "cpu_seconds": 7284.1,
+      "page_p50_ms": 2973.96,
+      "page_p95_ms": 3624.61,
+      "successful_pages": 100,
+      "blank_pages": 0,
+      "failed_pages": 0,
+      "worker_peak_rss_kib": 899556
+    },
+    {
+      "pages": 150,
+      "files": 150,
+      "total_seconds": 453.606,
+      "cpu_seconds": 10730.676,
+      "page_p50_ms": 2967.66,
+      "page_p95_ms": 3624.37,
+      "successful_pages": 150,
+      "blank_pages": 0,
+      "failed_pages": 0,
+      "worker_peak_rss_kib": 900180
+    },
+    {
+      "pages": 250,
+      "files": 250,
+      "total_seconds": 756.412,
+      "cpu_seconds": 17897.581,
+      "page_p50_ms": 2951.88,
+      "page_p95_ms": 3559.21,
+      "successful_pages": 250,
+      "blank_pages": 0,
+      "failed_pages": 0,
+      "worker_peak_rss_kib": 898688
+    }
+  ]
+}
