@@ -1,0 +1,133 @@
+{
+  "schema_version": "1.0",
+  "result": "PASS",
+  "scope": "isolated synthetic single-API single-worker development fault recovery",
+  "run_id": "fault-20260724-c84f19",
+  "compose_project": "ahamark-recovery-v7-fault-20260724-c84f19",
+  "docker_engine_event": {
+    "restart_started_at": "2026-07-24T18:26:06.505+08:00",
+    "engine_recovered_at": "2026-07-24T18:27:57.183+08:00",
+    "restart_count": 1,
+    "normal_docker_desktop_restart_only": true,
+    "factory_reset_or_prune": false,
+    "final_engine_id": "e58206e5-1b25-479b-8d66-b891e1009f71",
+    "server_version": "29.6.2",
+    "consecutive_checks": 2
+  },
+  "scenarios": [
+    {
+      "name": "worker_offline_queue_and_recovery",
+      "result": "PASS",
+      "transition": ["queued", "completed"]
+    },
+    {
+      "name": "worker_running_checkpoint",
+      "result": "PASS",
+      "job_id": "eabbf26a-e494-490f-b4b5-03eeae492dd7",
+      "transition": ["running", "running", "completed"]
+    },
+    {
+      "name": "visibility_timeout_and_redelivery",
+      "result": "PASS",
+      "configured_seconds": 15,
+      "observed_completion_seconds": 102.23,
+      "attempt_transition": [1, 2]
+    },
+    {
+      "name": "redelivered_running_resume",
+      "result": "PASS",
+      "requires_explicit_celery_redelivered": true
+    },
+    {
+      "name": "redis_unavailable_result",
+      "result": "PASS",
+      "http_status": 503,
+      "error_code": "WORKER_UNAVAILABLE"
+    },
+    {
+      "name": "redis_recovery_retry",
+      "result": "PASS",
+      "job_id": "69d310e3-6504-4ad0-9d4f-1d04bb3442b3",
+      "transition": ["failed", "completed"]
+    },
+    {
+      "name": "minio_report_write_failure",
+      "result": "PASS",
+      "old_job_id": "43c112d1-71d0-40ee-8f7c-0dbb8aa0bac7",
+      "old_job_status": "failed",
+      "old_job_stored_file": false
+    },
+    {
+      "name": "minio_recovery_new_retry_job",
+      "result": "PASS",
+      "old_job_id": "43c112d1-71d0-40ee-8f7c-0dbb8aa0bac7",
+      "new_job_id": "3c94ef0d-9648-480e-8aac-19d268f2537b",
+      "new_job_status": "completed",
+      "old_job_unchanged": true
+    },
+    {
+      "name": "recognition_duplicate_dispatch",
+      "result": "PASS",
+      "duplicate_pages": 0,
+      "duplicate_blocks": 0,
+      "duplicate_candidates": 0
+    },
+    {
+      "name": "report_idempotency_and_retry",
+      "result": "PASS",
+      "job_id": "4f1fcadd-556c-4386-8763-40c8c505ed5e",
+      "unique_successful_job_ids": 1
+    },
+    {
+      "name": "analytics_sequential_five",
+      "result": "PASS",
+      "snapshot_id": "15070c49-44af-44d7-892e-9221d4f2ea3c"
+    },
+    {
+      "name": "analytics_concurrent_twenty",
+      "result": "PASS",
+      "snapshot_id": "15070c49-44af-44d7-892e-9221d4f2ea3c"
+    }
+  ],
+  "final_reconciliation": {
+    "recognition_queued": 0,
+    "recognition_running": 0,
+    "report_queued": 0,
+    "report_running": 0,
+    "celery_active": 0,
+    "celery_reserved": 0,
+    "duplicate_report_idempotency_keys": 0,
+    "duplicate_analytics_snapshots": 0,
+    "database_records_missing_object": 0,
+    "object_missing_database": 0,
+    "current_run_unknown_orphans": 0,
+    "unable_to_classify": 0,
+    "source_objects": 18,
+    "stored_files": 9,
+    "immutable_grade_state_unchanged": true,
+    "teaching_insight_bindings_unchanged": true
+  },
+  "final_services": {
+    "expected": 7,
+    "healthy": 7,
+    "services": [
+      "postgres",
+      "postgres_restore",
+      "redis",
+      "minio",
+      "minio-restore",
+      "api",
+      "worker"
+    ]
+  },
+  "limitations": {
+    "production_visibility_timeout_seconds": 3600,
+    "test_checkpoints_rejected_in_production": true,
+    "multi_instance_high_availability_verified": false,
+    "production_rpo_rto_established": false
+  },
+  "raw_evidence": {
+    "relative_path": "../.recovery-v7/fault-20260724-c84f19/failure-recovery-raw.json",
+    "sha256": "fe825009dd0f64ba9636c8244170c215181fa3f1da974dc574c46dd61c98ac5f"
+  }
+}

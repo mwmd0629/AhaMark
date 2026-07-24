@@ -1,15 +1,16 @@
 # AhaMark 最终验收报告
 
-版本 `0.1.0`；更新日期 2026-07-23；分支 `master`；第五部分提交及第六部分工作树基线为
-`8ba3a413c4d7864506294ce728fa4f4dffeefce2`。
+版本 `0.1.0`；更新日期 2026-07-24；分支 `master`；第七部分验收 HEAD 为
+`3cf1ae27e78490f43449ca7af4e93919d2251402`，工作树保持未暂存、未提交。
 
 本报告中的 `PASS` 仅表示对应验收检查在记录范围内通过，不等于整项能力已完成真实环境验证或达到生产可用。统一能力状态、数据边界和产品措辞以 `PROJECT-BASELINE.md`、`CAPABILITY-EVIDENCE-MATRIX.md`、`DATA-SECURITY-BOUNDARIES.md` 和 `PRODUCT-CAPABILITY-STATEMENTS.md` 为准。
 
 ## 最终结论
 
-**等级 C：内部演示或开发测试。** 教师核心业务 A–H、第五部分权限/文件矩阵及第六部分
-开发机有界容量已用纯合成数据通过；生产容量与 SLA、多实例扩展、Redis/MinIO 故障恢复、
-MinIO 备份恢复和生产运维仍未建立，不适合真实教学试点或生产。
+**等级 C：内部演示或开发测试。** 教师核心业务 A–H、第五部分权限/文件矩阵、第六部分
+开发机有界容量及第七部分 7A–7D 已用纯合成数据通过。PostgreSQL/MinIO 独立恢复和单
+Worker 故障恢复只在开发环境成立；生产灾备、高可用、生产 RPO/RTO、SLA、多实例恢复和
+生产运维均未建立，不适合真实学生数据、真实教学试点、生产部署或公网开放。
 
 ## 验收矩阵
 
@@ -17,7 +18,7 @@ MinIO 备份恢复和生产运维仍未建立，不适合真实教学试点或�
 |---|---|---|
 | 六核心服务 | PASS | web/api/worker/PostgreSQL/Redis/MinIO healthy；栈保持运行 |
 | 数据库迁移 | PASS | 活动库 0010；独立空库 upgrade；0010→0009→0010 |
-| 后端测试 | PASS | 第六部分关闭轮 87 passed、2 skipped、1 warning；Ruff、mypy 通过；skip 为既有 RapidOCR/系统字体或 Provider 可用性条件 |
+| 后端测试 | PASS | 第七部分关闭轮 113 passed、2 skipped、1 warning；Ruff 113 files、mypy 52 files |
 | 前端测试 | PASS | 第四部分关闭轮完整 Vitest：12 files、26 tests passed |
 | 前端格式/lint/type | PASS | Prettier、ESLint、TypeScript |
 | Next production build | PASS | 18 条路由构建成功；SWC lockfile 修补警告仍存在但未阻断 |
@@ -32,11 +33,15 @@ MinIO 备份恢复和生产运维仍未建立，不适合真实教学试点或�
 | 生产容量与 SLA | PARTIAL | 最大规模 Analytics 学生趋势/详情约 7.7–7.9 秒；多实例、正式 SLA、故障条件和生产数据分布未验证 |
 | MIME/恶意文件 | PASS | 41 个运行时结构 fixture；批次与存储/DB 回滚通过 |
 | Auth/Session/CSRF | PASS | 登录、错误、Cookie、CSRF、过期、撤销、production 边界 |
-| MinIO/签名 URL | PASS（安全范围） | owner 隔离；2 秒 test-only 真实到期与重签；恢复属后续 |
-| Worker 故障 | PARTIAL | pause/unpause 与 ready/pong 通过；Redis 中断/超时任务未跑 |
+| MinIO/签名 URL | PASS（开发范围） | owner 隔离；7/7 对象独立恢复；2 秒 test-only 到期 403、重签 200、旧 URL 仍失效 |
+| Worker 故障 | PASS（开发范围） | 单 Worker 离线/崩溃、redelivery、Redis/MinIO 故障和恢复后对账通过 |
 | 反向代理 | PASS | nginx -t、health、登录、Cookie、CSRF、安全头 |
-| PostgreSQL 备份恢复 | PASS | 独立库恢复计数 3/4/5/8/8/3 |
-| MinIO 备份恢复 | NOT RUN | 只读孤儿扫描工具已提供 |
+| PostgreSQL 备份恢复 | PASS（开发范围） | custom-format 独立恢复，Alembic/计数/关系/稳定哈希一致 |
+| MinIO 备份恢复 | PASS（开发范围） | 新空 bucket、7/7 对象、metadata/引用/解析/签名 URL/孤儿对账通过 |
+| 第七部分 7A–7D | PASS | 两个正式 Run、两份原始证据和两份脱敏摘要；文档门禁通过 |
+| 生产灾备 | NOT ESTABLISHED | 异地、加密、密钥轮换、长期、增量和生产规模未验证 |
+| 生产高可用 | NOT ESTABLISHED | 单 API/单 Worker 开发环境不能证明多实例或自动切换 |
+| 生产 RPO/RTO | NOT ESTABLISHED | RPO 0 秒因窗口无写入；2.314 秒仅为独立数据库恢复 |
 | 可用性/可访问性逐页 | NOT RUN | Analytics 冒烟不能替代完整巡检 |
 | 真实主观题 AI | NOT APPLICABLE | Provider unavailable；主观题人工评分；production 禁 fake |
 
@@ -45,7 +50,7 @@ MinIO 备份恢复和生产运维仍未建立，不适合真实教学试点或�
 5A、5B 正式关闭：27 类资源×29 类操作，117 个适用格、666 个明确 N/A，六种身份
 702/702；隔离栈 HTTP 16/16；文件结构 fixture 41/41；本轮孤儿增量为 0。P0/P1 无
 未修项。本结论不是外部渗透或生产安全认证，也不完成多实例限速、Cookie 重放专项、
-Redis/MinIO 故障恢复、MinIO 备份恢复、生产容量/SLA或生产运维；项目等级保持 C。
+生产灾备、高可用、生产容量/SLA或生产运维；项目等级保持 C。
 
 ## 第三部分异常与版本一致性
 
@@ -86,6 +91,30 @@ ReportJob retry 生命周期已通过专用真实 Edge 脚本验证，第三部�
 外部依赖：RapidOCR 可用但不保证手写/公式；公式 OCR unavailable；真实主观题 AI unavailable。发布含义是教师确认版本，不是已发送学生端。
 
 第二部分新增 BUSINESS-E2E 与机器证据，并更新 HANDOFF、FINAL-ACCEPTANCE 和能力矩阵。本任务没有 git add、提交、推送、PR 或部署；没有删除 Volume；独立 E2E 栈和证据数据保持运行/保留，等待用户决定。
+
+## 第七部分恢复验收（2026-07-24）
+
+状态：**7A–7D PASS，开发环境范围。**
+
+- 正式 7A/7B Run：`gate-20260724-static-a1`
+- 正式 7C Run：`fault-20260724-c84f19`
+- 7A/7B 原始证据 SHA-256：
+  `d2ea850fbcc8769ca875be1a9df5fd8745fd6730774f20bc050678fa7e0816a2`
+- 7C 原始证据 SHA-256：
+  `fe825009dd0f64ba9636c8244170c215181fa3f1da974dc574c46dd61c98ac5f`
+- 正式摘要：`backup-restore-verification.json`、`failure-recovery-verification.json`
+- 运维文档：`BACKUP-RESTORE.md`、`FAILURE-RECOVERY.md`、`OPERATIONS.md`
+
+观察 RPO 为 0 秒，只因为备份窗口内没有源写入；不是生产承诺。2.314 秒只表示独立
+PostgreSQL 数据库恢复，不是完整应用恢复时间。恢复 broker visibility timeout 为 15 秒，
+但实际重投完成为 102.230 秒，15 秒不是实际恢复时间或 SLA。
+
+Docker Desktop Engine 曾持续返回 HTTP 500，仅执行一次官方正常重启；未执行 WSL reset、
+factory reset、prune 或数据清理。重启会中断全部本地容器，不能作为生产高可用机制。
+7A/7B 容器因此 stopped；其 ID、5 个卷和网络保持不变。7C 最终 7 服务 healthy。
+
+正式 Run 和所有失败 Run 均保留，失败 Run 不得拼接为 PASS。资源占用磁盘，后续清理必须
+取得独立授权、列出精确目标并再次确认。本阶段未清理 Docker，未开始第八部分。
 
 ## 第六部分容量更新（2026-07-23）
 

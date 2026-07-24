@@ -1,0 +1,148 @@
+x-recovery-labels: &recovery-labels
+  com.ahamark.recovery-v7.run-id: ${RECOVERY_V7_RUN_ID:?required}
+  com.ahamark.recovery-v7.project: ${RECOVERY_V7_COMPOSE_PROJECT:?required}
+
+x-app-env: &app-env
+  APP_ENV: test
+  RECOVERY_V7_ENABLED: "true"
+  RECOVERY_V7_RUN_ID: ${RECOVERY_V7_RUN_ID:?required}
+  RECOVERY_V7_COMPOSE_PROJECT: ${RECOVERY_V7_COMPOSE_PROJECT:?required}
+  DATABASE_URL: postgresql+psycopg://${RECOVERY_POSTGRES_USER:?required}:${RECOVERY_POSTGRES_PASSWORD:?required}@postgres:5432/${RECOVERY_SOURCE_DATABASE:?required}
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/1
+  CELERY_VISIBILITY_TIMEOUT: "15"
+  MINIO_ENDPOINT: minio:9000
+  MINIO_PUBLIC_ENDPOINT: minio:9000
+  MINIO_ACCESS_KEY: ${RECOVERY_MINIO_ACCESS_KEY:?required}
+  MINIO_SECRET_KEY: ${RECOVERY_MINIO_SECRET_KEY:?required}
+  MINIO_BUCKET: ${RECOVERY_SOURCE_BUCKET:?required}
+  MINIO_SECURE: "false"
+  MINIO_PUBLIC_SECURE: "false"
+  SIGNED_URL_EXPIRY_SECONDS: "2"
+  DEMO_ACTOR_ENABLED: "false"
+  RECOGNITION_PROVIDER: fake
+  GRADING_PROVIDER: unavailable
+  RECOVERY_V7_FAULT_CHECKPOINT: ${RECOVERY_V7_FAULT_CHECKPOINT:-}
+  RECOVERY_V7_FAULT_DELAY_SECONDS: ${RECOVERY_V7_FAULT_DELAY_SECONDS:-0}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    labels: *recovery-labels
+    environment:
+      POSTGRES_DB: ${RECOVERY_SOURCE_DATABASE:?required}
+      POSTGRES_USER: ${RECOVERY_POSTGRES_USER:?required}
+      POSTGRES_PASSWORD: ${RECOVERY_POSTGRES_PASSWORD:?required}
+    volumes: [postgres_source_data:/var/lib/postgresql/data]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${RECOVERY_POSTGRES_USER:?required} -d ${RECOVERY_SOURCE_DATABASE:?required}",
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  postgres_restore:
+    image: postgres:16-alpine
+    labels: *recovery-labels
+    environment:
+      POSTGRES_DB: ${RECOVERY_RESTORED_DATABASE:?required}
+      POSTGRES_USER: ${RECOVERY_POSTGRES_USER:?required}
+      POSTGRES_PASSWORD: ${RECOVERY_POSTGRES_PASSWORD:?required}
+    volumes: [postgres_restore_data:/var/lib/postgresql/data]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${RECOVERY_POSTGRES_USER:?required} -d ${RECOVERY_RESTORED_DATABASE:?required}",
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  redis:
+    image: redis:7-alpine
+    labels: *recovery-labels
+    command: redis-server --appendonly yes
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    labels: *recovery-labels
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${RECOVERY_MINIO_ACCESS_KEY:?required}
+      MINIO_ROOT_PASSWORD: ${RECOVERY_MINIO_SECRET_KEY:?required}
+    volumes: [minio_source_data:/data]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  minio-restore:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    labels: *recovery-labels
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${RECOVERY_MINIO_ACCESS_KEY:?required}
+      MINIO_ROOT_PASSWORD: ${RECOVERY_MINIO_SECRET_KEY:?required}
+    volumes: [minio_restore_data:/data]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  api:
+    build: {context: ., dockerfile: apps/api/Dockerfile}
+    labels: *recovery-labels
+    environment: *app-env
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      minio: {condition: service_healthy}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  worker:
+    build: {context: ., dockerfile: apps/api/Dockerfile}
+    labels: *recovery-labels
+    environment: *app-env
+    command: celery -A workers.celery_app:celery_app worker --loglevel=INFO
+    depends_on:
+      redis: {condition: service_healthy}
+      api: {condition: service_healthy}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A workers.celery_app:celery_app inspect ping -d celery@$${HOSTNAME}",
+        ]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+
+volumes:
+  postgres_source_data:
+    labels: *recovery-labels
+  postgres_restore_data:
+    labels: *recovery-labels
+  redis_data:
+    labels: *recovery-labels
+  minio_source_data:
+    labels: *recovery-labels
+  minio_restore_data:
+    labels: *recovery-labels

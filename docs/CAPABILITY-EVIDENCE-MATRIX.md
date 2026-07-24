@@ -11,7 +11,7 @@
 - `UNAVAILABLE`：没有可用正式实现或 Provider。
 - `OUT_OF_SCOPE`：当前版本明确不做。
 
-真实证据简称：`BUSINESS-E2E` = `business-e2e-verification.json` + `BUSINESS-E2E.md`；`HTTP72` = `analytics72-http-verification.json`；`BROWSER72` = `analytics72-browser-smoke.json`；`PERF` = `performance-results.json`；`AUTH-MATRIX` = `AUTHORIZATION-MATRIX.md` + `authorization-matrix-verification.json` + `authorization-http-verification.json`；`FILE-MATRIX` = `FILE-SECURITY-VERIFICATION.md` + `file-security-verification.json`；`DOC-EVIDENCE` = HANDOFF/FINAL-ACCEPTANCE 中记录的环境验证。
+真实证据简称：`BUSINESS-E2E` = `business-e2e-verification.json` + `BUSINESS-E2E.md`；`HTTP72` = `analytics72-http-verification.json`；`BROWSER72` = `analytics72-browser-smoke.json`；`PERF` = `performance-results.json`；`AUTH-MATRIX` = `AUTHORIZATION-MATRIX.md` + `authorization-matrix-verification.json` + `authorization-http-verification.json`；`FILE-MATRIX` = `FILE-SECURITY-VERIFICATION.md` + `file-security-verification.json`；`RECOVERY7` = `backup-restore-verification.json` + `failure-recovery-verification.json` + 两份恢复手册；`DOC-EVIDENCE` = HANDOFF/FINAL-ACCEPTANCE 中记录的环境验证。
 
 ## 摘要
 
@@ -33,7 +33,9 @@
 | 文件安全 | IMPLEMENTED_AND_VERIFIED | 41/41 结构 fixture、故障补偿及真实 URL 到期通过 |
 | 权限隔离 | IMPLEMENTED_AND_VERIFIED | 27×29、702/702、全路由边界及 HTTP 16/16 通过 |
 | 性能 | PARTIAL | 第六部分开发机有界容量 PASS；PARTIAL 仅指生产容量、SLA、多实例与故障条件尚未建立 |
-| 备份恢复 | PARTIAL | PostgreSQL 既有恢复记录；MinIO 未运行 |
+| 备份恢复 | IMPLEMENTED_AND_VERIFIED（开发范围） | RECOVERY7：PostgreSQL/MinIO 独立恢复及单 Worker 故障恢复通过；生产灾备、高可用和 RPO/RTO 未建立 |
+| 生产灾备/RPO/RTO | UNAVAILABLE | 异地、加密、增量、长期、生产规模和正式恢复目标均未建立 |
+| 生产高可用/多实例恢复 | UNAVAILABLE | 第七部分是单 API/单 Worker；未验证多实例切换或自动故障转移 |
 | 生产部署 | UNAVAILABLE | 当前仅等级 C，开发 Compose 不能直接生产使用 |
 
 ## 逐项证据
@@ -200,10 +202,10 @@
 - 模型/迁移：StoredFile.owner/status；`0001`。
 - 自动化证据：`FILE-MATRIX` 记录 41/41 个运行时小型结构 fixture，覆盖 PDF、PNG/JPEG、DOCX/XLSX、公式注入、首/中/末非法批次全有或全无、同批重复校验值、存储写失败补偿和数据库提交失败补偿；本轮安全 marker 的孤儿增量为 0。
 - 真实证据：test-only 有效期 2 秒的真实 MinIO 签名 URL 到期后返回 403；重新鉴权签发成功，旧 URL 不恢复有效。隔离 HTTP 同时验证 StoredFile metadata、signed URL 和 delete 的 owner 边界。
-- 限制：fixture 是运行时生成的小型结构输入，不是外部攻击者渗透、真实恶意软件执行、无限文件类型覆盖或解析器模糊测试。Redis/MinIO 故障恢复、MinIO 备份恢复、生产容量与运维仍未完成。
+- 限制：fixture 是运行时生成的小型结构输入，不是外部攻击者渗透、真实恶意软件执行、无限文件类型覆盖或解析器模糊测试。第七部分只完成开发环境恢复；生产灾备、高可用、生产容量与运维仍未建立。
 - 可以说：第五部分所列结构化文件安全 fixture 已通过；上传前内容校验、批次原子性、对象补偿、StoredFile owner 隔离和短期签名 URL 到期已验证。
 - 禁止说：已抵御所有恶意文件、文件上传绝对安全、已通过外部渗透或生产安全认证、MinIO 灾备恢复已完成。
-- 后续验收条件：生产前仍需独立完成外部安全评估、容量与资源约束验证、Redis/MinIO 故障恢复和 MinIO 备份恢复；不得把这些后续项反写为第五部分未完成。
+- 后续验收条件：生产前仍需独立完成外部安全评估、容量与资源约束验证，以及正式拓扑下的灾备、高可用和多实例恢复；不得把这些后续项反写为第五部分未完成。
 
 ### 15. 权限隔离 — `IMPLEMENTED_AND_VERIFIED`
 
@@ -233,16 +235,25 @@
 - 禁止说：已证明生产容量、OCR 准确率、手写/公式能力或生产 SLA。
 - 后续验收条件：生产前按正式部署拓扑、真实脱敏分布、监控和 SLA 重新压测。
 
-### 17. 备份恢复 — `PARTIAL`
+### 17. 备份与故障恢复 — `IMPLEMENTED_AND_VERIFIED（开发范围）`
 
-- 实现位置：`OPERATIONS.md`、只读 `scan_storage_orphans`。
-- 模型/迁移：全库和 StoredFile 对象引用；无自动恢复模型。
-- 自动化证据：孤儿扫描工具只读设计；无完整灾备自动化。
-- 真实证据：DOC-EVIDENCE 记录独立 PostgreSQL 逻辑恢复及关键表计数；MinIO 恢复 NOT RUN。
-- 限制：数据库与对象必须成对备份；Redis/MinIO 中断、版本化、RPO/RTO 和恢复后一致性未验证。
-- 可以说：PostgreSQL 在独立环境做过一次逻辑恢复验证，且有只读孤儿扫描。
-- 禁止说：完整灾备通过、MinIO 可恢复、已满足 RPO/RTO。
-- 后续验收条件：受控目标上的 PostgreSQL+MinIO 联合恢复、引用一致性、权限与恢复演练记录。
+- 实现位置：`BACKUP-RESTORE.md`、`FAILURE-RECOVERY.md`、`OPERATIONS.md`、恢复 Compose、
+  只读 reconciliation 和两个正式摘要。
+- 模型/迁移：全库、StoredFile 动态对象引用、RecognitionJob、ReportJob、
+  AnalyticsSnapshot；Alembic `0010_report_student`。
+- 自动化证据：恢复安全测试、Windows UTF-8/结构化结果测试、OCR/Report/Analytics
+  定向测试，以及完整后端 113 passed、2 skipped；Ruff 113 files、mypy 52 files。
+- 真实证据：RECOVERY7。`gate-20260724-static-a1` 完成 PostgreSQL custom-format 独立
+  恢复和 MinIO 7/7 对象恢复；`fault-20260724-c84f19` 完成 12 个单 Worker 故障场景。
+- 限制：只适用于纯合成、单 API/单 Worker 开发环境。观察 RPO 为 0 秒仅因备份窗口无写入；
+  2.314 秒仅是独立数据库恢复；visibility 配置 15 秒而实际重投完成 102.230 秒。
+  异地、加密、密钥轮换、长期、增量、生产规模、多实例和自动切换均未验证。
+- 可以说：PostgreSQL 独立备份恢复、MinIO 独立对象恢复和单 Worker 故障恢复在记录的开发
+  环境 PASS；StoredFile、文件解析、签名 URL、队列、幂等和孤儿对账通过。
+- 禁止说：生产灾备、生产高可用、生产 RPO/RTO 或 SLA 已建立；不得把 Fake OCR、
+  test-only 故障注入或 Docker Desktop 重启描述为生产能力。
+- 后续验收条件：按正式部署拓扑验证加密/异地/增量/长期备份、多实例切换、监控告警、
+  生产规模和经批准的 RPO/RTO。
 
 ### 18. 生产部署 — `UNAVAILABLE`
 

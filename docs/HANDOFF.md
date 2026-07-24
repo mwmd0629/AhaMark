@@ -1,12 +1,13 @@
-# AhaMark 教师核心业务浏览器闭环交接（2026-07-23）
+# AhaMark 项目交接（更新于 2026-07-24）
 
 第一部分的可审计基线入口为 `PROJECT-BASELINE.md`；能力状态以 `CAPABILITY-EVIDENCE-MATRIX.md` 为准。下文“通过”只描述既有检查记录，不自动表示生产可用。
 
 ## 最终结论
 
-验收等级仍为 **C（内部演示或开发测试）**。第二部分教师核心业务浏览器闭环、
-第五部分权限与文件安全以及第六部分开发机有界容量均已关闭。第六部分通过不自动升级到
-B；生产容量与 SLA、多实例扩展、Redis/MinIO 故障恢复、MinIO 备份恢复和生产运维仍未完成。
+验收等级仍为 **C（内部演示或开发测试）**。第二部分教师核心业务浏览器闭环、第五部分
+权限与文件安全、第六部分开发机有界容量以及第七部分 7A–7D 均已关闭。第七部分证明
+PostgreSQL、MinIO 和单 Worker 故障恢复在纯合成独立开发环境通过；不建立生产灾备、
+高可用、生产 RPO/RTO、SLA 或多实例恢复能力。
 
 ## 真实状态
 
@@ -22,6 +23,9 @@ B；生产容量与 SLA、多实例扩展、Redis/MinIO 故障恢复、MinIO 备
   包含 50 份不同学生 PDF 的 ZIP；52/52 Celery/MinIO Job completed。
 - Analytics：除既有 35 请求、6 步冒烟和 A–H 闭环外，第六部分已覆盖 50/100/200 人、
   20/50/100 题以及同 Release 顺序/20 路并发幂等；最大规模学生读取约 8 秒。
+- 恢复：7A/7B 正式 Run `gate-20260724-static-a1`、7C 正式 Run
+  `fault-20260724-c84f19`。PostgreSQL/MinIO 独立恢复和单 Worker 故障恢复均为开发环境
+  PASS；7A/7B 容器因 Docker Desktop 正常重启处于 stopped，7C 最终 7 服务 healthy。
 
 ## 第二部分浏览器证据
 
@@ -52,7 +56,7 @@ B；生产容量与 SLA、多实例扩展、Redis/MinIO 故障恢复、MinIO 备
 - 证据：`docs/SCORE-CORRECTNESS.md`、`docs/score-correctness-verification.json` 和
   `docs/score-correctness-browser-verification.json`。
 
-## 第八部分变更
+## 既有安全与运维加固
 
 - P0：修复通用文件元数据、删除、签名 URL 无认证/无 owner 校验。
 - P1：统一上传内容检查；PDF/图片/Office 安全限制；学生作业整批先验后存；存储错误回滚。
@@ -64,7 +68,8 @@ B；生产容量与 SLA、多实例扩展、Redis/MinIO 故障恢复、MinIO 备
 
 ## 验证汇总
 
-- 后端：第五部分完整门禁 87 passed，1 条第三方 Starlette TestClient 弃用警告；Ruff 与 mypy 通过。
+- 后端：第七部分关闭轮 113 passed、2 skipped，1 条第三方 Starlette TestClient
+  弃用警告；Ruff format/check 113 files、mypy 52 files 通过。
 - 前端：第四部分关闭轮 26 tests passed；Prettier、ESLint、TypeScript 通过。
 - Next build：18 条路由构建通过；仍有 lockfile SWC 自动修补失败警告（未阻断构建）。
 - 性能：五类同步接口 100%；P95 为 40.51–88.18 ms。仅单客户端开发冒烟。
@@ -74,8 +79,11 @@ B；生产容量与 SLA、多实例扩展、Redis/MinIO 故障恢复、MinIO 备
   Cookie 重放和完整多会话管理仍属后续。
 - Worker：pause 时 `/ready` degraded/0 worker；unpause 后 pong 且 healthy。
 - 代理：登录 200、缺 CSRF 403、正确退出 204、CSP/nosniff 可见。
-- PostgreSQL 恢复：独立库恢复并验证 users/classes/assignments/submissions/snapshots/releases = 3/4/5/8/8/3。
-- MinIO 恢复：NOT RUN；只读孤儿扫描发现合成 PDF 缺对象 1 条、旧 smoke 对象缺记录 1 条，未删除。
+- PostgreSQL 恢复：独立 custom-format 备份恢复，源/目标稳定哈希一致；开发环境 PASS。
+- MinIO 恢复：7/7 对象、metadata/checksum/content-type、文件解析、StoredFile 引用、
+  2 秒签名 URL 到期/重签和六类孤儿对账通过；开发环境 PASS。
+- 故障恢复：Worker 离线/崩溃、真实 redelivery、Redis/MinIO 故障、Report retry 和三类
+  幂等通过；visibility 配置 15 秒，实际重投完成 102.230 秒。
 
 ## 启动、停止与恢复
 
@@ -85,10 +93,10 @@ B；生产容量与 SLA、多实例扩展、Redis/MinIO 故障恢复、MinIO 备
 
 1. 第六部分开发机有界容量已通过，但最大规模 Analytics 学生趋势/详情约 7.7–7.9 秒；
    生产容量、SLA、多实例扩展、故障条件和生产数据分布尚未建立。
-2. MinIO 备份恢复、Redis/MinIO 中断恢复未验证。
+2. 生产灾备、高可用、多实例恢复、异地/加密/增量/长期备份和生产 RPO/RTO 未建立。
 3. 开发 Compose 暴露 MinIO 端口，未提供正式 TLS/secret/监控平台配置。
-4. 第五部分已提交为 `8ba3a413c4d7864506294ce728fa4f4dffeefce2`；第六部分工作树
-   修改仍全部未暂存、未提交、未推送、未部署。
+4. 当前第七部分工作树仍全部未暂存、未提交、未推送、未部署；原始恢复证据位于被忽略的
+   `.recovery-v7/`，正式提交只应包含脱敏摘要。
 
 ## 第五部分：权限与文件安全
 
@@ -99,9 +107,32 @@ B；生产容量与 SLA、多实例扩展、Redis/MinIO 故障恢复、MinIO 备
 - 无未修 P0/P1；全局孤儿扫描含既有 recognition 派生对象口径噪声，未自动删除。
 - 证据：`AUTHORIZATION-MATRIX.md`、`FILE-SECURITY-VERIFICATION.md` 及对应 JSON。
 
-后续维护先从 `docs/FINAL-ACCEPTANCE.md` 中生产容量/SLA、故障恢复、备份恢复和生产运维
-等 NOT RUN/PARTIAL 项开始；第六部分不再是未完成项。不要扩展学生端或宣称主观题 AI
-自动评分。本轮第六部分工作树尚未提交、推送或部署。
+后续维护从 `docs/FINAL-ACCEPTANCE.md` 中生产容量/SLA、生产灾备、高可用、多实例和
+正式部署等 NOT ESTABLISHED/PARTIAL 项开始；第六和第七部分不再是未完成项。不要扩展
+学生端，不要宣称主观题 AI 自动评分或把规则型 TeachingInsight 描述为 AI 深度分析。
+
+## 第七部分恢复交接（2026-07-24）
+
+- 7A PostgreSQL：PASS；备份 4,198,752 bytes，1.058 秒，独立恢复 2.314 秒。
+- 7B MinIO：PASS；7 个对象恢复，结构解析和六类孤儿对账通过。
+- 7C 故障恢复：PASS；12/12 场景通过，最终队列、Celery、对象和重复计数均为 0。
+- 7D 文档与证据：见 `BACKUP-RESTORE.md`、`FAILURE-RECOVERY.md` 及两份正式 JSON 摘要。
+- 正式 Run 和所有失败 Run 均保留。失败 Run 只能用于诊断，不能拼接 PASS。
+- Docker 资源较多并占用磁盘；任何清理需要独立授权、精确清单和再次确认。
+- 本阶段未清理 Docker、未提交、未部署，也未开始第八部分。
+
+### 保留的恢复资源
+
+- 正式 7A/7B：`gate-20260724-static-a1`，7 容器、5 卷、1 网络；容器因 Docker Desktop
+  重启处于 stopped，容器 ID、卷和网络未重建。
+- 正式 7C：`fault-20260724-c84f19`，7 容器、5 卷、1 网络；最终 7 服务 healthy。
+- 失败/尝试 Run：`fault-20260724-57b17b`、`fault-20260724-2e18a9`、
+  `fault-20260724-bb4faf`、`fault-20260724-916cba`、`fault-20260724-db8635`、
+  `fault-20260724-e6add0`、`fault-20260724-6b6141`、`fault-20260724-5edcbd`、
+  `fault-20260724-2a722c`。每个保留 7 容器、5 卷和 1 个精确命名网络。
+
+这些资源占用本地磁盘，本阶段没有执行任何清理。后续清理必须单独授权，先生成精确资源
+清单，再次确认 Run ID、project、容器、卷、网络、数据库和 bucket；不得扩大目标范围。
 
 ## 第六部分容量交接（2026-07-23）
 

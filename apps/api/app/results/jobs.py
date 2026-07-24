@@ -6,6 +6,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from app.failure_recovery import recovery_fault_checkpoint
 from app.models import (
     AuditLog,
     FileStatus,
@@ -20,14 +21,23 @@ from app.results.services import gradebook_xlsx, release_scores, student_report_
 from app.storage.base import ObjectStorage
 
 
-def run_report_job(db: Session, storage: ObjectStorage, job_id: uuid.UUID) -> None:
+def run_report_job(
+    db: Session,
+    storage: ObjectStorage,
+    job_id: uuid.UUID,
+    *,
+    allow_running_resume: bool = False,
+) -> None:
     job = db.get(ReportJob, job_id)
     if job is None or job.status in {"completed", "partially_completed"}:
         return
-    if job.status == "running":
+    if job.status == "running" and not allow_running_resume:
         return
-    job.status, job.started_at, job.progress = "running", now_utc(), 5
-    db.commit()
+    transitioned_to_running = job.status != "running"
+    if transitioned_to_running:
+        job.status, job.started_at, job.progress = "running", now_utc(), 5
+        db.commit()
+        recovery_fault_checkpoint("report-before-storage")
     written_key: str | None = None
     try:
         release = db.get(GradeRelease, job.grade_release_id)

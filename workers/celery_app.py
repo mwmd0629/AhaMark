@@ -21,4 +21,5 @@ celery_app.conf.update(
     task_soft_time_limit=1740,
     worker_prefetch_multiplier=1,
     result_expires=3600,
+    broker_transport_options={"visibility_timeout": s.celery_visibility_timeout},
 )

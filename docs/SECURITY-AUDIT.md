@@ -1,11 +1,12 @@
-# 安全审计（含第五部分权限与文件安全，更新于 2026-07-23）
+# 安全审计（更新于 2026-07-24）
 
 ## 结论
 
 状态：**PASS（第五部分矩阵范围内）**。27 类资源 × 29 操作的显式适用/N/A
 矩阵、六身份 702/702、41/41 文件 fixture、全业务路由 Session/CSRF 边界和隔离栈
-真实 HTTP 16/16 已通过。Cookie 重放、多实例限速、外部渗透与 Redis/MinIO 故障不在
-本结论内，仍不支持真实教学试点或生产。
+真实 HTTP 16/16 已通过。第七部分另在纯合成独立开发环境完成 PostgreSQL/MinIO 恢复和
+单 Worker 故障恢复，但不改变 Cookie 重放、多实例限速、外部渗透、生产灾备与高可用
+缺口。项目整体等级保持 C，不适合真实学生数据、真实教学试点、生产部署或公网开放。
 
 ## 已修复
 
@@ -26,9 +27,24 @@
 - PASS：对象键随机且含 owner；签名 URL 默认 900 秒；Bucket 未通过应用公开；Nginx 不代理 MinIO 控制台。
 - PASS：117 个适用格、666 个 N/A 已机器化；test-only 2 秒签名 URL 在真实 MinIO
   到期 403，重新签发通过。
-- PASS（本轮范围）：第五部分安全 marker 的孤儿增量为 0。历史只读报告中的既有
-  缺对象/无记录项未自动删除；全局扫描还会把未建 StoredFile 的 recognition 派生图
-  列为对象无记录。MinIO 对象备份恢复仍未执行。
+- PASS（开发恢复范围）：正式 7A/7B Run 将 7 个 MinIO 对象恢复到全新 bucket，
+  metadata/checksum/content-type、StoredFile 动态引用、图片/PDF/XLSX/ZIP 解析和六类
+  孤儿对账通过；未自动删除任何对象。结论不外推到生产对象存储或长期备份。
+
+## 第七部分恢复安全边界
+
+- 恢复命令要求 `APP_ENV=test`、恢复门禁、合法 Run ID，以及数据库/bucket/project 的
+  精确身份一致。
+- Compose 无宿主机发布端口，源/目标数据库、bucket、卷和网络均独立命名。
+- reconciliation 默认只读，不自动删除孤儿、bucket、对象或记录。
+- 原始证据位于被忽略的 `.recovery-v7/`；正式摘要不含密码、Token、Cookie、CSRF、
+  完整签名 URL、查询参数、`X-Amz-*` 或运行时凭据。
+- test-only 故障检查点在 production 硬拒绝；只有 Celery 明确标记 redelivered 时才允许
+  running Job 恢复。
+- Docker Desktop Engine HTTP 500 仅通过一次正常重启恢复；未执行 WSL reset、factory
+  reset、prune 或数据清理。桌面重启中断全部本地容器，不能作为生产高可用机制。
+- 正式和失败 Run 均保留。失败 Run 只能作为诊断历史，不能拼接 PASS；任何资源清理需要
+  独立授权、精确清单和再次确认。
 
 ## 代理和响应头
 

@@ -1,6 +1,26 @@
 # AhaMark
 
-AhaMark 是面向教师的 AI 作业批改与学情分析平台。当前已实现数据库会话认证、Submission OCR 工程链路、教师评分复核、不可变成绩发布、异步 Excel/中文 PDF 报告和版本化学情统计。RapidOCR 是真实本地印刷体 OCR；当前没有真实主观题 AI Provider，主观题必须人工评分。第五部分已完成 27 类资源权限矩阵和运行时文件安全 fixture；但异步容量、MinIO 恢复和正式生产运维仍未完成，因此验收等级为 **C（内部演示或开发测试）**，不适合真实教学试点或生产。
+AhaMark 是面向教师的 AI 作业批改与学情分析平台。当前已实现数据库会话认证、Submission OCR 工程链路、教师评分复核、不可变成绩发布、异步 Excel/中文 PDF 报告和版本化学情统计。RapidOCR 是真实本地印刷体 OCR；当前没有真实主观题 AI Provider，主观题必须人工评分。第五部分权限与文件安全、第六部分开发机有界容量及第七部分开发环境备份/故障恢复均已完成定义范围内验收。整体等级仍为 **C（内部演示或开发测试）**，不适合真实学生数据、真实教学试点、生产部署或公网开放。
+
+## 第七部分：开发环境恢复验收
+
+第七部分 7A–7D 为 PASS：
+
+- PostgreSQL 独立逻辑备份恢复：开发环境 PASS
+- MinIO 独立对象恢复、metadata、引用、文件解析及孤儿对账：开发环境 PASS
+- 单 API/单 Worker 的 Worker、Redis、MinIO 故障恢复：开发环境 PASS
+- 运维文档、脱敏摘要和证据收口：PASS
+
+正式证据入口：
+
+- [备份恢复手册](docs/BACKUP-RESTORE.md)
+- [故障恢复手册](docs/FAILURE-RECOVERY.md)
+- [备份恢复摘要](docs/backup-restore-verification.json)
+- [故障恢复摘要](docs/failure-recovery-verification.json)
+
+本结论不建立生产灾备、生产高可用、生产 RPO/RTO、SLA 或多实例恢复能力。异地、加密、
+增量和长期备份均未验证。观察 RPO 为 0 秒仅因备份窗口无源写入；2.314 秒仅是独立数据库
+恢复耗时。Broker visibility timeout 为 15 秒，正式重投完成观察值为 102.230 秒。
 
 第一部分基线入口：`docs/PROJECT-BASELINE.md`。能力证据、数据安全边界和统一产品措辞分别见 `docs/CAPABILITY-EVIDENCE-MATRIX.md`、`docs/DATA-SECURITY-BOUNDARIES.md`、`docs/PRODUCT-CAPABILITY-STATEMENTS.md`。这些文档严格区分实现、自动化验证、真实环境证据和生产可用性。
 
@@ -47,12 +67,12 @@ Analytics 7.1 新增 API：
 
 所有下钻使用 CurrentUser，并校验 AnalyticsSnapshot、Assignment、Class 与固定 GradeRelease 的所有权；列表默认 20 条、最多 100 条并稳定排序。教学建议明确标记为“规则型教学建议”，保留原始内容及编辑历史，确认后不可静默修改，evidence 数字在确认时与固定 AnalyticsSnapshot 再校验。前端未引入图表库，使用原生 HTML/CSS，因此无新增许可证和锁文件变化。
 
-历史上的第八部分接手条件包含浏览器闭环、性能、安全专项、代理和隔离矩阵；其中
-第五部分现已完成定义范围内的权限与文件安全矩阵。异步/并发容量、Redis/MinIO
-故障恢复、MinIO 备份恢复和生产运维仍待后续。当前仍没有真实主观题 AI Provider，
+历史上的后续接手条件包含浏览器闭环、性能、安全专项、代理和隔离矩阵；第五部分权限与
+文件安全、第六部分开发机容量和第七部分开发环境恢复现已完成定义范围内验收。生产容量、
+生产灾备、高可用、正式部署和运维体系仍未建立。当前仍没有真实主观题 AI Provider，
 主观题必须教师人工评分。
 
-## 第八部分交付入口
+## 验收与交付入口
 
 - 最终验收：`docs/FINAL-ACCEPTANCE.md`
 - 安全与文件策略：`docs/SECURITY-AUDIT.md`、`docs/FILE-SECURITY.md`
@@ -202,4 +222,7 @@ npm.cmd run test
 npm.cmd run build
 ```
 
-2026-07-22 修改前：Pytest 19 passed；后端格式/检查/mypy、前端格式/lint/typecheck/build 通过，Vitest 首次因沙箱 esbuild EACCES 未启动。修改后：Pytest 21 passed，Vitest 8 files / 17 tests passed（批准后在沙箱外运行），其余质量命令通过。详见 `docs/HANDOFF.md`。仓库仍在 `master` 且没有任何提交；所有项目文件均未跟踪。应先审阅并建立前五部分与 5.5 的基线提交，当前任务没有提交、推送或部署。
+历史验证记录详见 `docs/HANDOFF.md`。第七部分关闭轮复用刚完成的后端门禁：
+113 passed、2 skipped，Ruff format/check 113 files，mypy 52 files；7D 另执行 JSON、原始
+证据哈希、Markdown UTF-8、相对链接、陈旧口径、敏感字段和 Git diff 门禁。当前第七部分
+工作树仍未暂存、未提交、未推送或部署。

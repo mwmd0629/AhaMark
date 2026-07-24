@@ -37,3 +37,4 @@ tests/.artifacts/
 *.onnx
 *.pdmodel
 *.pdiparams
+.recovery-v7/

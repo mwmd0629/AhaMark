@@ -1,0 +1,88 @@
+{
+  "schema_version": "1.0",
+  "result": "PASS",
+  "scope": "isolated synthetic development backup and restore verification",
+  "run_id": "gate-20260724-static-a1",
+  "compose_project": "ahamark-recovery-v7-gate-20260724-static-a1",
+  "versions": {
+    "postgresql": "16.14",
+    "minio_image": "RELEASE.2025-04-22T22-12-26Z",
+    "alembic_revision": "0010_report_student"
+  },
+  "postgresql": {
+    "backup_format": "custom (-Fc)",
+    "backup_size_bytes": 4198752,
+    "backup_seconds": 1.058,
+    "restore_seconds": 2.314,
+    "source_stable_hash": "57a4c1da9f9ef9b5a95f323aac49ea0cbd61b7ec555ea89651c9224ec4d83480",
+    "restored_stable_hash": "57a4c1da9f9ef9b5a95f323aac49ea0cbd61b7ec555ea89651c9224ec4d83480",
+    "selected_record_counts": {
+      "students": 852,
+      "submissions": 351,
+      "submission_score_snapshots": 351,
+      "grade_releases": 3,
+      "grade_release_items": 350,
+      "report_jobs": 1,
+      "analytics_snapshots": 1,
+      "teaching_insights": 1,
+      "stored_files": 7
+    },
+    "snapshot_boundaries": {
+      "complete": 350,
+      "incomplete": 1,
+      "incomplete_students_scored_as_zero": 0,
+      "missing_students_without_formal_grade": 2,
+      "unfinalized_students_with_complete_snapshot": 0
+    },
+    "binding_reconciliation": {
+      "grade_release_snapshot_bindings": 350,
+      "invalid_grade_release_sources": 0,
+      "invalid_report_release_links": 0,
+      "invalid_analytics_release_links": 0,
+      "invalid_insight_analytics_links": 0,
+      "duplicate_complete_analytics": 0,
+      "stored_file_reference_violations": 0
+    }
+  },
+  "minio": {
+    "source_objects": 7,
+    "restored_objects": 7,
+    "manifest_mismatches": 0,
+    "metadata_checksum_content_type_mismatches": 0,
+    "parsed_files": {
+      "png": 3,
+      "pdf": 1,
+      "xlsx": 1,
+      "zip": 1,
+      "json": 1
+    },
+    "signed_url": {
+      "ttl_seconds": 2,
+      "initial_status": 200,
+      "expired_status": 403,
+      "renewed_status": 200,
+      "old_after_renew_status": 403,
+      "url_query_recorded": false
+    },
+    "orphan_classification": {
+      "database_missing_object": 0,
+      "object_missing_database": 0,
+      "legitimate_derived_objects": 1,
+      "known_historical_orphans": 0,
+      "current_run_unknown_orphans": 0,
+      "unable_to_classify": 0
+    },
+    "automatic_deletion": false
+  },
+  "development_observations": {
+    "writes_during_backup": false,
+    "observed_data_loss_records": 0,
+    "observed_rpo_seconds": 0,
+    "observed_database_restore_seconds": 2.314,
+    "disclaimer": "The observed RPO is zero only because no source writes occurred during this development backup window. It is not a production RPO commitment. The restore time covers an isolated database restore, not full application recovery."
+  },
+  "raw_evidence": {
+    "relative_path": "../.recovery-v7/gate-20260724-static-a1/backup-restore-verification.json",
+    "sha256": "d2ea850fbcc8769ca875be1a9df5fd8745fd6730774f20bc050678fa7e0816a2"
+  }
+}

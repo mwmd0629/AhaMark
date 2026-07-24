@@ -168,9 +168,9 @@ def main() -> None:
     concurrency = concurrent_idempotency()
     passed = (
         all(
-        result["unique_snapshot_ids"] == 1
-        and result["source_snapshot_count"] == result["students"]
-        and all(drill["status"] in {200, 201} for drill in result["drills"])
+            result["unique_snapshot_ids"] == 1
+            and result["source_snapshot_count"] == result["students"]
+            and all(drill["status"] in {200, 201} for drill in result["drills"])
             for result in results
         )
         and concurrency["unique_snapshot_ids"] == 1

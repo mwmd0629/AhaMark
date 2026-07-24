@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
+    celery_visibility_timeout: int = 3600
     cors_origins: list[str] = ["http://localhost:3000"]
     minio_endpoint: str = "localhost:9000"
     minio_public_endpoint: str | None = None

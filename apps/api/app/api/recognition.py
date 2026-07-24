@@ -7,6 +7,7 @@ from app.api.actor import Actor
 from app.api.domain import ApiProblem, audit
 from app.core.config import get_settings
 from app.db.session import get_db
+from app.failure_recovery import recovery_fault_checkpoint
 from app.models import (
     Assignment,
     CandidateStatus,
@@ -157,16 +158,20 @@ def dispatch_recognition_job(db: Session, job: RecognitionJob) -> None:
         raise ApiProblem(503, "WORKER_UNAVAILABLE", "Redis 或 Celery Worker 不可用") from exc
 
 
-def run_recognition_job(db: Session, storage: ObjectStorage, job_id: uuid.UUID) -> None:
+def run_recognition_job(
+    db: Session,
+    storage: ObjectStorage,
+    job_id: uuid.UUID,
+    *,
+    allow_running_resume: bool = False,
+) -> None:
     settings = get_settings()
     job = db.scalar(select(RecognitionJob).where(RecognitionJob.id == job_id).with_for_update())
     if not job:
         return
-    if job.status in {
-        RecognitionStatus.running,
-        RecognitionStatus.completed,
-        RecognitionStatus.partially_completed,
-    }:
+    if job.status in {RecognitionStatus.completed, RecognitionStatus.partially_completed}:
+        return
+    if job.status == RecognitionStatus.running and not allow_running_resume:
         return
     provider = provider_from_settings(settings)
     available, reason = provider.available()
@@ -177,9 +182,14 @@ def run_recognition_job(db: Session, storage: ObjectStorage, job_id: uuid.UUID) 
         job.failed_at = now_utc()
         db.commit()
         return
+    transitioned_to_running = job.status != RecognitionStatus.running
     job.status = RecognitionStatus.running
-    job.started_at = now_utc()
+    if transitioned_to_running:
+        job.started_at = now_utc()
     job.attempt += 1
+    db.commit()
+    if transitioned_to_running:
+        recovery_fault_checkpoint("recognition-running")
     converter = DefaultDocumentConverter(settings)
     preprocessor = PillowPreprocessor()
     pages = list(
