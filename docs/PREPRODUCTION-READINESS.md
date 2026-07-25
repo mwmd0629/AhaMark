@@ -23,7 +23,7 @@ Compose project 为 `ahamark-preprod-<run-id>`，拥有独立的 PostgreSQL、Re
 
 ## 2026-07-24/25 运行时验收
 
-Docker Desktop 正常启动后连续两轮资源计数稳定。正式 Run 为 `v8-20260725-000100`，入口为
+Docker Desktop 正常启动后连续两轮资源计数稳定。该轮历史 Run 为 `v8-20260725-000100`，入口为
 `https://localhost:9443`。8A、8B 已 PASS；8C 的端口、HTTPS 和安全头通过，但现有 Nginx 容器因
 healthcheck 使用 `localhost` 命中未监听地址而显示 unhealthy，源码已改为 `127.0.0.1`，按不重建资源边界未
 重建容器，因此 8C 为 PARTIAL。8D 因没有 production-safe 的完整 GradeRelease/ReportJob
@@ -61,4 +61,5 @@ skipped）、Prettier、ESLint、TypeScript、Vitest（26 passed）、Next produ
 Nginx 配置、JSON 解析及 `git diff --check` 全部通过。机器可读的 ID、状态和原始证据 SHA-256 见两份 JSON。
 
 据此，第八部分 8A–8E 及 Edge 均可正式关闭，项目等级仍为 C。该结论不代表生产高可用、生产灾备、外部渗透
-通过、真实主观题 AI 可用或手写/公式 OCR 可靠；第九部分未开始。
+通过、真实主观题 AI 可用或手写/公式 OCR 可靠。原定八部分已经完成；任何后续工作属于重新规划的可选扩展，
+不自动形成新的编号部分。

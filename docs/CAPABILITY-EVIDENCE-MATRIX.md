@@ -17,7 +17,7 @@
 
 | 模块 | 状态 | 结论 |
 |---|---|---|
-| 认证 | IMPLEMENTED_AND_VERIFIED | 真实登录/CSRF 会话用于 HTTP72 与 BROWSER72；多实例限速等仍有限制 |
+| 认证 | IMPLEMENTED_AND_VERIFIED | 真实登录/CSRF 会话用于 HTTP72 与 BROWSER72；Redis 共享限速已在本地双 API 环境验证 |
 | 班级与学生 | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 覆盖真实浏览器创建、CSV 预览/确认、前导零与列表 |
 | 作业和 Rubric | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 覆盖六步向导、题目/题区/知识点/Rubric/发布正常主路径 |
 | 试卷 OCR | PARTIAL | Fake 编排 150/200/250 页、真实 RapidOCR 清晰印刷体 100/150/250 页完成；准确率、公式/手写/DOCX 仍有缺口 |
@@ -46,10 +46,11 @@
 - 模型/迁移：User、UserSession；`0001_initial`、`0008_teacher_sessions`。
 - 自动化证据：`tests/test_auth.py` 覆盖登录、me、CSRF、退出、过期、production 禁 demo、教师隔离和初始化教师。
 - 真实证据：HTTP72 两个教师真实登录；BROWSER72 登录与换教师；DOC-EVIDENCE 记录 Nginx 下登录/CSRF/Cookie 检查。
-- 限制：限速是单进程内存；Cookie 重放、多会话 UI、完整固定会话测试未完成；当前在线状态未复核。
-- 可以说：数据库会话、scrypt、HttpOnly/SameSite、写请求 CSRF、production Secure/禁 demo 已实现，并在开发验证范围内通过。
-- 禁止说：企业级 IAM、完整 SSO/MFA、多实例防爆破或生产认证已验收。
-- 后续验收条件：完整会话攻击用例、多副本 Redis 限速、全资源权限矩阵和生产 TLS/secret 配置。
+- 真实限速证据：production 登录限速使用 Redis 共享固定窗口状态，已验证双 API 实例累计失败次数；默认窗口 300 秒、阈值 5 次，Redis 不可用时 fail closed；限速 key 使用 HMAC，不包含明文密码。
+- 限制：上述限速仅在本地预生产式双 API 环境验证；不代表公网 DDoS、WAF 或生产攻击面能力。Cookie 重放、多会话 UI、完整固定会话测试未完成；当前在线状态未复核。
+- 可以说：数据库会话、scrypt、HttpOnly/SameSite、写请求 CSRF、production Secure/禁 demo 及本地双 API Redis 共享限速已实现，并在记录的开发验证范围内通过。
+- 禁止说：企业级 IAM、完整 SSO/MFA、公网防爆破、WAF、DDoS 防护或生产认证已验收。
+- 后续验收条件：完整会话攻击用例、Cookie 重放、多会话管理和生产 TLS/secret/攻击面验证。
 
 ### 2. 班级与学生 — `IMPLEMENTED_AND_VERIFIED`
 
@@ -264,7 +265,7 @@
 - 限制：第八部分本地预生产栈仅由 Nginx 回环发布 HTTPS；仍无正式证书、secret store、监控告警、完整容量/安全/灾备和发布审计。
 - 可以说：提供开发部署骨架和本地代理配置。
 - 禁止说：生产可用、可公网开放、可真实教学试点。
-- 后续验收条件：首先需要用户批准建立可追溯 Git 基线；生产能力仍需独立完整验收，当前保持 unavailable。
+- 后续验收条件：项目已建立连续、可追溯的八提交链；生产能力仍需独立完整验收，当前保持 unavailable。
 
 ## 明确 OUT_OF_SCOPE
 
@@ -272,3 +273,4 @@
 > 第八部分：production 守卫、双实例认证/CSRF/Redis 共享限速、Nginx 暴露、单 API
 > 切换、日志扫描和 Edge 均为 PASS；正式 Run 为 `v8-final-20260725-c6568104`，历史 Run
 > `v8-20260725-000100` 保持 PARTIAL，以 preproduction 两份 JSON 为准。
+> 原定八部分已经完成；任何后续工作属于重新规划的可选扩展，不自动形成新的编号部分。

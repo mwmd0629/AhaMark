@@ -1,14 +1,16 @@
 # AhaMark 最终验收报告
 
-版本 `0.1.0`；更新日期 2026-07-24；分支 `master`；第七部分验收 HEAD 为
-`3cf1ae27e78490f43449ca7af4e93919d2251402`，工作树保持未暂存、未提交。
+版本 `0.1.0`；更新日期 2026-07-25；分支 `master`；八部分最终功能基线为
+`cc9146a5edf001817915c020f7aa26bc8053b989`。原定八部分均已提交，最终审计时工作树干净；
+本次文档收口提交只修正文档状态，不构成新的项目部分。
 
 本报告中的 `PASS` 仅表示对应验收检查在记录范围内通过，不等于整项能力已完成真实环境验证或达到生产可用。统一能力状态、数据边界和产品措辞以 `PROJECT-BASELINE.md`、`CAPABILITY-EVIDENCE-MATRIX.md`、`DATA-SECURITY-BOUNDARIES.md` 和 `PRODUCT-CAPABILITY-STATEMENTS.md` 为准。
 
 ## 最终结论
 
-**等级 C：内部演示或开发测试。** 教师核心业务 A–H、第五部分权限/文件矩阵、第六部分
-开发机有界容量及第七部分 7A–7D 已用纯合成数据通过。PostgreSQL/MinIO 独立恢复和单
+**等级 C：内部演示或开发测试。** 原定第一至第八部分均已正式关闭。教师核心业务 A–H、
+第五部分权限/文件矩阵、第六部分开发机有界容量、第七部分 7A–7D 以及第八部分
+8A–8E 和 Edge 已用纯合成数据通过。PostgreSQL/MinIO 独立恢复和单
 Worker 故障恢复只在开发环境成立；生产灾备、高可用、生产 RPO/RTO、SLA、多实例恢复和
 生产运维均未建立，不适合真实学生数据、真实教学试点、生产部署或公网开放。
 
@@ -32,7 +34,7 @@ Worker 故障恢复只在开发环境成立；生产灾备、高可用、生产 
 | 第六部分开发机容量 | PASS | 单 API/单 Worker；1600/1600 同步请求，Fake/RapidOCR 至 250 页，50 人报告及 200 人/100 题 Analytics 完成 |
 | 生产容量与 SLA | PARTIAL | 最大规模 Analytics 学生趋势/详情约 7.7–7.9 秒；多实例、正式 SLA、故障条件和生产数据分布未验证 |
 | MIME/恶意文件 | PASS | 41 个运行时结构 fixture；批次与存储/DB 回滚通过 |
-| Auth/Session/CSRF | PASS | 登录、错误、Cookie、CSRF、过期、撤销、production 边界 |
+| Auth/Session/CSRF | PASS | 登录、错误、Cookie、CSRF、过期、撤销、production 边界；Redis 共享限速在本地双 API 环境通过 |
 | MinIO/签名 URL | PASS（开发范围） | owner 隔离；7/7 对象独立恢复；2 秒 test-only 到期 403、重签 200、旧 URL 仍失效 |
 | Worker 故障 | PASS（开发范围） | 单 Worker 离线/崩溃、redelivery、Redis/MinIO 故障和恢复后对账通过 |
 | 反向代理 | PASS | nginx -t、health、登录、Cookie、CSRF、安全头 |
@@ -114,7 +116,8 @@ factory reset、prune 或数据清理。重启会中断全部本地容器，不�
 7A/7B 容器因此 stopped；其 ID、5 个卷和网络保持不变。7C 最终 7 服务 healthy。
 
 正式 Run 和所有失败 Run 均保留，失败 Run 不得拼接为 PASS。资源占用磁盘，后续清理必须
-取得独立授权、列出精确目标并再次确认。本阶段未清理 Docker，未开始第八部分。
+取得独立授权、列出精确目标并再次确认。该轮第七部分验收时未清理 Docker，第八部分当时
+尚未开始；随后第八部分已正式关闭并提交。
 
 ## 第六部分容量更新（2026-07-23）
 
@@ -127,4 +130,5 @@ Fake OCR 编排与真实 RapidOCR 均完成 150/200/250 或 100/150/250 页阶�
 项目等级仍保持 C。
 > 第八部分 8A–8E 及 Edge 已由正式 Run `v8-final-20260725-c6568104` 和两份
 > preproduction 机器证据关闭；历史 Run `v8-20260725-000100` 仍为 PARTIAL。项目等级仍为
-> C，生产高可用和生产灾备仍为 NOT ESTABLISHED，第九部分未开始。
+> C，生产高可用和生产灾备仍为 NOT ESTABLISHED。原定八部分已经完成；任何后续工作属于
+> 重新规划的可选扩展，不自动形成新的编号部分。

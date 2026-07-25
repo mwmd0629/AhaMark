@@ -1,6 +1,7 @@
 # AhaMark
 
-> 第八部分本地预生产门禁 8A–8E 及 Edge 已 PASS；正式 Run 为
+> 原定第一至第八部分均已正式关闭，并已形成连续、可追溯的八提交链。第八部分功能基线为
+> `cc9146a5edf001817915c020f7aa26bc8053b989`；本地预生产门禁 8A–8E 及 Edge 已 PASS，正式 Run 为
 > `v8-final-20260725-c6568104`，证据入口见
 > [`docs/PREPRODUCTION-READINESS.md`](docs/PREPRODUCTION-READINESS.md)。该门禁只证明本地 API
 > 层故障切换，不建立生产高可用或灾备，项目等级仍为 C。
@@ -31,9 +32,9 @@ AhaMark 是面向教师的 AI 作业批改与学情分析平台。当前已实�
 
 ## 教师认证与安全边界
 
-正式会话认证位于 `app/api/auth.py`：密码使用标准库 scrypt（独立随机盐），登录创建随机数据库会话，浏览器只保存 HttpOnly `ahamark_session` Cookie；另有 SameSite=Lax CSRF Cookie，带会话的写请求必须发送 `X-CSRF-Token`。会话默认 12 小时，支持撤销、过期、当前用户与退出，登录按 IP+邮箱进行进程内窗口限速。生产环境 Cookie 自动 Secure，且 `APP_ENV=production` 时绝不回退到 demo actor。
+正式会话认证位于 `app/api/auth.py`：密码使用标准库 scrypt（独立随机盐），登录创建随机数据库会话，浏览器只保存 HttpOnly `ahamark_session` Cookie；另有 SameSite=Lax CSRF Cookie，带会话的写请求必须发送 `X-CSRF-Token`。会话默认 12 小时，支持撤销、过期、当前用户与退出。production 登录限速使用 Redis 共享固定窗口状态，已验证双 API 实例累计失败次数；默认窗口 300 秒、阈值 5 次，Redis 不可用时 fail closed。限速 key 使用 HMAC，不包含明文密码。生产环境 Cookie 自动 Secure，且 `APP_ENV=production` 时绝不回退到 demo actor。
 
-当前未开放公共注册。管理员在受控环境中执行 `python -m app.cli.create_teacher --email teacher@example.com --display-name 教师姓名`，按不回显提示输入密码，然后访问 `/login`。前端使用 Cookie，不把长期令牌写入 localStorage；教师布局通过 `/auth/me` 保护。开发期 demo actor 只有 `DEMO_ACTOR_ENABLED=true` 且非 production 时可用。多 API 实例部署时还应把登录限速迁移到 Redis。
+当前未开放公共注册。管理员在受控环境中执行 `python -m app.cli.create_teacher --email teacher@example.com --display-name 教师姓名`，按不回显提示输入密码，然后访问 `/login`。前端使用 Cookie，不把长期令牌写入 localStorage；教师布局通过 `/auth/me` 保护。开发期 demo actor 只有 `DEMO_ACTOR_ENABLED=true` 且非 production 时可用。共享限速仅在本地预生产式双 API 环境验证，不代表公网 DDoS、WAF 或生产攻击面能力。
 
 ## 最终成绩、发布与分析
 
@@ -227,7 +228,7 @@ npm.cmd run test
 npm.cmd run build
 ```
 
-历史验证记录详见 `docs/HANDOFF.md`。第七部分关闭轮复用刚完成的后端门禁：
+历史验证记录详见 `docs/HANDOFF.md`。第七部分关闭轮当时复用刚完成的后端门禁：
 113 passed、2 skipped，Ruff format/check 113 files，mypy 52 files；7D 另执行 JSON、原始
-证据哈希、Markdown UTF-8、相对链接、陈旧口径、敏感字段和 Git diff 门禁。当前第七部分
-工作树仍未暂存、未提交、未推送或部署。
+证据哈希、Markdown UTF-8、相对链接、陈旧口径、敏感字段和 Git diff 门禁。该轮结束时
+第七部分工作树仍未暂存、未提交、未推送或部署；随后第一至第八部分均已提交。

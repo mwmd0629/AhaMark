@@ -1,11 +1,12 @@
-# AhaMark 项目交接（更新于 2026-07-24）
+# AhaMark 项目交接（更新于 2026-07-25）
 
 第一部分的可审计基线入口为 `PROJECT-BASELINE.md`；能力状态以 `CAPABILITY-EVIDENCE-MATRIX.md` 为准。下文“通过”只描述既有检查记录，不自动表示生产可用。
 
 ## 最终结论
 
-验收等级仍为 **C（内部演示或开发测试）**。第二部分教师核心业务浏览器闭环、第五部分
-权限与文件安全、第六部分开发机有界容量以及第七部分 7A–7D 均已关闭。第七部分证明
+验收等级仍为 **C（内部演示或开发测试）**。原定第一至第八部分均已正式关闭并提交，
+形成连续、可追溯的八提交链；第八部分功能基线为
+`cc9146a5edf001817915c020f7aa26bc8053b989`。第七部分证明
 PostgreSQL、MinIO 和单 Worker 故障恢复在纯合成独立开发环境通过；第八部分另完成本地
 双 API 故障切换，但 PostgreSQL、Redis、MinIO 和 Nginx 仍可能是单点，不建立生产灾备、
 高可用、生产 RPO/RTO 或 SLA。
@@ -14,7 +15,7 @@ PostgreSQL、MinIO 和单 Worker 故障恢复在纯合成独立开发环境通�
 
 - 服务：核心六服务均 healthy；可选 Nginx proxy 配置与语法通过。栈保持运行，三个命名卷保留。
 - 数据库：活动库 `0010_report_student (head)`；独立空库 upgrade、`0010→0009→0010` 通过。
-- 认证：scrypt、数据库 Session、HttpOnly/SameSite、production Secure、CSRF、撤销/过期、禁用用户、production 禁 demo 已实现并测试。
+- 认证：scrypt、数据库 Session、HttpOnly/SameSite、production Secure、CSRF、撤销/过期、禁用用户、production 禁 demo 已实现并测试；production 登录限速使用 Redis 共享状态，双 API 累计失败、默认 300 秒/5 次、Redis 不可用时 fail closed 及 HMAC key 均已在本地预生产式环境验证。
 - OCR：第二部分 UI 闭环使用 test-only Fake OCR；第六部分另行完成 Fake 编排
   150/200/250 页和 RapidOCR 3.9.2 清晰印刷体 100/150/250 页吞吐阶梯。Fake 与真实
   吞吐证据不能互换，也不证明准确率、手写或公式能力；公式 OCR unavailable。
@@ -76,8 +77,8 @@ PostgreSQL、MinIO 和单 Worker 故障恢复在纯合成独立开发环境通�
 - 性能：五类同步接口 100%；P95 为 40.51–88.18 ms。仅单客户端开发冒烟。
 - 文件安全：第五部分 41/41 个运行时结构 fixture 通过，批次原子性、对象补偿和真实
   MinIO 短期 URL 到期/重签已验证；不代表外部渗透或生产安全认证。
-- 隔离：第五部分 27×29 矩阵、702/702 身份结果与隔离 HTTP 16/16 通过；多实例限速、
-  Cookie 重放和完整多会话管理仍属后续。
+- 隔离：第五部分 27×29 矩阵、702/702 身份结果与隔离 HTTP 16/16 通过；双 API Redis
+  共享登录限速已在本地预生产式环境验证，Cookie 重放和完整多会话管理仍属后续。
 - Worker：pause 时 `/ready` degraded/0 worker；unpause 后 pong 且 healthy。
 - 代理：登录 200、缺 CSRF 403、正确退出 204、CSP/nosniff 可见。
 - PostgreSQL 恢复：独立 custom-format 备份恢复，源/目标稳定哈希一致；开发环境 PASS。
@@ -96,8 +97,8 @@ PostgreSQL、MinIO 和单 Worker 故障恢复在纯合成独立开发环境通�
    生产容量、SLA、多实例扩展、故障条件和生产数据分布尚未建立。
 2. 生产灾备、高可用、多实例恢复、异地/加密/增量/长期备份和生产 RPO/RTO 未建立。
 3. 开发 Compose 暴露 MinIO 端口，未提供正式 TLS/secret/监控平台配置。
-4. 当前第七部分工作树仍全部未暂存、未提交、未推送、未部署；原始恢复证据位于被忽略的
-   `.recovery-v7/`，正式提交只应包含脱敏摘要。
+4. 第七部分关闭轮当时的工作树全部未暂存、未提交、未推送、未部署；原始恢复证据位于
+   被忽略的 `.recovery-v7/`，该轮正式提交只应包含脱敏摘要。随后八部分均已提交。
 
 ## 第五部分：权限与文件安全
 
@@ -120,7 +121,8 @@ PostgreSQL、MinIO 和单 Worker 故障恢复在纯合成独立开发环境通�
 - 7D 文档与证据：见 `BACKUP-RESTORE.md`、`FAILURE-RECOVERY.md` 及两份正式 JSON 摘要。
 - 正式 Run 和所有失败 Run 均保留。失败 Run 只能用于诊断，不能拼接 PASS。
 - Docker 资源较多并占用磁盘；任何清理需要独立授权、精确清单和再次确认。
-- 本阶段未清理 Docker、未提交、未部署，也未开始第八部分。
+- 该轮第七部分恢复交接时未清理 Docker、未提交、未部署，第八部分当时尚未开始；随后
+  第八部分已正式关闭并提交。
 
 ### 保留的恢复资源
 
@@ -154,4 +156,5 @@ PostgreSQL、MinIO 和单 Worker 故障恢复在纯合成独立开发环境通�
   不证明系统绝对上限、OCR 准确率、手写/公式能力、生产容量或生产 SLA。
 > 第八部分 8A–8E 及 Edge 已由正式 Run `v8-final-20260725-c6568104` 验证为 PASS；
 > `v8-20260725-000100` 保持 PARTIAL 历史。该结论仅覆盖本地 API 层故障切换，项目等级仍为
-> C；未清理既有 Docker 资源，也未开始第九部分。见 `PREPRODUCTION-READINESS.md`。
+> C；未清理既有 Docker 资源。原定八部分已经完成；任何后续工作属于重新规划的可选扩展，
+> 不自动形成新的编号部分。见 `PREPRODUCTION-READINESS.md`。
