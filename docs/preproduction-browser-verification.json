@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "run_id": "v8-final-20260725-c6568104",
+  "browser": "Microsoft Edge",
+  "entrypoint": "https://localhost:9543",
+  "certificate": "local self-signed only",
+  "status": "PASS",
+  "scenarios": {
+    "login": "PASS",
+    "refresh_session": "PASS",
+    "protected_dashboard": "PASS",
+    "classes": "PASS",
+    "assignments": "PASS",
+    "grade_release_with_data": "PASS",
+    "report_status_with_data": "PASS",
+    "analytics_with_data": "PASS",
+    "missing_student_not_zero": "PASS",
+    "request_id": "PASS",
+    "cookie_secure": "PASS",
+    "cookie_http_only": "PASS",
+    "cookie_same_site_lax": "PASS",
+    "browser_storage_has_no_credentials": "PASS",
+    "data_before_failover": "PASS",
+    "data_during_api_a_stop": "PASS",
+    "data_after_api_a_restore": "PASS",
+    "logout_status_204": "PASS",
+    "old_session_rejected": "PASS"
+  },
+  "business_ids": {
+    "grade_release_id": "f0b515a6-5c7c-455a-b6a6-f078d5d325fe",
+    "report_job_id": "83b7bb12-0371-4bf5-8654-a97ee09f6fe6",
+    "analytics_snapshot_id": "ded1e65a-20e8-4f3a-a5ff-ea55be3358b7",
+    "grading_batch_id": "d78bc80e-ebdc-42df-bdeb-2e746ff2bf01"
+  },
+  "raw_evidence_sha256": "B0858DF6B760BC7A972CF20014A2233BBEB68AF892E2F3532018686F80766C77",
+  "notes": [
+    "A real Microsoft Edge executable was used in headless mode.",
+    "The original API A container was stopped and started; it was not deleted or recreated.",
+    "No production certificate claim is made.",
+    "No credential, Cookie value, CSRF token, Session value, signed URL, or private key is recorded."
+  ]
+}

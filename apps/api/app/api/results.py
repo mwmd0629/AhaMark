@@ -5,6 +5,7 @@ from typing import Annotated, Any, Literal, cast
 
 from app.api.actor import Actor
 from app.api.domain import ApiProblem, audit
+from app.core.request_id import celery_request_headers
 from app.db.session import get_db
 from app.models import (
     AnalyticsSnapshot,
@@ -376,7 +377,11 @@ def create_report(
     try:
         from workers.celery_app import celery_app
 
-        celery_app.send_task("ahamark.report.run", args=[str(job.id)])
+        celery_app.send_task(
+            "ahamark.report.run",
+            args=[str(job.id)],
+            headers=celery_request_headers(),
+        )
     except Exception as exc:
         job.status, job.error_code, job.error_message = (
             "failed",

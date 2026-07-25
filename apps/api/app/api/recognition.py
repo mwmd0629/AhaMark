@@ -6,6 +6,7 @@ from typing import Annotated, Any, Literal
 from app.api.actor import Actor
 from app.api.domain import ApiProblem, audit
 from app.core.config import get_settings
+from app.core.request_id import celery_request_headers
 from app.db.session import get_db
 from app.failure_recovery import recovery_fault_checkpoint
 from app.models import (
@@ -148,7 +149,7 @@ def dispatch_recognition_job(db: Session, job: RecognitionJob) -> None:
     try:
         from workers.tasks.ocr import run_recognition
 
-        run_recognition.delay(str(job.id))
+        run_recognition.apply_async(args=[str(job.id)], headers=celery_request_headers())
     except Exception as exc:
         job.status = RecognitionStatus.failed
         job.error_code = "WORKER_UNAVAILABLE"

@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal
 from app.api.actor import Actor
 from app.api.domain import ApiProblem, audit
 from app.core.config import get_settings
+from app.core.request_id import celery_request_headers
 from app.db.session import get_db
 from app.grading.providers import grade_objective, provider_from_settings
 from app.models import (
@@ -719,7 +720,11 @@ def start_submission_recognition(
         try:
             from workers.celery_app import celery_app
 
-            celery_app.send_task("ahamark.submission_recognition.run", args=[str(job.id)])
+            celery_app.send_task(
+                "ahamark.submission_recognition.run",
+                args=[str(job.id)],
+                headers=celery_request_headers(),
+            )
         except Exception as exc:
             job.status, job.error_code, job.error_message = (
                 "failed",
@@ -782,7 +787,11 @@ def retry_submission_page(
     else:
         from workers.celery_app import celery_app
 
-        celery_app.send_task("ahamark.submission_recognition.run", args=[str(job.id), str(page.id)])
+        celery_app.send_task(
+            "ahamark.submission_recognition.run",
+            args=[str(job.id), str(page.id)],
+            headers=celery_request_headers(),
+        )
     return submission_job_json(db, job)
 
 

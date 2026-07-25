@@ -6,8 +6,9 @@
 
 验收等级仍为 **C（内部演示或开发测试）**。第二部分教师核心业务浏览器闭环、第五部分
 权限与文件安全、第六部分开发机有界容量以及第七部分 7A–7D 均已关闭。第七部分证明
-PostgreSQL、MinIO 和单 Worker 故障恢复在纯合成独立开发环境通过；不建立生产灾备、
-高可用、生产 RPO/RTO、SLA 或多实例恢复能力。
+PostgreSQL、MinIO 和单 Worker 故障恢复在纯合成独立开发环境通过；第八部分另完成本地
+双 API 故障切换，但 PostgreSQL、Redis、MinIO 和 Nginx 仍可能是单点，不建立生产灾备、
+高可用、生产 RPO/RTO 或 SLA。
 
 ## 真实状态
 
@@ -151,3 +152,6 @@ PostgreSQL、MinIO 和单 Worker 故障恢复在纯合成独立开发环境通�
   `async-capacity-results.json`、`analytics-capacity-results.json`。
 - 适用边界：仅证明指定开发机、单 API/单 Worker 和合成数据；250 页是本轮测试上限，
   不证明系统绝对上限、OCR 准确率、手写/公式能力、生产容量或生产 SLA。
+> 第八部分 8A–8E 及 Edge 已由正式 Run `v8-final-20260725-c6568104` 验证为 PASS；
+> `v8-20260725-000100` 保持 PARTIAL 历史。该结论仅覆盖本地 API 层故障切换，项目等级仍为
+> C；未清理既有 Docker 资源，也未开始第九部分。见 `PREPRODUCTION-READINESS.md`。

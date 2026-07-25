@@ -130,3 +130,7 @@ StoredFile 必须和 ReportJob、PaperPage、SubmissionPage 等动态业务外�
 - OCR/报告任务只携带 job ID，不携带文件、答案或 OCR 全文。
 - 使用 `x-request-id`、Job ID、Submission ID、ReportJob ID 关联排障；不得记录密码、Cookie、CSRF、密钥、完整答案或成绩表。
 - 公式 OCR 和真实主观题 AI Provider 均 unavailable；主观题必须人工评分，禁止 production FakeProvider。
+> 本地预生产使用 `scripts/preproduction_v8.ps1` 和唯一 Run ID；仅 Nginx HTTPS 绑定
+> `127.0.0.1`。正式 Run `v8-final-20260725-c6568104` 的 8A–8E 及 Edge 已 PASS，历史
+> `v8-20260725-000100` 保持 PARTIAL。只证明本地 API 层切换；PostgreSQL、Redis、MinIO
+> 和 Nginx 仍可能是单点。禁止 `down -v`、prune、删除卷或复用既有资源。

@@ -5,8 +5,9 @@ import threading
 import time
 from collections import defaultdict, deque
 from datetime import timedelta
-from typing import Annotated
+from typing import Annotated, cast
 
+import structlog
 from app.api.actor import authenticated_session, digest
 from app.core.config import get_settings
 from app.db.session import get_db
@@ -16,10 +17,16 @@ from pydantic import BaseModel, EmailStr, Field, TypeAdapter, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+try:
+    import redis
+except ImportError:  # pragma: no cover
+    redis = None  # type: ignore[assignment]
+
 router = APIRouter(prefix="/auth", tags=["auth"])
 Db = Annotated[Session, Depends(get_db)]
 _attempts: defaultdict[str, deque[float]] = defaultdict(deque)
 _attempt_lock = threading.Lock()
+log = structlog.get_logger()
 
 
 class LoginInput(BaseModel):
@@ -56,8 +63,36 @@ def verify_password(password: str, encoded: str) -> bool:
         return False
 
 
+def rate_limit_key(key: str) -> str:
+    value = hmac.new(
+        get_settings().session_hmac_secret.encode(), key.encode(), hashlib.sha256
+    ).hexdigest()
+    return f"ahamark:auth:login:{value}"
+
+
 def check_rate_limit(key: str) -> None:
     settings = get_settings()
+    if settings.app_env.lower() == "production":
+        if redis is None:
+            raise HTTPException(503, "登录服务暂时不可用")
+        try:
+            client = redis.Redis.from_url(
+                settings.redis_url, socket_connect_timeout=1, socket_timeout=1
+            )
+            shared_key = rate_limit_key(key)
+            count = int(cast(int, client.incr(shared_key)))
+            if count == 1:
+                client.expire(shared_key, settings.auth_login_window_seconds)
+            if count > settings.auth_login_max_attempts:
+                log.warning("auth_rate_limit_rejected", service="api")
+                raise HTTPException(429, "登录尝试过多，请稍后再试")
+            return
+        except HTTPException:
+            raise
+        except Exception:
+            log.error("auth_rate_limit_backend_unavailable", service="api")
+            if settings.auth_rate_limit_fail_closed:
+                raise HTTPException(503, "登录服务暂时不可用") from None
     cutoff = time.monotonic() - settings.auth_login_window_seconds
     with _attempt_lock:
         attempts = _attempts[key]

@@ -5,7 +5,8 @@
 状态：**PASS（第五部分矩阵范围内）**。27 类资源 × 29 操作的显式适用/N/A
 矩阵、六身份 702/702、41/41 文件 fixture、全业务路由 Session/CSRF 边界和隔离栈
 真实 HTTP 16/16 已通过。第七部分另在纯合成独立开发环境完成 PostgreSQL/MinIO 恢复和
-单 Worker 故障恢复，但不改变 Cookie 重放、多实例限速、外部渗透、生产灾备与高可用
+单 Worker 故障恢复；第八部分已验证 Redis 共享多实例限速和本地双 API 切换，但不改变
+Cookie 重放、外部渗透、生产灾备与高可用
 缺口。项目整体等级保持 C，不适合真实学生数据、真实教学试点、生产部署或公网开放。
 
 ## 已修复
@@ -18,7 +19,7 @@
 
 - PASS：scrypt 独立盐；随机数据库 Session；HttpOnly、SameSite=Lax；production 自动 Secure；CSRF 缺失为 403；退出撤销；过期拒绝；禁用用户拒绝；production 禁 demo actor；统一登录错误。
 - PASS：令牌不在 URL 或 localStorage；请求日志仅含 method/path/status/request ID。
-- PARTIAL：登录限速为单进程内存实现，多副本需迁移 Redis；Cookie 重放、多会话管理 UI、固定 Session 专项未完成。
+- PARTIAL：登录限速已迁移到 Redis 共享固定窗口并在双 API 下验证；Cookie 重放、多会话管理 UI、固定 Session 专项未完成。
 
 ## 隔离和对象存储
 
@@ -49,3 +50,7 @@
 ## 代理和响应头
 
 Nginx `nginx -t`、代理健康检查、登录、Cookie、缺失/正确 CSRF 均通过。已配置 CSP、nosniff、Referrer-Policy、Permissions-Policy、DENY frame、Host/协议/IP/request ID 转发、静态缓存和 API no-store。HSTS 只允许在生产 HTTPS 虚拟主机启用。
+> 第八部分增量：production 集中启动拒绝、HMAC Session 摘要、Redis 共享固定窗口登录
+> 限速（300 秒/5 次，故障 fail closed）及显式 CORS/Host/CSRF origin allowlist 已由正式
+> Run `v8-final-20260725-c6568104` 验证；8A–8E 及 Edge 均 PASS。该结果不是外部渗透
+> 认证，也不建立生产高可用或灾备。

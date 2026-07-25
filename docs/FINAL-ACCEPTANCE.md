@@ -40,7 +40,7 @@ Worker 故障恢复只在开发环境成立；生产灾备、高可用、生产 
 | MinIO 备份恢复 | PASS（开发范围） | 新空 bucket、7/7 对象、metadata/引用/解析/签名 URL/孤儿对账通过 |
 | 第七部分 7A–7D | PASS | 两个正式 Run、两份原始证据和两份脱敏摘要；文档门禁通过 |
 | 生产灾备 | NOT ESTABLISHED | 异地、加密、密钥轮换、长期、增量和生产规模未验证 |
-| 生产高可用 | NOT ESTABLISHED | 单 API/单 Worker 开发环境不能证明多实例或自动切换 |
+| 生产高可用 | NOT ESTABLISHED | 第八部分仅证明本地双 API 故障切换；PostgreSQL、Redis、MinIO、Nginx 和 Worker 仍可能是单点 |
 | 生产 RPO/RTO | NOT ESTABLISHED | RPO 0 秒因窗口无写入；2.314 秒仅为独立数据库恢复 |
 | 可用性/可访问性逐页 | NOT RUN | Analytics 冒烟不能替代完整巡检 |
 | 真实主观题 AI | NOT APPLICABLE | Provider unavailable；主观题人工评分；production 禁 fake |
@@ -49,7 +49,7 @@ Worker 故障恢复只在开发环境成立；生产灾备、高可用、生产 
 
 5A、5B 正式关闭：27 类资源×29 类操作，117 个适用格、666 个明确 N/A，六种身份
 702/702；隔离栈 HTTP 16/16；文件结构 fixture 41/41；本轮孤儿增量为 0。P0/P1 无
-未修项。本结论不是外部渗透或生产安全认证，也不完成多实例限速、Cookie 重放专项、
+未修项。本结论不是外部渗透或生产安全认证，也不完成 Cookie 重放专项、
 生产灾备、高可用、生产容量/SLA或生产运维；项目等级保持 C。
 
 ## 第三部分异常与版本一致性
@@ -125,3 +125,6 @@ Fake OCR 编排与真实 RapidOCR 均完成 150/200/250 或 100/150/250 页阶�
 的 PDF/XLSX/ZIP 内容核验通过；50/100/200 人 Analytics 和 20 路创建幂等通过。
 第六部分可以关闭，但最大规模 Analytics 学生读取约 8 秒，且结果不代表生产容量；
 项目等级仍保持 C。
+> 第八部分 8A–8E 及 Edge 已由正式 Run `v8-final-20260725-c6568104` 和两份
+> preproduction 机器证据关闭；历史 Run `v8-20260725-000100` 仍为 PARTIAL。项目等级仍为
+> C，生产高可用和生产灾备仍为 NOT ESTABLISHED，第九部分未开始。

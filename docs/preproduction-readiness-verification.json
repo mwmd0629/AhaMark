@@ -1,0 +1,163 @@
+{
+  "schema_version": 1,
+  "status": "PASS",
+  "scope": "local-preproduction-synthetic-only",
+  "history": [
+    {
+      "run_id": "v8-20260724T153500Z",
+      "status": "BLOCKED_DOCKER_DAEMON_UNAVAILABLE",
+      "note": "Static Run retained; uppercase project name was later found invalid for Docker Compose."
+    },
+    {
+      "run_id": "v8-20260724-235900",
+      "status": "BLOCKED_CERTIFICATE_GENERATION",
+      "note": "Retained without cleanup or reuse."
+    },
+    {
+      "run_id": "v8-20260725-000100",
+      "status": "PARTIAL",
+      "raw_evidence_sha256": "4CE1DB9E83C4752977369FBC076B15F8DC11EEFB90CCD038116BBE73481EBF2D",
+      "note": "Completed most runtime verification; Nginx container health, data-bearing failover, and HTTP-to-Worker correlation remained incomplete. The Run and all Docker resources were retained without rebuild or cleanup."
+    }
+  ],
+  "run_id": "v8-final-20260725-c6568104",
+  "compose_project": "ahamark-preprod-v8-final-20260725-c6568104",
+  "entrypoint": "https://localhost:9543",
+  "published_ports": ["127.0.0.1:9543->nginx:8443"],
+  "service_status": {
+    "nginx": "healthy",
+    "api_a": "healthy",
+    "api_b": "healthy",
+    "postgres": "healthy",
+    "redis": "healthy",
+    "minio": "healthy",
+    "worker": "running_and_celery_ping_ok",
+    "web": "running",
+    "migration": "exited_0"
+  },
+  "nginx": {
+    "status": "PASS",
+    "container_health": "healthy",
+    "healthcheck": "https://127.0.0.1:8443/health",
+    "https_status": 200,
+    "wrong_host_connection_closed": true,
+    "only_loopback_port": true,
+    "non_nginx_host_ports": 0,
+    "minio_console_public": false,
+    "hsts": true,
+    "csp": true,
+    "nosniff": true,
+    "referrer_policy": true,
+    "frame_policy": true,
+    "permissions_policy": true,
+    "no_store": true,
+    "nginx_config_test": "PASS"
+  },
+  "synthetic_business": {
+    "creation_path": "controlled create_teacher administrator capability, then public HTTPS APIs with a real Session and CSRF",
+    "teacher_id": "0b8d721c-4d31-448c-b853-79ba47842957",
+    "class_id": "8b2caefd-63b7-4c80-a45d-906bad5936e1",
+    "student_ids": [
+      "8d8edcfb-8878-4475-aab2-814d02b30784",
+      "2b17cd2f-2eb8-4102-883c-c31252a4fced",
+      "90ce3e29-d89c-48c9-b9a7-0cad9c0ac01a"
+    ],
+    "missing_student_id": "90ce3e29-d89c-48c9-b9a7-0cad9c0ac01a",
+    "assignment_id": "5cc19126-f7ee-46c7-8569-21f281beff42",
+    "grading_batch_id": "d78bc80e-ebdc-42df-bdeb-2e746ff2bf01",
+    "recognition_job_ids": [
+      "7b6e3cbd-4794-4c1b-804c-7a3add3c19c4",
+      "add334d4-e3e1-4661-a83d-dcd34666eb35"
+    ],
+    "recognition_provider": "rapidocr",
+    "score_snapshot_ids": [
+      "61deb307-019e-4ec7-9f88-f50814d4f3bd",
+      "fe9e0cdc-2994-4d64-a1a4-4fb2eb1fbe53"
+    ],
+    "grade_release_id": "f0b515a6-5c7c-455a-b6a6-f078d5d325fe",
+    "grade_release_snapshot_pin": "PASS",
+    "report_job_id": "83b7bb12-0371-4bf5-8654-a97ee09f6fe6",
+    "report_status": "completed",
+    "analytics_snapshot_id": "ded1e65a-20e8-4f3a-a5ff-ea55be3358b7",
+    "analytics_participant_count": 2,
+    "analytics_average_score": 7.5,
+    "missing_student_excluded": true
+  },
+  "single_api_failover": {
+    "status": "PASS",
+    "api_a_container_id": "c00721598c064ae26d3886226e7b2e786c69260675c5d20825ea99cfe69c52da",
+    "api_a_project_label": "ahamark-preprod-v8-final-20260725-c6568104",
+    "api_a_service_label": "api-a",
+    "operation": "stop_then_start_same_container",
+    "same_session": true,
+    "relogin": false,
+    "class": 200,
+    "assignment": 200,
+    "grade_release": 200,
+    "grade_release_snapshot_pin": "unchanged",
+    "report_job": 200,
+    "analytics": 200,
+    "student": 200,
+    "nginx_persistent_502": false,
+    "data_before_during_after": "unchanged",
+    "api_a_final": "healthy",
+    "api_b_final": "healthy",
+    "api_a_http_requests": 129,
+    "api_b_http_requests": 157
+  },
+  "observability": {
+    "status": "PASS",
+    "request_id": "cb46f3c31344593140a48432c693b1f0",
+    "celery_task_id": "da9be476-2727-4f56-a332-89f4a961f481",
+    "job_id": "83b7bb12-0371-4bf5-8654-a97ee09f6fe6",
+    "task_name": "ahamark.report.run",
+    "terminal_status": "completed",
+    "worker_duration_ms": 73,
+    "nginx_api_worker_exact_match": true,
+    "sensitive_pattern_matches": {
+      "nginx": 0,
+      "api_a": 0,
+      "api_b": 0,
+      "worker": 0
+    },
+    "exact_secret_matches": {
+      "nginx": 0,
+      "api_a": 0,
+      "api_b": 0,
+      "worker": 0
+    }
+  },
+  "automated_gates": {
+    "ruff_format": "PASS",
+    "ruff_check": "PASS",
+    "mypy_full": "PASS",
+    "request_context_and_production_security": "25 passed",
+    "pytest_full": "138 passed, 2 skipped",
+    "prettier": "PASS",
+    "eslint": "PASS",
+    "typescript": "PASS",
+    "vitest": "26 passed",
+    "next_production_build": "PASS",
+    "compose_render": "PASS",
+    "git_diff_check": "PASS"
+  },
+  "gates": {
+    "8A_production_guard": "PASS",
+    "8B_multi_instance_auth_csrf_rate_limit": "PASS",
+    "8C_nginx_network_exposure": "PASS",
+    "8D_single_api_failover": "PASS",
+    "8E_logging_tracing_audit": "PASS",
+    "Edge": "PASS"
+  },
+  "raw_evidence_sha256": {
+    "business_evidence": "AAE97AAAEBEDB16F95B539BA553EA0C158EE85F63FA06DD83A73D9FE4B8AC448",
+    "edge_evidence": "B0858DF6B760BC7A972CF20014A2233BBEB68AF892E2F3532018686F80766C77"
+  },
+  "notes": [
+    "All business data and identities are synthetic.invalid.",
+    "No test-only fixture, fake OCR, fake grading provider, recovery fixture, failure fixture, direct SQL business write, or direct ORM business write was used.",
+    "The local RapidOCR run proves workflow execution only, not OCR accuracy.",
+    "No old or final Run container, volume, network, database, bucket, or certificate was deleted, pruned, or cleaned.",
+    "Production HA, disaster recovery, external penetration testing, subjective AI availability, and handwriting/formula OCR reliability remain out of scope."
+  ]
+}

@@ -20,7 +20,9 @@ class CurrentActor:
 
 
 def digest(value: str) -> str:
-    return hashlib.sha256(value.encode()).hexdigest()
+    return hmac.new(
+        get_settings().session_hmac_secret.encode(), value.encode(), hashlib.sha256
+    ).hexdigest()
 
 
 def authenticated_session(request: Request, db: Session) -> tuple[UserSession, User] | None:
@@ -41,6 +43,9 @@ def authenticated_session(request: Request, db: Session) -> tuple[UserSession, U
     if user is None or user.status != Status.active:
         return None
     if request.method not in {"GET", "HEAD", "OPTIONS"}:
+        origin = request.headers.get("origin")
+        if origin and origin not in settings.csrf_trusted_origins:
+            raise HTTPException(403, "CSRF origin validation failed")
         csrf = request.headers.get("x-csrf-token", "")
         if not csrf or not hmac.compare_digest(digest(csrf), session.csrf_hash):
             raise HTTPException(403, "CSRF 校验失败")

@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+import pytest
 from app.core.config import Settings
 from app.grading.providers import (
     FakeGradingProvider,
@@ -27,9 +28,9 @@ def test_unavailable_provider_never_invents_score() -> None:
 
 def test_fake_provider_is_test_only_and_production_falls_back() -> None:
     development = provider_from_settings(Settings(app_env="test", grading_provider="fake"))
-    production = provider_from_settings(Settings(app_env="production", grading_provider="fake"))
     assert isinstance(development, FakeGradingProvider)
-    assert isinstance(production, UnavailableProvider)
+    with pytest.raises(ValueError, match="GRADING_PROVIDER cannot be fake"):
+        Settings(app_env="production", grading_provider="fake")
 
 
 def test_grading_schema_keeps_raw_correction_suggestion_and_snapshot_separate() -> None:

@@ -1,7 +1,9 @@
 from app.core.config import get_settings
+from app.core.logging import configure_logging
 from celery import Celery
 
 s = get_settings()
+configure_logging(s.log_level)
 celery_app = Celery(
     "ahamark",
     broker=s.celery_broker_url,

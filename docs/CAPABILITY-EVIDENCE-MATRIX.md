@@ -35,7 +35,7 @@
 | 性能 | PARTIAL | 第六部分开发机有界容量 PASS；PARTIAL 仅指生产容量、SLA、多实例与故障条件尚未建立 |
 | 备份恢复 | IMPLEMENTED_AND_VERIFIED（开发范围） | RECOVERY7：PostgreSQL/MinIO 独立恢复及单 Worker 故障恢复通过；生产灾备、高可用和 RPO/RTO 未建立 |
 | 生产灾备/RPO/RTO | UNAVAILABLE | 异地、加密、增量、长期、生产规模和正式恢复目标均未建立 |
-| 生产高可用/多实例恢复 | UNAVAILABLE | 第七部分是单 API/单 Worker；未验证多实例切换或自动故障转移 |
+| 生产高可用/多实例恢复 | UNAVAILABLE | 第八部分仅验证本地双 API 切换；PostgreSQL、Redis、MinIO、Nginx 和 Worker 仍可能是单点，未建立生产高可用 |
 | 生产部署 | UNAVAILABLE | 当前仅等级 C，开发 Compose 不能直接生产使用 |
 
 ## 逐项证据
@@ -213,7 +213,7 @@
 - 模型/迁移：主要资源 owner_id/关联所有权散布于 0001–0010。
 - 自动化证据：`AUTH-MATRIX` 包含 27 类资源、29 类操作、783 个资源×操作格，其中 117 个适用、666 个明确 `not_applicable`；六种身份共 702 个结果全部通过，并枚举全部业务路由的 Session/CSRF 边界。
 - 真实证据：隔离栈 HTTP 16/16，覆盖未认证拒绝、缺失/错误 CSRF、Teacher B 跨教师隐藏和 StoredFile owner 隔离；既有 HTTP72 与 BROWSER72 继续提供 Analytics Teacher B HTTP/Edge 证据。
-- 限制：结论只适用于第五部分定义的矩阵和间接引用范围，不是外部渗透测试，也不证明不存在任何越权漏洞。多实例登录限速、Cookie 重放专项、完整多会话管理、生产部署和故障恢复仍未完成。
+- 限制：结论只适用于第五部分定义的矩阵和间接引用范围，不是外部渗透测试，也不证明不存在任何越权漏洞。第八部分已验证 Redis 共享登录限速；Cookie 重放专项、完整多会话管理、生产部署和生产级故障恢复仍未完成。
 - 可以说：第五部分定义的资源×操作权限矩阵已通过；跨教师 owner 隔离、Session/CSRF、矩阵覆盖的间接引用和文件访问边界已验证。
 - 禁止说：已通过外部渗透、已证明不存在任何越权漏洞、已完成生产级 IAM 认证、多实例限速或 Cookie 重放专项。
 - 后续验收条件：生产前仍需外部安全评估、多实例限速、Cookie/多会话专项以及生产部署与故障恢复；不得把这些后续项描述成第五部分矩阵未执行。
@@ -261,7 +261,7 @@
 - 模型/迁移：PostgreSQL 目标与 0010 head；不构成生产部署证据。
 - 自动化证据：Compose/build/配置在既有文档中有检查记录。
 - 真实证据：DOC-EVIDENCE 记录本地六服务和 Nginx 冒烟，仅为开发环境。
-- 限制：当前 Compose 暴露端口；无正式 TLS、secret store、监控告警、完整容量/安全/灾备和发布审计；仓库无提交。
+- 限制：第八部分本地预生产栈仅由 Nginx 回环发布 HTTPS；仍无正式证书、secret store、监控告警、完整容量/安全/灾备和发布审计。
 - 可以说：提供开发部署骨架和本地代理配置。
 - 禁止说：生产可用、可公网开放、可真实教学试点。
 - 后续验收条件：首先需要用户批准建立可追溯 Git 基线；生产能力仍需独立完整验收，当前保持 unavailable。
@@ -269,3 +269,6 @@
 ## 明确 OUT_OF_SCOPE
 
 学生端、成绩通知/送达、公共注册、全自动主观题批改和大模型自主教学诊断不属于当前版本。GradeRelease 的存在不得改变这些范围判断。
+> 第八部分：production 守卫、双实例认证/CSRF/Redis 共享限速、Nginx 暴露、单 API
+> 切换、日志扫描和 Edge 均为 PASS；正式 Run 为 `v8-final-20260725-c6568104`，历史 Run
+> `v8-20260725-000100` 保持 PARTIAL，以 preproduction 两份 JSON 为准。
