@@ -109,7 +109,7 @@ it("回填标准答案并在切换题目时同步更新", async () => {
   expect(
     await screen.findByDisplayValue("第一题已保存答案"),
   ).toBeInTheDocument();
-  expect(screen.getByText(/AI 仅生成草稿，不能发布作业/)).toBeInTheDocument();
+  expect(screen.getByText(/由 Codex 生成可编辑草稿，不能直接发布作业/)).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("当前题目"), {
     target: { value: "q2" },
   });

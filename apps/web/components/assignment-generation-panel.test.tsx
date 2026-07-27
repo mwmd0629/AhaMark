@@ -139,10 +139,12 @@ it("恢复 partial/unavailable、风险与草稿历史并允许单阶段重试",
   expect((await screen.findByLabelText("生成状态")).textContent).toContain(
     "部分完成",
   );
-  expect(screen.getAllByText("真实 Provider 不可用").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("等待 Codex 代生成").length).toBeGreaterThan(0);
   expect(screen.getByText("阻断 2")).toBeInTheDocument();
   expect(screen.getByText("草稿历史版本（1）")).toBeInTheDocument();
-  expect(screen.getByText(/AI 仅生成草稿，不能发布作业/)).toBeInTheDocument();
+  expect(
+    screen.getByText(/由 Codex 生成可编辑草稿，不能直接发布作业/),
+  ).toBeInTheDocument();
   expect(screen.queryByText("发布作业")).not.toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: "重试此阶段" }));
@@ -290,8 +292,10 @@ it("展示服务器能力开关并在教师启动被禁用时关闭启动按钮"
     real_provider_quality_passed: false,
   });
   render(<AssignmentGenerationPanel assignmentId="assignment-1" />);
-  expect(await screen.findByText(/Provider unavailable/)).toBeInTheDocument();
-  expect(screen.getByText(/不会伪造生成结果/)).toBeInTheDocument();
+  expect(
+    await screen.findByText(/当前草稿生成方式：Codex/),
+  ).toBeInTheDocument();
+  expect(screen.getByText(/不会伪造 Provider 已完成/)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "启动生成任务" })).toBeDisabled();
 });
 

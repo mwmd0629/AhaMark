@@ -131,7 +131,7 @@ export function AssignmentGenerationPanel({
       setError(
         reason instanceof ApiError
           ? reason.message
-          : "无法恢复 AI 草稿生成任务",
+          : "无法恢复 Codex 草稿生成任务",
       );
       return [];
     }
@@ -214,10 +214,9 @@ export function AssignmentGenerationPanel({
     <Card className="space-y-4 border-[var(--brand-200)] p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="font-bold">AI 草稿生成</h2>
+          <h2 className="font-bold">Codex 草稿生成</h2>
           <p className="mt-1 text-sm text-[var(--neutral-600)]">
-            AI
-            仅生成草稿，不能发布作业。班级、截止时间、总分、答案与各版本仍须教师确认。
+            由 Codex 生成可编辑草稿，不能直接发布作业。班级、截止时间、总分、答案与各版本仍须教师确认。
           </p>
         </div>
         <Button
@@ -241,25 +240,14 @@ export function AssignmentGenerationPanel({
           className="rounded-lg border border-[var(--neutral-200)] bg-[var(--neutral-50)] p-3 text-sm"
         >
           <div className="font-medium">
-            当前 AI 能力：
-            {capabilities.provider_status === "available"
-              ? capabilities.provider
-              : "Provider unavailable"}
+            当前草稿生成方式：Codex（由当前 Codex 任务执行）
           </div>
           <div className="mt-1 text-[var(--neutral-600)]">
-            外部 Provider 请求：
-            {capabilities.external_provider_requests ? "允许" : "禁止"}
-            ；仅建议模式：
-            {capabilities.suggestion_only ? "开启" : "未开启"}；真实 Provider
-            质量声明：
-            {capabilities.real_provider_quality_passed ? "已通过" : "未通过"}。
+            外部 Provider：不使用；仅生成建议草稿，不会自动发布。
           </div>
-          {capabilities.provider_status === "unavailable" && (
-            <div className="mt-1 text-amber-700">
-              AI Provider
-              当前不可用，不会伪造生成结果；教师仍可手工完成六步流程。
-            </div>
-          )}
+          <div className="mt-1 text-amber-700">
+            Codex 生成结果仍需教师逐项确认；页面不会伪造 Provider 已完成。
+          </div>
         </div>
       )}
 
@@ -307,7 +295,7 @@ export function AssignmentGenerationPanel({
             </div>
           </div>
           <div
-            aria-label="AI 草稿生成进度"
+            aria-label="Codex 草稿生成进度"
             className="h-2 overflow-hidden rounded bg-[var(--neutral-100)]"
           >
             <div
@@ -356,7 +344,7 @@ export function AssignmentGenerationPanel({
             <span>警告 {risk.warning}</span>
             <span>阻断 {risk.blocking}</span>
             {current.provider_mode === "unavailable" && (
-              <strong className="text-amber-700">真实 Provider 不可用</strong>
+              <strong className="text-amber-700">等待 Codex 代生成</strong>
             )}
             {ACTIVE.has(current.status) && (
               <Button
