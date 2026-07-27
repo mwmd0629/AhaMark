@@ -1,8 +1,19 @@
 import hashlib
 import json
 import uuid
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 
+from app.ai_grading.guards import (
+    GuardViolation,
+    public_status,
+    require_answer_relation,
+    require_confirmed_answer,
+    require_submission_mutable,
+    validate_evidence_refs,
+    validate_score,
+    validate_validation_link,
+)
 from app.api.actor import Actor
 from app.api.domain import ApiProblem, audit
 from app.core.config import get_settings
@@ -14,7 +25,9 @@ from app.models import (
     AIProviderInvocation,
     AIScoringJob,
     AISuggestionReview,
+    CriterionValidationResult,
     MathValidationJob,
+    Question,
     QuestionRecognitionEvidence,
     ReferenceAnswerVersion,
     RubricCriterion,
@@ -64,8 +77,10 @@ def _assert_submission_mutable(db: Session, submission_id: uuid.UUID) -> None:
     submission = db.get(Submission, submission_id)
     if not submission:
         raise ApiProblem(404, "SUBMISSION_NOT_FOUND", "Submission not found")
-    if submission.finalized_at is not None:
-        raise ApiProblem(409, "FINALIZED_READ_ONLY", "Finalized submissions are read-only")
+    try:
+        require_submission_mutable(submission)
+    except GuardViolation as exc:
+        raise exc.problem(409) from exc
 
 
 def _enqueue(job: AIScoringJob, db: Session, criterion_key: str | None) -> None:
@@ -86,6 +101,16 @@ def job_json(db: Session, j: AIScoringJob) -> dict[str, Any]:
         select(AIProviderInvocation).where(AIProviderInvocation.ai_scoring_job_id == j.id)
     ).all()
     draft = db.scalar(select(AIFeedbackDraft).where(AIFeedbackDraft.ai_scoring_job_id == j.id))
+    validation_by_criterion: dict[uuid.UUID, list[str]] = {}
+    if j.math_validation_job_id:
+        validation_rows = db.scalars(
+            select(CriterionValidationResult).where(
+                CriterionValidationResult.validation_job_id == j.math_validation_job_id,
+                CriterionValidationResult.stale_at.is_(None),
+            )
+        ).all()
+        for result in validation_rows:
+            validation_by_criterion.setdefault(result.criterion_id, []).append(str(result.id))
     return {
         "id": str(j.id),
         "student_answer_id": str(j.student_answer_id),
@@ -107,11 +132,23 @@ def job_json(db: Session, j: AIScoringJob) -> dict[str, Any]:
             {
                 "id": str(x.id),
                 "criterion_stable_key": x.criterion_stable_key,
-                "status": x.status,
+                "status": public_status(
+                    x.status,
+                    points=x.suggested_points,
+                    stale=bool(j.stale_at),
+                    error_code=j.error_code,
+                ),
+                "reason": x.manual_review_reason or x.reasoning_summary,
+                "error_codes": [j.error_code] if j.error_code else [],
+                "evidence_ids": x.evidence_refs,
+                "validation_refs": validation_by_criterion.get(x.criterion_id, []),
+                "requires_review": True,
                 "suggested_points": str(x.suggested_points)
                 if x.suggested_points is not None
                 else None,
                 "max_points": str(x.max_points),
+                "score": str(x.suggested_points) if x.suggested_points is not None else None,
+                "max_score": str(x.max_points),
                 "confidence": str(x.confidence) if x.confidence is not None else None,
                 "evidence_refs": x.evidence_refs,
                 "missing_steps": x.missing_steps,
@@ -169,8 +206,16 @@ def create_job(data: CreateJob, db: Db, actor: Actor) -> dict[str, Any]:
     submission = db.get(Submission, answer.submission_id)
     if not submission or submission.owner_id != actor.id:
         raise ApiProblem(404, "SUBMISSION_NOT_FOUND", "Submission not found")
-    if submission.finalized_at is not None:
-        raise ApiProblem(409, "FINALIZED_READ_ONLY", "Finalized submissions are read-only")
+    question = db.get(Question, answer.question_id)
+    try:
+        require_answer_relation(answer, submission, question, actor.id)
+        require_confirmed_answer(answer)
+    except GuardViolation as exc:
+        raise exc.problem(422) from exc
+    try:
+        require_submission_mutable(submission)
+    except GuardViolation as exc:
+        raise exc.problem(409) from exc
     batch_cost = db.scalar(
         select(func.coalesce(func.sum(AIScoringJob.estimated_cost), 0)).where(
             AIScoringJob.assignment_id == submission.assignment_id,
@@ -195,7 +240,13 @@ def create_job(data: CreateJob, db: Db, actor: Actor) -> dict[str, Any]:
         .order_by(QuestionRecognitionEvidence.recognition_version.desc())
     )
     reference = db.get(ReferenceAnswerVersion, rubric.reference_answer_version_id)
-    if not evidence or not reference or reference.status != "confirmed":
+    if (
+        not evidence
+        or evidence.owner_id != actor.id
+        or evidence.submission_id != submission.id
+        or not reference
+        or reference.status != "confirmed"
+    ):
         raise ApiProblem(
             422, "AI_INPUT_NOT_CONFIRMED", "Confirmed recognition and reference answer required"
         )
@@ -384,14 +435,59 @@ def review(suggestion_id: uuid.UUID, data: ReviewInput, db: Db, actor: Actor) ->
     _assert_submission_mutable(db, job.submission_id)
     if job.stale_at or job.status == "stale":
         raise ApiProblem(409, "AI_SUGGESTION_STALE", "Stale suggestion cannot be adopted")
+    criterion = db.get(RubricCriterion, suggestion.criterion_id)
+    if not criterion or criterion.rubric_version_id != job.rubric_version_id:
+        raise ApiProblem(409, "CRITERION_SET_INVALID", "Criterion is not part of current rubric")
+    known_evidence = {
+        f"recognition:{job.recognition_evidence_id}",
+        *(
+            str(source.get("block_id") or source.get("id"))
+            for source in (
+                db.get(QuestionRecognitionEvidence, job.recognition_evidence_id).block_sources
+                if db.get(QuestionRecognitionEvidence, job.recognition_evidence_id)
+                else []
+            )
+        ),
+    }
+    try:
+        validate_evidence_refs(suggestion.evidence_refs, known_evidence)
+    except GuardViolation as exc:
+        raise exc.problem(422) from exc
+    if job.math_validation_job_id:
+        validation_job = db.get(MathValidationJob, job.math_validation_job_id)
+        validation_result = db.scalar(
+            select(CriterionValidationResult).where(
+                CriterionValidationResult.validation_job_id == job.math_validation_job_id,
+                CriterionValidationResult.criterion_id == suggestion.criterion_id,
+                CriterionValidationResult.generation == validation_job.generation,
+            )
+        ) if validation_job else None
+        try:
+            validate_validation_link(
+                validation_job,
+                validation_result,
+                answer_id=job.student_answer_id,
+                rubric_id=job.rubric_version_id,
+                reference_id=job.reference_answer_version_id,
+                criterion_id=suggestion.criterion_id,
+            )
+        except GuardViolation as exc:
+            raise exc.problem(409 if exc.status == "stale" else 422) from exc
     if data.action == "accepted":
         selected = suggestion.suggested_points
     elif data.action == "modified":
         selected = data.selected_points
     else:
         selected = None
-    if selected is not None and not 0 <= selected <= suggestion.max_points:
-        raise ApiProblem(422, "SCORE_OUT_OF_RANGE", "Selected points out of range")
+    step_raw = (criterion.partial_credit_policy or {}).get("step")
+    try:
+        validate_score(
+            Decimal(str(selected)) if selected is not None else None,
+            Decimal(str(criterion.max_points)),
+            Decimal(str(step_raw)) if step_raw else None,
+        )
+    except GuardViolation as exc:
+        raise exc.problem(422) from exc
     entry = AISuggestionReview(
         suggestion_id=suggestion.id,
         reviewer_id=actor.id,
