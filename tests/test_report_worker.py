@@ -51,3 +51,30 @@ def test_report_worker_accepts_only_job_id_and_is_idempotent(monkeypatch: object
     assert len(storage.data) == 1
     run_report_job(db, storage, job_id)  # type: ignore[arg-type]
     assert len(storage.data) == 1
+
+
+def test_report_worker_does_not_resurrect_failed_job(monkeypatch: object) -> None:
+    job_id, owner_id, release_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    job = SimpleNamespace(
+        id=job_id,
+        owner_id=owner_id,
+        grade_release_id=release_id,
+        report_type="gradebook_xlsx",
+        status="failed",
+        started_at=None,
+        progress=5,
+        stored_file_id=None,
+        completed_at=None,
+        error_code="SYNTHETIC_FAILURE",
+        error_message="historical failure",
+    )
+    release = SimpleNamespace(id=release_id, version=3)
+    db, storage = FakeDb(job, release), MemoryStorage()
+    monkeypatch.setattr("app.results.jobs.gradebook_xlsx", lambda _db, _release: b"xlsx")
+    run_report_job(db, storage, job_id)  # type: ignore[arg-type]
+    assert job.status == "failed"
+    assert job.progress == 5
+    assert job.stored_file_id is None
+    assert job.error_code == "SYNTHETIC_FAILURE"
+    assert job.error_message == "historical failure"
+    assert storage.data == {}

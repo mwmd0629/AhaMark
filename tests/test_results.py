@@ -106,18 +106,22 @@ def test_xlsx_has_required_sheets_and_student_number_is_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     data = payload()
+    data.details[0].question_number = "=1+1"
     row = validated(data)
     monkeypatch.setattr("app.results.services.release_scores", lambda _db, _id: [row])
-    student = SimpleNamespace(student_number="00123", name="测试学生")
-    school_class = SimpleNamespace(name="一班")
-    assignment = SimpleNamespace(title="测试作业")
+    student = SimpleNamespace(student_number="00123", name="+测试学生")
+    school_class = SimpleNamespace(name="-一班")
+    assignment = SimpleNamespace(title="@测试作业")
 
     class FakeDb:
         def get(self, model: object, object_id: object) -> object:
             name = getattr(model, "__name__", "")
-            return {"Student": student, "SchoolClass": school_class, "Assignment": assignment}.get(
-                name
-            )
+            return {
+                "Student": student,
+                "SchoolClass": school_class,
+                "Assignment": assignment,
+                "KnowledgePoint": SimpleNamespace(name="=恶意知识点"),
+            }.get(name)
 
     release = SimpleNamespace(
         id=uuid.uuid4(), class_id=uuid.uuid4(), assignment_id=uuid.uuid4(), version=2
@@ -127,6 +131,11 @@ def test_xlsx_has_required_sheets_and_student_number_is_text(
     assert workbook.sheetnames == ["成绩总表", "题目统计", "知识点统计", "导出说明"]
     assert workbook["成绩总表"]["A2"].value == "00123"
     assert workbook["成绩总表"]["A2"].number_format == "@"
+    assert workbook["成绩总表"]["B2"].value == "'+测试学生"
+    assert workbook["成绩总表"]["C2"].value == "'-一班"
+    assert workbook["成绩总表"]["D2"].value == "'@测试作业"
+    assert workbook["题目统计"]["A2"].value == "'=1+1"
+    assert workbook["知识点统计"]["A2"].value == "'=恶意知识点"
     assert workbook["导出说明"]["B1"].value == 2
 
 

@@ -29,7 +29,7 @@ def run_report_job(
     allow_running_resume: bool = False,
 ) -> None:
     job = db.get(ReportJob, job_id)
-    if job is None or job.status in {"completed", "partially_completed"}:
+    if job is None or job.status in {"completed", "partially_completed", "failed"}:
         return
     if job.status == "running" and not allow_running_resume:
         return

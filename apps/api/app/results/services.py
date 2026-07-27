@@ -389,6 +389,10 @@ def gradebook_xlsx(db: Session, release: GradeRelease) -> bytes:
     scores = release_scores(db, release.id)
     metrics = compute_metrics(scores)
     questions = sorted({d.question_number for row in scores for d in row.payload.details})
+
+    def safe(value: str) -> str:
+        return f"'{value}" if value.startswith(("=", "+", "-", "@")) else value
+
     wb = Workbook()
     ws = wb.active
     ws.title = "成绩总表"
@@ -398,7 +402,7 @@ def gradebook_xlsx(db: Session, release: GradeRelease) -> bytes:
             "姓名",
             "班级",
             "作业",
-            *questions,
+            *[safe(question) for question in questions],
             "总分",
             "满分",
             "得分率",
@@ -415,9 +419,6 @@ def gradebook_xlsx(db: Session, release: GradeRelease) -> bytes:
             db.get(Assignment, release.assignment_id),
         )
         detail = {x.question_number: float(x.score) for x in row.payload.details}
-
-        def safe(value: str) -> str:
-            return f"'{value}" if value.startswith(("=", "+", "-", "@")) else value
 
         ws.append(
             [
@@ -439,7 +440,7 @@ def gradebook_xlsx(db: Session, release: GradeRelease) -> bytes:
     for q in metrics["questions"]:
         qws.append(
             [
-                q["question_number"],
+                safe(q["question_number"]),
                 q["question_type"],
                 q["participants"],
                 q["score_rate"],
@@ -454,7 +455,7 @@ def gradebook_xlsx(db: Session, release: GradeRelease) -> bytes:
         name = db.get(KnowledgePoint, uuid.UUID(kp["knowledge_point_id"]))
         kws.append(
             [
-                name.name if name else kp["knowledge_point_id"],
+                safe(name.name) if name else kp["knowledge_point_id"],
                 ",".join(kp["question_ids"]),
                 kp["sample_count"],
                 kp["mastery_rate"],
