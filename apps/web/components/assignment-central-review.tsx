@@ -10,6 +10,7 @@ import {
   type AssignmentReviewItemRecord,
   type AssignmentReviewSessionRecord,
 } from "@/lib/api";
+import { getReviewCopy } from "@/lib/review-copy";
 
 const confirmations = [
   ["classes", "确认班级"],
@@ -17,9 +18,9 @@ const confirmations = [
   ["total_score", "确认总分"],
   ["file_roles", "确认文件角色"],
   ["answer_sources", "确认答案来源"],
-  ["paper_version", "确认 PaperVersion"],
+  ["paper_version", "确认试卷版本"],
   ["reference_answers", "确认答案版本"],
-  ["structured_rubrics", "确认 Structured Rubric"],
+  ["structured_rubrics", "确认评分标准"],
 ] as const;
 
 export function AssignmentCentralReview({
@@ -39,6 +40,7 @@ export function AssignmentCentralReview({
   const [section, setSection] = useState("all");
   const [busy, setBusy] = useState(false);
   const [bindingId, setBindingId] = useState<string>();
+  const [resolvedOpen, setResolvedOpen] = useState(false);
 
   const load = useCallback(
     async (candidate?: AssignmentReviewSessionRecord) => {
@@ -87,7 +89,150 @@ export function AssignmentCentralReview({
       ),
     [items, severity, section],
   );
+  const isResolved = (row: AssignmentReviewItemRecord) =>
+    ["acknowledged", "resolved", "rejected"].includes(row.status);
+  const unresolved = visible
+    .filter((row) => !isResolved(row))
+    .sort(
+      (a, b) =>
+        ({ blocking: 0, warning: 1, info: 2 })[a.severity] -
+        ({ blocking: 0, warning: 1, info: 2 })[b.severity],
+    );
+  const resolved = visible.filter(isResolved);
   const sections = [...new Set(items.map((row) => row.section))].sort();
+  const sectionLabels: Record<string, string> = {
+    validation: "内容版本",
+    classes: "发布班级",
+    due_at: "截止时间",
+    files: "试卷文件",
+    pages: "试卷页面",
+    questions: "题目",
+    answers: "参考答案",
+    rubrics: "评分标准",
+    total_score: "分值",
+  };
+
+  const renderReview = (review: AssignmentReviewItemRecord) => {
+    const copy = getReviewCopy(review.issue_code);
+    return (
+      <li key={review.id} className="rounded-xl border p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold text-slate-500">
+              {review.severity === "blocking"
+                ? "影响发布"
+                : review.severity === "warning"
+                  ? "建议处理"
+                  : "提示"}{" "}
+              · {sectionLabels[review.section] ?? "其他"}
+            </p>
+            <strong className="mt-1 block">{copy.title}</strong>
+          </div>
+          <span
+            className={`rounded-full px-2 py-1 text-xs ${
+              review.severity === "blocking"
+                ? "bg-red-100 text-red-700"
+                : review.severity === "warning"
+                  ? "bg-amber-100 text-amber-800"
+                  : "bg-emerald-100 text-emerald-800"
+            }`}
+          >
+            {isResolved(review) ? "已解决" : "待处理"}
+          </span>
+        </div>
+        <p className="mt-2 text-sm text-slate-700">{copy.message}</p>
+        {isResolved(review) && (
+          <dl className="mt-3 grid gap-1 rounded-lg bg-slate-50 p-3 text-sm">
+            {review.teacher_action && (
+              <div>
+                <dt className="inline font-medium">处理方式：</dt>
+                <dd className="inline">
+                  {review.teacher_action === "acknowledge"
+                    ? "已确认查看"
+                    : review.teacher_action === "resolve_manual"
+                      ? "人工检查并解决"
+                      : review.teacher_action}
+                </dd>
+              </div>
+            )}
+            {review.teacher_note && (
+              <div>
+                <dt className="inline font-medium">教师备注：</dt>
+                <dd className="inline">{review.teacher_note}</dd>
+              </div>
+            )}
+            {review.reviewed_by && (
+              <div>
+                <dt className="inline font-medium">处理人：</dt>
+                <dd className="inline">{review.reviewed_by}</dd>
+              </div>
+            )}
+            {review.reviewed_at && (
+              <div>
+                <dt className="inline font-medium">处理时间：</dt>
+                <dd className="inline">
+                  {new Date(review.reviewed_at).toLocaleString("zh-CN")}
+                </dd>
+              </div>
+            )}
+          </dl>
+        )}
+        <details className="mt-3">
+          <summary className="cursor-pointer text-sm text-slate-600">
+            查看技术详情
+          </summary>
+          <div className="mt-2 rounded bg-slate-950 p-3 text-xs text-slate-100">
+            <p>错误码：{review.issue_code}</p>
+            <p>问题 ID：{review.id}</p>
+            <p>来源哈希：{review.source_hash}</p>
+            <pre className="mt-2 overflow-auto whitespace-pre-wrap">
+              {JSON.stringify(review.evidence, null, 2)}
+            </pre>
+          </div>
+        </details>
+        {!isResolved(review) && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              onClick={() =>
+                onNavigate(
+                  review.section === "files"
+                    ? 2
+                    : review.section === "pages"
+                      ? 3
+                      : review.section === "questions"
+                        ? 4
+                        : ["answers", "rubrics"].includes(review.section)
+                          ? 5
+                          : 1,
+                )
+              }
+            >
+              {copy.action}
+            </Button>
+            {review.severity === "warning" && (
+              <Button
+                disabled={busy}
+                onClick={() =>
+                  act(
+                    () =>
+                      assignmentReviewApi.disposition(
+                        review.id,
+                        session!.review_version,
+                        "acknowledge",
+                      ),
+                    "问题已标记为已查看",
+                  )
+                }
+              >
+                确认已查看
+              </Button>
+            )}
+          </div>
+        )}
+      </li>
+    );
+  };
 
   if (!session) {
     return (
@@ -115,21 +260,19 @@ export function AssignmentCentralReview({
       <div>
         <h2 className="font-bold">集中审查中心</h2>
         <p className="text-sm text-slate-600">
-          generation {session.generation} · DraftRevision{" "}
-          {session.draft_revision_id} · PaperVersion {session.paper_version_id}{" "}
-          · legacy {session.legacy_rubric_version_id ?? "未绑定"} ·{" "}
-          {session.status}
+          请先处理影响发布的问题，再确认其余内容。版本等排查信息可在技术详情中查看。
         </p>
       </div>
       <div className="grid grid-cols-3 gap-3" aria-label="风险汇总">
         <div className="rounded bg-emerald-50 p-3">
-          绿色 {session.counts.info}
+          提示 {session.counts.info}
         </div>
         <div className="rounded bg-amber-50 p-3">
-          黄色 {session.counts.warning}
+          警告 {session.counts.warning}
         </div>
         <div className="rounded bg-red-50 p-3">
-          红色 {session.counts.blocking}
+          阻塞 {session.counts.blocking}
+          <span className="sr-only">红色 {session.counts.blocking}</span>
         </div>
       </div>
       <div className="flex flex-wrap gap-3">
@@ -138,10 +281,10 @@ export function AssignmentCentralReview({
           value={severity}
           onChange={(event) => setSeverity(event.target.value)}
         >
-          <option value="all">全部风险</option>
-          <option value="blocking">红色</option>
-          <option value="warning">黄色</option>
-          <option value="info">绿色</option>
+          <option value="all">全部问题</option>
+          <option value="blocking">影响发布</option>
+          <option value="warning">警告</option>
+          <option value="info">提示</option>
         </Select>
         <Select
           aria-label="按分区过滤"
@@ -151,7 +294,7 @@ export function AssignmentCentralReview({
           <option value="all">全部分区</option>
           {sections.map((value) => (
             <option key={value} value={value}>
-              {value}
+              {sectionLabels[value] ?? value}
             </option>
           ))}
         </Select>
@@ -169,68 +312,27 @@ export function AssignmentCentralReview({
           刷新审查
         </Button>
       </div>
-      <ul className="space-y-2">
-        {visible.map((review) => (
-          <li key={review.id} className="rounded-xl border p-3">
-            <div className="flex items-center justify-between gap-2">
-              <strong>
-                {review.severity === "blocking"
-                  ? "红色"
-                  : review.severity === "warning"
-                    ? "黄色"
-                    : "绿色"}{" "}
-                · {review.section} · {review.title}
-              </strong>
-              <span>{review.status}</span>
-            </div>
-            <p className="text-sm">{review.message}</p>
-            <details>
-              <summary className="cursor-pointer text-sm">证据</summary>
-              <pre className="overflow-auto whitespace-pre-wrap text-xs">
-                {JSON.stringify(review.evidence, null, 2)}
-              </pre>
-            </details>
-            <div className="mt-2 flex gap-2">
-              <Button
-                variant="outline"
-                onClick={() =>
-                  onNavigate(
-                    review.section === "files"
-                      ? 2
-                      : review.section === "pages"
-                        ? 3
-                        : review.section === "questions"
-                          ? 4
-                          : ["answers", "rubrics"].includes(review.section)
-                            ? 5
-                            : 1,
-                  )
-                }
-              >
-                前往修改
-              </Button>
-              {review.severity === "warning" && review.status === "open" && (
-                <Button
-                  disabled={busy}
-                  onClick={() =>
-                    act(
-                      () =>
-                        assignmentReviewApi.disposition(
-                          review.id,
-                          session.review_version,
-                          "acknowledge",
-                        ),
-                      "黄色风险已确认查看",
-                    )
-                  }
-                >
-                  确认已查看
-                </Button>
-              )}
-            </div>
-          </li>
-        ))}
-      </ul>
+      {unresolved.length > 0 && (
+        <ul className="space-y-2">{unresolved.map(renderReview)}</ul>
+      )}
+      {resolved.length > 0 && (
+        <section className="rounded-xl border">
+          <button
+            type="button"
+            className="flex w-full items-center justify-between p-4 text-left font-semibold"
+            aria-expanded={resolvedOpen}
+            onClick={() => setResolvedOpen((open) => !open)}
+          >
+            <span>已解决 {resolved.length} 项</span>
+            <span aria-hidden="true">{resolvedOpen ? "收起" : "展开"}</span>
+          </button>
+          {resolvedOpen && (
+            <ul className="space-y-2 border-t p-3">
+              {resolved.map(renderReview)}
+            </ul>
+          )}
+        </section>
+      )}
       <div className="space-y-2">
         <h3 className="font-semibold">教师显式确认</h3>
         <div className="flex flex-wrap gap-2">
@@ -257,7 +359,7 @@ export function AssignmentCentralReview({
         </div>
       </div>
       <div className="space-y-2">
-        <h3 className="font-semibold">legacy Rubric 绑定</h3>
+        <h3 className="font-semibold">评分标准发布绑定</h3>
         <div className="flex gap-2">
           <Button
             disabled={busy}
@@ -282,7 +384,7 @@ export function AssignmentCentralReview({
                     bindingId!,
                     session.review_version,
                   ),
-                "legacy 绑定已确认",
+                "评分标准绑定已确认",
               )
             }
           >
@@ -293,7 +395,7 @@ export function AssignmentCentralReview({
       <div className="rounded-xl border p-4">
         <h3 className="font-semibold">发布门禁</h3>
         <p>
-          班级 {item.classes.length} · 截止时间 {item.due_at ?? "未设置"} · 总分{" "}
+          班级 {item.classes.length} · 截止时间 {item.due_at ?? "无截止时间"} · 总分{" "}
           {item.total_score ?? "未设置"}
         </p>
         <div className="mt-3 flex gap-2">
@@ -322,7 +424,7 @@ export function AssignmentCentralReview({
               if (
                 !readiness ||
                 !window.confirm(
-                  `确认由教师发布？\n班级：${readiness.class_ids.length}\n截止：${readiness.due_at}\n总分：${readiness.total_score}\nPaper：${readiness.paper_version_id}\nRubric：${readiness.legacy_rubric_version_id}`,
+                  `确认由教师发布？\n班级：${readiness.class_ids.length}\n截止：${readiness.due_at ?? "无截止时间"}\n总分：${readiness.total_score}`,
                 )
               )
                 return;

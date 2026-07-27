@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import {
   ApiError,
@@ -12,6 +13,8 @@ import {
 import { Button, Card, Input, PageHeader, Select } from "@/components/ui";
 
 export default function GradingPage() {
+  const searchParams = useSearchParams();
+  const requestedAssignmentId = searchParams.get("assignmentId") ?? "";
   const [assignments, setAssignments] = useState<AssignmentRecord[]>([]);
   const [assignmentId, setAssignmentId] = useState("");
   const [items, setItems] = useState<GradingBatch[]>([]);
@@ -31,6 +34,15 @@ export default function GradingPage() {
       .catch(() => setError("无法加载已发布作业"))
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (
+      requestedAssignmentId &&
+      assignments.some((item) => item.id === requestedAssignmentId)
+    ) {
+      setAssignmentId(requestedAssignmentId);
+    }
+  }, [assignments, requestedAssignmentId]);
 
   useEffect(() => {
     if (!assignmentId) {

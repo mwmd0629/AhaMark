@@ -31,6 +31,10 @@ export type AssignmentReviewItemRecord = {
   source_hash: string;
   status: string;
   eligibility: boolean;
+  teacher_action?: string | null;
+  teacher_note?: string | null;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
 };
 
 export type AssignmentReadinessRecord = {
@@ -39,7 +43,7 @@ export type AssignmentReadinessRecord = {
   status: string;
   expires_at: string;
   class_ids: string[];
-  due_at: string;
+  due_at: string | null;
   total_score: string;
   paper_version_id: string;
   legacy_rubric_version_id: string;
@@ -351,7 +355,7 @@ export type AssignmentRecord = {
   instructions?: string;
   status: AssignmentStatus;
   total_score?: string;
-  due_at?: string;
+  due_at?: string | null;
   published_at?: string;
   updated_at: string;
   classes: Pick<ClassRecord, "id" | "name" | "status">[];
@@ -402,7 +406,7 @@ export type AssignmentInput = {
   description?: string;
   instructions?: string;
   total_score?: number;
-  due_at?: string;
+  due_at?: string | null;
   class_ids: string[];
 };
 export const assignmentsApi = {
@@ -429,6 +433,10 @@ export const assignmentsApi = {
       { method: "POST", body },
     );
   },
+  preview: (id: string, fileId: string) =>
+    request<{ url: string }>(`/api/assignments/${id}/files/${fileId}/preview`, {
+      method: "POST",
+    }),
   page: (id: string, pageId: string, data: Record<string, unknown>) =>
     request(`/api/assignments/${id}/pages/${pageId}`, {
       method: "PATCH",

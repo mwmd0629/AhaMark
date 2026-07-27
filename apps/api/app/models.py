@@ -2283,7 +2283,7 @@ class AssignmentPublishReadinessSnapshot(Base):
     source_snapshot_hash: Mapped[str] = mapped_column(String(64))
     assignment_state_hash: Mapped[str] = mapped_column(String(64))
     class_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
-    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     total_score: Mapped[Any] = mapped_column(Numeric(10, 2))
     issue_counts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     readiness_hash: Mapped[str] = mapped_column(String(64), unique=True)

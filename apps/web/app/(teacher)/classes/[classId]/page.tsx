@@ -43,6 +43,7 @@ export default function ClassDetailPage({
   const [membership, setMembership] = useState("active");
   const [groupId, setGroupId] = useState("");
   const [saving, setSaving] = useState(false);
+  const [studentOpen, setStudentOpen] = useState(false);
   const [preview, setPreview] = useState<ImportPreview>();
   const toast = useToast();
   const load = async () => {
@@ -82,6 +83,7 @@ export default function ClassDetailPage({
       event.currentTarget.reset();
       toast("学生已加入班级");
       await load();
+      setStudentOpen(false);
     } catch (e) {
       toast(e instanceof ApiError ? e.body.message : "添加失败", "error");
     } finally {
@@ -147,12 +149,15 @@ export default function ClassDetailPage({
       )
     )
       return;
+    setSaving(true);
     try {
       await studentsApi.remove(classId, student.id);
       toast("学生已移出班级");
       await load();
     } catch (e) {
       toast(e instanceof Error ? e.message : "操作失败", "error");
+    } finally {
+      setSaving(false);
     }
   };
   if (loading && !klass)
@@ -185,6 +190,8 @@ export default function ClassDetailPage({
               title="添加学生"
               description="若该学号已属于当前教师，将复用学生档案并加入本班。"
               dismissible={false}
+              open={studentOpen}
+              onOpenChange={setStudentOpen}
               trigger={<Button>添加学生</Button>}
             >
               <form className="grid gap-4" onSubmit={addStudent}>
@@ -220,12 +227,26 @@ export default function ClassDetailPage({
                     </span>
                     <Button
                       variant="ghost"
+                      disabled={saving}
                       onClick={async () => {
                         if (
                           window.confirm("删除分组不会删除学生，是否继续？")
                         ) {
-                          await groupsApi.remove(g.id);
-                          await load();
+                          setSaving(true);
+                          try {
+                            await groupsApi.remove(g.id);
+                            await load();
+                            toast("分组已删除");
+                          } catch (error) {
+                            toast(
+                              error instanceof ApiError
+                                ? error.message
+                                : "删除分组失败",
+                              "error",
+                            );
+                          } finally {
+                            setSaving(false);
+                          }
                         }
                       }}
                     >
@@ -409,7 +430,9 @@ export default function ClassDetailPage({
                     <Button
                       variant="ghost"
                       onClick={() => void remove(student)}
-                      disabled={student.membership_status !== "active"}
+                      disabled={
+                        saving || student.membership_status !== "active"
+                      }
                     >
                       移出
                     </Button>

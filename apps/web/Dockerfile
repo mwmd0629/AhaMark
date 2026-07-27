@@ -3,7 +3,7 @@ WORKDIR /app
 COPY package*.json ./
 COPY apps/web/package.json apps/web/package.json
 RUN npm ci && npm install --no-save \
-    @next/swc-linux-x64-musl@15.5.9 \
+    @next/swc-linux-x64-musl@15.5.7 \
     lightningcss-linux-x64-musl@1.32.0 \
     @tailwindcss/oxide-linux-x64-musl@4.3.3
 FROM deps AS build

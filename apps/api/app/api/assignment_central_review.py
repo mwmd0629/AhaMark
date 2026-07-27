@@ -488,8 +488,6 @@ def generated_issues(db: Session, session: AssignmentReviewSession) -> list[dict
         for x in links
     ):
         add("CLASS_NOT_ACTIVE", "classes", "班级不存在、越权或已归档")
-    if assignment.due_at is None:
-        add("DUE_AT_REQUIRED", "due_at", "截止时间不能为空")
     qs = questions(db, paper.id)
     if not qs:
         add("QUESTIONS_REQUIRED", "questions", "当前试卷没有已物化题目")
@@ -921,6 +919,8 @@ def list_review_items(
                 "eligibility": x.eligibility,
                 "teacher_action": x.teacher_action,
                 "teacher_note": x.teacher_note,
+                "reviewed_by": str(x.reviewed_by) if x.reviewed_by else None,
+                "reviewed_at": x.reviewed_at,
             }
             for x in items
         ]
@@ -983,8 +983,6 @@ def confirm(
     value = confirmation_value(db, session, confirmation_type)
     if confirmation_type == "classes" and not value["class_ids"]:
         raise ApiProblem(422, "CLASSES_REQUIRED", "班级不能为空")
-    if confirmation_type == "due_at" and value["due_at"] is None:
-        raise ApiProblem(422, "DUE_AT_REQUIRED", "截止时间不能为空")
     if confirmation_type == "total_score" and (
         value["total_score"] is None or any(x["score"] is None for x in value["question_scores"])
     ):
@@ -1328,7 +1326,7 @@ def prepare_publication(
         )
         .with_for_update()
     )
-    if binding is None or assignment.due_at is None or assignment.total_score is None:
+    if binding is None or assignment.total_score is None:
         raise ApiProblem(422, "PUBLICATION_INPUT_INCOMPLETE", "发布输入不完整")
     paper = db.get(PaperVersion, session.paper_version_id)
     legacy = db.get(RubricVersion, binding.legacy_rubric_version_id)

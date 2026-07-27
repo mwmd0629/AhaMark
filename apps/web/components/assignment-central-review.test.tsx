@@ -1,5 +1,11 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, expect, it, vi } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AssignmentCentralReview } from "./assignment-central-review";
 import { assignmentReviewApi, type AssignmentRecord } from "@/lib/api";
 
@@ -39,6 +45,24 @@ vi.mock("@/lib/api", async () => {
             status: "open",
             eligibility: false,
           },
+          {
+            id: "risk-2",
+            section: "pages",
+            entity_type: "page",
+            entity_id: "page-2",
+            severity: "warning",
+            issue_code: "PAPER_VARIANT_REVIEW",
+            title: "PAPER VARIANT REVIEW",
+            message: "mixed document suspected",
+            evidence: { page_id: "page-2" },
+            source_hash: "b".repeat(64),
+            status: "resolved",
+            eligibility: true,
+            teacher_action: "resolve_manual",
+            teacher_note: "已核对为同一份试卷",
+            reviewed_by: "teacher-1",
+            reviewed_at: "2026-07-27T12:00:00Z",
+          },
         ],
       }),
     },
@@ -59,6 +83,7 @@ const assignment = {
 } as AssignmentRecord;
 
 beforeEach(() => vi.clearAllMocks());
+afterEach(cleanup);
 
 it("不会在加载时自动创建审查或发布，并由教师显式开始", async () => {
   render(
@@ -76,4 +101,45 @@ it("不会在加载时自动创建审查或发布，并由教师显式开始", a
   );
   expect(await screen.findByText("红色 1")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "教师确认并发布" })).toBeDisabled();
+});
+
+it("把技术错误码转换成教师能理解的文案，并保留技术详情", async () => {
+  render(
+    <AssignmentCentralReview
+      item={assignment}
+      onNavigate={vi.fn()}
+      onPublished={vi.fn()}
+    />,
+  );
+  fireEvent.click(
+    await screen.findByRole("button", { name: "开始集中审查" }),
+  );
+  expect(await screen.findByText("需要教师检查的内容")).toBeInTheDocument();
+  expect(screen.queryByText("CONFIRM CLASSES REQUIRED")).not.toBeInTheDocument();
+  expect(screen.getByText("查看技术详情")).toBeInTheDocument();
+});
+
+it("已解决问题默认收起，可在本地展开查看处理信息", async () => {
+  render(
+    <AssignmentCentralReview
+      item={assignment}
+      onNavigate={vi.fn()}
+      onPublished={vi.fn()}
+    />,
+  );
+  fireEvent.click(
+    await screen.findByRole("button", { name: "开始集中审查" }),
+  );
+  const toggle = await screen.findByRole("button", { name: /已解决 1 项/ });
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  expect(
+    screen.queryByText("请确认试卷页面属于同一份试卷"),
+  ).not.toBeInTheDocument();
+  fireEvent.click(toggle);
+  expect(toggle).toHaveAttribute("aria-expanded", "true");
+  expect(
+    screen.getByText("请确认试卷页面属于同一份试卷"),
+  ).toBeInTheDocument();
+  expect(screen.getByText("已核对为同一份试卷")).toBeInTheDocument();
+  expect(assignmentReviewApi.items).toHaveBeenCalledTimes(1);
 });

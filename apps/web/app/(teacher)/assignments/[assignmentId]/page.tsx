@@ -105,11 +105,17 @@ export default function AssignmentDetailPage({
       <Card className="p-6">
         <h2 className="font-bold">学生提交与批改</h2>
         <p className="mt-2 text-sm text-slate-600">
-          学生作业上传和 AI 初批尚未接入。
+          教师可以上传学生作业，系统会按文件名自动匹配学生，再进入 OCR 和批改流程。
         </p>
-        <Button className="mt-4" disabled>
-          上传学生作业（后续开放）
-        </Button>
+        {item.status === "draft" ? (
+          <Button className="mt-4" disabled>
+            发布作业后可上传学生作业
+          </Button>
+        ) : (
+          <Link href={`/grading?assignmentId=${item.id}`}>
+            <Button className="mt-4">上传学生作业</Button>
+          </Link>
+        )}
       </Card>
     </div>
   );
