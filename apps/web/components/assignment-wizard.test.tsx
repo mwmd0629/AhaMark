@@ -92,9 +92,9 @@ vi.mock("@/lib/api", async () => {
         name: "新试卷.pdf",
         pages_created: 3,
       }),
-      preview: vi
-        .fn()
-        .mockResolvedValue({ url: "https://example.test/paper.pdf?signature=1" }),
+      preview: vi.fn().mockResolvedValue({
+        url: "https://example.test/paper.pdf?signature=1",
+      }),
       page: vi.fn().mockResolvedValue({}),
     },
   };
@@ -109,7 +109,9 @@ it("回填标准答案并在切换题目时同步更新", async () => {
   expect(
     await screen.findByDisplayValue("第一题已保存答案"),
   ).toBeInTheDocument();
-  expect(screen.getByText(/由 Codex 生成可编辑草稿，不能直接发布作业/)).toBeInTheDocument();
+  expect(
+    screen.getByText(/由 Codex 生成可编辑草稿，不能直接发布作业/),
+  ).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("当前题目"), {
     target: { value: "q2" },
   });
@@ -141,7 +143,9 @@ it("拒绝非法格式并允许重新选择", async () => {
   fireEvent.click(screen.getByRole("button", { name: /上传试卷/ }));
   fireEvent.drop(screen.getByRole("button", { name: "上传试卷文件" }), {
     dataTransfer: {
-      files: [new File(["bad"], "脚本.exe", { type: "application/octet-stream" })],
+      files: [
+        new File(["bad"], "脚本.exe", { type: "application/octet-stream" }),
+      ],
     },
   });
   expect(

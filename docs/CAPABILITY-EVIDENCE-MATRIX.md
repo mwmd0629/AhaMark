@@ -1,6 +1,6 @@
 # AhaMark 能力与证据矩阵
 
-基线日期：2026-07-22。状态针对本表所列能力的完整范围，不把“有代码”或“测试通过”自动提升为真实环境或生产可用。
+基线日期：2026-07-28；Git 功能基线 `8746e18`。状态针对本表所列能力的完整范围，不把“有代码”或“测试通过”自动提升为真实环境或生产可用。
 
 ## 状态定义
 
@@ -19,7 +19,7 @@
 |---|---|---|
 | 认证 | IMPLEMENTED_AND_VERIFIED | 真实登录/CSRF 会话用于 HTTP72 与 BROWSER72；Redis 共享限速已在本地双 API 环境验证 |
 | 班级与学生 | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 覆盖真实浏览器创建、CSV 预览/确认、前导零与列表 |
-| 作业和 Rubric | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 覆盖六步向导、题目/题区/知识点/Rubric/发布正常主路径 |
+| 作业和 Rubric | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 覆盖六步向导、题目/题区/知识点/Rubric/发布；`4c6266b` 修复真实满分、manual-only 绑定和集中审查过滤 |
 | 试卷 OCR | PARTIAL | Fake 编排 150/200/250 页、真实 RapidOCR 清晰印刷体 100/150/250 页完成；准确率、公式/手写/DOCX 仍有缺口 |
 | 学生作业 OCR | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 在隔离 test-only Fake OCR 下验证异步 UI/持久化编排，不证明真实 OCR 能力 |
 | 客观题评分 | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 显示 objective-rule Criterion/Evidence 并由教师接受 |
@@ -27,7 +27,7 @@
 | 教师复核 | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 覆盖客观题接受、主观题 UI 人工评分、强制项与 finalize |
 | 最终成绩 | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E + 第四部分金标准 v1/v2，合法 complete Snapshot 与缺失不记零通过 |
 | GradeRelease | IMPLEMENTED_AND_VERIFIED | 第四部分验证 v1/v2 固定具体 Snapshot 且历史不漂移；学生送达 OUT_OF_SCOPE |
-| XLSX/PDF | IMPLEMENTED_AND_VERIFIED | 固定 Release 的 50 名不同学生、50 PDF、50 行 XLSX、50 PDF ZIP；52/52 Job completed |
+| XLSX/PDF | IMPLEMENTED_AND_VERIFIED | 固定 Release 的 50 名不同学生、50 PDF、50 行 XLSX、50 PDF ZIP；52/52 Job completed；`8746e18` 覆盖所有外部文本列公式注入防护 |
 | Analytics | IMPLEMENTED_AND_VERIFIED | 50/100/200 人、20/50/100 题及同 Release 顺序/20 路并发幂等通过；最大规模学生读取约 8 秒 |
 | TeachingInsight | IMPLEMENTED_AND_VERIFIED | 第四部分验证规则型建议 evidence 固定 AnalyticsSnapshot 及历史不漂移 |
 | 文件安全 | IMPLEMENTED_AND_VERIFIED | 41/41 结构 fixture、故障补偿及真实 URL 到期通过 |

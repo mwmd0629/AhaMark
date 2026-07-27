@@ -1,8 +1,8 @@
 # AhaMark 最终验收报告
 
-版本 `0.1.0`；更新日期 2026-07-25；分支 `master`；八部分最终功能基线为
-`cc9146a5edf001817915c020f7aa26bc8053b989`。原定八部分均已提交，最终审计时工作树干净；
-本次文档收口提交只修正文档状态，不构成新的项目部分。
+版本 `0.1.0`；更新日期 2026-07-28；分支 `master`；批改闭环最终功能基线为
+`8746e1819d0dc78333ee8670c8ce763dc103b528`，包含集成修复提交 `4c6266b` 与 `8746e18`。
+本地比 `origin/master` 超前 2，本任务不 push；本次收口不构成新的产品功能部分。
 
 本报告中的 `PASS` 仅表示对应验收检查在记录范围内通过，不等于整项能力已完成真实环境验证或达到生产可用。统一能力状态、数据边界和产品措辞以 `PROJECT-BASELINE.md`、`CAPABILITY-EVIDENCE-MATRIX.md`、`DATA-SECURITY-BOUNDARIES.md` 和 `PRODUCT-CAPABILITY-STATEMENTS.md` 为准。
 
@@ -19,11 +19,11 @@ Worker 故障恢复只在开发环境成立；生产灾备、高可用、生产 
 | 项目 | 状态 | 证据/说明 |
 |---|---|---|
 | 六核心服务 | PASS | web/api/worker/PostgreSQL/Redis/MinIO healthy；栈保持运行 |
-| 数据库迁移 | PASS | 活动库 0010；独立空库 upgrade；0010→0009→0010 |
-| 后端测试 | PASS | 第七部分关闭轮 113 passed、2 skipped、1 warning；Ruff 113 files、mypy 52 files |
-| 前端测试 | PASS | 第四部分关闭轮完整 Vitest：12 files、26 tests passed |
+| 数据库迁移 | PASS | current/heads 均为 `0024_nullable_publish_readiness_due_at`；本轮无迁移 |
+| 后端测试 | PASS（定向范围） | 第三至第五部分定向集合 36 passed、1 warning；完整套件在 120 秒窗口未完成；Ruff format/check 167 files、mypy 91 files |
+| 前端测试 | PASS | 完整 Vitest：21 files、60 tests passed |
 | 前端格式/lint/type | PASS | Prettier、ESLint、TypeScript |
-| Next production build | PASS | 18 条路由构建成功；SWC lockfile 修补警告仍存在但未阻断 |
+| Next production build | PASS | 23 条路由构建成功；SWC lockfile 修补警告仍存在但未阻断 |
 | Analytics HTTP | PASS | 35 请求，含 14 项 Teacher B 隔离 |
 | Analytics 浏览器 | PASS | 6 步无头 Edge 冒烟 |
 | 教师核心业务浏览器 A–H | PASS | 独立栈、无头 Edge、纯合成数据；8/8 阶段通过，见 BUSINESS-E2E 与机器 JSON |
@@ -46,6 +46,21 @@ Worker 故障恢复只在开发环境成立；生产灾备、高可用、生产 
 | 生产 RPO/RTO | NOT ESTABLISHED | RPO 0 秒因窗口无写入；2.314 秒仅为独立数据库恢复 |
 | 可用性/可访问性逐页 | NOT RUN | Analytics 冒烟不能替代完整巡检 |
 | 真实主观题 AI | NOT APPLICABLE | Provider unavailable；主观题人工评分；production 禁 fake |
+
+## 批改闭环最终集成（第六部分）
+
+- `4c6266b`：Structured Rubric 默认使用题目真实满分；`manual_only` 可在
+  `validation_rule` 为空时绑定；集中审查过滤 stale/superseded，并将人工解决动作限制在白名单；
+  隔离浏览器门禁有明确等待上限。
+- `8746e18`：failed ReportJob 保持终态、重试创建新任务；XLSX 全部外部文本列统一使用公式注入
+  防护。
+- 验证闭环为：发布作业 → GradingBatch → 上传/匹配 → 页面处理/OCR → 答案确认 →
+  客观规则/主观人工评分 → TeacherReview → finalize → complete Snapshot → GradeRelease →
+  报告 → Analytics。
+- AI/Codex 结果始终是 suggestion-only，教师拥有最终裁决；主观题真实 Provider unavailable，
+  Fake Provider 仅限非 production 测试，不构成质量证据。OCR 工程链路通过不证明手写或公式准确率。
+- 最终成绩只来自合法 complete `SubmissionScoreSnapshot`；`released` 只表示教师确认发布版本，
+  不表示学生已收到。
 
 ## 第五部分权限与文件安全
 

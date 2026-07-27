@@ -112,7 +112,8 @@ export default function AssignmentDetailPage({
       <Card className="p-6">
         <h2 className="font-bold">学生提交与批改</h2>
         <p className="mt-2 text-sm text-slate-600">
-          教师可以上传学生作业，系统会按文件名自动匹配学生，再进入 OCR 和批改流程。
+          教师可以上传学生作业，系统会按文件名自动匹配学生，再进入 OCR
+          和批改流程。
         </p>
         {item.status === "draft" ? (
           <Button className="mt-4" disabled>

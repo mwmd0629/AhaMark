@@ -516,14 +516,17 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
                 )}
                 {!["uploading", "processing"].includes(uploadState) && (
                   <Button variant="ghost" onClick={() => chooseUpload()}>
-                    {uploadState === "success" ? "选择其他文件" : "删除所选文件"}
+                    {uploadState === "success"
+                      ? "选择其他文件"
+                      : "删除所选文件"}
                   </Button>
                 )}
               </div>
             </div>
           )}
           <p className="text-sm">
-            当前共 {item.paper_version?.pages.length ?? 0} 页。上传成功后可直接进入下一步。
+            当前共 {item.paper_version?.pages.length ?? 0}{" "}
+            页。上传成功后可直接进入下一步。
           </p>
           <Button
             onClick={() => setStep(3)}
@@ -554,7 +557,9 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
                         ? "border-[var(--brand-600)] shadow-sm"
                         : "border-transparent"
                     }`}
-                    aria-current={selectedPageId === page.id ? "page" : undefined}
+                    aria-current={
+                      selectedPageId === page.id ? "page" : undefined
+                    }
                   >
                     <div className="grid h-28 place-items-center overflow-hidden rounded bg-slate-100">
                       {url && !previewErrors[page.stored_file_id] ? (

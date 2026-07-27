@@ -36,7 +36,9 @@ docker compose exec -T api alembic heads
 docker compose exec -T api alembic upgrade head
 ```
 
-回滚只能在名称明确的非生产库验证。本次已在独立库完成空库 `upgrade head`、`0010 -> 0009 -> 0010`。
+当前代码与活动库 current/heads 均应为 `0024_nullable_publish_readiness_due_at`。回滚只能在名称
+明确的非生产库验证；历史上已在独立库完成空库 `upgrade head` 与 `0010 -> 0009 -> 0010`，
+该历史记录不表示当前活动库仍停留在 0010。
 
 ## 恢复操作边界
 

@@ -42,7 +42,8 @@ const copies: Record<string, ReviewCopy> = {
   },
   DUE_AT_REQUIRED: {
     title: "截止时间未设置",
-    message: "当前作业选择了设置截止时间，请选择具体日期和时间；也可以改为无截止时间。",
+    message:
+      "当前作业选择了设置截止时间，请选择具体日期和时间；也可以改为无截止时间。",
     action: "返回修改",
   },
 };

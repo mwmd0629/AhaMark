@@ -1,7 +1,7 @@
 # AhaMark
 
-> **当前仓库状态（2026-07-27）：** 本地 `master` 位于
-> `e83937c`，已推送到 [`mwmd0629/AhaMark`](https://github.com/mwmd0629/AhaMark)，Alembic
+> **当前仓库状态（2026-07-28）：** 本地 `master` 功能基线位于
+> `8746e1819d0dc78333ee8670c8ce763dc103b528`，比 `origin/master` 超前 2 个提交且尚未 push；Alembic
 > 唯一 head 为 `0024_nullable_publish_readiness_due_at`；迁移 0011–0024 已进入 `master`。六步
 > Assignment Generation（编排、元数据/文件分析、题目提取、答案与 Rubric 草稿、集中复核发布、
 > Provider 调用审计）已按受控、仅建议方式落地。Provider 默认 `unavailable`，外部请求默认
@@ -15,6 +15,10 @@
 > `v8-final-20260725-c6568104`，证据入口见
 > [`docs/PREPRODUCTION-READINESS.md`](docs/PREPRODUCTION-READINESS.md)。该门禁只证明本地 API
 > 层故障切换，不建立生产高可用或灾备，项目等级仍为 C。
+>
+> 批改闭环最终集成基线包含 `4c6266b` 与 `8746e18`：Structured Rubric 使用题目真实满分，
+> `manual_only` 可绑定空 `validation_rule`，集中审查过滤 stale/superseded 并限制人工解决动作，
+> 浏览器门禁有界；failed ReportJob 只能创建新任务重试，XLSX 所有外部文本列均防公式注入。
 
 AhaMark 是面向教师的 AI 作业批改与学情分析平台。当前已实现数据库会话认证、Submission OCR 工程链路、教师评分复核、不可变成绩发布、异步 Excel/中文 PDF 报告和版本化学情统计。RapidOCR 是真实本地印刷体 OCR；当前没有真实主观题 AI Provider，主观题必须人工评分。第五部分权限与文件安全、第六部分开发机有界容量及第七部分开发环境备份/故障恢复均已完成定义范围内验收。整体等级仍为 **C（内部演示或开发测试）**，不适合真实学生数据、真实教学试点、生产部署或公网开放。
 

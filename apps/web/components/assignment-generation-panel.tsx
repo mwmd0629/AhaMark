@@ -216,7 +216,8 @@ export function AssignmentGenerationPanel({
         <div>
           <h2 className="font-bold">Codex 草稿生成</h2>
           <p className="mt-1 text-sm text-[var(--neutral-600)]">
-            由 Codex 生成可编辑草稿，不能直接发布作业。班级、截止时间、总分、答案与各版本仍须教师确认。
+            由 Codex
+            生成可编辑草稿，不能直接发布作业。班级、截止时间、总分、答案与各版本仍须教师确认。
           </p>
         </div>
         <Button

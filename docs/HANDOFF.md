@@ -1,11 +1,11 @@
-# AhaMark 项目交接（更新于 2026-07-27）
+# AhaMark 项目交接（更新于 2026-07-28）
 
 第一部分的可审计基线入口为 `PROJECT-BASELINE.md`；能力状态以 `CAPABILITY-EVIDENCE-MATRIX.md` 为准。下文“通过”只描述既有检查记录，不自动表示生产可用。
 
-## 当前工作区交接摘要（2026-07-27）
+## 当前工作区交接摘要（2026-07-28）
 
-- 当前分支为 `master`，HEAD 为 `e83937c`，已推送到
-  `https://github.com/mwmd0629/AhaMark`。
+- 当前分支为 `master`，功能基线 HEAD 为
+  `8746e1819d0dc78333ee8670c8ce763dc103b528`；比 `origin/master` 超前 2 个提交，未 push。
 - 当前 Alembic head 为 `0024_nullable_publish_readiness_due_at`。
 - 最近完成的教师端改进包括：创建学生/班级后的列表刷新、试卷拖拽上传框、整理页面预览、
   无截止时间、通俗化集中审查文案、已解决问题折叠，以及已发布作业的教师上传学生作业入口。
@@ -16,13 +16,22 @@
 - 当前本地服务由 Docker Compose 运行，六个服务均已验证 healthy。项目工作区位于
   `D:\OpenAIData\Workspaces\AhaMark`，Docker 数据位于 `D:\OpenAIData\Docker\LocalDocker`。
   C 盘对应路径只保留目录联接，避免旧工具路径失效。
-- 当前验证结果：Web lint 通过，前端 Vitest 59 项通过，Web production build 通过，
-  `tests/test_assignment_central_review_publish.py` 4 项通过。
+- 第六部分最终门禁：第三至第五部分定向后端集合 36 passed、1 warning；完整后端套件在
+  120 秒门禁窗口内未完成。Web Vitest 21 files / 60 tests、lint、typecheck、production build
+  通过；Ruff format/check 与项目范围 mypy 通过。API `/health`、`/ready` 与 Web 均为 HTTP 200。
 
-## 2026-07-27 当前仓库状态
+## 2026-07-28 批改闭环最终集成基线
 
-- 本地 `master` HEAD 为 `e83937c`，已推送到 GitHub；Alembic 唯一 head 为
-  `0024_nullable_publish_readiness_due_at`，0011–0024 已进入 `master`。
+- 本地 `master` 功能基线 HEAD 为 `8746e18`，比 `origin/master` 超前 2；本任务不 push。
+  Alembic current/heads 均为 `0024_nullable_publish_readiness_due_at`，本轮无迁移、API 或依赖变化。
+- `4c6266b` 已进入 `master`：Structured Rubric 默认题目真实满分；`manual_only` 空
+  `validation_rule` 可绑定；集中审查排除 stale/superseded，并只允许白名单人工解决动作；
+  浏览器门禁具有明确等待上限。
+- `8746e18` 已进入 `master`：failed ReportJob 不可原地复活，只能创建新任务重试；XLSX
+  成绩总表、题目统计、知识点统计和说明页的全部外部文本字段统一防公式注入。
+- 闭环保持：作业发布 → GradingBatch → 上传/匹配 → 页面处理/OCR → 答案确认 →
+  客观规则/主观人工评分 → TeacherReview → finalize → complete Snapshot → GradeRelease →
+  报告 → Analytics。最终成绩只读取合法 complete `SubmissionScoreSnapshot`。
 - `codex/checkpoint-grading-assignment-generation-20260726` 仍保留。
   `codex/preserve-master-worktree-20260727` 位于
   `14ef34c2fef7e18788f548f040d4b961b051b074`，仅用于保全旧工作树，不应作为普通功能分支
@@ -44,6 +53,26 @@
 PostgreSQL、MinIO 和单 Worker 故障恢复在纯合成独立开发环境通过；第八部分另完成本地
 双 API 故障切换，但 PostgreSQL、Redis、MinIO 和 Nginx 仍可能是单点，不建立生产灾备、
 高可用、生产 RPO/RTO 或 SLA。
+
+## 下一阶段：线性代数主观题 AI 批改接入基线（仅交接，不在本轮开发）
+
+- 输入与证据：复用 `StudentAnswer`、`StudentAnswerRegion`、答案确认和版本失效链路；任何模型
+  建议只能引用当前 `ValidationContext.evidence_ids`，公式/手写识别不确定时必须 abstain 或转人工。
+- Rubric：复用版本化 Structured Rubric、`criterion_stable_key`、criterion 最大分、
+  `manual_only`、步长与题目真实满分；不得绕过 `apps/api/app/ai_grading/schema.py::validate_output`。
+- Provider 边界：实现点为 `apps/api/app/ai_grading/providers.py::AIScoringProvider`，默认
+  `UnavailableAIScoringProvider`；Fake 仅测试。若未来接真实 Provider，仍须保留请求审计、严格
+  JSON schema、超时/重试、输入清洗和 suggestion-only 语义。
+- 编排与 API：复用 `apps/api/app/api/ai_grading.py` 的 AIScoringJob、stale/superseded 和重跑
+  规则；答案、Rubric 或证据版本变化必须使旧建议失效。
+- 教师裁决：复用 `apps/api/app/api/grading.py` 的 `TeacherReview`、人工评分、拒绝/修改、
+  finalize 资格检查和 `ScoreRevision`；AI 建议不得直接写最终分。
+- 成绩与下游：继续通过 `SubmissionScoreSnapshot(status=complete)` →
+  `FinalScoreService` → `GradeRelease` → Report/Analytics；不得从 GradingResult、Provider 输出或
+  临时 Review 直接生成最终成绩。
+- 下一阶段最小证据集应另行规划：代表性的线性代数题型/证明步骤数据集、教师双评基线、公式与
+  矩阵证据可读性、逐 criterion 一致性、拒答/低置信安全性、版本失效、提示注入、成本/延迟和
+  教师覆盖率。Fake Provider 与当前 OCR 吞吐证据均不能替代质量评估。
 
 ## 真实状态
 
