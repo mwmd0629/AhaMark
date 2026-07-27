@@ -63,6 +63,20 @@ vi.mock("@/lib/api", async () => {
             reviewed_by: "teacher-1",
             reviewed_at: "2026-07-27T12:00:00Z",
           },
+          {
+            id: "risk-3",
+            section: "answers",
+            entity_type: "assignment",
+            entity_id: "assignment-1",
+            severity: "blocking",
+            issue_code: "CONFIRM_ANSWER_SOURCES_REQUIRED",
+            title: "CONFIRM ANSWER SOURCES REQUIRED",
+            message: "历史确认项不应再次处理",
+            evidence: {},
+            source_hash: "c".repeat(64),
+            status: "stale",
+            eligibility: false,
+          },
         ],
       }),
     },
@@ -111,11 +125,11 @@ it("把技术错误码转换成教师能理解的文案，并保留技术详情"
       onPublished={vi.fn()}
     />,
   );
-  fireEvent.click(
-    await screen.findByRole("button", { name: "开始集中审查" }),
-  );
+  fireEvent.click(await screen.findByRole("button", { name: "开始集中审查" }));
   expect(await screen.findByText("需要教师检查的内容")).toBeInTheDocument();
-  expect(screen.queryByText("CONFIRM CLASSES REQUIRED")).not.toBeInTheDocument();
+  expect(
+    screen.queryByText("CONFIRM CLASSES REQUIRED"),
+  ).not.toBeInTheDocument();
   expect(screen.getByText("查看技术详情")).toBeInTheDocument();
 });
 
@@ -127,9 +141,7 @@ it("已解决问题默认收起，可在本地展开查看处理信息", async (
       onPublished={vi.fn()}
     />,
   );
-  fireEvent.click(
-    await screen.findByRole("button", { name: "开始集中审查" }),
-  );
+  fireEvent.click(await screen.findByRole("button", { name: "开始集中审查" }));
   const toggle = await screen.findByRole("button", { name: /已解决 1 项/ });
   expect(toggle).toHaveAttribute("aria-expanded", "false");
   expect(
@@ -137,9 +149,23 @@ it("已解决问题默认收起，可在本地展开查看处理信息", async (
   ).not.toBeInTheDocument();
   fireEvent.click(toggle);
   expect(toggle).toHaveAttribute("aria-expanded", "true");
-  expect(
-    screen.getByText("请确认试卷页面属于同一份试卷"),
-  ).toBeInTheDocument();
+  expect(screen.getByText("请确认试卷页面属于同一份试卷")).toBeInTheDocument();
   expect(screen.getByText("已核对为同一份试卷")).toBeInTheDocument();
   expect(assignmentReviewApi.items).toHaveBeenCalledTimes(1);
+});
+
+it("不会把历史失效项当成待处理项，也不允许人工绕过结构性门禁", async () => {
+  render(
+    <AssignmentCentralReview
+      item={assignment}
+      onNavigate={vi.fn()}
+      onPublished={vi.fn()}
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "开始集中审查" }));
+  await screen.findByText("需要教师检查的内容");
+  expect(screen.queryByText("历史确认项不应再次处理")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "人工检查并解决" }),
+  ).not.toBeInTheDocument();
 });

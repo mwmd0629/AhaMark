@@ -1,4 +1,5 @@
-import { chromium } from "file:///C:/Users/Lenovo/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/.pnpm/playwright@1.61.1/node_modules/playwright/index.mjs";
+import { chromium } from "file:///C:/Users/Lenovo/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.mjs";
+import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -13,7 +14,10 @@ const password =
 const runPrefix = process.env.BUSINESS_E2E_RUN_PREFIX ?? "business-e2e";
 const markerSuffix =
   process.env.BUSINESS_E2E_MARKER_SUFFIX ?? "business-e2e.synthetic.invalid";
+const composeProject =
+  process.env.BUSINESS_E2E_COMPOSE_PROJECT ?? "ahamark-business-e2e";
 const exceptionBootstrap = process.env.BUSINESS_E2E_EXCEPTION_BOOTSTRAP === "1";
+const runTimeoutMs = Number(process.env.BUSINESS_E2E_TIMEOUT_MS ?? "240000");
 const runId = `${runPrefix}-${new Date().toISOString().replace(/[-:.TZ]/g, "")}`;
 const marker = `${runId}.${markerSuffix}`;
 const numberSeed = Number(runId.replace(/\D/g, "").slice(-6));
@@ -37,7 +41,7 @@ const evidence = {
   }).trim(),
   environment: {
     kind: "isolated_compose",
-    compose_project: "ahamark-business-e2e",
+    compose_project: composeProject,
     web_origin: base,
     data_policy: "synthetic_only",
   },
@@ -135,6 +139,11 @@ const browser = await chromium.launch({
 const context = await browser.newContext({ acceptDownloads: true });
 const page = await context.newPage();
 let currentStage = "A";
+let runTimedOut = false;
+const runWatchdog = setTimeout(() => {
+  runTimedOut = true;
+  void browser.close();
+}, runTimeoutMs);
 
 function stage(key, step) {
   evidence.stages[key].ui_steps.push(step);
@@ -152,6 +161,23 @@ async function clickAndWait(button, responsePattern) {
 }
 async function selectByLabel(label, text) {
   await page.getByLabel(label).selectOption({ label: text });
+}
+async function drainButtons(locator, label, maxAttempts) {
+  for (let attempts = 0; attempts < maxAttempts; attempts += 1) {
+    const before = await locator.count();
+    if (before === 0) return;
+    await locator.first().click();
+    let decreased = false;
+    for (let polls = 0; polls < 40; polls += 1) {
+      if ((await locator.count()) < before) {
+        decreased = true;
+        break;
+      }
+      await page.waitForTimeout(250);
+    }
+    assert.equal(decreased, true, `${label} button count must decrease`);
+  }
+  assert.equal(await locator.count(), 0, `${label} loop must converge`);
 }
 async function selectQuestion(number) {
   const select = page.getByLabel("当前题目");
@@ -176,6 +202,7 @@ async function selectQuestion(number) {
     throw new Error(
       `QUESTION_${number}_SAVE_TARGET_MISMATCH:${option.value}:${saveTarget}`,
     );
+  return option.value;
 }
 
 try {
@@ -185,7 +212,7 @@ try {
   await page.getByRole("button", { name: "登录" }).click();
   await page.waitForURL("**/dashboard");
   await page.reload();
-  await page.getByRole("heading", { name: /早上好/ }).waitFor();
+  await page.getByRole("heading", { name: /(?:早上好|你好)/ }).waitFor();
   const storageKeys = await page.evaluate(() => Object.keys(localStorage));
   if (
     storageKeys.some((key) =>
@@ -208,7 +235,8 @@ try {
   await page.getByLabel("学科").fill("合成数学");
   await page.getByRole("button", { name: "保存班级" }).click();
   await page.getByText(className, { exact: true }).waitFor();
-  await page.getByRole("button", { name: "关闭对话框" }).click();
+  const closeClassDialog = page.getByRole("button", { name: "关闭对话框" });
+  if (await closeClassDialog.isVisible()) await closeClassDialog.click();
   await page.getByRole("link", { name: className, exact: true }).click();
   await page.waitForURL("**/classes/*");
   const classId = page.url().split("/").pop();
@@ -247,10 +275,12 @@ try {
   await page.getByLabel("总分").fill("10");
   await page.getByRole("button", { name: "保存并继续" }).click();
   await page.getByLabel("选择试卷文件").setInputFiles(paperFile);
-  await page.getByRole("heading", { name: "添加题目" }).waitFor();
+  await page.getByRole("button", { name: "开始上传" }).click();
+  await page.getByRole("button", { name: "继续整理页面" }).click();
+  await page.getByRole("heading", { name: "整理页面" }).waitFor();
   await page.getByRole("button", { name: /步骤 3/ }).click();
   await page.getByRole("heading", { name: "整理页面" }).waitFor();
-  await page.getByText("第 1 页", { exact: true }).waitFor();
+  await page.getByRole("heading", { name: "第 1 页", exact: true }).waitFor();
   stage("C", "six_step_wizard_basics_and_real_class");
   stage("C", "runtime_synthetic_png_upload_and_paper_page_created");
   evidence.stages.C.status = "passed";
@@ -315,23 +345,93 @@ try {
   });
   if (await continueRubric.isVisible()) await continueRubric.click();
   else await page.getByRole("heading", { name: "评分标准" }).waitFor();
-  await selectQuestion(2);
+  const objectiveQuestionId = await selectQuestion(2);
   await page.waitForTimeout(250);
   await page.getByLabel("标准答案").fill("1. 测试题");
   await clickAndWait(
     page.getByRole("button", { name: "保存本题评分标准" }),
     "/rubrics/",
   );
-  await selectQuestion(1);
+  const subjectiveQuestionId = await selectQuestion(1);
   await page.waitForTimeout(250);
   await page.getByLabel("标准答案").fill("教师人工判断");
   await clickAndWait(
     page.getByRole("button", { name: "保存本题评分标准" }),
     "/rubrics/",
   );
+  for (const [questionId, answer] of [
+    [subjectiveQuestionId, "教师人工判断"],
+    [objectiveQuestionId, "1. 测试题"],
+  ]) {
+    await page.goto(
+      `${base}/assignments/${assignmentId}/rubrics/${questionId}`,
+    );
+    await page.getByLabel("标准答案草稿").fill(answer);
+    await page.getByRole("button", { name: "保存新版本" }).click();
+    await page.getByRole("button", { name: "确认来源与版本" }).click();
+    await page.getByText(/teacher_authored · confirmed/).waitFor();
+    await page.getByRole("button", { name: "创建 Rubric 草稿" }).click();
+    await page.getByRole("dialog", { name: "结构化 Rubric 编辑器" }).waitFor();
+    await page.getByRole("button", { name: "校验并确认" }).click();
+    await page.getByText("confirmed", { exact: true }).waitFor();
+  }
+  await page.goto(`${base}/assignments/${assignmentId}/edit`);
+  await page.getByRole("button", { name: /步骤 5/ }).click();
   await page.getByRole("button", { name: "进入发布检查" }).click();
-  await page.getByText("后端检查通过，可以发布。").waitFor();
-  await page.getByRole("button", { name: "发布作业" }).click();
+  await page.getByRole("button", { name: "启动生成任务" }).click();
+  await page.getByText("Generation", { exact: true }).waitFor();
+  await page
+    .getByLabel("生成状态")
+    .getByText(/(?:部分完成|需要教师复核|已完成)/)
+    .waitFor({ timeout: 120_000 });
+  const fileAnalysisButtons = page.getByRole("button", {
+    name: "确认文件分析",
+  });
+  await drainButtons(fileAnalysisButtons, "file analysis confirmation", 8);
+  const extractionReview = page.getByRole("region", {
+    name: "页面整理与题目抽取复核",
+  });
+  const generatedSuggestionRejects = extractionReview.getByRole("button", {
+    name: "拒绝",
+    exact: true,
+  });
+  await drainButtons(
+    generatedSuggestionRejects,
+    "generated suggestion rejection",
+    12,
+  );
+  await page.getByRole("button", { name: "开始集中审查" }).click();
+  await page.getByRole("heading", { name: "集中审查中心" }).waitFor();
+  const explicitConfirmations = page
+    .getByRole("heading", { name: "教师显式确认" })
+    .locator("xpath=..");
+  for (const label of [
+    "确认班级",
+    "确认截止时间",
+    "确认总分",
+    "确认文件角色",
+    "确认答案来源",
+    "确认试卷版本",
+    "确认答案版本",
+    "确认评分标准",
+  ]) {
+    await explicitConfirmations
+      .getByRole("button", { name: label, exact: true })
+      .click();
+  }
+  await page.getByRole("button", { name: "准备发布评分标准" }).click();
+  await page.getByRole("button", { name: "确认绑定" }).click();
+  const manualResolutions = page.getByRole("button", {
+    name: "人工检查并解决",
+  });
+  await drainButtons(manualResolutions, "manual review resolution", 12);
+  const warningAcknowledgements = page.getByRole("button", {
+    name: "确认已查看",
+  });
+  await drainButtons(warningAcknowledgements, "warning acknowledgement", 20);
+  await page.getByRole("button", { name: "准备发布", exact: true }).click();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "教师确认并发布" }).click();
   await page.waitForURL(`**/assignments/${assignmentId}`);
   stage("D", "objective_and_subjective_questions_with_positive_scores");
   stage("D", "rubric_items_knowledge_point_publish_check_and_publish");
@@ -427,20 +527,47 @@ try {
       ) {
         if ((await panel.getAttribute("data-provider")) !== "objective-rule")
           throw new Error("OBJECTIVE_PROVIDER_NOT_RULE_BASED");
-        await page.getByRole("button", { name: "接受", exact: true }).click();
+        const answerId = await panel.getAttribute("data-answer-id");
+        await Promise.all([
+          page.waitForResponse(
+            (response) =>
+              response.url().includes(`/student-answers/${answerId}/review`) &&
+              response.request().method() === "PUT" &&
+              response.ok(),
+          ),
+          page.getByRole("button", { name: "接受", exact: true }).click(),
+        ]);
       } else {
         if ((await panel.getAttribute("data-provider")) !== "unavailable")
           throw new Error("SUBJECTIVE_PROVIDER_BOUNDARY_MISSING");
-        const scorePromise = page.waitForEvent("dialog");
-        const clickPromise = page
-          .getByRole("button", { name: "手动评分" })
-          .click();
-        const score = await scorePromise;
-        const feedbackPromise = page.waitForEvent("dialog");
-        await score.accept(submissionIndex === 0 ? "4" : "3");
-        const feedback = await feedbackPromise;
-        await feedback.accept(`合成教师人工评分 ${submissionIndex + 1}`);
-        await clickPromise;
+        const answerId = await panel.getAttribute("data-answer-id");
+        const score = submissionIndex === 0 ? "4" : "3";
+        const dialogHandler = async (dialog) => {
+          const prompt = dialog.message();
+          if (prompt.includes("最终分数")) {
+            await dialog.accept(score);
+          } else if (prompt.includes("评分项")) {
+            await dialog.accept(score);
+          } else {
+            await dialog.accept(`合成教师人工评分 ${submissionIndex + 1}`);
+          }
+        };
+        page.on("dialog", dialogHandler);
+        try {
+          await Promise.all([
+            page.waitForResponse(
+              (response) =>
+                response
+                  .url()
+                  .includes(`/student-answers/${answerId}/review`) &&
+                response.request().method() === "PUT" &&
+                response.ok(),
+            ),
+            page.getByRole("button", { name: "手动评分" }).click(),
+          ]);
+        } finally {
+          page.off("dialog", dialogHandler);
+        }
       }
       await page.getByText("复核结果已保存").waitFor();
     }
@@ -537,11 +664,19 @@ try {
   evidence.objects.analytics_snapshot_id =
     await metrics.getAttribute("data-snapshot-id");
   const metricText = await metrics.textContent();
-  if (!metricText?.includes("参与人数2") || !metricText.includes("平均分8.5"))
+  const expectedAverage =
+    evidence.reconciliation.snapshot_scores.reduce(
+      (total, score) => total + score,
+      0,
+    ) / evidence.reconciliation.snapshot_scores.length;
+  if (
+    !metricText?.includes("参与人数2") ||
+    !metricText.includes(`平均分${expectedAverage}`)
+  )
     throw new Error("ANALYTICS_RECONCILIATION_FAILED");
-  await page.getByRole("button", { name: "90-100" }).click();
-  await page.getByText(/分数段 90-100/).waitFor();
-  await page.getByRole("link", { name: "查看学生详情" }).click();
+  await page.getByRole("button", { name: "0-59" }).click();
+  await page.getByText(/分数段 0-59/).waitFor();
+  await page.getByRole("link", { name: "查看学生详情" }).first().click();
   await page.waitForURL("**/analytics/students/*");
   await page.getByText("当前发布成绩").waitFor();
   stage("H", "score_band_drilldown_and_student_detail");
@@ -578,7 +713,7 @@ try {
     participant_count: 2,
     unfinished_student_count: 1,
     unfinished_counted_as_zero: false,
-    analytics_average: 8.5,
+    analytics_average: expectedAverage,
     reports_source_grade_release_id: evidence.objects.grade_release_id,
     analytics_source_grade_release_id:
       await metrics.getAttribute("data-release-id"),
@@ -589,8 +724,11 @@ try {
 } catch (error) {
   evidence.failure = {
     stage: currentStage,
-    code:
-      error instanceof Error ? error.message.slice(0, 200) : "UNKNOWN_FAILURE",
+    code: runTimedOut
+      ? `RUN_TIMEOUT_${runTimeoutMs}MS`
+      : error instanceof Error
+        ? error.message.slice(0, 200)
+        : "UNKNOWN_FAILURE",
     url: page.url(),
   };
   evidence.stages[currentStage].status = "failed";
@@ -603,6 +741,7 @@ try {
     .catch(() => undefined);
   throw error;
 } finally {
+  clearTimeout(runWatchdog);
   evidence.completed_at = new Date().toISOString();
   fs.writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`);
   await browser.close();

@@ -21,6 +21,7 @@ x-app-env: &app-env
   RECOGNITION_PROVIDER: fake
   GRADING_PROVIDER: unavailable
   AI_GRADING_PROVIDER: fake
+  ASSIGNMENT_GENERATION_PROVIDER: fake
   BUSINESS_E2E_TEACHER_PASSWORD: Synthetic-Business-E2E-Only!
 
 services:

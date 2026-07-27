@@ -22,6 +22,7 @@ export default function StructuredRubricPage() {
   const [answer, setAnswer] = useState("");
   const [message, setMessage] = useState("");
   const [questionTitle, setQuestionTitle] = useState(questionId);
+  const [questionMaxScore, setQuestionMaxScore] = useState("1");
   const [diff, setDiff] = useState<string[]>([]);
 
   const load = useCallback(async () => {
@@ -38,6 +39,7 @@ export default function StructuredRubricPage() {
     setQuestionTitle(
       question ? `第 ${question.question_number} 题` : questionId,
     );
+    setQuestionMaxScore(String(question?.max_score ?? 1));
   }, [assignmentId, questionId]);
 
   useEffect(() => {
@@ -69,20 +71,17 @@ export default function StructuredRubricPage() {
     const created = await structuredRubricApi.create(questionId, {
       reference_answer_version_id: confirmedReference.id,
       title: `${questionTitle} Rubric`,
-      total_points: "1",
+      total_points: questionMaxScore,
       criteria: [
         {
           stable_key: "final_answer",
           title: "最终答案",
-          max_points: "1",
+          max_points: questionMaxScore,
           criterion_type: "final_answer",
           required: true,
           dependencies: [],
           validation_mode: "manual_only",
-          validation_rule: {
-            answer_type: "manual_only",
-            domain: "rational",
-          },
+          validation_rule: {},
         },
       ],
     });

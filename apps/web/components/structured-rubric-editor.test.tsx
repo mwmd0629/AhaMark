@@ -49,11 +49,12 @@ describe("StructuredRubricEditor", () => {
     expect(cancel).toHaveBeenCalledOnce();
   });
 
-  it("validates totals and edits mode, domain, variables, ordering and dependencies", () => {
+  it("validates totals and edits mode, domain, variables, ordering and dependencies", async () => {
+    const save = vi.fn().mockResolvedValue(undefined);
     render(
       <StructuredRubricEditor
         initial={rubric}
-        onSave={vi.fn()}
+        onSave={save}
         onConfirm={vi.fn()}
         onCancel={vi.fn()}
       />,
@@ -77,6 +78,15 @@ describe("StructuredRubricEditor", () => {
     expect(screen.getByLabelText("评分项 1 标题")).toHaveValue("新评分项");
     fireEvent.click(screen.getAllByRole("button", { name: "删除评分项" })[0]);
     expect(screen.queryByDisplayValue("新评分项")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("评分项 1 验证模式"), {
+      target: { value: "manual_only" },
+    });
+    fireEvent.change(screen.getByLabelText("评分项 1 分值"), {
+      target: { value: "5" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+    await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save.mock.calls[0][0].criteria[0].validation_rule).toEqual({});
   });
 
   it("makes confirmed versions read-only", () => {

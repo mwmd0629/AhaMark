@@ -23,6 +23,13 @@ const confirmations = [
   ["structured_rubrics", "确认评分标准"],
 ] as const;
 
+const manuallyResolvableBlockingCodes = new Set([
+  "GENERATION_PARTIAL",
+  "PAPER_VARIANT_REVIEW",
+  "QUESTION_CONFIRMATION_REQUIRED",
+  "QUESTION_PAPER_ROLE_UNCONFIRMED",
+]);
+
 export function AssignmentCentralReview({
   item,
   onNavigate,
@@ -84,6 +91,7 @@ export function AssignmentCentralReview({
     () =>
       items.filter(
         (row) =>
+          !["stale", "superseded"].includes(row.status) &&
           (severity === "all" || row.severity === severity) &&
           (section === "all" || row.section === section),
       ),
@@ -96,7 +104,7 @@ export function AssignmentCentralReview({
     .sort(
       (a, b) =>
         ({ blocking: 0, warning: 1, info: 2 })[a.severity] -
-        ({ blocking: 0, warning: 1, info: 2 })[b.severity],
+        { blocking: 0, warning: 1, info: 2 }[b.severity],
     );
   const resolved = visible.filter(isResolved);
   const sections = [...new Set(items.map((row) => row.section))].sort();
@@ -228,6 +236,25 @@ export function AssignmentCentralReview({
                 确认已查看
               </Button>
             )}
+            {review.severity === "blocking" &&
+              manuallyResolvableBlockingCodes.has(review.issue_code) && (
+                <Button
+                  disabled={busy}
+                  onClick={() =>
+                    act(
+                      () =>
+                        assignmentReviewApi.disposition(
+                          review.id,
+                          session!.review_version,
+                          "resolve_manual",
+                        ),
+                      "问题已由教师人工检查并解决",
+                    )
+                  }
+                >
+                  人工检查并解决
+                </Button>
+              )}
           </div>
         )}
       </li>
@@ -395,8 +422,8 @@ export function AssignmentCentralReview({
       <div className="rounded-xl border p-4">
         <h3 className="font-semibold">发布门禁</h3>
         <p>
-          班级 {item.classes.length} · 截止时间 {item.due_at ?? "无截止时间"} · 总分{" "}
-          {item.total_score ?? "未设置"}
+          班级 {item.classes.length} · 截止时间 {item.due_at ?? "无截止时间"} ·
+          总分 {item.total_score ?? "未设置"}
         </p>
         <div className="mt-3 flex gap-2">
           <Button

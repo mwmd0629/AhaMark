@@ -96,7 +96,7 @@ export function StructuredRubricEditor({
           required: true,
           dependencies: [],
           validation_mode: "manual_only",
-          validation_rule: { answer_type: "manual_only", domain: "rational" },
+          validation_rule: {},
         },
       ],
     }));
@@ -189,10 +189,7 @@ export function StructuredRubricEditor({
                         validation_mode: mode,
                         validation_rule:
                           mode === "manual_only"
-                            ? {
-                                answer_type: "manual_only",
-                                domain: "rational",
-                              }
+                            ? {}
                             : {
                                 answer_type: "exact_scalar",
                                 domain: "rational",
