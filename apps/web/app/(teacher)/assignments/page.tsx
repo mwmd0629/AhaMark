@@ -22,6 +22,7 @@ export default function AssignmentsPage() {
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
+  const [deletingId, setDeletingId] = useState("");
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
@@ -37,6 +38,24 @@ export default function AssignmentsPage() {
     }
   }, [search, status]);
   useEffect(() => void load(), [load]);
+  async function deleteAssignment(item: AssignmentRecord) {
+    if (
+      !window.confirm(
+        `确定删除“${item.title}”吗？作业会移入归档，可通过状态筛选找回，不会删除历史成绩。`,
+      )
+    )
+      return;
+    setDeletingId(item.id);
+    setError("");
+    try {
+      await assignmentsApi.archive(item.id);
+      setItems((old) => old.filter((current) => current.id !== item.id));
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "删除作业失败");
+    } finally {
+      setDeletingId("");
+    }
+  }
   return (
     <div className="space-y-6">
       <PageHeader
@@ -115,12 +134,24 @@ export default function AssignmentsPage() {
                     <Badge status={item.status} />
                   </td>
                   <td className="px-5 py-4">
-                    <Link
-                      className="font-semibold text-[var(--brand-700)]"
-                      href={`/assignments/${item.id}${item.status === "draft" ? "/edit" : ""}`}
-                    >
-                      {item.status === "draft" ? "继续编辑" : "查看"}
-                    </Link>
+                    <div className="flex items-center gap-3">
+                      <Link
+                        className="font-semibold text-[var(--brand-700)]"
+                        href={`/assignments/${item.id}${item.status === "draft" ? "/edit" : ""}`}
+                      >
+                        {item.status === "draft" ? "继续编辑" : "查看"}
+                      </Link>
+                      {item.status !== "archived" && (
+                        <Button
+                          variant="danger"
+                          className="px-2 py-1 text-xs"
+                          loading={deletingId === item.id}
+                          onClick={() => void deleteAssignment(item)}
+                        >
+                          删除
+                        </Button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}

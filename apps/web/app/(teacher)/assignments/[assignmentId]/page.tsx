@@ -42,11 +42,18 @@ export default function AssignmentDetailPage({
             </Button>
             <Button
               variant="danger"
-              onClick={async () =>
-                setItem(await assignmentsApi.archive(item.id))
-              }
+              disabled={item.status === "archived"}
+              onClick={async () => {
+                if (
+                  !window.confirm(
+                    `确定删除“${item.title}”吗？作业会移入归档，可通过状态筛选找回，不会删除历史成绩。`,
+                  )
+                )
+                  return;
+                setItem(await assignmentsApi.archive(item.id));
+              }}
             >
-              归档
+              {item.status === "archived" ? "已删除" : "删除"}
             </Button>
           </>
         }
