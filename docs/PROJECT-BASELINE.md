@@ -1,10 +1,17 @@
 # AhaMark 项目基线与能力边界
 
-基线日期：2026-07-22
+> **历史基线快照（封存于 2026-07-25）：本文件保留 0010 时点的历史事实，不是当前状态。**
+> 当前状态请以 [`HANDOFF.md`](HANDOFF.md) 和 [`../README.md`](../README.md) 为准。仓库现已
+> 发展到唯一 Alembic head `0023_assignment_provider_invocation_audit`，不得把下文历史
+> `0010_report_student` 误读为当前 head。
+
+原始基线日期：2026-07-22
+
+快照封存日期：2026-07-25
 
 项目版本：`0.1.0`（`pyproject.toml`、`apps/web/package.json`）
 
-当前分支：`master`
+快照分支：`master`
 
 正式验收等级：**C（内部演示或开发测试）**
 

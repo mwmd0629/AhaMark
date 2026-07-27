@@ -1,5 +1,14 @@
 # AhaMark
 
+> **当前仓库状态（2026-07-27）：** 本地 `master` 位于
+> `9d39535cecb4f01c26ea43fa7001436660b1b320`，Alembic 唯一 head 为
+> `0023_assignment_provider_invocation_audit`；迁移 0011–0023 已进入 `master`。六步
+> Assignment Generation（编排、元数据/文件分析、题目提取、答案与 Rubric 草稿、集中复核发布、
+> Provider 调用审计）已按受控、仅建议方式落地。Provider 默认 `unavailable`，外部请求默认
+> `false`，`suggestion-only=true`；AI 不能自动发布作业，也不能写入最终成绩。
+> **REAL-PROVIDER QUALITY PENDING**。本地仓库没有配置 remote，合入 `master` 不代表已部署，
+> 本次合并也没有自动执行任何数据库迁移。本项目仍不代表 Production Ready。
+
 > 原定第一至第八部分均已正式关闭，并已形成连续、可追溯的八提交链。第八部分功能基线为
 > `cc9146a5edf001817915c020f7aa26bc8053b989`；本地预生产门禁 8A–8E 及 Edge 已 PASS，正式 Run 为
 > `v8-final-20260725-c6568104`，证据入口见
@@ -56,7 +65,12 @@ AnalyticsSnapshot 固定 GradeRelease，旧快照不覆盖。后端统一计算�
 - `POST /api/grade-releases/{id}/analytics`
 - `POST /api/analytics/{id}/insights`
 
-最新迁移为 `0010_report_student`，未修改 0001–0007 的 revision 内容。`/analytics` 已包含加载、空、错误、小样本、0–100% 图表、键盘可访问表格和数据版本选择。分数段、题目、知识点、最终错误类型均可分页下钻；班级、学生及知识点历史趋势只读取每份作业最新有效发布版本，缺失作业不记零。学生详情路由为 `/analytics/students/{studentId}`，展示发布成绩、各题最终值、知识点、教师确认评语、ScoreRevision 与真实 ReportJob 状态。
+当前仓库 Alembic 唯一 head 为 `0023_assignment_provider_invocation_audit`；`0010_report_student`
+是下述报告与学情功能对应的历史迁移节点。`/analytics` 已包含加载、空、错误、小样本、0–100%
+图表、键盘可访问表格和数据版本选择。分数段、题目、知识点、最终错误类型均可分页下钻；班级、
+学生及知识点历史趋势只读取每份作业最新有效发布版本，缺失作业不记零。学生详情路由为
+`/analytics/students/{studentId}`，展示发布成绩、各题最终值、知识点、教师确认评语、
+ScoreRevision 与真实 ReportJob 状态。
 
 Analytics 7.1 新增 API：
 
@@ -144,7 +158,8 @@ Submission OCR 数据与试卷 RecognitionJob/PaperPage 隔离：学生域使用
 
 `POST /api/submissions/{id}/finalize` 会逐题检查答案、教师最终分、分值范围、强制复核和当前 RubricVersion，并生成新的 SubmissionScoreSnapshot 版本而不覆盖旧版本。第七部分只能读取最新 `status=complete` 快照；`details` 保存每题 question/answer/review ID、最终分、满分、错误类型和评语。AI/规则 GradingResult 不是最终成绩来源。
 
-学生作业与批改子系统对应迁移为 `0006_submissions_grading_review`；仓库当前 Alembic head 为 `0010_report_student`：
+学生作业与批改子系统对应迁移为 `0006_submissions_grading_review`；仓库当前 Alembic 唯一 head
+为 `0023_assignment_provider_invocation_audit`：
 
 ```powershell
 python -m alembic upgrade head

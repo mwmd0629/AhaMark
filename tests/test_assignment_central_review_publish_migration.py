@@ -14,12 +14,10 @@ from app.models import (
     AssignmentRubricPublicationBinding,
 )
 
-from test_support.database_isolation import create_marked_target
+from test_support.database_isolation import create_marked_target, discover_git_protected_roots
 
-FORBIDDEN_ROOTS = (
-    Path(__file__).parents[1].resolve(),
-    Path(r"D:\OpenAIData\Workspaces\AhaMark").resolve(),
-)
+WORKTREE_ROOT = Path(__file__).parents[1].resolve()
+FORBIDDEN_ROOTS = discover_git_protected_roots(WORKTREE_ROOT)
 
 
 def load_migration() -> ModuleType:

@@ -102,7 +102,7 @@ def test_login_input_accepts_controlled_local_account_domain() -> None:
     from app.api.auth import LoginInput
 
     payload = LoginInput(
-        email="HR0196@AHAMARK.LOCAL",
+        email="TEACHER-AUTH-TEST@AHAMARK.LOCAL",
         password="local-only-password",
     )
-    assert payload.email == "hr0196@ahamark.local"
+    assert payload.email == "teacher-auth-test@ahamark.local"

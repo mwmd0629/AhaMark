@@ -1,6 +1,24 @@
-# AhaMark 项目交接（更新于 2026-07-25）
+# AhaMark 项目交接（更新于 2026-07-27）
 
 第一部分的可审计基线入口为 `PROJECT-BASELINE.md`；能力状态以 `CAPABILITY-EVIDENCE-MATRIX.md` 为准。下文“通过”只描述既有检查记录，不自动表示生产可用。
+
+## 2026-07-27 当前仓库状态
+
+- 本地 `master` HEAD 为 `9d39535cecb4f01c26ea43fa7001436660b1b320`；Alembic 唯一
+  head 为 `0023_assignment_provider_invocation_audit`，0011–0023 已进入 `master`。
+- `codex/checkpoint-grading-assignment-generation-20260726` 仍保留。
+  `codex/preserve-master-worktree-20260727` 位于
+  `14ef34c2fef7e18788f548f040d4b961b051b074`，仅用于保全旧工作树，不应作为普通功能分支
+  merge。
+- Assignment Generation 六步 Controlled Landing 在本地合成/静态范围内 PASS：覆盖迁移链与
+  PostgreSQL 双向 offline SQL、仅建议工作流、安全 Provider 默认值、后端与 Web 本地门禁；
+  不包含真实 Provider 调用、真实教学质量、生产部署、HA 或 SLA。
+- Provider 默认 `unavailable`，外部请求默认关闭，`suggestion-only=true`；AI 不能自动发布或
+  写最终成绩。**REAL-PROVIDER QUALITY PENDING**，真实教学质量与 Production Ready 均未通过。
+- 仓库没有 remote，本状态未 push。合入 `master` 不代表生产部署，也没有因合并自动执行数据库
+  迁移。
+- 既有 Docker/evidence 资源没有清理；事故数据库没有恢复或覆盖（
+  **AFFECTED DATABASE RECOVERY NOT PERFORMED**）。
 
 ## 最终结论
 
@@ -14,7 +32,9 @@ PostgreSQL、MinIO 和单 Worker 故障恢复在纯合成独立开发环境通�
 ## 真实状态
 
 - 服务：核心六服务均 healthy；可选 Nginx proxy 配置与语法通过。栈保持运行，三个命名卷保留。
-- 数据库：活动库 `0010_report_student (head)`；独立空库 upgrade、`0010→0009→0010` 通过。
+- 数据库：该历史验收轮活动库为 `0010_report_student (head)`，独立空库
+  `0010→0009→0010` 通过；当前仓库唯一迁移 head 已发展到
+  `0023_assignment_provider_invocation_audit`，本轮未对现有数据库执行迁移。
 - 认证：scrypt、数据库 Session、HttpOnly/SameSite、production Secure、CSRF、撤销/过期、禁用用户、production 禁 demo 已实现并测试；production 登录限速使用 Redis 共享状态，双 API 累计失败、默认 300 秒/5 次、Redis 不可用时 fail closed 及 HMAC key 均已在本地预生产式环境验证。
 - OCR：第二部分 UI 闭环使用 test-only Fake OCR；第六部分另行完成 Fake 编排
   150/200/250 页和 RapidOCR 3.9.2 清晰印刷体 100/150/250 页吞吐阶梯。Fake 与真实

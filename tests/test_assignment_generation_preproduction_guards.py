@@ -31,6 +31,7 @@ def test_landing_names_are_unique_and_keep_synthetic_identity() -> None:
 
 def test_stage4_project_old_port_bucket_and_account_are_rejected() -> None:
     config = build_config("assignment-generation-v3-20260726-120001", 18444)
+    # Denylist sentinel: this long-lived identity must never become a test login account.
     invalid = replace(
         config,
         project_name=LEGACY_PROJECT,
