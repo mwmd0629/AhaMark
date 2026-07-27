@@ -1,12 +1,13 @@
 # AhaMark
 
 > **当前仓库状态（2026-07-27）：** 本地 `master` 位于
-> `9d39535cecb4f01c26ea43fa7001436660b1b320`，Alembic 唯一 head 为
-> `0023_assignment_provider_invocation_audit`；迁移 0011–0023 已进入 `master`。六步
+> `e83937c`，已推送到 [`mwmd0629/AhaMark`](https://github.com/mwmd0629/AhaMark)，Alembic
+> 唯一 head 为 `0024_nullable_publish_readiness_due_at`；迁移 0011–0024 已进入 `master`。六步
 > Assignment Generation（编排、元数据/文件分析、题目提取、答案与 Rubric 草稿、集中复核发布、
 > Provider 调用审计）已按受控、仅建议方式落地。Provider 默认 `unavailable`，外部请求默认
 > `false`，`suggestion-only=true`；AI 不能自动发布作业，也不能写入最终成绩。
-> **REAL-PROVIDER QUALITY PENDING**。本地仓库没有配置 remote，合入 `master` 不代表已部署，
+> **REAL-PROVIDER QUALITY PENDING**。本地开发阶段由 Codex 代为执行需要 API 的草稿生成，
+> 结果仍需教师确认。合入 `master` 不代表已部署，
 > 本次合并也没有自动执行任何数据库迁移。本项目仍不代表 Production Ready。
 
 > 原定第一至第八部分均已正式关闭，并已形成连续、可追溯的八提交链。第八部分功能基线为
@@ -16,6 +17,30 @@
 > 层故障切换，不建立生产高可用或灾备，项目等级仍为 C。
 
 AhaMark 是面向教师的 AI 作业批改与学情分析平台。当前已实现数据库会话认证、Submission OCR 工程链路、教师评分复核、不可变成绩发布、异步 Excel/中文 PDF 报告和版本化学情统计。RapidOCR 是真实本地印刷体 OCR；当前没有真实主观题 AI Provider，主观题必须人工评分。第五部分权限与文件安全、第六部分开发机有界容量及第七部分开发环境备份/故障恢复均已完成定义范围内验收。整体等级仍为 **C（内部演示或开发测试）**，不适合真实学生数据、真实教学试点、生产部署或公网开放。
+
+## 当前可用的教师流程
+
+- 作业创建向导支持试卷拖拽/点击上传、文件状态展示、页面缩略图预览和当前页切换。
+- 截止时间支持“无截止时间”或手动设置日期与时间。
+- 已发布作业详情页提供“上传学生作业”入口；教师可创建批改批次并上传 PDF/PNG/JPG/JPEG。
+- 学生作业文件会按文件名中的学号或班级内唯一姓名自动匹配，歧义匹配需教师确认。
+- 集中审查将问题翻译为教师可理解的说明，已解决问题默认收起，未解决阻塞项优先展示。
+- AI Provider 当前默认不可用；由 Codex 代跑草稿生成时，结果仍作为待教师确认的建议，不自动发布或写入最终成绩。
+
+## 本地运行与数据位置
+
+推荐在 D 盘工作区运行：
+
+```powershell
+cd D:\OpenAIData\Workspaces\AhaMark
+Copy-Item .env.example .env
+docker compose up --build -d
+Invoke-WebRequest -UseBasicParsing http://localhost:8000/health
+```
+
+Web 地址为 <http://localhost:3000>，API 健康检查为 <http://localhost:8000/health>。
+Docker 数据、项目工作区和桌面交付文件已迁移到 `D:\OpenAIData`；C 盘保留的路径只是兼容性目录联接。
+不要提交 `.env`、数据库文件、`node_modules` 或 `.next`。
 
 ## 第七部分：开发环境恢复验收
 
@@ -65,7 +90,7 @@ AnalyticsSnapshot 固定 GradeRelease，旧快照不覆盖。后端统一计算�
 - `POST /api/grade-releases/{id}/analytics`
 - `POST /api/analytics/{id}/insights`
 
-当前仓库 Alembic 唯一 head 为 `0023_assignment_provider_invocation_audit`；`0010_report_student`
+当前仓库 Alembic 唯一 head 为 `0024_nullable_publish_readiness_due_at`；`0010_report_student`
 是下述报告与学情功能对应的历史迁移节点。`/analytics` 已包含加载、空、错误、小样本、0–100%
 图表、键盘可访问表格和数据版本选择。分数段、题目、知识点、最终错误类型均可分页下钻；班级、
 学生及知识点历史趋势只读取每份作业最新有效发布版本，缺失作业不记零。学生详情路由为

@@ -2,10 +2,27 @@
 
 第一部分的可审计基线入口为 `PROJECT-BASELINE.md`；能力状态以 `CAPABILITY-EVIDENCE-MATRIX.md` 为准。下文“通过”只描述既有检查记录，不自动表示生产可用。
 
+## 当前工作区交接摘要（2026-07-27）
+
+- 当前分支为 `master`，HEAD 为 `e83937c`，已推送到
+  `https://github.com/mwmd0629/AhaMark`。
+- 当前 Alembic head 为 `0024_nullable_publish_readiness_due_at`。
+- 最近完成的教师端改进包括：创建学生/班级后的列表刷新、试卷拖拽上传框、整理页面预览、
+  无截止时间、通俗化集中审查文案、已解决问题折叠，以及已发布作业的教师上传学生作业入口。
+- 教师上传学生作业的后端链路已经存在：先创建 `GradingBatch`，再调用
+  `POST /api/grading-batches/{batch_id}/files`，之后进行文件名匹配、OCR、批改和教师复核。
+- 当前真实 AI Provider 仍未配置。需要生成草稿时由 Codex 代为调用/写入 API，结果必须保留为
+  建议或教师确认版本，不得伪装成真实 Provider，也不得自动发布。
+- 当前本地服务由 Docker Compose 运行，六个服务均已验证 healthy。项目工作区位于
+  `D:\OpenAIData\Workspaces\AhaMark`，Docker 数据位于 `D:\OpenAIData\Docker\LocalDocker`。
+  C 盘对应路径只保留目录联接，避免旧工具路径失效。
+- 当前验证结果：Web lint 通过，前端 Vitest 59 项通过，Web production build 通过，
+  `tests/test_assignment_central_review_publish.py` 4 项通过。
+
 ## 2026-07-27 当前仓库状态
 
-- 本地 `master` HEAD 为 `9d39535cecb4f01c26ea43fa7001436660b1b320`；Alembic 唯一
-  head 为 `0023_assignment_provider_invocation_audit`，0011–0023 已进入 `master`。
+- 本地 `master` HEAD 为 `e83937c`，已推送到 GitHub；Alembic 唯一 head 为
+  `0024_nullable_publish_readiness_due_at`，0011–0024 已进入 `master`。
 - `codex/checkpoint-grading-assignment-generation-20260726` 仍保留。
   `codex/preserve-master-worktree-20260727` 位于
   `14ef34c2fef7e18788f548f040d4b961b051b074`，仅用于保全旧工作树，不应作为普通功能分支
@@ -15,8 +32,7 @@
   不包含真实 Provider 调用、真实教学质量、生产部署、HA 或 SLA。
 - Provider 默认 `unavailable`，外部请求默认关闭，`suggestion-only=true`；AI 不能自动发布或
   写最终成绩。**REAL-PROVIDER QUALITY PENDING**，真实教学质量与 Production Ready 均未通过。
-- 仓库没有 remote，本状态未 push。合入 `master` 不代表生产部署，也没有因合并自动执行数据库
-  迁移。
+- 合入 `master` 不代表生产部署；数据库迁移仍需在目标环境显式执行。
 - 既有 Docker/evidence 资源没有清理；事故数据库没有恢复或覆盖（
   **AFFECTED DATABASE RECOVERY NOT PERFORMED**）。
 
