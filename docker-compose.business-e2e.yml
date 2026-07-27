@@ -7,6 +7,7 @@ x-app-env: &app-env
   CELERY_BROKER_URL: redis://redis:6379/0
   CELERY_RESULT_BACKEND: redis://redis:6379/1
   CORS_ORIGINS: '["http://localhost:3300"]'
+  CSRF_TRUSTED_ORIGINS: '["http://localhost:3300"]'
   MINIO_ENDPOINT: minio:9000
   MINIO_PUBLIC_ENDPOINT: localhost:9900
   MINIO_ACCESS_KEY: ahamark-business-e2e
@@ -19,6 +20,7 @@ x-app-env: &app-env
   AUTH_COOKIE_SECURE: "false"
   RECOGNITION_PROVIDER: fake
   GRADING_PROVIDER: unavailable
+  AI_GRADING_PROVIDER: fake
   BUSINESS_E2E_TEACHER_PASSWORD: Synthetic-Business-E2E-Only!
 
 services:
@@ -29,6 +31,7 @@ services:
       POSTGRES_USER: ahamark_e2e
       POSTGRES_PASSWORD: business-e2e-only
     volumes: [postgres_data:/var/lib/postgresql/data]
+    ports: ["127.0.0.1:55432:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ahamark_e2e -d ahamark_business_e2e"]
       interval: 3s

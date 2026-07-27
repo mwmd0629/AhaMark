@@ -15,6 +15,15 @@ const mocks = vi.hoisted(() => ({
   grade: vi.fn(),
   review: vi.fn(),
 }));
+const recognitionMocks = vi.hoisted(() => ({
+  blocks: vi.fn().mockResolvedValue([]),
+  edit: vi.fn(),
+  split: vi.fn(),
+  merge: vi.fn(),
+  reorder: vi.fn(),
+  confirm: vi.fn(),
+  retry: vi.fn(),
+}));
 
 vi.mock("next/navigation", () => ({
   useParams: () => ({ batchId: "b1" }),
@@ -30,6 +39,7 @@ vi.mock("next/link", () => ({
 }));
 vi.mock("@/lib/api", () => ({
   gradingApi: mocks,
+  answerRecognitionApi: recognitionMocks,
 }));
 
 afterEach(() => {

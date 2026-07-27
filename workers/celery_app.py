@@ -13,6 +13,11 @@ celery_app = Celery(
         "workers.tasks.ocr",
         "workers.tasks.reports",
         "workers.tasks.submission_ocr",
+        "workers.tasks.submission_processing",
+        "workers.tasks.answer_recognition",
+        "workers.tasks.math_validation",
+        "workers.tasks.ai_grading",
+        "workers.tasks.assignment_generation",
     ],
 )
 celery_app.conf.update(

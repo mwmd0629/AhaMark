@@ -7,6 +7,13 @@ vi.mock("next/navigation", () => ({
   usePathname: pathnameMock,
   useRouter: () => routerMock,
 }));
+vi.mock("@/components/auth-gate", () => ({
+  useAuthUser: () => ({
+    id: "teacher-id",
+    email: "teacher@ahamark.local",
+    display_name: "测试教师",
+  }),
+}));
 beforeEach(() => {
   pathnameMock.mockReturnValue("/classes");
 });
@@ -35,4 +42,18 @@ it("renders every teacher navigation item and highlights current route", () => {
   expect(
     screen.getAllByRole("link", { name: "班级与学生" })[0],
   ).toHaveAttribute("aria-current", "page");
+  expect(screen.getByRole("link", { name: "搜索" })).toHaveAttribute(
+    "href",
+    "/search",
+  );
+  expect(screen.getByRole("link", { name: "消息" })).toHaveAttribute(
+    "href",
+    "/notifications",
+  );
+  expect(screen.getByRole("link", { name: "使用帮助" })).toHaveAttribute(
+    "href",
+    "/help",
+  );
+  expect(screen.getByText("测试教师")).toBeInTheDocument();
+  expect(screen.getByText("teacher@ahamark.local")).toBeInTheDocument();
 });

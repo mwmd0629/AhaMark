@@ -4,14 +4,19 @@ import uuid
 from app.core.config import get_settings
 from app.main import app
 from app.models import (
+    Assignment,
+    AssignmentStatus,
     ClassStudent,
     GradingCriterionResult,
     GradingEvidence,
     MembershipStatus,
+    PaperVersion,
+    RubricVersion,
     Student,
     StudentAnswer,
     SubmissionPage,
     SubmissionRecognitionBlock,
+    VersionStatus,
     now_utc,
 )
 from app.storage.dependencies import get_storage
@@ -26,6 +31,13 @@ client = TestClient(app)
 def png(color: str) -> bytes:
     output = io.BytesIO()
     Image.new("RGB", (240, 160), color).save(output, "PNG")
+    return output.getvalue()
+
+
+def four_page_pdf() -> bytes:
+    output = io.BytesIO()
+    pages = [Image.new("RGB", (240, 160), color) for color in ("white", "ivory", "snow", "beige")]
+    pages[0].save(output, "PDF", save_all=True, append_images=pages[1:])
     return output.getvalue()
 
 
@@ -64,7 +76,21 @@ def workflow() -> tuple[object, FakeStorage, str, str, str]:
         f"/api/assignments/{assignment_id}/rubrics/{question['id']}",
         json={"standard_answer": "1. 测试题", "items": [{"title": "答案正确", "points": 10}]},
     )
-    assert client.post(f"/api/assignments/{assignment_id}/publish").status_code == 200
+    # Downstream workflow fixture: construct the historical published
+    # precondition directly. Production HTTP publication now requires a
+    # teacher-created central-review readiness snapshot.
+    assignment = db.get(Assignment, uuid.UUID(assignment_id))
+    assert assignment is not None
+    paper = db.get(PaperVersion, assignment.active_paper_version_id)
+    rubric = db.get(RubricVersion, assignment.active_rubric_version_id)
+    assert paper is not None and rubric is not None
+    paper.status = VersionStatus.confirmed
+    paper.confirmed_at = now_utc()
+    rubric.status = VersionStatus.confirmed
+    rubric.confirmed_at = now_utc()
+    assignment.status = AssignmentStatus.published
+    assignment.published_at = now_utc()
+    db.commit()
     batch = client.post(
         f"/api/assignments/{assignment_id}/grading-batches",
         json={"class_id": str(school_class.id)},
@@ -111,6 +137,52 @@ def test_submission_ocr_worker_is_idempotent_and_writes_answers() -> None:
         assert len(storage.objects) >= 12
     finally:
         settings.recognition_provider = previous
+        app.dependency_overrides.pop(get_storage, None)
+        db.close()
+
+
+def test_student_number_filename_separators_and_manual_pdf_confirmation_keep_all_pages() -> None:
+    db, _storage, batch_id, submission_id, _question_id = workflow()
+    try:
+        for index, filename in enumerate(
+            ("0001_answer.png", "0001-answer.png", "0001 answer.png", "（0001）答卷.png")
+        ):
+            response = client.post(
+                f"/api/grading-batches/{batch_id}/files",
+                files=[
+                    (
+                        "files",
+                        (filename, png(("red", "green", "blue", "black")[index]), "image/png"),
+                    )
+                ],
+            )
+            assert response.status_code == 201, response.text
+            assert response.json()["items"][0]["status"] == "confirmed"
+
+        upload = client.post(
+            f"/api/grading-batches/{batch_id}/files",
+            files=[("files", ("unknown.pdf", four_page_pdf(), "application/pdf"))],
+        )
+        assert upload.status_code == 201, upload.text
+        item = upload.json()["items"][0]
+        assert item["status"] == "pending"
+        student_id = db.scalar(select(Student.id).where(Student.student_number == "0001"))
+        confirmation = client.post(
+            f"/api/grading-batches/{batch_id}/matches/{item['match_id']}/confirm",
+            json={"student_id": str(student_id)},
+        )
+        assert confirmation.status_code == 200, confirmation.text
+        stored_file_id = uuid.UUID(item["file_id"])
+        pages = db.scalars(
+            select(SubmissionPage)
+            .where(
+                SubmissionPage.submission_id == submission_id,
+                SubmissionPage.stored_file_id == stored_file_id,
+            )
+            .order_by(SubmissionPage.page_number)
+        ).all()
+        assert [page.source_page_number for page in pages] == [1, 2, 3, 4]
+    finally:
         app.dependency_overrides.pop(get_storage, None)
         db.close()
 

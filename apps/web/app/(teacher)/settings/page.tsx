@@ -1,4 +1,5 @@
 "use client";
+import { useAuthUser } from "@/components/auth-gate";
 import { HealthStatus } from "@/components/health-status";
 import {
   Button,
@@ -10,9 +11,9 @@ import {
   Select,
   useToast,
 } from "@/components/ui";
-import { demoTeacher } from "@/lib/demo-data";
 export default function SettingsPage() {
   const toast = useToast();
+  const user = useAuthUser();
   return (
     <div className="space-y-6">
       <PageHeader
@@ -45,11 +46,11 @@ export default function SettingsPage() {
           <Card id="setting-0" className="p-5">
             <SectionHeader
               title="个人信息"
-              description="演示教师，未来由认证上下文提供"
+              description="当前登录教师的认证身份"
             />
             <div className="mt-5 grid gap-4 sm:grid-cols-2">
-              <Input label="姓名" defaultValue={demoTeacher.name} />
-              <Input label="职务" defaultValue="数学教师" />
+              <Input label="姓名" value={user?.display_name || ""} readOnly />
+              <Input label="邮箱" value={user?.email || ""} readOnly />
             </div>
           </Card>
           <Card id="setting-1" className="p-5">

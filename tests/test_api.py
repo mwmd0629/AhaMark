@@ -9,8 +9,14 @@ def test_health() -> None:
     assert response.headers["x-request-id"]
 
 
-def test_ready_with_sqlite() -> None:
-    assert TestClient(app).get("/ready").status_code == 200
+def test_ready_with_healthy_dependencies(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.api.routes.dependency_readiness",
+        lambda *_args: {"ready": True, "status": "available", "components": {}},
+    )
+    response = TestClient(app).get("/ready")
+    assert response.status_code == 200
+    assert response.json()["ready"] is True
 
 
 def test_error_shape() -> None:

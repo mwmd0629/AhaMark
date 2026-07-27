@@ -1,6 +1,7 @@
 "use client";
 import {
   createContext,
+  forwardRef,
   useContext,
   useEffect,
   useId,
@@ -101,17 +102,16 @@ export function Input({
     </label>
   );
 }
-export function Select({
-  label,
-  children,
-  className,
-  ...props
-}: SelectHTMLAttributes<HTMLSelectElement> & { label?: string }) {
+export const Select = forwardRef<
+  HTMLSelectElement,
+  SelectHTMLAttributes<HTMLSelectElement> & { label?: string }
+>(function Select({ label, children, className, ...props }, ref) {
   const id = useId();
   return (
     <label className="grid gap-1.5 text-sm font-medium" htmlFor={id}>
       {label && <span>{label}</span>}
       <select
+        ref={ref}
         id={id}
         className={cx(
           "h-10 rounded-[var(--radius-md)] border border-[var(--border)] bg-white px-3 font-normal",
@@ -123,7 +123,7 @@ export function Select({
       </select>
     </label>
   );
-}
+});
 export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
   return (
     <div
@@ -401,31 +401,45 @@ export function Dialog({
   title,
   description,
   children,
+  dismissible = true,
+  open: controlledOpen,
+  onOpenChange,
 }: {
   trigger: ReactNode;
   title: string;
   description?: string;
   children: ReactNode;
+  dismissible?: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
+  const open = controlledOpen ?? internalOpen;
+  const changeOpen = (nextOpen: boolean) => {
+    if (controlledOpen === undefined) setInternalOpen(nextOpen);
+    onOpenChange?.(nextOpen);
+  };
   const closeRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!open) return;
     closeRef.current?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (dismissible && e.key === "Escape") {
+        if (controlledOpen === undefined) setInternalOpen(false);
+        onOpenChange?.(false);
+      }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [open]);
+  }, [controlledOpen, dismissible, onOpenChange, open]);
   return (
     <>
-      {<span onClick={() => setOpen(true)}>{trigger}</span>}
+      {<span onClick={() => changeOpen(true)}>{trigger}</span>}
       {open && (
         <div
           className="fixed inset-0 z-50 grid place-items-center bg-slate-950/40 p-4"
           role="presentation"
-          onMouseDown={() => setOpen(false)}
+          onMouseDown={() => dismissible && changeOpen(false)}
         >
           <div
             role="dialog"
@@ -448,7 +462,7 @@ export function Dialog({
               <button
                 ref={closeRef}
                 aria-label="关闭对话框"
-                onClick={() => setOpen(false)}
+                onClick={() => changeOpen(false)}
                 className="grid h-9 w-9 place-items-center rounded-lg hover:bg-slate-100"
               >
                 <Icon name="close" />
@@ -507,8 +521,29 @@ export function Dropdown({
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutside = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        rootRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+      }
+    };
+    document.addEventListener("pointerdown", closeOnOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
   return (
-    <div className="relative">
+    <div ref={rootRef} className="relative">
       <button
         aria-haspopup="menu"
         aria-expanded={open}

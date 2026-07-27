@@ -83,6 +83,64 @@ def run_submission_recognition_job(
         else []
     )
     job_record.status = "running"
+    # Every active question gets an answer record up front. Question/page association
+    # is represented only by StudentAnswerRegion; page order is never treated as a
+    # question number.
+    for question in questions:
+        answer = db.scalar(
+            select(StudentAnswer).where(
+                StudentAnswer.submission_id == submission.id,
+                StudentAnswer.question_id == question.id,
+            )
+        )
+        if answer is None:
+            db.add(
+                StudentAnswer(
+                    submission_id=submission.id,
+                    question_id=question.id,
+                    question_version_reference=str(
+                        assignment.active_paper_version_id if assignment else "unknown"
+                    ),
+                    status="manual_segmentation_required",
+                    requires_review=True,
+                )
+            )
+    db.flush()
+    # A single-question paper has an unambiguous whole-page template fallback.
+    # Multi-question papers never receive an order-based guess and require template
+    # regions or explicit teacher segmentation.
+    if len(questions) == 1 and pages:
+        answer = db.scalar(
+            select(StudentAnswer).where(
+                StudentAnswer.submission_id == submission.id,
+                StudentAnswer.question_id == questions[0].id,
+            )
+        )
+        existing_region = (
+            db.scalar(
+                select(StudentAnswerRegion.id).where(
+                    StudentAnswerRegion.student_answer_id == answer.id
+                )
+            )
+            if answer
+            else None
+        )
+        if answer and existing_region is None:
+            db.add(
+                StudentAnswerRegion(
+                    student_answer_id=answer.id,
+                    submission_page_id=pages[0].id,
+                    x=0,
+                    y=0,
+                    width=1,
+                    height=1,
+                    source="template",
+                    confidence=Decimal("1"),
+                    status="confirmed",
+                    confirmed_by=job_record.owner_id,
+                    confirmed_at=now_utc(),
+                )
+            )
     db.commit()
     failures = 0
     for page in pages:
@@ -135,86 +193,6 @@ def run_submission_recognition_job(
                 )
             page.width, page.height = rendered.width, rendered.height
             page.status = "blank" if not blocks else "recognized"
-            question = (
-                questions[page.page_number - 1] if page.page_number <= len(questions) else None
-            )
-            if question:
-                answer = db.scalar(
-                    select(StudentAnswer).where(
-                        StudentAnswer.submission_id == submission.id,
-                        StudentAnswer.question_id == question.id,
-                    )
-                )
-                text = "\n".join(block.text for block in blocks if block.text)
-                confidence_values = [
-                    Decimal(str(block.confidence))
-                    for block in blocks
-                    if block.confidence is not None
-                ]
-                confidence = min(confidence_values) if confidence_values else None
-                if answer is None:
-                    answer = StudentAnswer(
-                        submission_id=submission.id,
-                        question_id=question.id,
-                        question_version_reference=str(
-                            assignment.active_paper_version_id if assignment else "unknown"
-                        ),
-                    )
-                    db.add(answer)
-                    db.flush()
-                previous_effective = (
-                    answer.corrected_text
-                    if answer.corrected_text is not None
-                    else answer.recognized_text
-                )
-                answer.recognized_text = text or None
-                answer.recognized_latex = None
-                answer.recognition_confidence = confidence
-                answer.recognition_provider = provider.name
-                answer.recognition_provider_version = provider.version
-                answer.is_blank = not blocks
-                answer.status = "blank" if not blocks else "recognized"
-                recognized_requires_review = (
-                    not blocks
-                    or confidence is None
-                    or confidence < Decimal(str(settings.recognition_high_confidence))
-                )
-                current_effective = (
-                    answer.corrected_text
-                    if answer.corrected_text is not None
-                    else answer.recognized_text
-                )
-                answer_changed = (
-                    previous_effective is not None and previous_effective != current_effective
-                )
-                answer.requires_review = recognized_requires_review or answer_changed
-                if answer_changed:
-                    answer.status = "stale"
-                    for result in db.scalars(
-                        select(GradingResult).where(
-                            GradingResult.student_answer_id == answer.id,
-                            GradingResult.status.in_(["suggested", "accepted", "modified"]),
-                        )
-                    ).all():
-                        result.status = "stale"
-                db.execute(
-                    delete(StudentAnswerRegion).where(
-                        StudentAnswerRegion.student_answer_id == answer.id
-                    )
-                )
-                for block in blocks:
-                    db.add(
-                        StudentAnswerRegion(
-                            student_answer_id=answer.id,
-                            submission_page_id=page.id,
-                            x=block.region[0],
-                            y=block.region[1],
-                            width=block.region[2],
-                            height=block.region[3],
-                            source="ocr",
-                            confidence=block.confidence,
-                        )
-                    )
             db.commit()
         except Exception as exc:
             db.rollback()
@@ -229,6 +207,71 @@ def run_submission_recognition_job(
                 )
                 current_job.error_message = str(exc)[:500]
             db.commit()
+    # Aggregate OCR only through confirmed answer regions. This naturally supports
+    # multiple questions on one page and one question spanning multiple pages.
+    answers = db.scalars(
+        select(StudentAnswer).where(StudentAnswer.submission_id == submission.id)
+    ).all()
+    for answer in answers:
+        regions = db.scalars(
+            select(StudentAnswerRegion).where(
+                StudentAnswerRegion.student_answer_id == answer.id,
+                StudentAnswerRegion.status == "confirmed",
+            )
+        ).all()
+        if not regions:
+            answer.status, answer.requires_review = "manual_segmentation_required", True
+            continue
+        selected: list[SubmissionRecognitionBlock] = []
+        for region in regions:
+            recognized_blocks = db.scalars(
+                select(SubmissionRecognitionBlock)
+                .where(SubmissionRecognitionBlock.submission_page_id == region.submission_page_id)
+                .order_by(SubmissionRecognitionBlock.block_index)
+            ).all()
+            for recognized_row in recognized_blocks:
+                center_x = Decimal(recognized_row.x) + Decimal(recognized_row.width) / 2
+                center_y = Decimal(recognized_row.y) + Decimal(recognized_row.height) / 2
+                if Decimal(region.x) <= center_x <= Decimal(region.x) + Decimal(
+                    region.width
+                ) and Decimal(region.y) <= center_y <= Decimal(region.y) + Decimal(region.height):
+                    selected.append(recognized_row)
+        previous_effective = (
+            answer.corrected_text if answer.corrected_text is not None else answer.recognized_text
+        )
+        text = "\n".join(block.text for block in selected if block.text)
+        confidences = [
+            Decimal(block.confidence) for block in selected if block.confidence is not None
+        ]
+        confidence = min(confidences) if confidences else None
+        answer.recognized_text = text or None
+        answer.recognized_latex = None
+        answer.recognition_confidence = confidence
+        answer.recognition_provider = provider.name
+        answer.recognition_provider_version = provider.version
+        answer.is_blank = not selected
+        answer.status = "blank" if not selected else "recognized"
+        current_effective = (
+            answer.corrected_text if answer.corrected_text is not None else answer.recognized_text
+        )
+        changed = previous_effective is not None and previous_effective != current_effective
+        answer.requires_review = (
+            len(regions) > 1
+            or not selected
+            or confidence is None
+            or confidence < Decimal(str(settings.recognition_high_confidence))
+            or changed
+        )
+        if changed:
+            answer.status = "stale"
+            for result in db.scalars(
+                select(GradingResult).where(
+                    GradingResult.student_answer_id == answer.id,
+                    GradingResult.status.in_(["suggested", "accepted", "modified"]),
+                )
+            ).all():
+                result.status = "stale"
+    db.commit()
     final_job = db.get(SubmissionRecognitionJob, job_id)
     if final_job:
         final_job.status = (
@@ -243,17 +286,15 @@ def run_submission_recognition_job(
 
 
 def mark_submission_stale(db: Session, submission_id: uuid.UUID) -> None:
-    db.execute(
-        delete(SubmissionRecognitionBlock).where(
-            SubmissionRecognitionBlock.submission_page_id.in_(
-                select(SubmissionPage.id).where(SubmissionPage.submission_id == submission_id)
-            )
-        )
-    )
+    from app.math_validation.stale import stale_for_answer
+    from app.recognition.answer_evidence import mark_answer_recognition_stale
+
     answers = db.scalars(
         select(StudentAnswer).where(StudentAnswer.submission_id == submission_id)
     ).all()
     for answer in answers:
+        stale_for_answer(db, answer.id, "SCORING_INPUT_CHANGED")
+        mark_answer_recognition_stale(db, answer.id)
         answer.status, answer.requires_review = "stale", True
         for result in db.scalars(
             select(GradingResult).where(GradingResult.student_answer_id == answer.id)

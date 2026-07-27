@@ -1,0 +1,8 @@
+{
+  "evidence_reference_valid_rate": {"min": 1.0},
+  "manual_required_recall": {"min": 1.0},
+  "deterministic_conflict_recall": {"min": 1.0},
+  "high_confidence_error_rate": {"max": 0.05},
+  "abstain_precision": {"min": 0.9},
+  "abstain_recall": {"min": 0.9}
+}

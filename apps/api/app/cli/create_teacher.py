@@ -3,13 +3,13 @@ import getpass
 
 from sqlalchemy import select
 
-from app.api.auth import hash_password
+from app.api.auth import hash_password, normalize_email
 from app.db.session import SessionLocal
 from app.models import Status, User
 
 
 def create_teacher(email: str, display_name: str, password: str) -> User:
-    normalized = email.lower().strip()
+    normalized = normalize_email(email)
     if len(password) < 8:
         raise ValueError("密码至少需要 8 个字符")
     with SessionLocal() as db:

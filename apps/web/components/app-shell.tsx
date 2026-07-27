@@ -3,8 +3,8 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
+import { useAuthUser } from "@/components/auth-gate";
 import { authApi } from "@/lib/api";
-import { demoTeacher } from "@/lib/demo-data";
 import { Icon } from "./icons";
 import { navigation, pageTitles } from "./navigation";
 import { Avatar, Breadcrumb, Drawer, Dropdown, ToastProvider } from "./ui";
@@ -35,14 +35,6 @@ function NavItems({
             <span className={collapsed ? "sr-only" : "truncate"}>
               {item.label}
             </span>
-            {"demoCount" in item && !collapsed && (
-              <span
-                title="演示待复核数量"
-                className="ml-auto rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800"
-              >
-                {item.demoCount}
-              </span>
-            )}
           </Link>
         );
       })}
@@ -69,9 +61,12 @@ function Brand({ collapsed = false }: { collapsed?: boolean }) {
 export function AppShell({ children }: { children: ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
+  const user = useAuthUser();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const title = pageTitles[pathname] ?? "教师端";
+  const displayName = user?.display_name || user?.email || "教师";
+  const initials = displayName.trim().slice(0, 1).toUpperCase() || "师";
   return (
     <ToastProvider>
       <div className="min-h-screen">
@@ -111,38 +106,41 @@ export function AppShell({ children }: { children: ReactNode }) {
               <strong className="sm:hidden">{title}</strong>
             </div>
             <div className="flex items-center gap-1.5">
-              <button
-                aria-label="搜索（即将开放）"
-                title="搜索（即将开放）"
+              <Link
+                href="/search"
+                aria-label="搜索"
+                title="搜索"
                 className="grid h-10 w-10 place-items-center rounded-lg text-slate-500 hover:bg-slate-100"
               >
                 <Icon name="search" />
-              </button>
-              <button
-                aria-label="通知（演示）"
-                title="通知（演示）"
+              </Link>
+              <Link
+                href="/notifications"
+                aria-label="消息"
+                title="消息"
                 className="relative grid h-10 w-10 place-items-center rounded-lg text-slate-500 hover:bg-slate-100"
               >
                 <Icon name="bell" />
-                <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-amber-500" />
-              </button>
-              <button
-                aria-label="帮助"
+              </Link>
+              <Link
+                href="/help"
+                aria-label="使用帮助"
+                title="使用帮助"
                 className="hidden h-10 w-10 place-items-center rounded-lg text-slate-500 hover:bg-slate-100 sm:grid"
               >
                 <Icon name="help" />
-              </button>
+              </Link>
               <div className="mx-2 h-6 w-px bg-[var(--border)]" />
               <Dropdown
                 label={
                   <span className="flex items-center gap-2">
-                    <Avatar initials={demoTeacher.initials} size="sm" />
+                    <Avatar initials={initials} size="sm" />
                     <span className="hidden text-left md:block">
                       <span className="block text-xs font-semibold">
-                        {demoTeacher.name}
+                        {displayName}
                       </span>
                       <span className="block text-[10px] text-[var(--text-secondary)]">
-                        演示用户
+                        {user?.email || "教师账号"}
                       </span>
                     </span>
                   </span>

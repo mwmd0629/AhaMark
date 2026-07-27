@@ -2,9 +2,9 @@
 name = "ahamark"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = ["fastapi>=0.115,<1", "uvicorn[standard]>=0.34,<1", "sqlalchemy>=2.0,<3", "alembic>=1.14,<2", "psycopg[binary]>=3.2,<4", "pydantic-settings>=2.7,<3", "structlog>=25.1,<26", "celery[redis]>=5.4,<6", "minio>=7.2,<8", "python-multipart>=0.0.20,<1", "email-validator>=2.2,<3", "openpyxl>=3.1,<4", "Pillow>=12.2,<13", "pypdfium2>=5.3,<6", "pypdf>=6.7,<7", "reportlab>=4.4,<5"]
+dependencies = ["fastapi>=0.115,<1", "uvicorn[standard]>=0.34,<1", "sqlalchemy>=2.0,<3", "alembic>=1.14,<2", "psycopg[binary]>=3.2,<4", "pydantic-settings>=2.7,<3", "structlog>=25.1,<26", "celery[redis]>=5.4,<6", "minio>=7.2,<8", "python-multipart>=0.0.20,<1", "email-validator>=2.2,<3", "httpx>=0.28,<1", "openpyxl>=3.1,<4", "Pillow>=12.2,<13", "pypdfium2>=5.3,<6", "pypdf>=6.7,<7", "reportlab>=4.4,<5"]
 [project.optional-dependencies]
-dev = ["pytest>=8.3,<9", "pytest-cov>=6,<7", "httpx>=0.28,<1", "ruff>=0.9,<1", "mypy>=1.14,<2"]
+dev = ["pytest>=8.3,<9", "pytest-cov>=6,<7", "ruff>=0.9,<1", "mypy>=1.14,<2"]
 ocr = ["rapidocr>=3,<4", "onnxruntime>=1.17,<2"]
 [build-system]
 requires = ["setuptools>=75"]

@@ -39,3 +39,6 @@ tests/.artifacts/
 *.pdiparams
 .recovery-v7/
 .preproduction-v8/
+/.preproduction-assignment-generation/
+.preproduction-assignment-generation/**/runtime.env
+.preproduction-assignment-generation/**/certs/*.key

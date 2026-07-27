@@ -21,6 +21,14 @@ Compose project 为 `ahamark-preprod-<run-id>`，拥有独立的 PostgreSQL、Re
 
 只有 `docs/preproduction-readiness-verification.json` 与 `docs/preproduction-browser-verification.json` 中 8A–8E 和 Edge 全部为 PASS，且完整门禁无 P0/P1，才可关闭第八部分。未运行或受环境限制必须标记 BLOCKED，不能推断通过。
 
+## API health 与 readiness 语义
+
+- `/health` 是轻量进程存活探针，不访问 PostgreSQL、Redis、MinIO、Worker、OCR 或 Provider；API 进程可响应时返回 200。
+- `/ready` 是依赖型业务流量探针。PostgreSQL、Redis、MinIO 为 hard dependency，任何一项不可用时返回 503 和脱敏 component 状态；全部可用时返回 200。
+- Celery Worker 作为 soft dependency 报告 available/degraded，避免仅因异步能力暂时不可用而移除仍能处理同步请求的 API。
+- OCR 与 Assignment Generation Provider 是 capability 状态；fake/unavailable 或未配置会显示 degraded/unavailable，但不使 API 整体 unready。
+- API 容器 healthcheck 使用 `/ready`。Nginx 在连接错误、timeout、502、503、504 时尝试另一 API upstream；单实例 dependency readiness 失败不会把 503 固定返回给客户端。
+
 ## 2026-07-24/25 运行时验收
 
 Docker Desktop 正常启动后连续两轮资源计数稳定。该轮历史 Run 为 `v8-20260725-000100`，入口为
@@ -59,6 +67,16 @@ Cookie、浏览器存储、request ID、单 API 故障切换和退出均 PASS，
 最终自动化门禁为 Ruff format/check、完整 mypy、25 个定向安全/关联测试、完整 Pytest（138 passed、2
 skipped）、Prettier、ESLint、TypeScript、Vitest（26 passed）、Next production build、Compose 渲染、
 Nginx 配置、JSON 解析及 `git diff --check` 全部通过。机器可读的 ID、状态和原始证据 SHA-256 见两份 JSON。
+
+2026-07-25 当前工作树复核未重建或清理任何 Docker 资源。Nginx 的实际容器 healthcheck
+`https://127.0.0.1:8443/health`、`nginx -t`、双 API 健康状态和 Celery ping 再次通过。复核通过正式
+HTTPS API、真实 Session/CSRF 为同一固定 Release 新建并完成 ReportJob
+`a79dcecb-800d-4ce7-84ad-31ca82e5deaa`；request ID
+`78e71e0fa29d1d639c0ae988befadfda` 在当前保留的 Nginx、API A 和 Worker 日志中精确一致，
+Celery task ID 为 `c8b7b1ed-5930-4c37-9cf1-de65acef5096`，Worker 终态 completed、耗时
+156 ms。随后只 stop/start 同一个 API A 容器；真实 Edge 在同一 Session 下对班级、作业、固定 Release/
+Snapshot、新 Report、Analytics 和学生数据的前、中、后读取均通过，API A 恢复 healthy。当前复核证据保存为
+忽略目录内的 `business-evidence-current.json` 和 `edge-evidence-current.json`，SHA-256 记录在机器 JSON。
 
 据此，第八部分 8A–8E 及 Edge 均可正式关闭，项目等级仍为 C。该结论不代表生产高可用、生产灾备、外部渗透
 通过、真实主观题 AI 可用或手写/公式 OCR 可靠。原定八部分已经完成；任何后续工作属于重新规划的可选扩展，

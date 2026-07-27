@@ -1,0 +1,35 @@
+{
+  "schema_version": "assignment-generation-evaluation-schema-v1",
+  "dataset_version": "assignment-generation-evaluation-v1",
+  "format": "JSON Lines",
+  "required_fields": [
+    "case_id",
+    "dataset_version",
+    "category",
+    "source_type",
+    "synthetic",
+    "input_files",
+    "page_ground_truth",
+    "file_role_ground_truth",
+    "answer_source_ground_truth",
+    "question_ground_truth",
+    "answer_ground_truth",
+    "rubric_ground_truth",
+    "expected_issues",
+    "expected_manual_review",
+    "forbidden_actions",
+    "notes"
+  ],
+  "rules": {
+    "synthetic_must_be_true": true,
+    "case_id_unique": true,
+    "forbidden_actions_must_include_publish": true,
+    "additional_properties": false
+  },
+  "null_policy": {
+    "metric": "null when denominator is zero or required real-provider telemetry was not supplied",
+    "threshold": "null never passes",
+    "skipped_case": "excluded only from that metric denominator"
+  },
+  "coordinate_system": "normalized [x0,y0,x1,y1] within 0..1"
+}

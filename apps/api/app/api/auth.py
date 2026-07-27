@@ -29,6 +29,20 @@ _attempt_lock = threading.Lock()
 log = structlog.get_logger()
 
 
+def normalize_email(value: str) -> str:
+    normalized = value.lower().strip()
+    if normalized.endswith(".synthetic.invalid") and "@" in normalized:
+        local, domain = normalized.rsplit("@", 1)
+        if local and domain.endswith(".synthetic.invalid"):
+            return normalized
+    if "@" in normalized:
+        local, domain = normalized.rsplit("@", 1)
+        if domain == "ahamark.local":
+            validated = str(TypeAdapter(EmailStr).validate_python(f"{local}@example.com"))
+            return f"{validated.rsplit('@', 1)[0]}@ahamark.local"
+    return str(TypeAdapter(EmailStr).validate_python(normalized))
+
+
 class LoginInput(BaseModel):
     email: str
     password: str = Field(min_length=8, max_length=256)
@@ -36,12 +50,7 @@ class LoginInput(BaseModel):
     @field_validator("email")
     @classmethod
     def validate_email(cls, value: str) -> str:
-        normalized = value.lower().strip()
-        if normalized.endswith(".synthetic.invalid") and "@" in normalized:
-            local, domain = normalized.rsplit("@", 1)
-            if local and domain.endswith(".synthetic.invalid"):
-                return normalized
-        return str(TypeAdapter(EmailStr).validate_python(normalized))
+        return normalize_email(value)
 
 
 def hash_password(password: str) -> str:

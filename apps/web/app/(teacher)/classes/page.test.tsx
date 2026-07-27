@@ -1,4 +1,10 @@
-import { render, screen } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ClassesPage from "./page";
 
@@ -67,5 +73,64 @@ describe("classes API page", () => {
     );
     render(<ClassesPage />);
     expect(await screen.findByText("API unavailable")).toBeInTheDocument();
+  });
+
+  it("offers academic year choices and moves there from subject with Enter", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue({ ok: true, status: 200, json: async () => empty }),
+    );
+    const { container } = render(<ClassesPage />);
+    await within(container).findByText("还没有班级");
+    fireEvent.click(
+      within(container).getByRole("button", { name: "创建班级" }),
+    );
+    const subject = within(container).getByLabelText("学科");
+    const academicYear = within(container).getByLabelText("学年");
+    expect(academicYear).toHaveDisplayValue("请选择学年");
+    expect(
+      within(container).getByRole("option", { name: "2026-2027" }),
+    ).toBeInTheDocument();
+    fireEvent.keyDown(subject, { key: "Enter" });
+    expect(academicYear).toHaveFocus();
+  });
+
+  it("closes the create dialog after a successful class creation", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation((_url: string, init?: RequestInit) =>
+        Promise.resolve({
+          ok: true,
+          status: init?.method === "POST" ? 201 : 200,
+          json: async () =>
+            init?.method === "POST"
+              ? {
+                  id: "created-class",
+                  name: "八年级（5）班",
+                  status: "active",
+                }
+              : empty,
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const { container } = render(<ClassesPage />);
+    await within(container).findByText("还没有班级");
+    fireEvent.click(
+      within(container).getByRole("button", { name: "创建班级" }),
+    );
+    fireEvent.change(within(container).getByLabelText(/班级名称/), {
+      target: { value: "八年级（5）班" },
+    });
+    fireEvent.click(
+      within(container).getByRole("button", { name: "保存班级" }),
+    );
+    await waitFor(() =>
+      expect(within(container).queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(
+      fetchMock.mock.calls.some(([, init]) => init?.method === "POST"),
+    ).toBe(true);
   });
 });

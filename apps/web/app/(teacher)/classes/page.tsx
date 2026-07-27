@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable react-hooks/exhaustive-deps */
 import Link from "next/link";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Icon } from "@/components/icons";
 import {
   Button,
@@ -18,6 +18,8 @@ import {
 import { ApiError, classesApi, type ClassRecord } from "@/lib/api";
 
 export default function ClassesPage() {
+  const academicYearRef = useRef<HTMLSelectElement>(null);
+  const [createOpen, setCreateOpen] = useState(false);
   const [items, setItems] = useState<ClassRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -27,6 +29,16 @@ export default function ClassesPage() {
   const [pages, setPages] = useState(1);
   const [saving, setSaving] = useState(false);
   const toast = useToast();
+  const openAcademicYearPicker = () => {
+    const picker = academicYearRef.current;
+    if (!picker) return;
+    picker.focus();
+    try {
+      picker.showPicker?.();
+    } catch {
+      // Native select remains focused when the browser blocks programmatic opening.
+    }
+  };
   const load = async () => {
     setLoading(true);
     setError("");
@@ -48,7 +60,8 @@ export default function ClassesPage() {
   const create = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setSaving(true);
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     try {
       await classesApi.create({
         name: String(form.get("name")),
@@ -57,9 +70,10 @@ export default function ClassesPage() {
         academic_year: String(form.get("academic_year") || ""),
         semester: String(form.get("semester") || ""),
       });
-      event.currentTarget.reset();
+      formElement.reset();
       toast("班级已创建");
       await load();
+      setCreateOpen(false);
     } catch (e) {
       toast(e instanceof ApiError ? e.body.message : "创建失败", "error");
     } finally {
@@ -93,6 +107,9 @@ export default function ClassesPage() {
           <Dialog
             title="创建班级"
             description="同一教师下班级名称不可重复。"
+            dismissible={false}
+            open={createOpen}
+            onOpenChange={setCreateOpen}
             trigger={
               <Button>
                 <Icon name="plus" className="h-4 w-4" />
@@ -104,12 +121,40 @@ export default function ClassesPage() {
               <Input label="班级名称" name="name" required maxLength={120} />
               <div className="grid grid-cols-2 gap-3">
                 <Input label="年级" name="grade" />
-                <Input label="学科" name="subject" />
                 <Input
+                  label="学科"
+                  name="subject"
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      openAcademicYearPicker();
+                    }
+                  }}
+                />
+                <Select
+                  ref={academicYearRef}
                   label="学年"
                   name="academic_year"
-                  placeholder="2025-2026"
-                />
+                  defaultValue=""
+                  onFocus={(event) => {
+                    if (event.currentTarget.matches(":focus-visible")) {
+                      try {
+                        event.currentTarget.showPicker?.();
+                      } catch {
+                        // Keyboard users can still open the focused native select.
+                      }
+                    }
+                  }}
+                >
+                  <option value="" disabled>
+                    请选择学年
+                  </option>
+                  <option value="2024-2025">2024-2025</option>
+                  <option value="2025-2026">2025-2026</option>
+                  <option value="2026-2027">2026-2027</option>
+                  <option value="2027-2028">2027-2028</option>
+                  <option value="2028-2029">2028-2029</option>
+                </Select>
                 <Input label="学期" name="semester" />
               </div>
               <Button type="submit" loading={saving}>

@@ -14,6 +14,7 @@ import {
   type SubmissionRecord,
 } from "@/lib/api";
 import { Button, Card, PageHeader } from "@/components/ui";
+import { SubmissionSegmentationWorkspace } from "@/components/submission-segmentation-workspace";
 
 const terminal = new Set(["completed", "partially_completed", "failed"]);
 
@@ -128,6 +129,19 @@ export default function GradingBatchPage({
     }
     await act("匹配已由教师通过 UI 明确确认", async () => {
       await gradingApi.confirmMatch(batchId, matchId, studentId);
+      await load();
+    });
+  }
+
+  async function undoUpload(matchId: string) {
+    if (
+      !window.confirm(
+        "确认撤销这次错误上传？已完成或已进入批改的数据不会被直接删除。",
+      )
+    )
+      return;
+    await act("错误上传已安全撤销", async () => {
+      await gradingApi.undoUpload(batchId, matchId);
       await load();
     });
   }
@@ -385,6 +399,11 @@ export default function GradingBatchPage({
                     )}
                   </div>
                 )}
+                {item.status !== "finalized" && (
+                  <div className="mt-3">
+                    <SubmissionSegmentationWorkspace submissionId={item.id} />
+                  </div>
+                )}
               </article>
             );
           })}
@@ -430,6 +449,37 @@ export default function GradingBatchPage({
                     onClick={() => void confirmMatch(item.id)}
                   >
                     人工确认匹配
+                  </Button>
+                  <Button
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() => void undoUpload(item.id)}
+                  >
+                    撤销错误上传
+                  </Button>
+                </div>
+              ))}
+          </div>
+        )}
+        {batch.matching.items.some((item) => item.status === "confirmed") && (
+          <div className="space-y-2 rounded-xl border p-4">
+            <h3 className="font-semibold">已匹配上传</h3>
+            {batch.matching.items
+              .filter((item) => item.status === "confirmed")
+              .map((item) => (
+                <div
+                  key={item.id}
+                  className="flex items-center justify-between gap-3 text-sm"
+                >
+                  <span>
+                    {item.filename} · {item.method}
+                  </span>
+                  <Button
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() => void undoUpload(item.id)}
+                  >
+                    撤销错误上传
                   </Button>
                 </div>
               ))}

@@ -12,6 +12,9 @@ import {
   Select,
   useToast,
 } from "@/components/ui";
+import { AssignmentGenerationPanel } from "@/components/assignment-generation-panel";
+import { AnswerRubricGenerationReview } from "@/components/answer-rubric-generation-review";
+import { AssignmentCentralReview } from "@/components/assignment-central-review";
 import {
   ApiError,
   assignmentsApi,
@@ -27,7 +30,7 @@ const steps = [
   "整理页面",
   "编辑题目",
   "评分标准",
-  "检查并发布",
+  "集中审查与发布",
 ];
 
 export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
@@ -85,6 +88,12 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
     () => item?.paper_version?.questions.find((x) => x.id === selectedQuestion),
     [item, selectedQuestion],
   );
+  useEffect(() => {
+    const saved = item?.rubric_version?.question_rubrics.find(
+      (rubric) => rubric.question_id === selectedQuestion,
+    );
+    setAnswer(saved?.standard_answer ?? "");
+  }, [item, selectedQuestion]);
   if (error) return <ErrorState description={error} retry={load} />;
   if (!item) return <Card className="p-8">正在恢复后端草稿…</Card>;
 
@@ -123,6 +132,11 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
             <Button variant="outline">返回列表</Button>
           </Link>
         }
+      />
+      <AssignmentGenerationPanel
+        assignmentId={item.id}
+        assignment={item}
+        onAssignmentChanged={load}
       />
       <ol
         className="grid grid-cols-2 gap-2 md:grid-cols-6"
@@ -169,6 +183,9 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
               type="datetime-local"
               defaultValue={item.due_at?.slice(0, 16)}
             />
+            <p className="text-xs text-slate-500 md:col-span-2">
+              AI 不会设置截止时间；该字段仅由教师手动输入。
+            </p>
             <label className="grid gap-1.5 text-sm font-medium md:col-span-2">
               关联班级（创建草稿时已校验）
               <div className="flex flex-wrap gap-2">
@@ -187,7 +204,8 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
                 )}
               </div>
               <small className="text-slate-500">
-                当前共有 {classes.length} 个可用活动班级。
+                当前共有 {classes.length} 个可用活动班级。AI
+                不会推荐或自动选择班级。
               </small>
             </label>
             <label className="grid gap-1.5 text-sm font-medium md:col-span-2">
@@ -505,6 +523,13 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
       {step === 5 && (
         <Card className="space-y-4 p-6">
           <h2 className="font-bold">评分标准</h2>
+          <AnswerRubricGenerationReview
+            assignmentId={item.id}
+            questions={item.paper_version?.questions ?? []}
+          />
+          <h3 className="border-t pt-4 font-bold">
+            手动 legacy Rubric 快捷录入
+          </h3>
           <Select
             label="当前题目"
             value={selectedQuestion}
@@ -633,64 +658,11 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
       )}
 
       {step === 6 && (
-        <Card className="space-y-4 p-6">
-          <h2 className="font-bold">检查并发布</h2>
-          <div className="grid gap-2 sm:grid-cols-3">
-            <div>班级：{item.classes.length}</div>
-            <div>页面：{item.paper_version?.pages.length ?? 0}</div>
-            <div>题目：{item.paper_version?.questions.length ?? 0}</div>
-            <div>总分：{item.total_score ?? "未设置"}</div>
-            <div>试卷版本：v{item.paper_version?.version ?? "—"}</div>
-            <div>评分版本：v{item.rubric_version?.version ?? "—"}</div>
-          </div>
-          {item.completeness.issues.length ? (
-            <ul className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-              {item.completeness.issues.map((issue, i) => (
-                <li key={`${issue.code}-${i}`}>
-                  <button
-                    className="underline"
-                    onClick={() => setStep(issue.step)}
-                  >
-                    步骤 {issue.step}：{issue.message}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="rounded-xl bg-emerald-50 p-4 text-emerald-800">
-              后端检查通过，可以发布。
-            </p>
-          )}
-          <div className="flex gap-3">
-            <Button
-              variant="outline"
-              onClick={() => router.push("/assignments")}
-            >
-              保存草稿
-            </Button>
-            <Button
-              disabled={!item.completeness.ready}
-              loading={busy}
-              onClick={async () => {
-                setBusy(true);
-                try {
-                  await assignmentsApi.publish(item.id);
-                  toast("作业已发布");
-                  router.push(`/assignments/${item.id}`);
-                } catch (e) {
-                  toast(
-                    e instanceof ApiError ? e.message : "发布失败",
-                    "error",
-                  );
-                } finally {
-                  setBusy(false);
-                }
-              }}
-            >
-              发布作业
-            </Button>
-          </div>
-        </Card>
+        <AssignmentCentralReview
+          item={item}
+          onNavigate={setStep}
+          onPublished={() => router.push(`/assignments/${item.id}`)}
+        />
       )}
     </div>
   );

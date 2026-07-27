@@ -86,8 +86,18 @@ export default function AssignmentDetailPage({
         <ol className="mt-3 grid gap-2">
           {item.paper_version?.questions.map((q) => (
             <li className="rounded-xl border p-3" key={q.id}>
-              第 {q.question_number} 题 · {formatQuestionScore(q.max_score)} ·{" "}
-              {q.content_text || "未填写题干"}
+              <div className="flex items-center gap-3">
+                <span>
+                  第 {q.question_number} 题 · {formatQuestionScore(q.max_score)}{" "}
+                  · {q.content_text || "未填写题干"}
+                </span>
+                <Link
+                  href={`/assignments/${item.id}/rubrics/${q.id}`}
+                  className="ml-auto rounded border px-3 py-1 text-sm"
+                >
+                  标准答案与 Rubric
+                </Link>
+              </div>
             </li>
           ))}
         </ol>

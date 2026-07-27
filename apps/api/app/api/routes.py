@@ -1,33 +1,48 @@
 import hashlib
 import uuid
 from typing import Annotated
-from urllib.error import URLError
-from urllib.request import urlopen
 
 from app.api.actor import Actor
+from app.api.ai_grading import router as ai_grading_router
+from app.api.answer_recognition import router as answer_recognition_router
+from app.api.assignment_answer_rubric import router as assignment_answer_rubric_router
+from app.api.assignment_central_review import router as assignment_central_review_router
+from app.api.assignment_generation import router as assignment_generation_router
 from app.api.assignments import router as assignments_router
 from app.api.auth import router as auth_router
 from app.api.domain import router as domain_router
 from app.api.grading import router as grading_router
+from app.api.math_validation import router as math_validation_router
 from app.api.recognition import router as recognition_router
 from app.api.results import router as results_router
+from app.api.structured_rubrics import router as structured_rubrics_router
+from app.api.submission_processing import router as submission_processing_router
 from app.core.config import get_settings
+from app.core.readiness import dependency_readiness
 from app.db.session import get_db
 from app.models import FileStatus, StoredFile
-from app.recognition.pipeline import provider_from_settings
 from app.security.files import UnsafeFile, inspect_upload, safe_filename
 from app.storage.base import ObjectStorage
 from app.storage.dependencies import get_storage
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from sqlalchemy import select, text
+from fastapi.responses import JSONResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 router = APIRouter()
 router.include_router(auth_router)
 router.include_router(domain_router)
 router.include_router(assignments_router)
+router.include_router(assignment_generation_router)
+router.include_router(assignment_answer_rubric_router)
+router.include_router(assignment_central_review_router)
+router.include_router(answer_recognition_router)
+router.include_router(ai_grading_router)
 router.include_router(recognition_router)
 router.include_router(grading_router)
+router.include_router(math_validation_router)
+router.include_router(submission_processing_router)
+router.include_router(structured_rubrics_router)
 router.include_router(results_router)
 
 
@@ -37,68 +52,9 @@ def health() -> dict[str, str]:
 
 
 @router.get("/ready")
-def ready(db: Annotated[Session, Depends(get_db)]) -> dict[str, object]:
-    settings = get_settings()
-    capabilities: dict[str, dict[str, object]] = {}
-    try:
-        db.execute(text("SELECT 1"))
-        capabilities["postgresql"] = {"status": "available"}
-    except Exception as exc:
-        capabilities["postgresql"] = {
-            "status": "unavailable",
-            "reason": type(exc).__name__,
-        }
-    try:
-        from redis import Redis
-
-        Redis.from_url(settings.redis_url, socket_connect_timeout=0.5, socket_timeout=0.5).ping()
-        capabilities["redis"] = {"status": "available"}
-    except Exception as exc:
-        capabilities["redis"] = {"status": "unavailable", "reason": type(exc).__name__}
-    try:
-        from workers.celery_app import celery_app
-
-        replies = celery_app.control.inspect(timeout=0.75).ping()
-        capabilities["celery_worker"] = {
-            "status": "available" if replies else "unavailable",
-            "workers": len(replies or {}),
-        }
-    except Exception as exc:
-        capabilities["celery_worker"] = {
-            "status": "unavailable",
-            "reason": type(exc).__name__,
-        }
-    scheme = "https" if settings.minio_secure else "http"
-    try:
-        with urlopen(
-            f"{scheme}://{settings.minio_endpoint}/minio/health/live", timeout=0.75
-        ) as response:
-            minio_ok = response.status == 200
-        capabilities["minio"] = {"status": "available" if minio_ok else "degraded"}
-    except (OSError, URLError) as exc:
-        capabilities["minio"] = {"status": "unavailable", "reason": type(exc).__name__}
-    provider = provider_from_settings(settings)
-    ocr_available, ocr_reason = provider.available()
-    capabilities["text_ocr"] = {
-        "status": "available"
-        if ocr_available and not provider.is_demo
-        else ("degraded" if ocr_available else "unavailable"),
-        "provider": provider.name,
-        "version": provider.version,
-        "demo": provider.is_demo,
-        "reason": ocr_reason,
-    }
-    capabilities["formula_ocr"] = {
-        "status": "unavailable",
-        "reason": "未配置公式识别 Provider；数学字符仅作为普通文字并需人工复核",
-    }
-    required = ["postgresql", "redis", "celery_worker", "minio", "text_ocr"]
-    status = (
-        "available"
-        if all(capabilities[name]["status"] == "available" for name in required)
-        else "degraded"
-    )
-    return {"status": status, "capabilities": capabilities}
+def ready(db: Annotated[Session, Depends(get_db)]) -> JSONResponse:
+    result = dependency_readiness(db, get_settings())
+    return JSONResponse(result, status_code=200 if result["ready"] else 503)
 
 
 @router.post("/files", status_code=201)

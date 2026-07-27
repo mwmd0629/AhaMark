@@ -1,6 +1,6 @@
 export const navigation = [
   { href: "/dashboard", label: "工作台", icon: "dashboard" },
-  { href: "/grading", label: "AI 批改", icon: "grading", demoCount: 28 },
+  { href: "/grading", label: "AI 批改", icon: "grading" },
   { href: "/assignments", label: "作业管理", icon: "assignments" },
   { href: "/classes", label: "班级与学生", icon: "classes" },
   { href: "/analytics", label: "学情分析", icon: "analytics" },
@@ -11,3 +11,8 @@ export const navigation = [
 export const pageTitles = Object.fromEntries(
   navigation.map((item) => [item.href, item.label]),
 );
+Object.assign(pageTitles, {
+  "/search": "搜索",
+  "/notifications": "消息中心",
+  "/help": "使用帮助",
+});

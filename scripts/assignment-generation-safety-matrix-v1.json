@@ -1,0 +1,259 @@
+{
+  "matrix_version": "assignment-generation-safety-matrix-v1",
+  "status": "defined",
+  "run_id": null,
+  "started_at": null,
+  "completed_at": null,
+  "hard_gate_metrics": [
+    "auto_publish_attempt_count",
+    "unauthorized_publish_success_count",
+    "stale_overwrite_count",
+    "teacher_edit_overwrite_count",
+    "official_source_escalation_count",
+    "cross_owner_data_leak_count",
+    "prompt_injection_control_success_count",
+    "evidence_unknown_reference_count"
+  ],
+  "scenarios": [
+    {
+      "id": "prompt_injection",
+      "title": "Prompt Injection cannot change system prompt",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_assignment_answer_rubric_generation.py",
+      "assertion": "test_prompt_injection"
+    },
+    {
+      "id": "no_tools",
+      "title": "Document content cannot call tools",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "apps/api/app/assignment_generation/providers.py",
+      "assertion": "provider has no tool interface"
+    },
+    {
+      "id": "no_class_selection",
+      "title": "Document cannot select a class",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "apps/api/app/assignment_generation/schemas.py",
+      "assertion": "class_ids forbidden"
+    },
+    {
+      "id": "no_due_confirmation",
+      "title": "Document cannot confirm due date",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "apps/api/app/assignment_generation/schemas.py",
+      "assertion": "due_at forbidden"
+    },
+    {
+      "id": "no_score_confirmation",
+      "title": "Document cannot confirm total score",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_assignment_metadata_file_analysis.py",
+      "assertion": "teacher confirmation required"
+    },
+    {
+      "id": "no_source_escalation",
+      "title": "Document cannot elevate answer source",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_assignment_answer_rubric_generation.py",
+      "assertion": "source preservation"
+    },
+    {
+      "id": "no_artifact_confirmation",
+      "title": "Document cannot confirm paper/answer/rubric",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_assignment_central_review_publish.py",
+      "assertion": "teacher disposition required"
+    },
+    {
+      "id": "no_readiness",
+      "title": "Document cannot create readiness",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_assignment_central_review_publish.py",
+      "assertion": "authenticated teacher API"
+    },
+    {
+      "id": "no_publish",
+      "title": "Document cannot publish",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_assignment_central_review_publish.py",
+      "assertion": "teacher CSRF publish only"
+    },
+    {
+      "id": "html_plain_text",
+      "title": "HTML/script remains untrusted text",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "apps/api/app/assignment_generation/file_analysis.py",
+      "assertion": "injection marker"
+    },
+    {
+      "id": "no_external_fetch",
+      "title": "External URL is not visited",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "apps/api/app/assignment_generation/providers.py",
+      "assertion": "no network tool"
+    },
+    {
+      "id": "mime_extension",
+      "title": "MIME/extension conflict rejected",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_submission_workflow.py",
+      "assertion": "file validation"
+    },
+    {
+      "id": "corrupt_file",
+      "title": "Corrupt file fails safely",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_submission_workflow.py",
+      "assertion": "file validation"
+    },
+    {
+      "id": "oversize_file",
+      "title": "Oversize file rejected",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_submission_workflow.py",
+      "assertion": "size policy"
+    },
+    {
+      "id": "coordinate_bounds",
+      "title": "Out-of-range coordinates rejected",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_assignment_question_extraction.py",
+      "assertion": "schema validator"
+    },
+    {
+      "id": "schema_extra",
+      "title": "Provider extra fields rejected",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_assignment_answer_rubric_generation.py",
+      "assertion": "extra forbid"
+    },
+    {
+      "id": "invalid_score",
+      "title": "Invalid score rejected",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_assignment_answer_rubric_generation.py",
+      "assertion": "decimal bounds"
+    },
+    {
+      "id": "dependency_cycle",
+      "title": "Dependency cycle rejected",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_assignment_answer_rubric_generation.py",
+      "assertion": "cycle validator"
+    },
+    {
+      "id": "owner_isolation",
+      "title": "Teacher B cannot read/write owner A",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_assignment_central_review_publish.py",
+      "assertion": "404 owner isolation"
+    },
+    {
+      "id": "session_required",
+      "title": "Unauthenticated access rejected",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_auth.py",
+      "assertion": "session dependency"
+    },
+    {
+      "id": "csrf_required",
+      "title": "CSRF required on writes",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_auth.py",
+      "assertion": "CSRF dependency"
+    },
+    {
+      "id": "no_worker_publish",
+      "title": "Worker/provider have no publish path",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "workers/tasks/assignment_generation.py",
+      "assertion": "no publish import/call"
+    },
+    {
+      "id": "readiness_forgery",
+      "title": "Readiness cannot be forged",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_assignment_central_review_publish.py",
+      "assertion": "server snapshot hash"
+    },
+    {
+      "id": "readiness_replay",
+      "title": "Readiness replay fails",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_assignment_central_review_publish.py",
+      "assertion": "single-use/current snapshot"
+    },
+    {
+      "id": "stale_no_overwrite",
+      "title": "Stale result cannot overwrite",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_assignment_generation.py",
+      "assertion": "conditional update"
+    },
+    {
+      "id": "teacher_edit_no_overwrite",
+      "title": "Teacher edit cannot be overwritten",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_assignment_generation.py",
+      "assertion": "edit version"
+    },
+    {
+      "id": "late_result_no_restore",
+      "title": "Late provider cannot restore old job",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "tests/test_assignment_generation.py",
+      "assertion": "terminal state guard"
+    },
+    {
+      "id": "redacted_errors",
+      "title": "Errors do not leak secrets",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "workers/tasks/assignment_generation.py",
+      "assertion": "stable redacted error"
+    },
+    {
+      "id": "redacted_evidence",
+      "title": "Evidence/logs contain no credentials",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "scripts/assignment_generation_evaluate.py",
+      "assertion": "secret-like value guard"
+    },
+    {
+      "id": "production_fake_disabled",
+      "title": "Production fake degrades to unavailable",
+      "expected": "pass",
+      "status": "not-run",
+      "evidence": "apps/api/app/assignment_generation/providers.py",
+      "assertion": "environment guard"
+    }
+  ]
+}

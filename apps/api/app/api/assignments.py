@@ -7,9 +7,11 @@ from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from app.api.actor import Actor
+from app.api.assignment_central_review import PublishInput
 from app.api.domain import ApiProblem, audit
 from app.core.config import get_settings
 from app.db.session import get_db
+from app.math_validation.stale import stale_for_question
 from app.models import (
     ArchiveStatus,
     Assignment,
@@ -1094,6 +1096,7 @@ def patch_question(
         setattr(q, k, v)
     q.parent_question_id = data.parent_question_id
     set_kps(db, actor.id, item, q, data.knowledge_points)
+    stale_for_question(db, q.id, "QUESTION_CONTENT_CHANGED")
     audit(db, actor.id, "question.update", "question", q.id)
     db.commit()
     return question_json(db, q)
@@ -1110,6 +1113,7 @@ def remove_question(assignment_id: uuid.UUID, question_id: uuid.UUID, db: Db, ac
     if not q:
         raise ApiProblem(404, "QUESTION_NOT_FOUND", "题目不存在")
     q.status = QuestionStatus.removed
+    stale_for_question(db, q.id, "QUESTION_STATUS_CHANGED")
     audit(db, actor.id, "question.remove", "question", q.id)
     db.commit()
 
@@ -1257,38 +1261,17 @@ def check_publish(assignment_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, A
 
 
 @router.post("/{assignment_id}/publish")
-def publish_assignment(assignment_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
-    item = owned(db, actor.id, assignment_id)
-    current_paper, current_rubric = paper(db, item), rubric(db, item)
-    if (
-        item.status == AssignmentStatus.published
-        and current_paper is not None
-        and current_rubric is not None
-        and current_paper.status == VersionStatus.confirmed
-        and current_rubric.status == VersionStatus.confirmed
-    ):
-        return detail(db, item)
-    issues = publish_issues(db, item)
-    if issues:
-        raise ApiProblem(422, "ASSIGNMENT_INCOMPLETE", "作业尚未满足发布条件", {"issues": issues})
-    pv, rv = current_paper, current_rubric
-    assert pv is not None and rv is not None
-    pv.status = VersionStatus.confirmed
-    pv.confirmed_at = now_utc()
-    rv.status = VersionStatus.confirmed
-    rv.confirmed_at = now_utc()
-    item.status = AssignmentStatus.published
-    item.published_at = now_utc()
-    audit(
-        db,
-        actor.id,
-        "assignment.publish",
-        "assignment",
-        item.id,
-        {"paper_version_id": str(pv.id), "rubric_version_id": str(rv.id)},
-    )
-    db.commit()
-    return detail(db, item)
+def publish_assignment(
+    assignment_id: uuid.UUID,
+    data: PublishInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    # Import locally to keep the legacy completeness checker reusable by the
+    # central-review service without introducing an import cycle.
+    from app.api.assignment_central_review import teacher_publish
+
+    return detail(db, teacher_publish(db, actor.id, assignment_id, data))
 
 
 class RecognitionRegion(BaseModel):

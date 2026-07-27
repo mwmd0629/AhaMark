@@ -14,6 +14,7 @@ from app.models import (
     GradingResult,
     MembershipStatus,
     ReportJob,
+    RubricVersion,
     ScoreRevision,
     StoredFile,
     Student,
@@ -23,6 +24,7 @@ from app.models import (
     SubmissionPage,
     SubmissionScoreSnapshot,
     TeachingInsight,
+    VersionStatus,
     now_utc,
 )
 from app.results.services import FinalScoreService, release_scores
@@ -327,8 +329,23 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
         assert stale_accept.status_code == 409
         assert stale_accept.json()["code"] == "GRADING_RESULT_STALE"
         republish = client.post(f"/api/assignments/{submission.assignment_id}/publish")
-        assert republish.status_code == 200, republish.text
-        assert republish.json()["rubric_version"]["status"] == "confirmed"
+        # A published assignment cannot bypass the new readiness contract.
+        # Re-publication requires a fresh teacher review flow rather than
+        # the historical body-less endpoint.
+        assert republish.status_code == 422, republish.text
+        assert (
+            client.get(f"/api/assignments/{submission.assignment_id}").json()["status"]
+            == "published"
+        )
+        # Continue this legacy downstream versioning fixture with an explicitly
+        # confirmed rubric; production confirmation now occurs through review.
+        changed_rubric = db.get(
+            RubricVersion, uuid.UUID(rubric_change.json()["rubric_version"]["id"])
+        )
+        assert changed_rubric is not None
+        changed_rubric.status = VersionStatus.confirmed
+        changed_rubric.confirmed_at = now_utc()
+        db.commit()
         blocked = client.post(f"/api/submissions/{submission_id}/finalize")
         assert blocked.status_code == 200
         assert blocked.json()["status"] == "incomplete"

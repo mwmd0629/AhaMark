@@ -21,6 +21,20 @@ x-app-env: &app-env
   MINIO_SECURE: "false"
   RECOGNITION_PROVIDER: rapidocr
   GRADING_PROVIDER: unavailable
+  AI_GRADING_PROVIDER: ${AI_GRADING_PROVIDER:-unavailable}
+  AI_GRADING_BASE_URL: ${AI_GRADING_BASE_URL:-}
+  AI_GRADING_API_KEY: ${AI_GRADING_API_KEY:-}
+  AI_GRADING_MODEL: ${AI_GRADING_MODEL:-}
+  AI_GRADING_PROMPT_VERSION: ${AI_GRADING_PROMPT_VERSION:-ai-grading-v1}
+  ASSIGNMENT_GENERATION_PROVIDER: ${ASSIGNMENT_GENERATION_PROVIDER:-unavailable}
+  ASSIGNMENT_GENERATION_ENABLED: ${ASSIGNMENT_GENERATION_ENABLED:-true}
+  ASSIGNMENT_GENERATION_ALLOW_EXTERNAL_PROVIDER_REQUESTS: ${ASSIGNMENT_GENERATION_ALLOW_EXTERNAL_PROVIDER_REQUESTS:-false}
+  ASSIGNMENT_GENERATION_ALLOW_TEACHER_START: ${ASSIGNMENT_GENERATION_ALLOW_TEACHER_START:-true}
+  ASSIGNMENT_GENERATION_SUGGESTION_ONLY: ${ASSIGNMENT_GENERATION_SUGGESTION_ONLY:-true}
+  ASSIGNMENT_GENERATION_REAL_PROVIDER_QUALITY_PASSED: ${ASSIGNMENT_GENERATION_REAL_PROVIDER_QUALITY_PASSED:-false}
+  ASSIGNMENT_GENERATION_BASE_URL: ${ASSIGNMENT_GENERATION_BASE_URL:-}
+  ASSIGNMENT_GENERATION_API_KEY: ${ASSIGNMENT_GENERATION_API_KEY:-}
+  ASSIGNMENT_GENERATION_MODEL: ${ASSIGNMENT_GENERATION_MODEL:-}
 
 services:
   postgres:
@@ -71,7 +85,7 @@ services:
       redis: {condition: service_healthy}
       minio: {condition: service_healthy}
     healthcheck: &api-health
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready')"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -106,7 +120,7 @@ services:
       - "127.0.0.1:${PREPROD_HTTPS_PORT:?}:8443"
     volumes:
       - ./deploy/nginx/preproduction.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./.preproduction-v8/${PREPROD_RUN_ID:?}/certs:/etc/nginx/certs:ro
+      - ./${PREPROD_EVIDENCE_ROOT:-.preproduction-v8}/${PREPROD_RUN_ID:?}/certs:/etc/nginx/certs:ro
     depends_on:
       api-a: {condition: service_healthy}
       api-b: {condition: service_healthy}
@@ -118,6 +132,9 @@ services:
       retries: 20
 
 volumes:
-  postgres_data: {}
-  redis_data: {}
-  minio_data: {}
+  postgres_data: {name: "${POSTGRES_VOLUME:-${COMPOSE_PROJECT_NAME}_postgres_data}"}
+  redis_data: {name: "${REDIS_VOLUME:-${COMPOSE_PROJECT_NAME}_redis_data}"}
+  minio_data: {name: "${MINIO_VOLUME:-${COMPOSE_PROJECT_NAME}_minio_data}"}
+
+networks:
+  default: {name: "${PREPROD_NETWORK:-${COMPOSE_PROJECT_NAME}_default}"}

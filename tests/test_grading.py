@@ -1,9 +1,12 @@
+import json
+import urllib.error
 from decimal import Decimal
 
 import pytest
 from app.core.config import Settings
 from app.grading.providers import (
     FakeGradingProvider,
+    OpenAICompatibleGradingProvider,
     UnavailableProvider,
     grade_objective,
     normalize_objective,
@@ -41,3 +44,71 @@ def test_grading_schema_keeps_raw_correction_suggestion_and_snapshot_separate() 
         GradingResult.__table__.columns.keys()
     )
     assert {"status", "version", "details"} <= set(SubmissionScoreSnapshot.__table__.columns.keys())
+
+
+class ProviderResponse:
+    def __init__(self, content: str):
+        self.content = content
+
+    def __enter__(self) -> "ProviderResponse":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return json.dumps({"choices": [{"message": {"content": self.content}}]}).encode()
+
+
+def configured_provider() -> OpenAICompatibleGradingProvider:
+    return OpenAICompatibleGradingProvider(
+        Settings(
+            app_env="test",
+            grading_provider="openai_compatible",
+            grading_base_url="https://provider.invalid/v1",
+            grading_api_key="test-only",
+            grading_model="test-model",
+        )
+    )
+
+
+def test_subjective_provider_invalid_json_and_timeout_abstain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "urllib.request.urlopen", lambda *_args, **_kwargs: ProviderResponse("{invalid")
+    )
+    invalid = configured_provider().grade("answer", Decimal("10"), {"rubric_items": []})
+    assert invalid.score is None and invalid.abstain_reason == "invalid_response"
+
+    def timeout(*_args: object, **_kwargs: object) -> ProviderResponse:
+        raise urllib.error.URLError("timeout")
+
+    monkeypatch.setattr("urllib.request.urlopen", timeout)
+    unavailable = configured_provider().grade("answer", Decimal("10"), {"rubric_items": []})
+    assert unavailable.score is None and unavailable.abstain_reason == "timeout"
+
+
+def test_subjective_provider_without_evidence_cannot_suggest_score(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = {
+        "criteria": [{"rubric_item_id": "criterion-1", "score": 5, "evidence_refs": []}],
+        "total_suggested_score": 5,
+        "evidence": [],
+        "reasoning_summary": "结构有效但没有证据",
+        "feedback": None,
+        "error_type": None,
+        "confidence": 0.9,
+        "abstain_reason": None,
+    }
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *_args, **_kwargs: ProviderResponse(json.dumps(output)),
+    )
+    result = configured_provider().grade(
+        "answer",
+        Decimal("10"),
+        {"rubric_items": [{"id": "criterion-1", "max_points": "10"}]},
+    )
+    assert result.score is None and result.abstain_reason == "evidence_required"

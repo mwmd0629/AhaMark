@@ -6,6 +6,8 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
+    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
@@ -15,6 +17,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -411,6 +414,750 @@ class PaperPage(TimestampMixin, Base):
     thumbnail_storage_key: Mapped[str | None] = mapped_column(String(512))
 
 
+class AssignmentGenerationJob(TimestampMixin, Base):
+    __tablename__ = "assignment_generation_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_id", "idempotency_key", name="uq_assignment_generation_idempotency"
+        ),
+        UniqueConstraint("assignment_id", "generation", name="uq_assignment_generation_number"),
+        CheckConstraint("generation > 0", name="ck_assignment_generation_positive"),
+        CheckConstraint(
+            "progress >= 0 AND progress <= 100", name="ck_assignment_generation_progress"
+        ),
+        Index(
+            "ix_assignment_generation_owner_assignment_status",
+            "owner_id",
+            "assignment_id",
+            "status",
+        ),
+        Index(
+            "uq_assignment_generation_active",
+            "assignment_id",
+            unique=True,
+            sqlite_where=text(
+                "status IN ('queued','analyzing','processing_pages','extracting_questions',"
+                "'generating_rubrics','validating')"
+            ),
+            postgresql_where=text(
+                "status IN ('queued','analyzing','processing_pages','extracting_questions',"
+                "'generating_rubrics','validating')"
+            ),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignments.id", ondelete="CASCADE"), index=True
+    )
+    generation: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    current_stage: Mapped[str | None] = mapped_column(String(32))
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_fingerprint: Mapped[str] = mapped_column(String(64))
+    source_snapshot_hash: Mapped[str] = mapped_column(String(64))
+    provider_mode: Mapped[str] = mapped_column(String(32), default="unavailable")
+    provider_config_version: Mapped[str] = mapped_column(String(80))
+    prompt_version: Mapped[str] = mapped_column(String(80))
+    schema_version: Mapped[str] = mapped_column(String(80))
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    celery_task_id: Mapped[str | None] = mapped_column(String(80), index=True)
+    retryable: Mapped[bool] = mapped_column(Boolean, default=True)
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    stale_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AssignmentDraftRevision(TimestampMixin, Base):
+    __tablename__ = "assignment_draft_revisions"
+    __table_args__ = (
+        UniqueConstraint("assignment_id", "revision", name="uq_assignment_draft_revision"),
+        CheckConstraint("revision > 0", name="ck_assignment_draft_revision_positive"),
+        CheckConstraint(
+            "teacher_edit_version >= 0", name="ck_assignment_draft_teacher_edit_version"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignments.id", ondelete="CASCADE"), index=True
+    )
+    generation_job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_generation_jobs.id", ondelete="CASCADE"), unique=True
+    )
+    revision: Mapped[int] = mapped_column(Integer)
+    parent_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("assignment_draft_revisions.id", ondelete="SET NULL")
+    )
+    source_snapshot_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    draft_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    risk_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    teacher_edit_version: Mapped[int] = mapped_column(Integer, default=0)
+    created_by_type: Mapped[str] = mapped_column(String(32), default="worker")
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class GenerationStageResult(TimestampMixin, Base):
+    __tablename__ = "generation_stage_results"
+    __table_args__ = (
+        UniqueConstraint("job_id", "stage", "stage_generation", name="uq_generation_stage_run"),
+        CheckConstraint("stage_generation > 0", name="ck_generation_stage_positive"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_generation_jobs.id", ondelete="CASCADE"), index=True
+    )
+    stage: Mapped[str] = mapped_column(String(32))
+    stage_generation: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    expected_teacher_edit_version: Mapped[int] = mapped_column(Integer, default=0)
+    input_hash: Mapped[str] = mapped_column(String(64))
+    output_hash: Mapped[str | None] = mapped_column(String(64))
+    result_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    provider_invocation_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class GenerationIssue(TimestampMixin, Base):
+    __tablename__ = "generation_issues"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignments.id", ondelete="CASCADE"), index=True
+    )
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_generation_jobs.id", ondelete="CASCADE"), index=True
+    )
+    draft_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("assignment_draft_revisions.id", ondelete="CASCADE")
+    )
+    stage: Mapped[str | None] = mapped_column(String(32))
+    severity: Mapped[str] = mapped_column(String(16), index=True)
+    code: Mapped[str] = mapped_column(String(80), index=True)
+    entity_type: Mapped[str | None] = mapped_column(String(40))
+    entity_id: Mapped[str | None] = mapped_column(String(100))
+    message: Mapped[str] = mapped_column(Text)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    resolution_status: Mapped[str] = mapped_column(String(24), default="open")
+    resolved_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolution_note: Mapped[str | None] = mapped_column(Text)
+
+
+class AssignmentGenerationProviderInvocation(Base):
+    __tablename__ = "assignment_generation_provider_invocations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_generation_jobs.id", ondelete="CASCADE"), index=True
+    )
+    stage_result_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("generation_stage_results.id", ondelete="SET NULL")
+    )
+    provider: Mapped[str] = mapped_column(String(80))
+    model: Mapped[str | None] = mapped_column(String(160))
+    model_snapshot: Mapped[str | None] = mapped_column(String(160))
+    endpoint_mode: Mapped[str] = mapped_column(String(80))
+    provider_config_version: Mapped[str] = mapped_column(String(80), default="legacy-unknown")
+    prompt_version: Mapped[str] = mapped_column(String(80))
+    schema_version: Mapped[str] = mapped_column(String(80))
+    stage_generation: Mapped[int] = mapped_column(Integer, default=1)
+    request_hash: Mapped[str] = mapped_column(String(64))
+    response_hash: Mapped[str | None] = mapped_column(String(64))
+    provider_request_id: Mapped[str | None] = mapped_column(String(160))
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    estimated_cost: Mapped[Any | None] = mapped_column(Numeric(12, 6))
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    image_count: Mapped[int] = mapped_column(Integer, default=0)
+    image_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False
+    )
+
+
+class AssignmentFieldSuggestion(TimestampMixin, Base):
+    __tablename__ = "assignment_field_suggestions"
+    __table_args__ = (
+        UniqueConstraint(
+            "draft_revision_id",
+            "field_name",
+            "suggestion_version",
+            name="uq_assignment_field_suggestion_version",
+        ),
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1", name="ck_field_suggestion_confidence"
+        ),
+        CheckConstraint("suggestion_version > 0", name="ck_field_suggestion_version_positive"),
+        CheckConstraint("teacher_edit_version >= 0", name="ck_field_suggestion_teacher_version"),
+        Index(
+            "ix_field_suggestion_revision_field_status",
+            "draft_revision_id",
+            "field_name",
+            "status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignments.id", ondelete="CASCADE"), index=True
+    )
+    generation_job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_generation_jobs.id", ondelete="CASCADE"), index=True
+    )
+    draft_revision_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_draft_revisions.id", ondelete="CASCADE"), index=True
+    )
+    field_name: Mapped[str] = mapped_column(String(40))
+    suggested_value: Mapped[Any | None] = mapped_column(JSON)
+    normalized_value: Mapped[Any | None] = mapped_column(JSON)
+    confidence: Mapped[Any] = mapped_column(Numeric(6, 5))
+    evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    source_type: Mapped[str] = mapped_column(String(40))
+    source_stage: Mapped[str] = mapped_column(String(32), default="analyzing")
+    suggestion_version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24), default="suggested", index=True)
+    teacher_value: Mapped[Any | None] = mapped_column(JSON)
+    teacher_edit_version: Mapped[int] = mapped_column(Integer, default=0)
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_note: Mapped[str | None] = mapped_column(Text)
+
+
+class AssignmentSourceFileAnalysis(TimestampMixin, Base):
+    __tablename__ = "assignment_source_file_analyses"
+    __table_args__ = (
+        CheckConstraint(
+            "role_confidence >= 0 AND role_confidence <= 1",
+            name="ck_source_file_role_confidence",
+        ),
+        CheckConstraint(
+            "answer_source_confidence >= 0 AND answer_source_confidence <= 1",
+            name="ck_source_file_answer_confidence",
+        ),
+        CheckConstraint("teacher_edit_version >= 0", name="ck_source_file_teacher_version"),
+        Index(
+            "ix_source_file_analysis_revision_file_status",
+            "draft_revision_id",
+            "stored_file_id",
+            "analysis_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignments.id", ondelete="CASCADE"), index=True
+    )
+    generation_job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_generation_jobs.id", ondelete="CASCADE"), index=True
+    )
+    draft_revision_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_draft_revisions.id", ondelete="CASCADE"), index=True
+    )
+    stored_file_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("stored_files.id", ondelete="RESTRICT"), index=True
+    )
+    source_snapshot_hash: Mapped[str] = mapped_column(String(64))
+    detected_mime_type: Mapped[str] = mapped_column(String(127))
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    page_count: Mapped[int | None] = mapped_column(Integer)
+    suggested_role: Mapped[str] = mapped_column(String(32), default="unknown")
+    role_confidence: Mapped[Any] = mapped_column(Numeric(6, 5))
+    suggested_answer_source: Mapped[str] = mapped_column(String(32), default="unknown")
+    answer_source_confidence: Mapped[Any] = mapped_column(Numeric(6, 5))
+    duplicate_of_file_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("stored_files.id", ondelete="SET NULL")
+    )
+    analysis_status: Mapped[str] = mapped_column(String(24), default="suggested", index=True)
+    evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    warning_codes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    teacher_confirmed_role: Mapped[str | None] = mapped_column(String(32))
+    teacher_confirmed_answer_source: Mapped[str | None] = mapped_column(String(32))
+    teacher_edit_version: Mapped[int] = mapped_column(Integer, default=0)
+    confirmed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_note: Mapped[str | None] = mapped_column(Text)
+
+
+class AssignmentPageAnalysis(TimestampMixin, Base):
+    __tablename__ = "assignment_page_analyses"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_file_analysis_id", "paper_page_id", name="uq_source_file_page_analysis"
+        ),
+        CheckConstraint(
+            "quality_score IS NULL OR (quality_score >= 0 AND quality_score <= 1)",
+            name="ck_page_analysis_quality",
+        ),
+        CheckConstraint(
+            "blank_probability IS NULL OR (blank_probability >= 0 AND blank_probability <= 1)",
+            name="ck_page_analysis_blank_probability",
+        ),
+        CheckConstraint(
+            "duplicate_probability IS NULL OR "
+            "(duplicate_probability >= 0 AND duplicate_probability <= 1)",
+            name="ck_page_analysis_duplicate_probability",
+        ),
+        CheckConstraint("teacher_edit_version >= 0", name="ck_page_analysis_teacher_version"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignments.id", ondelete="CASCADE"), index=True
+    )
+    generation_job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_generation_jobs.id", ondelete="CASCADE"), index=True
+    )
+    draft_revision_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_draft_revisions.id", ondelete="CASCADE"), index=True
+    )
+    paper_page_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("paper_pages.id", ondelete="CASCADE"), index=True
+    )
+    source_file_analysis_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_source_file_analyses.id", ondelete="CASCADE"), index=True
+    )
+    source_snapshot_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(24), default="ready", index=True)
+    quality_score: Mapped[Any | None] = mapped_column(Numeric(6, 5))
+    blank_probability: Mapped[Any | None] = mapped_column(Numeric(6, 5))
+    duplicate_probability: Mapped[Any | None] = mapped_column(Numeric(6, 5))
+    duplicate_of_page_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("paper_pages.id", ondelete="SET NULL")
+    )
+    missing_page_suspected: Mapped[bool] = mapped_column(Boolean, default=False)
+    low_quality: Mapped[bool] = mapped_column(Boolean, default=False)
+    corrupted: Mapped[bool] = mapped_column(Boolean, default=False)
+    mixed_document_suspected: Mapped[bool] = mapped_column(Boolean, default=False)
+    variant_label: Mapped[str | None] = mapped_column(String(32))
+    metrics: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    warning_codes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    teacher_edit_version: Mapped[int] = mapped_column(Integer, default=0)
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PaperPageOrganizationSuggestion(TimestampMixin, Base):
+    __tablename__ = "paper_page_organization_suggestions"
+    __table_args__ = (
+        UniqueConstraint(
+            "draft_revision_id",
+            "paper_page_id",
+            "suggestion_version",
+            name="uq_page_org_suggestion_version",
+        ),
+        CheckConstraint("suggestion_version > 0", name="ck_page_org_version_positive"),
+        CheckConstraint("confidence >= 0 AND confidence <= 1", name="ck_page_org_confidence"),
+        CheckConstraint("teacher_edit_version >= 0", name="ck_page_org_teacher_version"),
+        CheckConstraint("suggested_page_number > 0", name="ck_page_org_page_positive"),
+        CheckConstraint("suggested_rotation IN (0, 90, 180, 270)", name="ck_page_org_rotation"),
+        Index("ix_page_org_owner", "owner_id"),
+        Index("ix_page_org_assignment", "assignment_id"),
+        Index("ix_page_org_job", "generation_job_id"),
+        Index("ix_page_org_revision", "draft_revision_id"),
+        Index("ix_page_org_paper_version", "paper_version_id"),
+        Index("ix_page_org_page", "paper_page_id"),
+        Index("ix_page_org_status", "status"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignments.id", ondelete="CASCADE")
+    )
+    generation_job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_generation_jobs.id", ondelete="CASCADE")
+    )
+    draft_revision_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_draft_revisions.id", ondelete="CASCADE")
+    )
+    paper_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("paper_versions.id", ondelete="CASCADE")
+    )
+    paper_page_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("paper_pages.id", ondelete="CASCADE")
+    )
+    suggestion_version: Mapped[int] = mapped_column(Integer)
+    suggested_page_number: Mapped[int] = mapped_column(Integer)
+    suggested_rotation: Mapped[int] = mapped_column(Integer)
+    suggested_status: Mapped[str] = mapped_column(String(30))
+    duplicate_of_page_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("paper_pages.id", ondelete="SET NULL")
+    )
+    variant_label: Mapped[str | None] = mapped_column(String(32))
+    confidence: Mapped[Any] = mapped_column(Numeric(6, 5))
+    reason_codes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    source_snapshot_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(24), default="suggested")
+    teacher_edit_version: Mapped[int] = mapped_column(Integer, default=0)
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_note: Mapped[str | None] = mapped_column(Text)
+
+
+class AssignmentQuestionExtractionCandidate(TimestampMixin, Base):
+    __tablename__ = "assignment_question_extraction_candidates"
+    __table_args__ = (
+        UniqueConstraint(
+            "draft_revision_id",
+            "candidate_version",
+            "source_question_candidate_id",
+            name="uq_question_extraction_revision_version_source",
+        ),
+        CheckConstraint("candidate_version > 0", name="ck_question_extraction_version_positive"),
+        CheckConstraint(
+            "overall_confidence >= 0 AND overall_confidence <= 1",
+            name="ck_question_extraction_confidence",
+        ),
+        CheckConstraint(
+            "max_score IS NULL OR max_score > 0", name="ck_question_extraction_score_positive"
+        ),
+        CheckConstraint("teacher_edit_version >= 0", name="ck_question_extraction_teacher_version"),
+        CheckConstraint(
+            "parent_candidate_id IS NULL OR parent_candidate_id <> id",
+            name="ck_question_extraction_not_self_parent",
+        ),
+        Index("ix_aqec_owner", "owner_id"),
+        Index("ix_aqec_assignment", "assignment_id"),
+        Index("ix_aqec_job", "generation_job_id"),
+        Index("ix_aqec_revision", "draft_revision_id"),
+        Index("ix_aqec_paper_version", "paper_version_id"),
+        Index("ix_aqec_recognition", "source_recognition_job_id"),
+        Index("ix_aqec_parent", "parent_candidate_id"),
+        Index("ix_aqec_status", "status"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignments.id", ondelete="CASCADE")
+    )
+    generation_job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_generation_jobs.id", ondelete="CASCADE")
+    )
+    draft_revision_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_draft_revisions.id", ondelete="CASCADE")
+    )
+    paper_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("paper_versions.id", ondelete="CASCADE")
+    )
+    source_recognition_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("recognition_jobs.id", ondelete="SET NULL")
+    )
+    source_question_candidate_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("question_candidates.id", ondelete="SET NULL")
+    )
+    candidate_version: Mapped[int] = mapped_column(Integer)
+    parent_candidate_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("assignment_question_extraction_candidates.id", ondelete="SET NULL")
+    )
+    question_number: Mapped[str | None] = mapped_column(String(80))
+    question_type: Mapped[str] = mapped_column(String(30), default="other")
+    content_text: Mapped[str | None] = mapped_column(Text)
+    content_latex: Mapped[str | None] = mapped_column(Text)
+    max_score: Mapped[Any | None] = mapped_column(Numeric(10, 2))
+    difficulty: Mapped[str | None] = mapped_column(String(20))
+    knowledge_point_suggestions: Mapped[list[str]] = mapped_column(JSON, default=list)
+    field_confidences: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    overall_confidence: Mapped[Any] = mapped_column(Numeric(6, 5))
+    extraction_method: Mapped[str] = mapped_column(String(40))
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    warning_codes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(24), default="suggested")
+    manual_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    teacher_edit_version: Mapped[int] = mapped_column(Integer, default=0)
+    teacher_value: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    source_snapshot_hash: Mapped[str] = mapped_column(String(64))
+    materialized_question_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("questions.id", ondelete="SET NULL"), unique=True
+    )
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_note: Mapped[str | None] = mapped_column(Text)
+
+
+class AssignmentQuestionExtractionRegion(Base):
+    __tablename__ = "assignment_question_extraction_regions"
+    __table_args__ = (
+        UniqueConstraint(
+            "candidate_id", "display_order", name="uq_question_extraction_region_order"
+        ),
+        CheckConstraint("display_order >= 0", name="ck_question_extraction_region_order"),
+        CheckConstraint(
+            "x >= 0 AND y >= 0 AND width > 0 AND height > 0",
+            name="ck_question_extraction_region_positive",
+        ),
+        CheckConstraint(
+            "x + width <= 1 AND y + height <= 1", name="ck_question_extraction_region_bounds"
+        ),
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1", name="ck_question_extraction_region_confidence"
+        ),
+        Index("ix_aqer_candidate", "candidate_id"),
+        Index("ix_aqer_page", "paper_page_id"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    candidate_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_question_extraction_candidates.id", ondelete="CASCADE")
+    )
+    paper_page_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("paper_pages.id", ondelete="CASCADE")
+    )
+    display_order: Mapped[int] = mapped_column(Integer)
+    region_type: Mapped[str] = mapped_column(String(30))
+    x: Mapped[Any] = mapped_column(Numeric(8, 6))
+    y: Mapped[Any] = mapped_column(Numeric(8, 6))
+    width: Mapped[Any] = mapped_column(Numeric(8, 6))
+    height: Mapped[Any] = mapped_column(Numeric(8, 6))
+    confidence: Mapped[Any] = mapped_column(Numeric(6, 5))
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    source_block_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    cross_page_group: Mapped[str | None] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class AssignmentAnswerDraftCandidate(TimestampMixin, Base):
+    __tablename__ = "assignment_answer_draft_candidates"
+    __table_args__ = (
+        UniqueConstraint(
+            "draft_revision_id",
+            "question_id",
+            "candidate_version",
+            name="uq_answer_candidate_revision_question_version",
+        ),
+        CheckConstraint("candidate_version > 0", name="ck_answer_candidate_version_positive"),
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1", name="ck_answer_candidate_confidence"
+        ),
+        CheckConstraint("teacher_edit_version >= 0", name="ck_answer_candidate_teacher_version"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignments.id", ondelete="CASCADE"), index=True
+    )
+    generation_job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_generation_jobs.id", ondelete="CASCADE"), index=True
+    )
+    draft_revision_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_draft_revisions.id", ondelete="CASCADE"), index=True
+    )
+    question_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("questions.id", ondelete="RESTRICT"), index=True
+    )
+    question_version: Mapped[str] = mapped_column(String(160))
+    candidate_version: Mapped[int] = mapped_column(Integer)
+    source_type: Mapped[str] = mapped_column(String(32))
+    source_file_analysis_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("assignment_source_file_analyses.id", ondelete="SET NULL")
+    )
+    source_page_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("paper_pages.id", ondelete="SET NULL")
+    )
+    source_region: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    raw_content: Mapped[str | None] = mapped_column(Text)
+    normalized_content: Mapped[str | None] = mapped_column(Text)
+    structured_content: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    alternative_answers: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    confidence: Mapped[Any] = mapped_column(Numeric(6, 5))
+    evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    warning_codes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(24), default="suggested", index=True)
+    manual_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    teacher_edit_version: Mapped[int] = mapped_column(Integer, default=0)
+    teacher_value: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    source_snapshot_hash: Mapped[str] = mapped_column(String(64))
+    materialized_reference_answer_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("reference_answer_versions.id", ondelete="SET NULL"), unique=True
+    )
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_note: Mapped[str | None] = mapped_column(Text)
+
+
+class AssignmentRubricDraftCandidate(TimestampMixin, Base):
+    __tablename__ = "assignment_rubric_draft_candidates"
+    __table_args__ = (
+        UniqueConstraint(
+            "draft_revision_id",
+            "question_id",
+            "candidate_version",
+            name="uq_rubric_candidate_revision_question_version",
+        ),
+        CheckConstraint("candidate_version > 0", name="ck_rubric_candidate_version_positive"),
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1", name="ck_rubric_candidate_confidence"
+        ),
+        CheckConstraint(
+            "total_points IS NULL OR total_points > 0", name="ck_rubric_candidate_points_positive"
+        ),
+        CheckConstraint("teacher_edit_version >= 0", name="ck_rubric_candidate_teacher_version"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignments.id", ondelete="CASCADE"), index=True
+    )
+    generation_job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_generation_jobs.id", ondelete="CASCADE"), index=True
+    )
+    draft_revision_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_draft_revisions.id", ondelete="CASCADE"), index=True
+    )
+    question_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("questions.id", ondelete="RESTRICT"), index=True
+    )
+    question_version: Mapped[str] = mapped_column(String(160))
+    answer_candidate_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_answer_draft_candidates.id", ondelete="RESTRICT")
+    )
+    candidate_version: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(200))
+    scoring_mode: Mapped[str] = mapped_column(String(24))
+    total_points: Mapped[Any | None] = mapped_column(Numeric(10, 2))
+    allow_partial_credit: Mapped[bool] = mapped_column(Boolean, default=True)
+    domain_requirements: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    validation_config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    common_error_types: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    feedback_templates: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    confidence: Mapped[Any] = mapped_column(Numeric(6, 5))
+    evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    warning_codes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(24), default="suggested", index=True)
+    manual_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    teacher_edit_version: Mapped[int] = mapped_column(Integer, default=0)
+    teacher_value: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    source_snapshot_hash: Mapped[str] = mapped_column(String(64))
+    materialized_structured_rubric_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("structured_rubric_versions.id", ondelete="SET NULL"), unique=True
+    )
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_note: Mapped[str | None] = mapped_column(Text)
+
+
+class AssignmentRubricCriterionDraft(TimestampMixin, Base):
+    __tablename__ = "assignment_rubric_criterion_drafts"
+    __table_args__ = (
+        UniqueConstraint(
+            "rubric_candidate_id", "criterion_key", name="uq_rubric_draft_criterion_key"
+        ),
+        UniqueConstraint(
+            "rubric_candidate_id", "display_order", name="uq_rubric_draft_criterion_order"
+        ),
+        CheckConstraint("display_order >= 0", name="ck_rubric_draft_order_nonnegative"),
+        CheckConstraint("points IS NULL OR points >= 0", name="ck_rubric_draft_points_nonnegative"),
+        CheckConstraint("confidence >= 0 AND confidence <= 1", name="ck_rubric_draft_confidence"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    rubric_candidate_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_rubric_draft_candidates.id", ondelete="CASCADE"), index=True
+    )
+    criterion_key: Mapped[str] = mapped_column(String(80))
+    display_order: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str | None] = mapped_column(Text)
+    points: Mapped[Any | None] = mapped_column(Numeric(10, 2))
+    criterion_type: Mapped[str] = mapped_column(String(32))
+    required: Mapped[bool] = mapped_column(Boolean, default=True)
+    dependency_keys: Mapped[list[str]] = mapped_column(JSON, default=list)
+    alternative_group: Mapped[str | None] = mapped_column(String(80))
+    partial_credit_rule: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    deduction_rule: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    validation_rule: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    common_error_codes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    feedback_template: Mapped[str | None] = mapped_column(Text)
+    confidence: Mapped[Any] = mapped_column(Numeric(6, 5))
+    evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    manual_required: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class AssignmentRubricValidationResult(Base):
+    __tablename__ = "assignment_rubric_validation_results"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    rubric_candidate_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_rubric_draft_candidates.id", ondelete="CASCADE"), index=True
+    )
+    answer_candidate_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_answer_draft_candidates.id", ondelete="CASCADE")
+    )
+    question_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("questions.id", ondelete="RESTRICT"), index=True
+    )
+    validation_mode: Mapped[str] = mapped_column(String(24))
+    status: Mapped[str] = mapped_column(String(30))
+    deterministic_result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    structural_result: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    issue_codes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    input_hash: Mapped[str] = mapped_column(String(64))
+    output_hash: Mapped[str] = mapped_column(String(64))
+    validator_version: Mapped[str] = mapped_column(String(80))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
 class Question(TimestampMixin, Base):
     __tablename__ = "questions"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -764,6 +1511,28 @@ class SubmissionPage(TimestampMixin, Base):
     rendered_storage_key: Mapped[str | None] = mapped_column(String(512))
     processed_storage_key: Mapped[str | None] = mapped_column(String(512))
     thumbnail_storage_key: Mapped[str | None] = mapped_column(String(512))
+    processing_status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    blur_score: Mapped[Any | None] = mapped_column(Numeric(10, 5))
+    brightness: Mapped[Any | None] = mapped_column(Numeric(10, 5))
+    contrast: Mapped[Any | None] = mapped_column(Numeric(10, 5))
+    blank_probability: Mapped[Any | None] = mapped_column(Numeric(6, 5))
+    duplicate_of_page_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("submission_pages.id", ondelete="SET NULL")
+    )
+    orientation_confidence: Mapped[Any | None] = mapped_column(Numeric(6, 5))
+    preprocessing_version: Mapped[str | None] = mapped_column(String(80))
+    quality_warnings: Mapped[list[str]] = mapped_column(JSON, default=list)
+    processing_error_code: Mapped[str | None] = mapped_column(String(80), index=True)
+    processing_error_message: Mapped[str | None] = mapped_column(Text)
+    retryable: Mapped[bool] = mapped_column(default=True)
+    perceptual_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    aligned_paper_page_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("paper_pages.id", ondelete="SET NULL"), index=True
+    )
+    alignment_transform: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    alignment_confidence: Mapped[Any | None] = mapped_column(Numeric(6, 5))
+    alignment_failure_reason: Mapped[str | None] = mapped_column(String(160))
+    page_version: Mapped[int] = mapped_column(Integer, default=1)
 
 
 class SubmissionFileMatch(Base):
@@ -833,6 +1602,71 @@ class StudentAnswerRegion(TimestampMixin, Base):
     height: Mapped[Any] = mapped_column(Numeric(8, 6))
     source: Mapped[str] = mapped_column(String(20), default="manual")
     confidence: Mapped[Any | None] = mapped_column(Numeric(6, 5))
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    confirmed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reason: Mapped[str | None] = mapped_column(String(255))
+    segmentation_version: Mapped[str] = mapped_column(String(80), default="submission-seg-v1")
+    region_version: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class SubmissionProcessingJob(TimestampMixin, Base):
+    __tablename__ = "submission_processing_jobs"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "idempotency_key", name="uq_submission_processing_key"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    submission_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("submissions.id", ondelete="CASCADE"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    stage: Mapped[str] = mapped_column(String(40), default="page_processing", index=True)
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    provider: Mapped[str] = mapped_column(String(80), default="local")
+    provider_version: Mapped[str] = mapped_column(String(80), default="pillow")
+    config_version: Mapped[str] = mapped_column(String(80), default="submission-processing-v1")
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    error_code: Mapped[str | None] = mapped_column(String(80), index=True)
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+
+class SubmissionQuestionAnchor(TimestampMixin, Base):
+    __tablename__ = "submission_question_anchors"
+    __table_args__ = (
+        UniqueConstraint(
+            "submission_processing_job_id",
+            "submission_page_id",
+            "block_index",
+            name="uq_submission_anchor_block",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    submission_processing_job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("submission_processing_jobs.id", ondelete="CASCADE"), index=True
+    )
+    submission_page_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("submission_pages.id", ondelete="CASCADE"), index=True
+    )
+    block_index: Mapped[int] = mapped_column(Integer)
+    text: Mapped[str] = mapped_column(String(120))
+    normalized_number: Mapped[str | None] = mapped_column(String(80), index=True)
+    candidate_question_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("questions.id", ondelete="SET NULL"), index=True
+    )
+    confidence: Mapped[Any] = mapped_column(Numeric(6, 5))
+    x: Mapped[Any] = mapped_column(Numeric(8, 6))
+    y: Mapped[Any] = mapped_column(Numeric(8, 6))
+    width: Mapped[Any] = mapped_column(Numeric(8, 6))
+    height: Mapped[Any] = mapped_column(Numeric(8, 6))
+    rejection_reason: Mapped[str | None] = mapped_column(String(160))
 
 
 class SubmissionRecognitionJob(TimestampMixin, Base):
@@ -855,6 +1689,18 @@ class SubmissionRecognitionJob(TimestampMixin, Base):
     idempotency_key: Mapped[str] = mapped_column(String(100))
     error_code: Mapped[str | None] = mapped_column(String(80))
     error_message: Mapped[str | None] = mapped_column(Text)
+    provider_kind: Mapped[str] = mapped_column(String(40), default="printed_text")
+    config_version: Mapped[str] = mapped_column(String(80), default="answer-evidence-v1")
+    input_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+    output_hash: Mapped[str | None] = mapped_column(String(64))
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    generation: Mapped[int] = mapped_column(Integer, default=1)
+    warning_codes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class SubmissionRecognitionBlock(Base):
@@ -881,6 +1727,130 @@ class SubmissionRecognitionBlock(Base):
     provider: Mapped[str] = mapped_column(String(80))
     provider_version: Mapped[str] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    student_answer_region_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("student_answer_regions.id", ondelete="CASCADE"), index=True
+    )
+    region_evidence_image_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("region_evidence_images.id", ondelete="RESTRICT"), index=True
+    )
+    source_page_number: Mapped[int | None] = mapped_column(Integer)
+    block_type: Mapped[str] = mapped_column(String(30), default="unknown", index=True)
+    normalized_text: Mapped[str | None] = mapped_column(Text)
+    reading_order: Mapped[int] = mapped_column(Integer, default=0)
+    warning_codes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    requires_review: Mapped[bool] = mapped_column(default=True, index=True)
+    evidence_image_key: Mapped[str | None] = mapped_column(String(512))
+    recognition_version: Mapped[int] = mapped_column(Integer, default=1)
+    input_hash: Mapped[str | None] = mapped_column(String(64))
+    output_hash: Mapped[str | None] = mapped_column(String(64))
+    stale_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    confirmed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, onupdate=now_utc
+    )
+
+
+class RegionEvidenceImage(TimestampMixin, Base):
+    __tablename__ = "region_evidence_images"
+    __table_args__ = (
+        UniqueConstraint(
+            "student_answer_region_id",
+            "source_kind",
+            "page_version",
+            "region_version",
+            "processing_config_version",
+            name="uq_region_evidence_source_version",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    submission_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("submissions.id", ondelete="CASCADE"), index=True
+    )
+    submission_page_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("submission_pages.id", ondelete="CASCADE"), index=True
+    )
+    student_answer_region_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("student_answer_regions.id", ondelete="CASCADE"), index=True
+    )
+    source_kind: Mapped[str] = mapped_column(String(20))
+    object_key: Mapped[str] = mapped_column(String(512), unique=True)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    input_hash: Mapped[str] = mapped_column(String(64))
+    width: Mapped[int] = mapped_column(Integer)
+    height: Mapped[int] = mapped_column(Integer)
+    margin_pixels: Mapped[int] = mapped_column(Integer)
+    source_page_number: Mapped[int] = mapped_column(Integer)
+    region_order: Mapped[int] = mapped_column(Integer)
+    page_version: Mapped[int] = mapped_column(Integer)
+    region_version: Mapped[int] = mapped_column(Integer)
+    processing_config_version: Mapped[str] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(30), default="ready", index=True)
+    stale_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class RecognitionRevision(Base):
+    __tablename__ = "recognition_revisions"
+    __table_args__ = (
+        UniqueConstraint("recognition_block_id", "revision", name="uq_recognition_revision"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    recognition_block_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("submission_recognition_blocks.id", ondelete="CASCADE"), index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer)
+    source: Mapped[str] = mapped_column(String(20), index=True)
+    raw_text: Mapped[str | None] = mapped_column(Text)
+    normalized_text: Mapped[str | None] = mapped_column(Text)
+    latex: Mapped[str | None] = mapped_column(Text)
+    warning_codes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    editor_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    base_recognition_version: Mapped[int] = mapped_column(Integer)
+    confirmed: Mapped[bool] = mapped_column(default=False)
+    stale_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class QuestionRecognitionEvidence(TimestampMixin, Base):
+    __tablename__ = "question_recognition_evidence"
+    __table_args__ = (
+        UniqueConstraint(
+            "student_answer_id", "recognition_version", name="uq_question_evidence_version"
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    submission_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("submissions.id", ondelete="CASCADE"), index=True
+    )
+    student_answer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("student_answers.id", ondelete="CASCADE"), index=True
+    )
+    recognition_job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("submission_recognition_jobs.id", ondelete="RESTRICT"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="requires_review", index=True)
+    block_sources: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    normalized_text: Mapped[str | None] = mapped_column(Text)
+    latex: Mapped[str | None] = mapped_column(Text)
+    provider_versions: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
+    input_hash: Mapped[str] = mapped_column(String(64))
+    output_hash: Mapped[str | None] = mapped_column(String(64))
+    recognition_version: Mapped[int] = mapped_column(Integer)
+    confirmed_revision: Mapped[int | None] = mapped_column(Integer)
+    requires_review: Mapped[bool] = mapped_column(default=True, index=True)
+    stale_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    confirmed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class GradingJob(TimestampMixin, Base):
@@ -1054,6 +2024,351 @@ class SubmissionScoreSnapshot(Base):
     )
 
 
+class ReferenceAnswerVersion(Base):
+    __tablename__ = "reference_answer_versions"
+    __table_args__ = (
+        UniqueConstraint("question_id", "version", name="uq_reference_answer_question_version"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    question_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("questions.id", ondelete="RESTRICT"), index=True
+    )
+    source_type: Mapped[str] = mapped_column(String(32), index=True)
+    source_file: Mapped[str | None] = mapped_column(String(512))
+    source_page: Mapped[int | None] = mapped_column(Integer)
+    source_region: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    raw_content: Mapped[str] = mapped_column(Text)
+    normalized_content: Mapped[str] = mapped_column(Text)
+    structured_content: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    teacher_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class StructuredRubricVersion(Base):
+    __tablename__ = "structured_rubric_versions"
+    __table_args__ = (
+        UniqueConstraint("question_id", "rubric_version", name="uq_structured_rubric_version"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    question_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("questions.id", ondelete="RESTRICT"), index=True
+    )
+    question_version: Mapped[str] = mapped_column(String(100))
+    reference_answer_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("reference_answer_versions.id", ondelete="RESTRICT"), index=True
+    )
+    rubric_version: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(200))
+    total_points: Mapped[Any] = mapped_column(Numeric(10, 2))
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    confirmed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class RubricCriterion(Base):
+    __tablename__ = "rubric_criteria"
+    __table_args__ = (
+        UniqueConstraint("rubric_version_id", "stable_key", name="uq_rubric_criterion_key"),
+        UniqueConstraint("rubric_version_id", "display_order", name="uq_rubric_criterion_order"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    rubric_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("structured_rubric_versions.id", ondelete="CASCADE"), index=True
+    )
+    stable_key: Mapped[str] = mapped_column(String(80))
+    title: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str | None] = mapped_column(Text)
+    max_points: Mapped[Any] = mapped_column(Numeric(10, 2))
+    display_order: Mapped[int] = mapped_column(Integer)
+    criterion_type: Mapped[str] = mapped_column(String(32))
+    required: Mapped[bool] = mapped_column(default=True)
+    dependencies: Mapped[list[str]] = mapped_column(JSON, default=list)
+    expected_evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    validation_mode: Mapped[str] = mapped_column(String(24))
+    manual_review_policy: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    partial_credit_policy: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    error_category: Mapped[str | None] = mapped_column(String(80))
+    validation_rule: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
+
+
+class AssignmentReviewSession(TimestampMixin, Base):
+    __tablename__ = "assignment_review_sessions"
+    __table_args__ = (
+        CheckConstraint("review_version > 0", name="ck_assignment_review_version_positive"),
+        CheckConstraint("generation > 0", name="ck_assignment_review_generation_positive"),
+        Index(
+            "uq_assignment_review_active",
+            "assignment_id",
+            unique=True,
+            sqlite_where=text(
+                "status IN ('draft','in_review','changes_required',"
+                "'ready_for_binding','ready_to_publish')"
+            ),
+            postgresql_where=text(
+                "status IN ('draft','in_review','changes_required',"
+                "'ready_for_binding','ready_to_publish')"
+            ),
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignments.id", ondelete="RESTRICT"), index=True
+    )
+    generation_job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_generation_jobs.id", ondelete="RESTRICT")
+    )
+    draft_revision_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_draft_revisions.id", ondelete="RESTRICT")
+    )
+    generation: Mapped[int] = mapped_column(Integer)
+    source_snapshot_hash: Mapped[str] = mapped_column(String(64))
+    review_version: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)
+    risk_ledger_hash: Mapped[str] = mapped_column(String(64))
+    blocking_count: Mapped[int] = mapped_column(Integer, default=0)
+    warning_count: Mapped[int] = mapped_column(Integer, default=0)
+    info_count: Mapped[int] = mapped_column(Integer, default=0)
+    expected_assignment_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    paper_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("paper_versions.id", ondelete="RESTRICT")
+    )
+    structured_binding_hash: Mapped[str] = mapped_column(String(64))
+    legacy_rubric_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("rubric_versions.id", ondelete="RESTRICT")
+    )
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AssignmentReviewItem(TimestampMixin, Base):
+    __tablename__ = "assignment_review_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "review_session_id", "issue_code", "source_hash", name="uq_review_item_source"
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    review_session_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_review_sessions.id", ondelete="RESTRICT"), index=True
+    )
+    section: Mapped[str] = mapped_column(String(32), index=True)
+    entity_type: Mapped[str] = mapped_column(String(64))
+    entity_id: Mapped[str] = mapped_column(String(64))
+    field_name: Mapped[str | None] = mapped_column(String(64))
+    severity: Mapped[str] = mapped_column(String(16), index=True)
+    issue_code: Mapped[str] = mapped_column(String(80))
+    title: Mapped[str] = mapped_column(String(200))
+    message: Mapped[str] = mapped_column(Text)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    source_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(24), default="open", index=True)
+    eligibility: Mapped[bool] = mapped_column(Boolean, default=False)
+    teacher_action: Mapped[str | None] = mapped_column(String(24))
+    teacher_note: Mapped[str | None] = mapped_column(Text)
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AssignmentExplicitConfirmation(Base):
+    __tablename__ = "assignment_explicit_confirmations"
+    __table_args__ = (
+        UniqueConstraint(
+            "review_session_id",
+            "confirmation_type",
+            "confirmation_version",
+            name="uq_assignment_confirmation_version",
+        ),
+        CheckConstraint(
+            "confirmation_version > 0", name="ck_assignment_confirmation_version_positive"
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    review_session_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_review_sessions.id", ondelete="RESTRICT"), index=True
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignments.id", ondelete="RESTRICT"), index=True
+    )
+    confirmation_type: Mapped[str] = mapped_column(String(32), index=True)
+    confirmed_value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    source_hash: Mapped[str] = mapped_column(String(64))
+    confirmation_version: Mapped[int] = mapped_column(Integer)
+    confirmed_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    invalidation_reason: Mapped[str | None] = mapped_column(String(160))
+
+
+class AssignmentRubricPublicationBinding(Base):
+    __tablename__ = "assignment_rubric_publication_bindings"
+    __table_args__ = (
+        UniqueConstraint("assignment_id", "binding_version", name="uq_assignment_binding_version"),
+        UniqueConstraint(
+            "review_session_id", "source_binding_hash", name="uq_review_binding_source"
+        ),
+        CheckConstraint("binding_version > 0", name="ck_assignment_binding_version_positive"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignments.id", ondelete="RESTRICT"), index=True
+    )
+    review_session_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_review_sessions.id", ondelete="RESTRICT"), index=True
+    )
+    paper_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("paper_versions.id", ondelete="RESTRICT")
+    )
+    legacy_rubric_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("rubric_versions.id", ondelete="RESTRICT"), unique=True
+    )
+    binding_version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24), default="draft", index=True)
+    source_binding_hash: Mapped[str] = mapped_column(String(64))
+    mapping: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    confirmed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT")
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AssignmentPublishReadinessSnapshot(Base):
+    __tablename__ = "assignment_publish_readiness_snapshots"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignments.id", ondelete="RESTRICT"), index=True
+    )
+    review_session_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_review_sessions.id", ondelete="RESTRICT"), index=True
+    )
+    paper_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("paper_versions.id", ondelete="RESTRICT")
+    )
+    legacy_rubric_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("rubric_versions.id", ondelete="RESTRICT")
+    )
+    binding_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_rubric_publication_bindings.id", ondelete="RESTRICT")
+    )
+    generation: Mapped[int] = mapped_column(Integer)
+    draft_revision_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignment_draft_revisions.id", ondelete="RESTRICT")
+    )
+    risk_ledger_hash: Mapped[str] = mapped_column(String(64))
+    source_snapshot_hash: Mapped[str] = mapped_column(String(64))
+    assignment_state_hash: Mapped[str] = mapped_column(String(64))
+    class_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    total_score: Mapped[Any] = mapped_column(Numeric(10, 2))
+    issue_counts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    readiness_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    status: Mapped[str] = mapped_column(String(24), default="ready", index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class MathValidationJob(TimestampMixin, Base):
+    __tablename__ = "math_validation_jobs"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "idempotency_key", name="uq_math_validation_idempotency"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    submission_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("submissions.id", ondelete="RESTRICT"), index=True
+    )
+    question_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("questions.id", ondelete="RESTRICT"), index=True
+    )
+    student_answer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("student_answers.id", ondelete="RESTRICT"), index=True
+    )
+    recognition_evidence_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("question_recognition_evidence.id", ondelete="RESTRICT"), index=True
+    )
+    scoring_input_version: Mapped[str] = mapped_column(String(160))
+    reference_answer_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("reference_answer_versions.id", ondelete="RESTRICT")
+    )
+    rubric_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("structured_rubric_versions.id", ondelete="RESTRICT")
+    )
+    engine: Mapped[str] = mapped_column(String(80), default="ahamark-safe-math")
+    engine_version: Mapped[str] = mapped_column(String(80))
+    config_version: Mapped[str] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    generation: Mapped[int] = mapped_column(Integer, default=1)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    celery_task_id: Mapped[str | None] = mapped_column(String(50), index=True)
+    input_hash: Mapped[str] = mapped_column(String(64))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    stale_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    error_code: Mapped[str | None] = mapped_column(String(80))
+
+
+class CriterionValidationResult(Base):
+    __tablename__ = "criterion_validation_results"
+    __table_args__ = (
+        UniqueConstraint(
+            "validation_job_id", "criterion_id", "generation", name="uq_criterion_validation_run"
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    validation_job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("math_validation_jobs.id", ondelete="CASCADE"), index=True
+    )
+    criterion_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("rubric_criteria.id", ondelete="RESTRICT"), index=True
+    )
+    generation: Mapped[int] = mapped_column(Integer)
+    result: Mapped[str] = mapped_column(String(30), index=True)
+    suggested_points: Mapped[Any | None] = mapped_column(Numeric(10, 2))
+    confidence: Mapped[Any | None] = mapped_column(Numeric(6, 5))
+    normalized_student_input: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    normalized_expected_input: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    assumptions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    comparison_method: Mapped[str] = mapped_column(String(80))
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    diagnostics: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    input_hash: Mapped[str] = mapped_column(String(64))
+    output_hash: Mapped[str] = mapped_column(String(64))
+    duration_ms: Mapped[int] = mapped_column(Integer)
+    engine_version: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    stale_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class GradeRelease(TimestampMixin, Base):
     __tablename__ = "grade_releases"
     __table_args__ = (
@@ -1180,3 +2495,157 @@ class TeachingInsight(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(30), default="generated", index=True)
     content: Mapped[dict[str, Any]] = mapped_column(JSON().with_variant(JSONB, "postgresql"))
     evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSON().with_variant(JSONB, "postgresql"))
+
+
+class AIScoringJob(TimestampMixin, Base):
+    __tablename__ = "ai_scoring_jobs"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "idempotency_key", name="uq_ai_scoring_idempotency"),
+        UniqueConstraint("student_answer_id", "generation", name="uq_ai_scoring_generation"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignments.id", ondelete="RESTRICT")
+    )
+    question_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("questions.id", ondelete="RESTRICT"))
+    submission_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("submissions.id", ondelete="RESTRICT")
+    )
+    student_answer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("student_answers.id", ondelete="RESTRICT"), index=True
+    )
+    recognition_evidence_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("question_recognition_evidence.id", ondelete="RESTRICT")
+    )
+    reference_answer_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("reference_answer_versions.id", ondelete="RESTRICT")
+    )
+    rubric_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("structured_rubric_versions.id", ondelete="RESTRICT")
+    )
+    math_validation_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("math_validation_jobs.id", ondelete="RESTRICT")
+    )
+    question_version: Mapped[str] = mapped_column(String(100))
+    scoring_input_version: Mapped[str] = mapped_column(String(160))
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    generation: Mapped[int] = mapped_column(Integer)
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    provider: Mapped[str] = mapped_column(String(80))
+    model: Mapped[str | None] = mapped_column(String(160))
+    model_snapshot: Mapped[str | None] = mapped_column(String(160))
+    endpoint_mode: Mapped[str] = mapped_column(String(80), default="responses")
+    prompt_version: Mapped[str] = mapped_column(String(80))
+    schema_version: Mapped[str] = mapped_column(String(80))
+    provider_config_version: Mapped[str] = mapped_column(String(80))
+    grading_config_version: Mapped[str] = mapped_column(String(80))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    response_hash: Mapped[str | None] = mapped_column(String(64))
+    provider_request_id: Mapped[str | None] = mapped_column(String(160))
+    celery_task_id: Mapped[str | None] = mapped_column(String(80))
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    image_count: Mapped[int] = mapped_column(Integer, default=0)
+    image_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    estimated_cost: Mapped[Any | None] = mapped_column(Numeric(12, 6))
+    retryable: Mapped[bool] = mapped_column(default=False)
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    stale_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AICriterionSuggestion(Base):
+    __tablename__ = "ai_criterion_suggestions"
+    __table_args__ = (
+        UniqueConstraint("ai_scoring_job_id", "criterion_id", name="uq_ai_criterion_job"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    ai_scoring_job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("ai_scoring_jobs.id", ondelete="CASCADE"), index=True
+    )
+    criterion_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("rubric_criteria.id", ondelete="RESTRICT")
+    )
+    criterion_stable_key: Mapped[str] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(40))
+    decision: Mapped[str] = mapped_column(String(40))
+    suggested_points: Mapped[Any | None] = mapped_column(Numeric(10, 2))
+    max_points: Mapped[Any] = mapped_column(Numeric(10, 2))
+    confidence: Mapped[Any | None] = mapped_column(Numeric(6, 5))
+    evidence_refs: Mapped[list[str]] = mapped_column(JSON, default=list)
+    matched_steps: Mapped[list[str]] = mapped_column(JSON, default=list)
+    missing_steps: Mapped[list[str]] = mapped_column(JSON, default=list)
+    detected_errors: Mapped[list[str]] = mapped_column(JSON, default=list)
+    reasoning_summary: Mapped[str | None] = mapped_column(Text)
+    manual_review_reason: Mapped[str | None] = mapped_column(Text)
+    student_feedback: Mapped[str | None] = mapped_column(Text)
+    teacher_note: Mapped[str | None] = mapped_column(Text)
+    abstained: Mapped[bool] = mapped_column(default=False)
+    deterministic_conflict: Mapped[bool] = mapped_column(default=False)
+    input_hash: Mapped[str] = mapped_column(String(64))
+    output_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class AIFeedbackDraft(TimestampMixin, Base):
+    __tablename__ = "ai_feedback_drafts"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    ai_scoring_job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("ai_scoring_jobs.id", ondelete="RESTRICT"), unique=True
+    )
+    student_feedback: Mapped[str] = mapped_column(Text, default="")
+    teacher_summary: Mapped[str] = mapped_column(Text, default="")
+    strengths: Mapped[list[str]] = mapped_column(JSON, default=list)
+    improvements: Mapped[list[str]] = mapped_column(JSON, default=list)
+    error_categories: Mapped[list[str]] = mapped_column(JSON, default=list)
+    risk_flags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    suggestion_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    teacher_disposition: Mapped[str] = mapped_column(String(30), default="pending")
+    edited_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+
+class AIProviderInvocation(Base):
+    __tablename__ = "ai_provider_invocations"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    ai_scoring_job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("ai_scoring_jobs.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(80))
+    endpoint_mode: Mapped[str] = mapped_column(String(80))
+    model: Mapped[str | None] = mapped_column(String(160))
+    prompt_version: Mapped[str] = mapped_column(String(80))
+    schema_version: Mapped[str] = mapped_column(String(80))
+    provider_request_id: Mapped[str | None] = mapped_column(String(160))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    response_hash: Mapped[str | None] = mapped_column(String(64))
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    cache_tokens: Mapped[int | None] = mapped_column(Integer)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    retry_number: Mapped[int] = mapped_column(Integer, default=0)
+    response_status: Mapped[str] = mapped_column(String(40))
+    capability_gaps: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class AISuggestionReview(Base):
+    __tablename__ = "ai_suggestion_reviews"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    suggestion_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("ai_criterion_suggestions.id", ondelete="RESTRICT"), index=True
+    )
+    reviewer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    action: Mapped[str] = mapped_column(String(30))
+    original_points: Mapped[Any | None] = mapped_column(Numeric(10, 2))
+    selected_points: Mapped[Any | None] = mapped_column(Numeric(10, 2))
+    reason: Mapped[str] = mapped_column(Text)
+    scoring_input_version: Mapped[str] = mapped_column(String(160))
+    rubric_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("structured_rubric_versions.id", ondelete="RESTRICT")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)

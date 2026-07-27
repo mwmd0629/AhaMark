@@ -33,6 +33,8 @@ def production_settings(**overrides: object) -> dict[str, object]:
         ("demo_actor_enabled", True),
         ("recognition_provider", "fake"),
         ("grading_provider", "fake"),
+        ("assignment_generation_provider", "fake"),
+        ("assignment_generation_suggestion_only", False),
         ("session_hmac_secret", "change-me"),
         ("database_url", "sqlite:///production.db"),
         ("minio_secret_key", "change-me-in-production"),

@@ -96,3 +96,13 @@ def test_login_input_accepts_reserved_synthetic_fixture_domain() -> None:
         password="synthetic-only-password",
     )
     assert payload.email == "teacher@business-e2e.synthetic.invalid"
+
+
+def test_login_input_accepts_controlled_local_account_domain() -> None:
+    from app.api.auth import LoginInput
+
+    payload = LoginInput(
+        email="HR0196@AHAMARK.LOCAL",
+        password="local-only-password",
+    )
+    assert payload.email == "hr0196@ahamark.local"

@@ -107,12 +107,12 @@
   },
   "observability": {
     "status": "PASS",
-    "request_id": "cb46f3c31344593140a48432c693b1f0",
-    "celery_task_id": "da9be476-2727-4f56-a332-89f4a961f481",
-    "job_id": "83b7bb12-0371-4bf5-8654-a97ee09f6fe6",
+    "request_id": "78e71e0fa29d1d639c0ae988befadfda",
+    "celery_task_id": "c8b7b1ed-5930-4c37-9cf1-de65acef5096",
+    "job_id": "a79dcecb-800d-4ce7-84ad-31ca82e5deaa",
     "task_name": "ahamark.report.run",
     "terminal_status": "completed",
-    "worker_duration_ms": 73,
+    "worker_duration_ms": 156,
     "nginx_api_worker_exact_match": true,
     "sensitive_pattern_matches": {
       "nginx": 0,
@@ -151,12 +151,16 @@
   },
   "raw_evidence_sha256": {
     "business_evidence": "AAE97AAAEBEDB16F95B539BA553EA0C158EE85F63FA06DD83A73D9FE4B8AC448",
-    "edge_evidence": "B0858DF6B760BC7A972CF20014A2233BBEB68AF892E2F3532018686F80766C77"
+    "edge_evidence": "B0858DF6B760BC7A972CF20014A2233BBEB68AF892E2F3532018686F80766C77",
+    "business_evidence_current": "3EABD96BE79C042958D6D2ED74A1B62B27197ABBA600E07879B83C91B6E6C977",
+    "edge_evidence_current": "B0858DF6B760BC7A972CF20014A2233BBEB68AF892E2F3532018686F80766C77"
   },
   "notes": [
     "All business data and identities are synthetic.invalid.",
     "No test-only fixture, fake OCR, fake grading provider, recovery fixture, failure fixture, direct SQL business write, or direct ORM business write was used.",
     "The local RapidOCR run proves workflow execution only, not OCR accuracy.",
+    "A current-run re-verification created ReportJob a79dcecb-800d-4ce7-84ad-31ca82e5deaa through the public HTTPS API and correlated request 78e71e0fa29d1d639c0ae988befadfda exactly across Nginx, API A, Celery headers, and Worker logs.",
+    "The current-run browser re-verification stopped and restarted only the same API A container; the same Session and pinned business data passed before, during, and after the outage.",
     "No old or final Run container, volume, network, database, bucket, or certificate was deleted, pruned, or cleaned.",
     "Production HA, disaster recovery, external penetration testing, subjective AI availability, and handwriting/formula OCR reliability remain out of scope."
   ]

@@ -1,19 +1,31 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  type ReactNode,
+} from "react";
 import { useRouter } from "next/navigation";
-import { authApi } from "@/lib/api";
+import { authApi, type AuthUser } from "@/lib/api";
+
+const AuthUserContext = createContext<AuthUser | null>(null);
+
+export function useAuthUser() {
+  return useContext(AuthUserContext);
+}
 
 export function AuthGate({ children }: { children: ReactNode }) {
   const router = useRouter();
-  const [ready, setReady] = useState(false);
+  const [user, setUser] = useState<AuthUser | null>(null);
   useEffect(() => {
     authApi
       .me()
-      .then(() => setReady(true))
+      .then(setUser)
       .catch(() => router.replace("/login"));
   }, [router]);
-  if (!ready)
+  if (!user)
     return (
       <div
         role="status"
@@ -22,5 +34,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
         正在验证登录状态…
       </div>
     );
-  return children;
+  return (
+    <AuthUserContext.Provider value={user}>{children}</AuthUserContext.Provider>
+  );
 }

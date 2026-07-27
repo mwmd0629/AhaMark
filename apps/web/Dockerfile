@@ -9,6 +9,8 @@ RUN npm ci && npm install --no-save \
 FROM deps AS build
 ARG NEXT_PUBLIC_API_URL=http://localhost:8000
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ENV NEXT_IGNORE_INCORRECT_LOCKFILE=1
+ENV NEXT_TELEMETRY_DISABLED=1
 COPY apps/web apps/web
 RUN npm run build --workspace apps/web
 FROM node:22-alpine

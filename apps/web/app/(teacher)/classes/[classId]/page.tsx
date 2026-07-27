@@ -184,6 +184,7 @@ export default function ClassDetailPage({
             <Dialog
               title="添加学生"
               description="若该学号已属于当前教师，将复用学生档案并加入本班。"
+              dismissible={false}
               trigger={<Button>添加学生</Button>}
             >
               <form className="grid gap-4" onSubmit={addStudent}>
@@ -200,6 +201,7 @@ export default function ClassDetailPage({
             </Dialog>
             <Dialog
               title="创建分组"
+              dismissible={false}
               trigger={<Button variant="outline">管理分组</Button>}
             >
               <form className="grid gap-4" onSubmit={addGroup}>
@@ -236,6 +238,7 @@ export default function ClassDetailPage({
             <Dialog
               title="导入学生名单"
               description="支持 XLSX/UTF-8 CSV。先预览校验，再确认写入。"
+              dismissible={false}
               trigger={<Button variant="outline">导入学生</Button>}
             >
               <div className="space-y-4">

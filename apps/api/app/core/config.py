@@ -49,10 +49,69 @@ class Settings(BaseSettings):
     recognition_low_confidence: float = 0.70
     recognition_high_confidence: float = 0.90
     recognition_config_version: str = "2026-07-22"
+    answer_recognition_provider: str = "unavailable"
+    answer_recognition_base_url: str | None = None
+    answer_recognition_api_key: str | None = None
+    answer_recognition_model: str | None = None
+    answer_recognition_timeout_seconds: float = 30.0
+    answer_recognition_max_attempts: int = 3
+    answer_recognition_margin_pixels: int = 12
+    answer_recognition_config_version: str = "answer-evidence-v1"
     grading_provider: str = "unavailable"
+    grading_base_url: str | None = None
+    grading_api_key: str | None = None
+    grading_model: str | None = None
+    grading_timeout_seconds: float = 30.0
     grading_prompt_version: str = "subjective-v1"
     grading_config_version: str = "2026-07-22"
     grading_auto_accept_confidence: float = 0.95
+    ai_grading_provider: str = "unavailable"
+    assignment_generation_enabled: bool = True
+    assignment_generation_provider: str = "unavailable"
+    assignment_generation_allow_external_provider_requests: bool = False
+    assignment_generation_allow_teacher_start: bool = True
+    assignment_generation_suggestion_only: bool = True
+    assignment_generation_real_provider_quality_passed: bool = False
+    assignment_generation_provider_config_version: str = "assignment-generation-provider-v1"
+    assignment_generation_prompt_version: str = "assignment-generation-prompt-v1"
+    assignment_generation_schema_version: str = "assignment-generation-schema-v1"
+    assignment_generation_max_attempts: int = 3
+    assignment_generation_base_url: str | None = None
+    assignment_generation_api_key: str | None = None
+    assignment_generation_model: str | None = None
+    assignment_generation_model_snapshot: str | None = None
+    assignment_generation_timeout_seconds: float = 45.0
+    assignment_generation_max_retries: int = 2
+    assignment_generation_max_input_tokens: int = 16000
+    assignment_generation_max_output_tokens: int = 4000
+    assignment_generation_max_images: int = 8
+    assignment_generation_max_image_bytes: int = 5 * 1024 * 1024
+    assignment_generation_max_total_image_bytes: int = 20 * 1024 * 1024
+    assignment_generation_max_estimated_cost: float = 1.0
+    assignment_generation_input_cost_per_million: float = 0.0
+    assignment_generation_output_cost_per_million: float = 0.0
+    assignment_generation_allow_private_base_url_for_tests: bool = False
+    ai_grading_base_url: str | None = None
+    ai_grading_api_key: str | None = None
+    ai_grading_model: str | None = None
+    ai_grading_timeout_seconds: float = 45.0
+    ai_grading_max_retries: int = 2
+    ai_grading_max_input_tokens: int = 16000
+    ai_grading_max_output_tokens: int = 4000
+    ai_grading_max_images: int = 4
+    ai_grading_max_image_bytes: int = 5 * 1024 * 1024
+    ai_grading_max_total_pixels: int = 24_000_000
+    ai_grading_max_request_bytes: int = 20 * 1024 * 1024
+    ai_grading_max_cost_per_question: float = 0.25
+    ai_grading_max_cost_per_batch: float = 25.0
+    ai_grading_input_cost_per_million: float = 0.0
+    ai_grading_output_cost_per_million: float = 0.0
+    ai_grading_prompt_version: str = "ai-grading-v1"
+    ai_grading_schema_version: str = "criterion-suggestion-v1"
+    ai_grading_config_version: str = "stage4-v1"
+    ai_grading_store_responses: bool = False
+    ai_grading_review_provider: str | None = None
+    ai_grading_review_model: str | None = None
     submission_max_files: int = 100
     submission_batch_max_bytes: int = 250 * 1024 * 1024
     submission_match_threshold: float = 0.95
@@ -90,6 +149,12 @@ class Settings(BaseSettings):
             errors.append("RECOGNITION_PROVIDER cannot be fake")
         if self.grading_provider.lower() == "fake":
             errors.append("GRADING_PROVIDER cannot be fake")
+        if self.ai_grading_provider.lower() == "fake":
+            errors.append("AI_GRADING_PROVIDER cannot be fake")
+        if self.assignment_generation_provider.lower() == "fake":
+            errors.append("ASSIGNMENT_GENERATION_PROVIDER cannot be fake")
+        if not self.assignment_generation_suggestion_only:
+            errors.append("ASSIGNMENT_GENERATION_SUGGESTION_ONLY must be true")
         if self.session_hmac_secret.lower() in weak or len(self.session_hmac_secret) < 32:
             errors.append("SESSION_HMAC_SECRET must be a strong value of at least 32 characters")
         if self.minio_access_key.lower() in weak:

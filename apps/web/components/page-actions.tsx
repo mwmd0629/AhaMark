@@ -6,6 +6,7 @@ export function CreateAssignmentAction() {
     <Dialog
       title="创建作业"
       description="当前为界面演示，不会写入后端。"
+      dismissible={false}
       trigger={<Button>创建作业</Button>}
     >
       <div className="grid gap-4">
@@ -26,6 +27,7 @@ export function UploadAction() {
     <Dialog
       title="上传学生作业"
       description="OCR 与 AI 评分尚未接入。"
+      dismissible={false}
       trigger={<Button>上传学生作业</Button>}
     >
       <div className="rounded-xl border border-dashed border-[var(--border)] p-8 text-center text-sm text-[var(--text-secondary)]">

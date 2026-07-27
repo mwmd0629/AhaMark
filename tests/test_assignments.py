@@ -184,9 +184,11 @@ def test_file_pages_question_region_rubric_and_publish():
         json={"standard_answer": "答案", "items": [{"title": "正确", "points": 10}]},
     )
     assert rubric.status_code == 200
+    # Publishing is intentionally unavailable without a teacher-created,
+    # server-side readiness snapshot from the central review workflow.
     published = client.post(f"/api/assignments/{aid}/publish")
-    assert published.status_code == 200 and published.json()["status"] == "published"
-    assert client.post(f"/api/assignments/{aid}/publish").status_code == 200
+    assert published.status_code == 422
+    assert client.get(f"/api/assignments/{aid}").json()["status"] == "draft"
     app.dependency_overrides.pop(get_storage, None)
 
 

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { gradingApi, type ReviewWorkspace } from "@/lib/api";
+import { AnswerRecognitionWorkspace } from "@/components/answer-recognition-workspace";
 
 type Decision = "accepted" | "modified" | "rejected" | "manual_scored";
 
@@ -62,6 +63,27 @@ export default function ReviewPage() {
       );
       if (feedback === null) return;
       payload.final_feedback = feedback;
+      if (answer.criteria.length) {
+        const criterionScores: Record<string, string> = {};
+        for (const criterion of answer.criteria) {
+          const awarded = window.prompt(
+            `评分项 ${criterion.rubric_item_id}（满分 ${criterion.max_points}）`,
+            criterion.awarded_points ?? "",
+          );
+          if (awarded === null) return;
+          if (
+            awarded.trim() === "" ||
+            Number.isNaN(Number(awarded)) ||
+            Number(awarded) < 0 ||
+            Number(awarded) > Number(criterion.max_points)
+          ) {
+            setMessage("评分项得分无效");
+            return;
+          }
+          criterionScores[criterion.rubric_item_id] = awarded;
+        }
+        payload.criterion_scores = criterionScores;
+      }
       payload.reason =
         decision === "modified" ? "教师修改 AI 建议" : "教师手动评分";
     }
@@ -142,6 +164,47 @@ export default function ReviewPage() {
       setMessage("已创建新的评分 Job/Result；旧结果保持 superseded/stale");
     } catch {
       setMessage("重新批改失败，请检查当前 Rubric 是否完整");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function addRegion() {
+    if (!answer || !page || saving) return;
+    const raw = window.prompt(
+      "输入答题区域 x,y,width,height（0–1 坐标）",
+      "0,0,1,1",
+    );
+    if (raw === null) return;
+    const values = raw.split(",").map(Number);
+    if (
+      values.length !== 4 ||
+      values.some((value) => Number.isNaN(value)) ||
+      values[0] < 0 ||
+      values[1] < 0 ||
+      values[2] <= 0 ||
+      values[3] <= 0 ||
+      values[0] + values[2] > 1 ||
+      values[1] + values[3] > 1
+    ) {
+      setMessage("区域坐标无效");
+      return;
+    }
+    setSaving(true);
+    try {
+      await gradingApi.createAnswerRegion(answer.id, {
+        submission_page_id: page.id,
+        x: values[0],
+        y: values[1],
+        width: values[2],
+        height: values[3],
+        source: "manual",
+        confirmed: true,
+      });
+      await load();
+      setMessage("答题区域已确认；旧 OCR 和评分已标记 stale，请重新识别");
+    } catch {
+      setMessage("答题区域保存失败");
     } finally {
       setSaving(false);
     }
@@ -350,6 +413,18 @@ export default function ReviewPage() {
                 />
                 <Info label="评分结果状态" value={answer.result?.status} />
               </div>
+              <Link
+                href={`/grading/${batchId}/review/${answer.id}/validation`}
+                className="inline-flex rounded border px-3 py-2 text-sm font-medium"
+              >
+                查看数学验证证据
+              </Link>
+              <AnswerRecognitionWorkspace
+                submissionId={submission.submission_id}
+                answerId={answer.id}
+                regionIds={(answer.regions ?? []).map((region) => region.id)}
+                readOnly={submission.status === "finalized"}
+              />
               {(answer.status === "stale" ||
                 answer.result?.status === "stale") && (
                 <div
@@ -361,6 +436,63 @@ export default function ReviewPage() {
                   已变化，旧建议不能继续接受。请重新批改或由教师重新人工评分。
                 </div>
               )}
+              {(answer.status === "manual_segmentation_required" ||
+                (answer.regions ?? []).length === 0) && (
+                <div
+                  role="alert"
+                  className="rounded border border-red-300 bg-red-50 p-3 text-sm"
+                >
+                  未找到可靠题号区域，必须人工切题后才能继续。系统不会用页码猜测题号。
+                </div>
+              )}
+              {(answer.recognized_text === undefined ||
+                Number(answer.confidence ?? 0) < 0.9) && (
+                <div className="rounded border border-amber-300 bg-amber-50 p-3 text-sm">
+                  OCR 为空或置信度不足，必须人工复核。公式识别未配置时不可用。
+                </div>
+              )}
+              <div>
+                <h3 className="font-semibold">答题区域</h3>
+                <button
+                  className="mt-2 rounded border px-3 py-2 text-sm"
+                  disabled={saving || !page}
+                  onClick={() => void addRegion()}
+                >
+                  在当前页增加区域
+                </button>
+                {(answer.regions ?? []).map((region) => (
+                  <div
+                    key={region.id}
+                    className="mt-2 flex items-center gap-2 text-sm"
+                  >
+                    <span>
+                      {region.source}/{region.status} · {region.x},{region.y},
+                      {region.width},{region.height}
+                    </span>
+                    <button
+                      className="text-red-700 underline"
+                      disabled={saving}
+                      onClick={() =>
+                        void (async () => {
+                          setSaving(true);
+                          try {
+                            await gradingApi.deleteAnswerRegion(
+                              answer.id,
+                              region.id,
+                            );
+                            await load();
+                            setMessage("区域已删除；旧 OCR 和评分已标记 stale");
+                          } finally {
+                            setSaving(false);
+                          }
+                        })()
+                      }
+                    >
+                      删除
+                    </button>
+                  </div>
+                ))}
+              </div>
               <div>
                 <h3 className="font-semibold">Criterion</h3>
                 {answer.criteria.map((item) => (
