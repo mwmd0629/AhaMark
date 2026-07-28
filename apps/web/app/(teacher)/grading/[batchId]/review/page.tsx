@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import { gradingApi, type ReviewWorkspace } from "@/lib/api";
 import { AnswerRecognitionWorkspace } from "@/components/answer-recognition-workspace";
+import { AIGradingReview } from "@/components/ai-grading-review";
 
 type Decision = "accepted" | "modified" | "rejected" | "manual_scored";
 
@@ -419,12 +420,14 @@ export default function ReviewPage() {
               >
                 查看数学验证证据
               </Link>
-              <AnswerRecognitionWorkspace
-                submissionId={submission.submission_id}
-                answerId={answer.id}
-                regionIds={(answer.regions ?? []).map((region) => region.id)}
-                readOnly={submission.status === "finalized"}
-              />
+              <div id="answer-recognition-workspace">
+                <AnswerRecognitionWorkspace
+                  submissionId={submission.submission_id}
+                  answerId={answer.id}
+                  regionIds={(answer.regions ?? []).map((region) => region.id)}
+                  readOnly={submission.status === "finalized"}
+                />
+              </div>
               {(answer.status === "stale" ||
                 answer.result?.status === "stale") && (
                 <div
@@ -463,6 +466,7 @@ export default function ReviewPage() {
                 {(answer.regions ?? []).map((region) => (
                   <div
                     key={region.id}
+                    id={`answer-region-${region.id}`}
                     className="mt-2 flex items-center gap-2 text-sm"
                   >
                     <span>
@@ -493,6 +497,11 @@ export default function ReviewPage() {
                   </div>
                 ))}
               </div>
+              <AIGradingReview
+                key={answer.id}
+                answerId={answer.id}
+                finalized={submission.status === "finalized"}
+              />
               <div>
                 <h3 className="font-semibold">Criterion</h3>
                 {answer.criteria.map((item) => (

@@ -41,6 +41,13 @@ vi.mock("@/lib/api", () => ({
   gradingApi: mocks,
   answerRecognitionApi: recognitionMocks,
 }));
+vi.mock("@/components/ai-grading-review", () => ({
+  AIGradingReview: ({ answerId }: { answerId: string }) => (
+    <section aria-label="AI 分项评分建议" data-answer-id={answerId}>
+      本地 Codex / AI 建议，需教师确认
+    </section>
+  ),
+}));
 
 afterEach(() => {
   cleanup();
@@ -121,6 +128,18 @@ it("allows an explicit teacher acceptance for a current low-confidence suggestio
       decision: "accepted",
     }),
   );
+});
+
+it("embeds the Codex suggestion review in the existing teacher workflow", async () => {
+  mocks.reviewWorkspace.mockResolvedValue(workspace());
+  render(<ReviewPage />);
+
+  expect(
+    await screen.findByRole("region", { name: "AI 分项评分建议" }),
+  ).toHaveAttribute("data-answer-id", "ans-1");
+  expect(
+    screen.getByText("本地 Codex / AI 建议，需教师确认"),
+  ).toBeInTheDocument();
 });
 
 it("surfaces incomplete finalize blockers instead of a false success", async () => {

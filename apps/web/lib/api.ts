@@ -1360,8 +1360,21 @@ export const mathValidationApi = {
 
 export type AISuggestion = {
   id: string;
+  criterion_id: string;
   criterion_stable_key: string;
-  status: string;
+  status:
+    | "scored"
+    | "abstain"
+    | "manual"
+    | "conflict"
+    | "insufficient"
+    | "failed"
+    | "stale";
+  reason?: string;
+  error_codes: string[];
+  evidence_ids: string[];
+  validation_refs: string[];
+  requires_review: true;
   suggested_points?: string;
   max_points: string;
   confidence?: string;
@@ -1372,6 +1385,13 @@ export type AISuggestion = {
   student_feedback?: string;
   teacher_note?: string;
   deterministic_conflict: boolean;
+  review?: {
+    id: string;
+    action: "accepted" | "modified" | "rejected";
+    selected_points?: string;
+    reason: string;
+    created_at: string;
+  };
 };
 
 export type AIScoringJob = {
@@ -1385,6 +1405,49 @@ export type AIScoringJob = {
   schema_version: string;
   stale: boolean;
   error_code?: string;
+  scoring_input_version: string;
+  rubric_version_id: string;
+  reference_answer_version_id: string;
+  evidence: Array<{
+    id: string;
+    kind: "recognition" | "region";
+    status: string;
+    stale: boolean;
+    version: number;
+    confirmed_revision?: number;
+    submission_page_id?: string;
+    coordinates?: {
+      x: string;
+      y: string;
+      width: string;
+      height: string;
+    };
+    target_id: string;
+  }>;
+  validation?: {
+    job_id: string;
+    status: string;
+    generation: number;
+    stale: boolean;
+    rubric_version_id: string;
+    reference_answer_version_id: string;
+    results: Array<{
+      id: string;
+      criterion_id: string;
+      generation: number;
+      result:
+        | "verified"
+        | "conflict"
+        | "indeterminate"
+        | "manual"
+        | "manual_required"
+        | "unsupported"
+        | "failed";
+      comparison_method: string;
+      stale: boolean;
+      diagnostics: Record<string, unknown>;
+    }>;
+  };
   usage: {
     input_tokens?: number;
     output_tokens?: number;
@@ -1404,6 +1467,9 @@ export type AIScoringJob = {
     request_id?: string;
     latency_ms?: number;
     status: string;
+    error_code?: string;
+    started_at?: string;
+    completed_at?: string;
   }>;
 };
 

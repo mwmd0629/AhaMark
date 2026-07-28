@@ -98,10 +98,43 @@ def job_json(db: Session, j: AIScoringJob) -> dict[str, Any]:
         .where(AICriterionSuggestion.ai_scoring_job_id == j.id)
         .order_by(AICriterionSuggestion.created_at)
     ).all()
+    reviews = (
+        db.scalars(
+            select(AISuggestionReview)
+            .where(AISuggestionReview.suggestion_id.in_([item.id for item in suggestions]))
+            .order_by(AISuggestionReview.created_at.desc())
+        ).all()
+        if suggestions
+        else []
+    )
+    reviews_by_suggestion: dict[uuid.UUID, AISuggestionReview] = {}
+    for review in reviews:
+        reviews_by_suggestion.setdefault(review.suggestion_id, review)
     invocations = db.scalars(
         select(AIProviderInvocation).where(AIProviderInvocation.ai_scoring_job_id == j.id)
     ).all()
     draft = db.scalar(select(AIFeedbackDraft).where(AIFeedbackDraft.ai_scoring_job_id == j.id))
+    recognition = db.get(QuestionRecognitionEvidence, j.recognition_evidence_id)
+    regions = db.scalars(
+        select(StudentAnswerRegion)
+        .where(
+            StudentAnswerRegion.student_answer_id == j.student_answer_id,
+            StudentAnswerRegion.status == "confirmed",
+        )
+        .order_by(StudentAnswerRegion.created_at)
+    ).all()
+    validation_job = (
+        db.get(MathValidationJob, j.math_validation_job_id) if j.math_validation_job_id else None
+    )
+    validation_results = (
+        db.scalars(
+            select(CriterionValidationResult)
+            .where(CriterionValidationResult.validation_job_id == validation_job.id)
+            .order_by(CriterionValidationResult.created_at)
+        ).all()
+        if validation_job
+        else []
+    )
     return {
         "id": str(j.id),
         "student_answer_id": str(j.student_answer_id),
@@ -113,6 +146,64 @@ def job_json(db: Session, j: AIScoringJob) -> dict[str, Any]:
         "schema_version": j.schema_version,
         "stale": j.stale_at is not None,
         "error_code": j.error_code,
+        "scoring_input_version": j.scoring_input_version,
+        "rubric_version_id": str(j.rubric_version_id),
+        "reference_answer_version_id": str(j.reference_answer_version_id),
+        "evidence": (
+            [
+                {
+                    "id": f"recognition:{recognition.id}",
+                    "kind": "recognition",
+                    "status": recognition.status,
+                    "stale": recognition.stale_at is not None,
+                    "version": recognition.recognition_version,
+                    "confirmed_revision": recognition.confirmed_revision,
+                    "target_id": "answer-recognition-workspace",
+                }
+            ]
+            if recognition
+            else []
+        )
+        + [
+            {
+                "id": f"region:{region.id}",
+                "kind": "region",
+                "status": region.status,
+                "stale": region.status in {"stale", "superseded"},
+                "version": region.region_version,
+                "submission_page_id": str(region.submission_page_id),
+                "coordinates": {
+                    "x": str(region.x),
+                    "y": str(region.y),
+                    "width": str(region.width),
+                    "height": str(region.height),
+                },
+                "target_id": f"answer-region-{region.id}",
+            }
+            for region in regions
+        ],
+        "validation": {
+            "job_id": str(validation_job.id),
+            "status": validation_job.status,
+            "generation": validation_job.generation,
+            "stale": validation_job.stale_at is not None,
+            "rubric_version_id": str(validation_job.rubric_version_id),
+            "reference_answer_version_id": str(validation_job.reference_answer_version_id),
+            "results": [
+                {
+                    "id": str(result.id),
+                    "criterion_id": str(result.criterion_id),
+                    "generation": result.generation,
+                    "result": result.result,
+                    "comparison_method": result.comparison_method,
+                    "stale": result.stale_at is not None,
+                    "diagnostics": result.diagnostics,
+                }
+                for result in validation_results
+            ],
+        }
+        if validation_job
+        else None,
         "usage": {
             "input_tokens": j.input_tokens,
             "output_tokens": j.output_tokens,
@@ -122,6 +213,7 @@ def job_json(db: Session, j: AIScoringJob) -> dict[str, Any]:
         "suggestions": [
             {
                 "id": str(x.id),
+                "criterion_id": str(x.criterion_id),
                 "criterion_stable_key": x.criterion_stable_key,
                 "status": public_status(
                     x.status,
@@ -150,6 +242,21 @@ def job_json(db: Session, j: AIScoringJob) -> dict[str, Any]:
                 "student_feedback": x.student_feedback,
                 "teacher_note": x.teacher_note,
                 "deterministic_conflict": x.deterministic_conflict,
+                "review": (
+                    {
+                        "id": str(reviews_by_suggestion[x.id].id),
+                        "action": reviews_by_suggestion[x.id].action,
+                        "selected_points": (
+                            str(reviews_by_suggestion[x.id].selected_points)
+                            if reviews_by_suggestion[x.id].selected_points is not None
+                            else None
+                        ),
+                        "reason": reviews_by_suggestion[x.id].reason,
+                        "created_at": reviews_by_suggestion[x.id].created_at.isoformat(),
+                    }
+                    if x.id in reviews_by_suggestion
+                    else None
+                ),
             }
             for x in suggestions
         ],
@@ -433,6 +540,15 @@ def review(suggestion_id: uuid.UUID, data: ReviewInput, db: Db, actor: Actor) ->
     _assert_submission_mutable(db, job.submission_id)
     if job.stale_at or job.status == "stale":
         raise ApiProblem(409, "AI_SUGGESTION_STALE", "Stale suggestion cannot be adopted")
+    existing_review = db.scalar(
+        select(AISuggestionReview).where(AISuggestionReview.suggestion_id == suggestion.id)
+    )
+    if existing_review:
+        raise ApiProblem(
+            409,
+            "AI_SUGGESTION_ALREADY_REVIEWED",
+            "This suggestion already has a teacher disposition",
+        )
     criterion = db.get(RubricCriterion, suggestion.criterion_id)
     if not criterion or criterion.rubric_version_id != job.rubric_version_id:
         raise ApiProblem(409, "CRITERION_SET_INVALID", "Criterion is not part of current rubric")

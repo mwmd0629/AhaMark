@@ -11,7 +11,9 @@ from app.ai_grading.providers import (
     provider_from_settings,
 )
 from app.api.actor import CurrentActor
-from app.api.ai_grading import job_json, retry_job
+from app.api.ai_grading import ReviewInput, job_json, retry_job
+from app.api.ai_grading import review as review_suggestion
+from app.api.domain import ApiProblem
 from app.core.config import Settings, get_settings
 from app.db.session import SessionLocal
 from app.models import (
@@ -144,6 +146,9 @@ def test_fake_provider_completes_audited_idempotent_loop(
     assert serialized["suggestions"][0]["requires_review"] is True
     assert serialized["suggestions"][0]["status"] == "scored"
     assert serialized["suggestions"][0]["validation_refs"] == suggestion.validation_refs
+    assert serialized["evidence"][0]["kind"] == "recognition"
+    assert serialized["validation"]["generation"] == 1
+    assert serialized["validation"]["results"][0]["id"] in suggestion.validation_refs
     assert serialized["invocations"][0]["started_at"] is not None
     assert run_with_provider(monkeypatch, FakeAIScoringProvider(), job)["status"] == (
         "already_processed"
@@ -156,6 +161,24 @@ def test_fake_provider_completes_audited_idempotent_loop(
         )
         == 1
     )
+    db.close()
+
+
+def test_teacher_disposition_is_immutable_against_duplicate_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db, job = scoring_job()
+    run_with_provider(monkeypatch, FakeAIScoringProvider(), job)
+    suggestion = db.scalar(
+        select(AICriterionSuggestion).where(AICriterionSuggestion.ai_scoring_job_id == job.id)
+    )
+    assert suggestion is not None
+    actor = CurrentActor(job.owner_id, "teacher@example.test")
+    data = ReviewInput(action="accepted", reason="教师核验后采纳")
+    review_suggestion(suggestion.id, data, db, actor)
+    with pytest.raises(ApiProblem) as duplicate:
+        review_suggestion(suggestion.id, data, db, actor)
+    assert duplicate.value.code == "AI_SUGGESTION_ALREADY_REVIEWED"
     db.close()
 
 
