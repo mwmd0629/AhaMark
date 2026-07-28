@@ -1,8 +1,8 @@
 # AhaMark 最终验收报告
 
 版本 `0.1.0`；更新日期 2026-07-28；分支 `master`；批改闭环最终功能基线为
-`8746e1819d0dc78333ee8670c8ce763dc103b528`，包含集成修复提交 `4c6266b` 与 `8746e18`。
-本地比 `origin/master` 超前 2，本任务不 push；本次收口不构成新的产品功能部分。
+`2377cd3`，包含线性代数批改第 1–4 部分；第 5 部分离线评测在本次收口完成。
+本地未 push；本报告不构成生产能力声明。
 
 本报告中的 `PASS` 仅表示对应验收检查在记录范围内通过，不等于整项能力已完成真实环境验证或达到生产可用。统一能力状态、数据边界和产品措辞以 `PROJECT-BASELINE.md`、`CAPABILITY-EVIDENCE-MATRIX.md`、`DATA-SECURITY-BOUNDARIES.md` 和 `PRODUCT-CAPABILITY-STATEMENTS.md` 为准。
 
@@ -24,6 +24,8 @@ Worker 故障恢复只在开发环境成立；生产灾备、高可用、生产 
 | 前端测试 | PASS | 完整 Vitest：21 files、60 tests passed |
 | 前端格式/lint/type | PASS | Prettier、ESLint、TypeScript |
 | Next production build | PASS | 23 条路由构建成功；SWC lockfile 修补警告仍存在但未阻断 |
+| 线性代数离线评测 | PASS（安全模式） | 24 例；status accuracy 100%；false_verified 0；引用拦截和 manual/unsupported 遵从均 100% |
+| 真实 Provider 质量 | NOT RUN | Provider 默认 unavailable；Fake 仅限测试；没有真实外部 API/学生文件上传 |
 | Analytics HTTP | PASS | 35 请求，含 14 项 Teacher B 隔离 |
 | Analytics 浏览器 | PASS | 6 步无头 Edge 冒烟 |
 | 教师核心业务浏览器 A–H | PASS | 独立栈、无头 Edge、纯合成数据；8/8 阶段通过，见 BUSINESS-E2E 与机器 JSON |

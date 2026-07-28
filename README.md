@@ -1,8 +1,9 @@
 # AhaMark
 
 > **当前仓库状态（2026-07-28）：** 本地 `master` 功能基线位于
-> `8746e1819d0dc78333ee8670c8ce763dc103b528`，比 `origin/master` 超前 2 个提交且尚未 push；Alembic
-> 唯一 head 为 `0024_nullable_publish_readiness_due_at`；迁移 0011–0024 已进入 `master`。六步
+> `2377cd3`（包含线性代数批改第 1–4 部分），尚未 push；Alembic
+> 唯一 head 为 `0025_ai_grading_audit_contract`。第 5 部分离线评测命令见
+> `scripts/linear_algebra_offline_evaluate.py`；所有样本均为本地 Codex 生成的合成数据。
 > Assignment Generation（编排、元数据/文件分析、题目提取、答案与 Rubric 草稿、集中复核发布、
 > Provider 调用审计）已按受控、仅建议方式落地。Provider 默认 `unavailable`，外部请求默认
 > `false`，`suggestion-only=true`；AI 不能自动发布作业，也不能写入最终成绩。
@@ -73,6 +74,24 @@ Docker 数据、项目工作区和桌面交付文件已迁移到 `D:\OpenAIData`
 正式会话认证位于 `app/api/auth.py`：密码使用标准库 scrypt（独立随机盐），登录创建随机数据库会话，浏览器只保存 HttpOnly `ahamark_session` Cookie；另有 SameSite=Lax CSRF Cookie，带会话的写请求必须发送 `X-CSRF-Token`。会话默认 12 小时，支持撤销、过期、当前用户与退出。production 登录限速使用 Redis 共享固定窗口状态，已验证双 API 实例累计失败次数；默认窗口 300 秒、阈值 5 次，Redis 不可用时 fail closed。限速 key 使用 HMAC，不包含明文密码。生产环境 Cookie 自动 Secure，且 `APP_ENV=production` 时绝不回退到 demo actor。
 
 当前未开放公共注册。管理员在受控环境中执行 `python -m app.cli.create_teacher --email teacher@example.com --display-name 教师姓名`，按不回显提示输入密码，然后访问 `/login`。前端使用 Cookie，不把长期令牌写入 localStorage；教师布局通过 `/auth/me` 保护。开发期 demo actor 只有 `DEMO_ACTOR_ENABLED=true` 且非 production 时可用。共享限速仅在本地预生产式双 API 环境验证，不代表公网 DDoS、WAF 或生产攻击面能力。
+
+## 线性代数主观题批改（第 1–5 部分）
+
+当前闭环是“本地 Codex/离线建议 → 数学验证与证据约束 → 教师复核 → TeacherReview/最终成绩”，
+AI 不自动定分、不创建 GradeRelease。题型 registry、严格引用/版本护栏、Worker 审计闭环和教师复核
+页面已实现；默认 Provider 仍为 `unavailable`，测试 Fake 仅限 `APP_ENV=test`，不代表真实 Provider。
+
+离线评测只使用合成数据，不上传文件、不调用外部 API：
+
+```powershell
+$env:PYTHONPATH='apps/api;.'
+python scripts/linear_algebra_offline_evaluate.py data/linear_algebra_evaluation_v1.json `
+  --output docs/linear-algebra-evaluation-v1-report.json
+```
+
+评测集覆盖 24 例和全部 registry 题型；当前报告要求 `false_verified=0`、引用拦截率与
+manual/unsupported 遵从率 100%、状态准确率至少 95%，并保留人工复核证据、隐私、成本和延迟
+作为未来真实 Provider 的前置门槛。当前安全模式 gate 通过不等于生产可用或真实质量验证。
 
 ## 最终成绩、发布与分析
 

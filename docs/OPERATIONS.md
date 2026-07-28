@@ -4,6 +4,22 @@
 开放。第七部分恢复 PASS 只适用于独立纯合成开发环境；生产灾备、高可用、RPO/RTO、
 多实例恢复、异地/加密/增量/长期备份均未建立。
 
+## 线性代数 AI 批改离线评测与 Provider 门槛
+
+所有文件处理、样本生成和结构化评测均在本地 Codex/离线代码完成，不上传文件、不调用真实
+外部 API。运行：
+
+```powershell
+$env:PYTHONPATH='apps/api;.'
+python scripts/linear_algebra_offline_evaluate.py data/linear_algebra_evaluation_v1.json `
+  --output docs/linear-algebra-evaluation-v1-report.json
+```
+
+当前合成集为 24 例，覆盖全部线性代数 registry 类型、冲突/退化、域与资源边界、manual/
+unsupported、伪造或 stale generation 引用。准入门槛是 `false_verified=0`、引用拦截率 100%、
+manual/unsupported 遵从率 100%、状态准确率至少 95%，并需人工抽检、隐私、成本和延迟证据。
+当前报告只证明本地确定性安全模式；`production_ready=false`，真实 Provider 仍不可用。
+
 ## 架构与启动
 
 六个核心服务为 web、api、worker、PostgreSQL、Redis、MinIO；可选 Nginx proxy 是入口层。复制 `.env.example` 为 `.env`，替换全部 `change-me` 值，生产必须设 `APP_ENV=production`、`DEMO_ACTOR_ENABLED=false`、`AUTH_COOKIE_SECURE=true`、HTTPS Origin 和专用 Bucket。

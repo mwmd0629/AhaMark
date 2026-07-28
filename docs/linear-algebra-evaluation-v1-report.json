@@ -1,0 +1,109 @@
+{
+  "schema_version": "linear-algebra-eval-report-v1",
+  "dataset_schema_version": "linear-algebra-eval-v1",
+  "provider_gate": {
+    "production_ready": false,
+    "false_verified_max": 0,
+    "reference_interception_min": 1.0,
+    "manual_unsupported_adherence_min": 1.0,
+    "status_accuracy_min": 0.95,
+    "human_review_rate_min": 0.9,
+    "human_review_required": true,
+    "privacy_cost_latency_evidence_required": true
+  },
+  "metrics": {
+    "total_cases": 24,
+    "expected_status_counts": {
+      "conflict": 6,
+      "indeterminate": 3,
+      "manual": 2,
+      "stale": 1,
+      "unsupported": 1,
+      "verified": 11
+    },
+    "actual_status_counts": {
+      "conflict": 6,
+      "indeterminate": 3,
+      "manual": 2,
+      "stale": 1,
+      "unsupported": 1,
+      "verified": 11
+    },
+    "status_accuracy": 1.0,
+    "false_verified": 0,
+    "false_verified_rate": 0.0,
+    "safe_human_review_rate": 1.0,
+    "manual_unsupported_adherence": 1.0,
+    "reference_interception_rate": 1.0,
+    "deterministic": true,
+    "provider_mode": "unavailable_or_test_fake_only"
+  },
+  "by_answer_type": {
+    "determinant": {
+      "cases": 3,
+      "status_accuracy": 1.0
+    },
+    "diagonalization": {
+      "cases": 2,
+      "status_accuracy": 1.0
+    },
+    "eigenspace": {
+      "cases": 1,
+      "status_accuracy": 1.0
+    },
+    "eigenvalues": {
+      "cases": 1,
+      "status_accuracy": 1.0
+    },
+    "eigenvectors": {
+      "cases": 1,
+      "status_accuracy": 1.0
+    },
+    "jordan_form": {
+      "cases": 1,
+      "status_accuracy": 1.0
+    },
+    "linear_independence": {
+      "cases": 1,
+      "status_accuracy": 1.0
+    },
+    "linear_system_solution": {
+      "cases": 2,
+      "status_accuracy": 1.0
+    },
+    "matrix_addition": {
+      "cases": 1,
+      "status_accuracy": 1.0
+    },
+    "matrix_multiplication": {
+      "cases": 2,
+      "status_accuracy": 1.0
+    },
+    "matrix_subtraction": {
+      "cases": 1,
+      "status_accuracy": 1.0
+    },
+    "matrix_transpose": {
+      "cases": 1,
+      "status_accuracy": 1.0
+    },
+    "proof": {
+      "cases": 1,
+      "status_accuracy": 1.0
+    },
+    "rank": {
+      "cases": 4,
+      "status_accuracy": 1.0
+    },
+    "span_basis": {
+      "cases": 1,
+      "status_accuracy": 1.0
+    },
+    "unknown_linear_type": {
+      "cases": 1,
+      "status_accuracy": 1.0
+    }
+  },
+  "failures": [],
+  "gate_passed_for_current_safe_mode": true
+}

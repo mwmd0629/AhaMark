@@ -1,6 +1,6 @@
 # AhaMark 能力与证据矩阵
 
-基线日期：2026-07-28；Git 功能基线 `8746e18`。状态针对本表所列能力的完整范围，不把“有代码”或“测试通过”自动提升为真实环境或生产可用。
+基线日期：2026-07-28；Git 功能基线 `2377cd3`。状态针对本表所列能力的完整范围，不把“有代码”或“测试通过”自动提升为真实环境或生产可用。
 
 ## 状态定义
 
@@ -23,7 +23,7 @@
 | 试卷 OCR | PARTIAL | Fake 编排 150/200/250 页、真实 RapidOCR 清晰印刷体 100/150/250 页完成；准确率、公式/手写/DOCX 仍有缺口 |
 | 学生作业 OCR | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 在隔离 test-only Fake OCR 下验证异步 UI/持久化编排，不证明真实 OCR 能力 |
 | 客观题评分 | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 显示 objective-rule Criterion/Evidence 并由教师接受 |
-| 主观题评分 | UNAVAILABLE | 真实 Provider 不存在，必须人工评分 |
+| 主观题评分 | PARTIAL | 线性代数 registry、离线数学验证、Codex/Worker 建议和教师复核已实现；真实 Provider 仍 unavailable，不能宣称真实质量 |
 | 教师复核 | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E 覆盖客观题接受、主观题 UI 人工评分、强制项与 finalize |
 | 最终成绩 | IMPLEMENTED_AND_VERIFIED | BUSINESS-E2E + 第四部分金标准 v1/v2，合法 complete Snapshot 与缺失不记零通过 |
 | GradeRelease | IMPLEMENTED_AND_VERIFIED | 第四部分验证 v1/v2 固定具体 Snapshot 且历史不漂移；学生送达 OUT_OF_SCOPE |

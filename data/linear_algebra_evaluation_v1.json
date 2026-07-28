@@ -1,0 +1,30 @@
+{
+  "schema_version": "linear-algebra-eval-v1",
+  "source": "synthetic-local-codex",
+  "cases": [
+    {"id":"add-pass","answer_type":"matrix_addition","rule":{"domain":"rational"},"student":[[1,2],[3,4]],"expected":[[1,2],[3,4]],"expected_status":"verified"},
+    {"id":"subtract-conflict","answer_type":"matrix_subtraction","rule":{"domain":"rational"},"student":[[0,0],[0,0]],"expected":[[1,2],[3,4]],"expected_status":"conflict"},
+    {"id":"multiply-pass","answer_type":"matrix_multiplication","rule":{"domain":"rational"},"student":[[1,1],[2,2]],"expected":[[1,1],[2,2]],"expected_status":"verified"},
+    {"id":"multiply-dimension","answer_type":"matrix_multiplication","rule":{"domain":"rational"},"student":[[1,2]],"expected":[[1],[2]],"expected_status":"conflict"},
+    {"id":"transpose-pass","answer_type":"matrix_transpose","rule":{"domain":"rational"},"student":[[1,2],[3,4]],"expected":[[1,2],[3,4]],"expected_status":"verified"},
+    {"id":"determinant-equivalent","answer_type":"determinant","rule":{"domain":"rational"},"student":"1/3","expected":"2/6","expected_status":"verified"},
+    {"id":"determinant-conflict","answer_type":"determinant","rule":{"domain":"rational"},"student":5,"expected":4,"expected_status":"conflict"},
+    {"id":"rank-pass","answer_type":"rank","rule":{"domain":"rational"},"student":[[1,0],[0,1]],"expected":2,"expected_status":"verified"},
+    {"id":"rank-limit","answer_type":"rank","rule":{"domain":"integer"},"student":[[1,2]],"expected":1,"limits":{"max_matrix_size":1},"expected_status":"indeterminate"},
+    {"id":"system-pass","answer_type":"linear_system_solution","rule":{"domain":"rational"},"student":[2,1],"expected":{"matrix":[[1,1],[1,-1]],"target":[3,1]},"expected_status":"verified"},
+    {"id":"system-conflict","answer_type":"linear_system_solution","rule":{"domain":"rational"},"student":[1,2],"expected":{"matrix":[[1,1],[1,-1]],"target":[3,1]},"expected_status":"conflict"},
+    {"id":"independence-pass","answer_type":"linear_independence","rule":{"domain":"rational"},"student":[[1,0],[0,1]],"expected":true,"expected_status":"verified"},
+    {"id":"span-dependent","answer_type":"span_basis","rule":{"domain":"rational"},"student":[[1,0],[2,0]],"expected":[[1,0],[0,1]],"expected_status":"conflict"},
+    {"id":"eigenvalues-pass","answer_type":"eigenvalues","rule":{"domain":"rational"},"student":[3,2],"expected":[[2,0],[0,3]],"expected_status":"verified"},
+    {"id":"eigenvectors-pass","answer_type":"eigenvectors","rule":{"domain":"rational"},"student":[1,0],"expected":{"matrix":[[2,0],[0,3]],"eigenvalue":2},"expected_status":"verified"},
+    {"id":"eigenspace-pass","answer_type":"eigenspace","rule":{"domain":"rational"},"student":[[1,0]],"expected":{"matrix":[[2,0],[0,3]],"eigenvalue":2},"expected_status":"verified"},
+    {"id":"diagonalization-pass","answer_type":"diagonalization","rule":{"domain":"rational"},"student":{"P":[[1,0],[0,1]],"D":[[2,0],[0,3]]},"expected":[[2,0],[0,3]],"expected_status":"verified"},
+    {"id":"diagonalization-singular","answer_type":"diagonalization","rule":{"domain":"rational"},"student":{"P":[[1,0],[0,0]],"D":[[2,0],[0,3]]},"expected":[[2,0],[0,3]],"expected_status":"conflict"},
+    {"id":"domain-mismatch","answer_type":"determinant","rule":{"domain":"integer"},"student":"1/2","expected":1,"expected_status":"indeterminate"},
+    {"id":"missing-domain","answer_type":"rank","rule":{},"student":[[1]],"expected":1,"expected_status":"indeterminate"},
+    {"id":"manual-proof","answer_type":"proof","rule":{"domain":"rational"},"student":"proof text","expected":"proof","expected_status":"manual"},
+    {"id":"unsupported-jordan","answer_type":"jordan_form","rule":{"domain":"rational"},"student":{},"expected":{},"expected_status":"manual"},
+    {"id":"unknown-type","answer_type":"unknown_linear_type","rule":{"domain":"rational"},"student":1,"expected":1,"expected_status":"unsupported"},
+    {"id":"stale-generation","answer_type":"rank","rule":{"domain":"rational"},"student":[[1]],"expected":1,"refs":{"generation":3},"current_refs":{"generation":4},"expected_status":"stale"}
+  ]
+}

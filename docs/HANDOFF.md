@@ -5,8 +5,8 @@
 ## 当前工作区交接摘要（2026-07-28）
 
 - 当前分支为 `master`，功能基线 HEAD 为
-  `8746e1819d0dc78333ee8670c8ce763dc103b528`；比 `origin/master` 超前 2 个提交，未 push。
-- 当前 Alembic head 为 `0024_nullable_publish_readiness_due_at`。
+  `2377cd3`（线性代数批改第 1–4 部分已整合）；未 push。
+- 当前 Alembic head 为 `0025_ai_grading_audit_contract`。
 - 最近完成的教师端改进包括：创建学生/班级后的列表刷新、试卷拖拽上传框、整理页面预览、
   无截止时间、通俗化集中审查文案、已解决问题折叠，以及已发布作业的教师上传学生作业入口。
 - 教师上传学生作业的后端链路已经存在：先创建 `GradingBatch`，再调用
@@ -16,9 +16,19 @@
 - 当前本地服务由 Docker Compose 运行，六个服务均已验证 healthy。项目工作区位于
   `D:\OpenAIData\Workspaces\AhaMark`，Docker 数据位于 `D:\OpenAIData\Docker\LocalDocker`。
   C 盘对应路径只保留目录联接，避免旧工具路径失效。
-- 第六部分最终门禁：第三至第五部分定向后端集合 36 passed、1 warning；完整后端套件在
-  120 秒门禁窗口内未完成。Web Vitest 21 files / 60 tests、lint、typecheck、production build
-  通过；Ruff format/check 与项目范围 mypy 通过。API `/health`、`/ready` 与 Web 均为 HTTP 200。
+- 线性代数第 5 部分离线评测：24 例、status accuracy 100%、false_verified 0、引用拦截率
+  100%、manual/unsupported 遵从率 100%；报告见 `linear-algebra-evaluation-v1-report.json`。
+- 最新教师复核门禁：Web Vitest 21 files / 66 tests、lint、typecheck、production build 通过；
+  线性代数 Worker/guards 定向后端 23 tests 通过；Ruff 与相关 mypy 通过。API `/health`、`/ready`
+  与 Web 均为 HTTP 200。
+
+## 线性代数批改第 1–5 部分
+
+题型 registry 与数学验证桥接（`4aef867`）、服务端评分护栏（`e26734e`）、可审计 Worker/Provider
+闭环与迁移 0025（`dfe7d26`）、教师复核 UI（`2377cd3`）和离线评测/准入门槛（当前第 5 部分）
+均保持 suggestion-only。凡需文件处理、抽取或生成的 API 工作流，当前由本地 Codex/确定性离线代码
+代劳；不上传用户文件，不调用真实外部 Provider。真实 Provider 上线前必须通过评测 gate、隐私/
+成本/延迟/人工抽检及密钥审计，且教师最终决定和 GradeRelease 约束不变。
 
 ## 2026-07-28 批改闭环最终集成基线
 
