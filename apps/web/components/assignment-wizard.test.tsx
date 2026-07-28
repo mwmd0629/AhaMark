@@ -28,6 +28,8 @@ vi.mock("@/lib/api", async () => {
   const assignment = {
     id: "assignment-1",
     title: "线代期末",
+    subject: "线性代数",
+    grade: "大二",
     status: "draft" as const,
     total_score: "20.00",
     updated_at: "2026-07-25T00:00:00Z",
@@ -179,4 +181,19 @@ it("无截止时间保存为 null，回显时保持无截止时间", async () =>
       "2026-07-25T00:00:00Z",
     ),
   );
+});
+
+it("年级使用大一至大四下拉选项并回填编辑值", async () => {
+  render(<AssignmentWizard assignmentId="assignment-1" />);
+  await screen.findByDisplayValue("第一题已保存答案");
+  fireEvent.click(screen.getByRole("button", { name: /基本信息/ }));
+
+  const grade = screen.getByLabelText("年级");
+  expect(grade).toHaveValue("大二");
+  expect(
+    Array.from((grade as HTMLSelectElement).options).map(
+      (option) => option.value,
+    ),
+  ).toEqual(["大一", "大二", "大三", "大四"]);
+  expect(grade.tagName).toBe("SELECT");
 });

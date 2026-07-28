@@ -41,6 +41,8 @@ const steps = [
   "集中审查与发布",
 ];
 
+const GRADE_OPTIONS = ["大一", "大二", "大三", "大四"] as const;
+
 function isPdfPreview(url: string) {
   return /\.pdf(?:$|[?#])/i.test(url);
 }
@@ -328,7 +330,13 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
               defaultValue={item.title}
             />
             <Input name="subject" label="学科" defaultValue={item.subject} />
-            <Input name="grade" label="年级" defaultValue={item.grade} />
+            <Select name="grade" label="年级" defaultValue={item.grade}>
+              {GRADE_OPTIONS.map((grade) => (
+                <option key={grade} value={grade}>
+                  {grade}
+                </option>
+              ))}
+            </Select>
             <Input
               name="total_score"
               label="总分"
