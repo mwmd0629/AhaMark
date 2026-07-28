@@ -1,6 +1,3 @@
-import io
-import json
-import urllib.error
 from decimal import Decimal
 
 import pytest
@@ -30,6 +27,9 @@ def valid_item() -> dict[str, object]:
         "confidence": ".7",
         "decision": "partially supported",
         "evidence_refs": ["block:1"],
+        "validation_refs": [],
+        "error_codes": [],
+        "requires_review": True,
         "matched_steps": ["states the assumption"],
         "missing_steps": ["does not justify the final implication"],
         "detected_errors": ["missing_justification"],
@@ -119,32 +119,11 @@ def configured() -> Settings:
     )
 
 
-class Response(io.BytesIO):
-    headers = {"x-request-id": "request-1"}
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        self.close()
-
-
-def test_provider_rejects_invalid_json_and_timeout(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "urllib.request.urlopen",
-        lambda *_args, **_kwargs: Response(
-            json.dumps({"choices": [{"message": {"content": "not-json"}}]}).encode()
-        ),
-    )
-    invalid = OpenAICompatibleAIScoringProvider(configured()).score({}, context())
-    assert invalid.output is None and invalid.error == "invalid_response:JSONDecodeError"
-
-    def timeout(*_args, **_kwargs):
-        raise urllib.error.URLError("timeout")
-
-    monkeypatch.setattr("urllib.request.urlopen", timeout)
-    failed = OpenAICompatibleAIScoringProvider(configured()).score({}, context())
-    assert failed.output is None and failed.retryable
+def test_real_provider_adapter_is_network_inert() -> None:
+    disabled = OpenAICompatibleAIScoringProvider(configured()).score({}, context())
+    assert disabled.output is None
+    assert disabled.error == "provider_not_authorized"
+    assert disabled.retryable is False
 
 
 def test_step_rule_and_question_total_are_enforced() -> None:

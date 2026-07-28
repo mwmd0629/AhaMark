@@ -1,9 +1,6 @@
 import hashlib
 import json
 import re
-import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -62,30 +59,60 @@ class FakeAIScoringProvider:
     name, endpoint_mode = "fake", "deterministic"
 
     def score(self, payload: dict[str, Any], context: ValidationContext) -> ProviderResponse:
-        criteria: list[dict[str, Any]] = [
-            {
-                "criterion_stable_key": k,
-                "status": "manual_required" if k in context.manual_only else "abstain",
-                "suggested_points": None,
-                "max_points": str(v),
-                "confidence": None,
-                "decision": "manual review required",
-                "evidence_refs": [],
-                "matched_steps": [],
-                "missing_steps": [],
-                "detected_errors": [],
-                "reasoning_summary": "Deterministic fake provider abstained.",
-                "manual_review_reason": "fake_provider",
-                "student_feedback": "",
-                "teacher_note": "Test-only output.",
-                "abstained": True,
-            }
-            for k, v in context.criterion_maxima.items()
-        ]
+        evidence_refs = sorted(context.evidence_ids)[:1]
+        criteria: list[dict[str, Any]] = []
+        for key, maximum in context.criterion_maxima.items():
+            deterministic_pass = context.deterministic.get(key) == "suggested_pass"
+            conflicted = key in context.conflicted
+            manual = key in context.manual_only or key in context.unsupported
+            status = (
+                "deterministic_conflict"
+                if conflicted
+                else "manual_required"
+                if manual
+                else "suggested_pass"
+                if deterministic_pass
+                else "abstain"
+            )
+            scored = status == "suggested_pass"
+            criteria.append(
+                {
+                    "criterion_stable_key": key,
+                    "status": status,
+                    "suggested_points": str(maximum) if scored else None,
+                    "max_points": str(maximum),
+                    "confidence": "1" if scored else None,
+                    "decision": "deterministically verified"
+                    if scored
+                    else "manual review required",
+                    "evidence_refs": evidence_refs if scored or conflicted or manual else [],
+                    "validation_refs": sorted(context.validation_refs.get(key, set())),
+                    "error_codes": (
+                        ["VALIDATION_CONFLICT"] if conflicted else ["MANUAL_ONLY"] if manual else []
+                    ),
+                    "requires_review": True,
+                    "matched_steps": [],
+                    "missing_steps": [],
+                    "detected_errors": [],
+                    "reasoning_summary": (
+                        "Deterministic validation passed."
+                        if scored
+                        else "Deterministic fake provider did not produce an adoptable score."
+                    ),
+                    "manual_review_reason": None if scored else "fake_provider",
+                    "student_feedback": "",
+                    "teacher_note": "Test-only output.",
+                    "abstained": not scored,
+                }
+            )
         raw = {
             "schema_version": "criterion-suggestion-v1",
             "criteria": criteria,
-            "total_suggested_points": None,
+            "total_suggested_points": (
+                str(sum(context.criterion_maxima.values()))
+                if criteria and all(item["suggested_points"] is not None for item in criteria)
+                else None
+            ),
             "student_feedback": "",
             "teacher_summary": "Test provider; manual review required.",
             "strengths": [],
@@ -97,105 +124,22 @@ class FakeAIScoringProvider:
 
 
 class OpenAICompatibleAIScoringProvider:
-    name, endpoint_mode = "openai_compatible", "chat_completions"
+    """Compatibility placeholder kept deliberately network-inert."""
+
+    name, endpoint_mode = "unavailable", "none"
 
     def __init__(self, s: Settings):
         self.s = s
 
     def score(self, payload: dict[str, Any], context: ValidationContext) -> ProviderResponse:
-        if (
-            not self.s.ai_grading_base_url
-            or not self.s.ai_grading_api_key
-            or not self.s.ai_grading_model
-        ):
-            return ProviderResponse(None, error="provider_configuration_incomplete")
-        images = payload.get("_images", [])
-        data_payload = {key: value for key, value in payload.items() if key != "_images"}
-        user_content: list[dict[str, Any]] = [
-            {
-                "type": "text",
-                "text": "DATA\n" + json.dumps(data_payload, ensure_ascii=False),
-            }
-        ]
-        user_content.extend(
-            {
-                "type": "image_url",
-                "image_url": {"url": image["data_url"], "detail": "high"},
-            }
-            for image in images
-        )
-        body = {
-            "model": self.s.ai_grading_model,
-            "temperature": 0,
-            "max_tokens": self.s.ai_grading_max_output_tokens,
-            "store": self.s.ai_grading_store_responses,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-        }
-        req = urllib.request.Request(
-            self.s.ai_grading_base_url.rstrip("/") + "/chat/completions",
-            data=json.dumps(body).encode(),
-            headers={
-                "Authorization": "Bearer " + self.s.ai_grading_api_key,
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        max_attempts = max(1, self.s.ai_grading_max_retries + 1)
-        for attempt in range(1, max_attempts + 1):
-            try:
-                with urllib.request.urlopen(
-                    req, timeout=self.s.ai_grading_timeout_seconds
-                ) as response:
-                    envelope = json.loads(response.read())
-                raw = json.loads(envelope["choices"][0]["message"]["content"])
-                out = validate_output(raw, context)
-                usage = envelope.get("usage", {})
-                return ProviderResponse(
-                    out,
-                    response.headers.get("x-request-id") or envelope.get("id"),
-                    usage.get("prompt_tokens"),
-                    usage.get("completion_tokens"),
-                    canonical_hash(raw),
-                    attempts=attempt,
-                )
-            except urllib.error.HTTPError as exc:
-                retryable = exc.code in {408, 429, 500, 502, 503, 504}
-                if retryable and attempt < max_attempts:
-                    time.sleep(min(2 ** (attempt - 1), 4))
-                    continue
-                return ProviderResponse(
-                    None,
-                    error=f"http_{exc.code}",
-                    retryable=retryable,
-                    attempts=attempt,
-                )
-            except (TimeoutError, urllib.error.URLError) as exc:
-                if attempt < max_attempts:
-                    time.sleep(min(2 ** (attempt - 1), 4))
-                    continue
-                return ProviderResponse(
-                    None,
-                    error=type(exc).__name__,
-                    retryable=True,
-                    attempts=attempt,
-                )
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                return ProviderResponse(
-                    None,
-                    error=f"invalid_response:{type(exc).__name__}",
-                    attempts=attempt,
-                )
-        raise AssertionError("provider attempt loop exhausted")
+        del payload, context
+        return ProviderResponse(None, error="provider_not_authorized")
 
 
 def provider_from_settings(s: Settings) -> AIScoringProvider:
     name = s.ai_grading_provider.lower()
-    if name == "fake" and s.app_env.lower() != "production":
+    if name == "fake" and s.app_env.lower() == "test":
         return FakeAIScoringProvider()
-    if name in {"openai", "openai_compatible", "compatible"}:
-        return OpenAICompatibleAIScoringProvider(s)
+    # Real network providers remain intentionally unreachable until a separate,
+    # explicitly authorized quality and security gate enables them.
     return UnavailableAIScoringProvider()

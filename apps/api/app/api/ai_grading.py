@@ -33,6 +33,7 @@ from app.models import (
     RubricCriterion,
     StructuredRubricVersion,
     StudentAnswer,
+    StudentAnswerRegion,
     Submission,
     now_utc,
 )
@@ -101,16 +102,6 @@ def job_json(db: Session, j: AIScoringJob) -> dict[str, Any]:
         select(AIProviderInvocation).where(AIProviderInvocation.ai_scoring_job_id == j.id)
     ).all()
     draft = db.scalar(select(AIFeedbackDraft).where(AIFeedbackDraft.ai_scoring_job_id == j.id))
-    validation_by_criterion: dict[uuid.UUID, list[str]] = {}
-    if j.math_validation_job_id:
-        validation_rows = db.scalars(
-            select(CriterionValidationResult).where(
-                CriterionValidationResult.validation_job_id == j.math_validation_job_id,
-                CriterionValidationResult.stale_at.is_(None),
-            )
-        ).all()
-        for result in validation_rows:
-            validation_by_criterion.setdefault(result.criterion_id, []).append(str(result.id))
     return {
         "id": str(j.id),
         "student_answer_id": str(j.student_answer_id),
@@ -139,10 +130,12 @@ def job_json(db: Session, j: AIScoringJob) -> dict[str, Any]:
                     error_code=j.error_code,
                 ),
                 "reason": x.manual_review_reason or x.reasoning_summary,
-                "error_codes": [j.error_code] if j.error_code else [],
+                "error_codes": sorted(
+                    set(x.error_codes or []) | ({j.error_code} if j.error_code else set())
+                ),
                 "evidence_ids": x.evidence_refs,
-                "validation_refs": validation_by_criterion.get(x.criterion_id, []),
-                "requires_review": True,
+                "validation_refs": x.validation_refs,
+                "requires_review": x.requires_review,
                 "suggested_points": str(x.suggested_points)
                 if x.suggested_points is not None
                 else None,
@@ -175,6 +168,9 @@ def job_json(db: Session, j: AIScoringJob) -> dict[str, Any]:
                 "request_id": x.provider_request_id,
                 "latency_ms": x.latency_ms,
                 "status": x.response_status,
+                "error_code": x.error_code,
+                "started_at": x.started_at.isoformat() if x.started_at else None,
+                "completed_at": x.completed_at.isoformat() if x.completed_at else None,
             }
             for x in invocations
         ],
@@ -255,6 +251,8 @@ def create_job(data: CreateJob, db: Db, actor: Actor) -> dict[str, Any]:
         .where(
             MathValidationJob.student_answer_id == answer.id,
             MathValidationJob.rubric_version_id == rubric.id,
+            MathValidationJob.reference_answer_version_id == reference.id,
+            MathValidationJob.status == "completed",
             MathValidationJob.stale_at.is_(None),
         )
         .order_by(MathValidationJob.generation.desc())
@@ -438,41 +436,74 @@ def review(suggestion_id: uuid.UUID, data: ReviewInput, db: Db, actor: Actor) ->
     criterion = db.get(RubricCriterion, suggestion.criterion_id)
     if not criterion or criterion.rubric_version_id != job.rubric_version_id:
         raise ApiProblem(409, "CRITERION_SET_INVALID", "Criterion is not part of current rubric")
+    recognition_evidence = db.get(QuestionRecognitionEvidence, job.recognition_evidence_id)
+    block_sources = recognition_evidence.block_sources if recognition_evidence else []
     known_evidence = {
         f"recognition:{job.recognition_evidence_id}",
-        *(
-            str(source.get("block_id") or source.get("id"))
-            for source in (
-                db.get(QuestionRecognitionEvidence, job.recognition_evidence_id).block_sources
-                if db.get(QuestionRecognitionEvidence, job.recognition_evidence_id)
-                else []
-            )
-        ),
+        *(str(source.get("block_id") or source.get("id")) for source in block_sources),
     }
+    known_evidence.update(
+        f"region:{region_id}"
+        for region_id in db.scalars(
+            select(StudentAnswerRegion.id).where(
+                StudentAnswerRegion.student_answer_id == job.student_answer_id,
+                StudentAnswerRegion.status == "confirmed",
+            )
+        )
+    )
+    known_evidence.discard("None")
     try:
         validate_evidence_refs(suggestion.evidence_refs, known_evidence)
     except GuardViolation as exc:
         raise exc.problem(422) from exc
     if job.math_validation_job_id:
         validation_job = db.get(MathValidationJob, job.math_validation_job_id)
-        validation_result = db.scalar(
+        validation_results = db.scalars(
             select(CriterionValidationResult).where(
                 CriterionValidationResult.validation_job_id == job.math_validation_job_id,
                 CriterionValidationResult.criterion_id == suggestion.criterion_id,
-                CriterionValidationResult.generation == validation_job.generation,
+                CriterionValidationResult.generation
+                == (validation_job.generation if validation_job else -1),
+                CriterionValidationResult.stale_at.is_(None),
             )
-        ) if validation_job else None
-        try:
-            validate_validation_link(
-                validation_job,
-                validation_result,
-                answer_id=job.student_answer_id,
-                rubric_id=job.rubric_version_id,
-                reference_id=job.reference_answer_version_id,
-                criterion_id=suggestion.criterion_id,
+        ).all()
+        validation_result = validation_results[0] if len(validation_results) == 1 else None
+        if set(suggestion.validation_refs) != {str(item.id) for item in validation_results}:
+            raise ApiProblem(
+                409,
+                "VALIDATION_STALE",
+                "Suggestion validation references no longer match current results",
             )
-        except GuardViolation as exc:
-            raise exc.problem(409 if exc.status == "stale" else 422) from exc
+        if data.action != "rejected":
+            try:
+                validate_validation_link(
+                    validation_job,
+                    validation_result,
+                    answer_id=job.student_answer_id,
+                    rubric_id=job.rubric_version_id,
+                    reference_id=job.reference_answer_version_id,
+                    criterion_id=suggestion.criterion_id,
+                )
+            except GuardViolation as exc:
+                raise exc.problem(409 if exc.status == "stale" else 422) from exc
+    elif suggestion.validation_refs:
+        raise ApiProblem(409, "VALIDATION_STALE", "Unexpected validation references")
+    suggestion_status = public_status(
+        suggestion.status,
+        points=suggestion.suggested_points,
+        stale=bool(job.stale_at),
+        error_code=job.error_code,
+    )
+    if data.action == "accepted" and (
+        suggestion_status != "scored"
+        or suggestion.suggested_points is None
+        or not suggestion.requires_review
+    ):
+        raise ApiProblem(
+            422,
+            "AI_SUGGESTION_NOT_ADOPTABLE",
+            "Only a current scored suggestion may be accepted",
+        )
     if data.action == "accepted":
         selected = suggestion.suggested_points
     elif data.action == "modified":

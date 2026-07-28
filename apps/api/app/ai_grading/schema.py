@@ -1,3 +1,4 @@
+import re
 from decimal import Decimal
 from typing import Literal, Self
 
@@ -18,7 +19,6 @@ InternalStatus = Literal[
     "insufficient_evidence",
     "deterministic_conflict",
     "manual_required",
-    "abstain",
 ]
 Status = Literal["scored", "abstain", "manual", "conflict", "insufficient", "failed", "stale"]
 Error = Literal[
@@ -50,6 +50,9 @@ class CriterionSuggestion(BaseModel):
     confidence: Decimal | None = Field(default=None, ge=0, le=1)
     decision: str = Field(min_length=1, max_length=80)
     evidence_refs: list[str]
+    validation_refs: list[str]
+    error_codes: list[str] = Field(default_factory=list, max_length=20)
+    requires_review: Literal[True]
     matched_steps: list[str] = Field(default_factory=list)
     missing_steps: list[str] = Field(default_factory=list)
     detected_errors: list[Error] = Field(default_factory=list)
@@ -68,6 +71,10 @@ class CriterionSuggestion(BaseModel):
             raise ValueError("suggested points out of range")
         if self.status == "deterministic_conflict" and not self.manual_review_reason:
             raise ValueError("deterministic conflict requires a review reason")
+        if any(not re.fullmatch(r"[A-Z][A-Z0-9_]{0,79}", code) for code in self.error_codes):
+            raise ValueError("invalid machine-readable error code")
+        if self.suggested_points is not None and self.error_codes:
+            raise ValueError("scored suggestion cannot carry blocking error codes")
         if not self.evidence_refs and self.status not in {"abstain", "insufficient_evidence"}:
             raise ValueError("scored suggestion requires evidence")
         return self
@@ -107,8 +114,9 @@ class ValidationContext(BaseModel):
     step_sizes: dict[str, Decimal] = Field(default_factory=dict)
     question_max_points: Decimal | None = None
     criterion_keys: set[str] | None = None
-    validation_refs: dict[str, str] = Field(default_factory=dict)
+    validation_refs: dict[str, set[str]] = Field(default_factory=dict)
     unsupported: set[str] = Field(default_factory=set)
+    conflicted: set[str] = Field(default_factory=set)
 
 
 def validate_output(raw: object, context: ValidationContext) -> AIGradingOutput:
@@ -131,8 +139,21 @@ def validate_output(raw: object, context: ValidationContext) -> AIGradingOutput:
             raise ValueError(str(exc)) from exc
         if key in context.manual_only and item.status != "manual_required":
             raise ValueError("manual-only criterion must remain manual")
-        if key in context.unsupported and item.suggested_points is not None:
+        expected_validation_refs = context.validation_refs.get(key, set())
+        if (
+            len(item.validation_refs) != len(set(item.validation_refs))
+            or set(item.validation_refs) != expected_validation_refs
+        ):
+            raise ValueError("validation reference mismatch")
+        if key in context.unsupported and (
+            item.suggested_points is not None
+            or item.status not in {"manual_required", "abstain", "insufficient_evidence"}
+        ):
             raise ValueError("unsupported criterion cannot be scored")
+        if key in context.conflicted and (
+            item.suggested_points is not None or item.status != "deterministic_conflict"
+        ):
+            raise ValueError("validation conflict cannot be scored")
         expected = context.deterministic.get(key)
         if expected and item.status not in {expected, "deterministic_conflict", "manual_required"}:
             raise ValueError("AI result conflicts with deterministic fact without conflict flag")

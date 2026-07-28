@@ -2578,6 +2578,9 @@ class AICriterionSuggestion(Base):
     max_points: Mapped[Any] = mapped_column(Numeric(10, 2))
     confidence: Mapped[Any | None] = mapped_column(Numeric(6, 5))
     evidence_refs: Mapped[list[str]] = mapped_column(JSON, default=list)
+    validation_refs: Mapped[list[str]] = mapped_column(JSON, default=list)
+    error_codes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    requires_review: Mapped[bool] = mapped_column(default=True)
     matched_steps: Mapped[list[str]] = mapped_column(JSON, default=list)
     missing_steps: Mapped[list[str]] = mapped_column(JSON, default=list)
     detected_errors: Mapped[list[str]] = mapped_column(JSON, default=list)
@@ -2630,6 +2633,9 @@ class AIProviderInvocation(Base):
     retry_number: Mapped[int] = mapped_column(Integer, default=0)
     response_status: Mapped[str] = mapped_column(String(40))
     capability_gaps: Mapped[list[str]] = mapped_column(JSON, default=list)
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
