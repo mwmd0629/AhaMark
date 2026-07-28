@@ -58,6 +58,7 @@ def test_question_anchor_formats_are_normalized_without_unknown_creation() -> No
         "\uff081\uff09",
         "(1)",
         "2.1",
+        "Q1:",
     ]
     assert [_normalize_question_number(value) for value in variants] == [
         "1",
@@ -69,6 +70,7 @@ def test_question_anchor_formats_are_normalized_without_unknown_creation() -> No
         "1",
         "1",
         "2.1",
+        "1",
     ]
     assert _normalize_question_number("\u7b54\u6848\u5f15\u7528\u7b2c 9 \u9898") is None
 
@@ -106,6 +108,7 @@ def test_processing_job_is_idempotent_and_region_bounds_are_enforced() -> None:
             .order_by(SubmissionPage.page_number)
         ).all()
         assert len(pages) == 3
+        initial_rotation = pages[0].rotation
         answer = db.scalar(
             select(StudentAnswer).where(
                 StudentAnswer.submission_id == submission_id,
@@ -127,6 +130,16 @@ def test_processing_job_is_idempotent_and_region_bounds_are_enforced() -> None:
             },
         )
         assert invalid.status_code == 422
+        rotated = client.post(
+            f"/api/submissions/{submission_id}/processing-pages/{pages[0].id}/rotate"
+            "?run_now=true",
+            json={"degrees": 90},
+        )
+        assert rotated.status_code == 200, rotated.text
+        db.expire_all()
+        rotated_page = db.get(SubmissionPage, pages[0].id)
+        assert rotated_page is not None
+        assert rotated_page.rotation == (initial_rotation + 90) % 360
     finally:
         settings.recognition_provider = previous
         app.dependency_overrides.pop(get_storage, None)

@@ -9,6 +9,7 @@ from app.models import (
     ClassStudent,
     GradingCriterionResult,
     GradingEvidence,
+    GradingResult,
     MembershipStatus,
     PaperVersion,
     RubricVersion,
@@ -16,6 +17,7 @@ from app.models import (
     StudentAnswer,
     SubmissionPage,
     SubmissionRecognitionBlock,
+    TeacherReview,
     VersionStatus,
     now_utc,
 )
@@ -259,6 +261,61 @@ def test_criteria_evidence_bulk_eligibility_and_consistency() -> None:
             f"/api/grading-batches/{batch_id}/questions/{answer.question_id}/consistency"
         )
         assert consistency.status_code == 200 and consistency.json()["total"] == 1
+    finally:
+        settings.recognition_provider = previous
+        app.dependency_overrides.pop(get_storage, None)
+        db.close()
+
+
+def test_local_codex_suggestion_is_review_only_and_supersedes_previous_result() -> None:
+    db, _storage, _batch_id, submission_id, _question_id = workflow()
+    settings = get_settings()
+    previous = settings.recognition_provider
+    settings.recognition_provider = "fake"
+    try:
+        client.post(
+            f"/api/submissions/{submission_id}/recognition-jobs?run_now=true",
+            json={"idempotency_key": "codex-ocr"},
+        )
+        answer = db.scalar(
+            select(StudentAnswer).where(StudentAnswer.submission_id == submission_id)
+        )
+        assert answer is not None
+        answer.requires_review = False
+        answer.status = "ready_for_grading"
+        db.commit()
+        graded = client.post(f"/api/student-answers/{answer.id}/grade")
+        assert graded.status_code == 200, graded.text
+        result = db.scalar(
+            select(GradingResult).where(GradingResult.student_answer_id == answer.id)
+        )
+        assert result is not None
+        criterion_id = db.scalar(
+            select(GradingCriterionResult.rubric_item_id).where(
+                GradingCriterionResult.grading_result_id == result.id
+            )
+        )
+        assert criterion_id is not None
+        suggestion = client.put(
+            f"/api/student-answers/{answer.id}/codex-suggestion",
+            json={
+                "score": 8,
+                "reasoning": "本地建议：答案证据完整，但结论表述不够严谨。",
+                "criterion_scores": {str(criterion_id): 8},
+            },
+        )
+        assert suggestion.status_code == 200, suggestion.text
+        assert suggestion.json()["provider"] == "codex-assisted"
+        assert suggestion.json()["status"] == "suggested"
+        assert db.scalar(
+            select(TeacherReview).where(TeacherReview.student_answer_id == answer.id)
+        ) is None
+        latest = db.scalar(
+            select(GradingResult)
+            .where(GradingResult.student_answer_id == answer.id)
+            .order_by(GradingResult.created_at.desc())
+        )
+        assert latest is not None and latest.score == 8 and latest.status == "suggested"
     finally:
         settings.recognition_provider = previous
         app.dependency_overrides.pop(get_storage, None)

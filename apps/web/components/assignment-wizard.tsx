@@ -146,6 +146,25 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
     () => item?.paper_version?.questions.find((x) => x.id === selectedQuestion),
     [item, selectedQuestion],
   );
+  const uploadedFiles = useMemo(() => {
+    const files = new Map<
+      string,
+      { id: string; name: string; pageCount: number }
+    >();
+    for (const page of item?.paper_version?.pages ?? []) {
+      const current = files.get(page.stored_file_id);
+      if (current) {
+        current.pageCount += 1;
+      } else {
+        files.set(page.stored_file_id, {
+          id: page.stored_file_id,
+          name: page.file_name ?? `已上传文件 ${files.size + 1}`,
+          pageCount: 1,
+        });
+      }
+    }
+    return [...files.values()];
+  }, [item?.paper_version?.pages]);
   useEffect(() => {
     const saved = item?.rubric_version?.question_rubrics.find(
       (rubric) => rubric.question_id === selectedQuestion,
@@ -433,6 +452,28 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
       {step === 2 && (
         <Card className="space-y-4 p-6">
           <h2 className="font-bold">上传试卷</h2>
+          {uploadedFiles.length > 0 && (
+            <section
+              aria-label="已上传文件"
+              className="rounded-xl border border-emerald-200 bg-emerald-50 p-4"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="font-semibold text-emerald-900">
+                  已上传到此作业（{uploadedFiles.length} 个文件）
+                </h3>
+                <span className="text-sm text-emerald-800">
+                  继续添加不会删除已有文件
+                </span>
+              </div>
+              <ul className="mt-2 space-y-1 text-sm text-emerald-950">
+                {uploadedFiles.map((file, index) => (
+                  <li key={file.id}>
+                    {index + 1}. {file.name} · {file.pageCount} 页 · 已保留
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
           <div
             className={`grid min-h-44 cursor-pointer place-items-center rounded-2xl border-2 border-dashed p-6 text-center transition ${
               dragging
@@ -525,7 +566,7 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
                 {!["uploading", "processing"].includes(uploadState) && (
                   <Button variant="ghost" onClick={() => chooseUpload()}>
                     {uploadState === "success"
-                      ? "选择其他文件"
+                      ? "继续添加文件"
                       : "删除所选文件"}
                   </Button>
                 )}
@@ -534,7 +575,7 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
           )}
           <p className="text-sm">
             当前共 {item.paper_version?.pages.length ?? 0}{" "}
-            页。上传成功后可直接进入下一步。
+            页。选择新的本地文件只会清空当前待选项，已经上传成功的文件仍保留在此作业中。
           </p>
           <Button
             onClick={() => setStep(3)}

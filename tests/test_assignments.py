@@ -150,6 +150,7 @@ def test_file_pages_question_region_rubric_and_publish():
     detail = client.get(f"/api/assignments/{aid}").json()
     page = detail["paper_version"]["pages"][0]
     assert (page["width"], page["height"]) == (100, 200)
+    assert page["file_name"] == "paper.png"
     assert (
         client.patch(f"/api/assignments/{aid}/pages/{page['id']}", json={"rotation": 90}).json()[
             "rotation"

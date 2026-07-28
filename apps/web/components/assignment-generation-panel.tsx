@@ -28,7 +28,7 @@ const STAGES: { key: AssignmentGenerationStage; label: string }[] = [
   { key: "analyzing", label: "分析输入" },
   { key: "processing_pages", label: "检查页面" },
   { key: "extracting_questions", label: "页面整理与题目抽取" },
-  { key: "generating_rubrics", label: "生成 Rubric（占位）" },
+  { key: "generating_rubrics", label: "生成答案与评分标准" },
   { key: "validating", label: "结构验证" },
 ];
 const STATUS_LABEL: Record<string, string> = {
@@ -160,6 +160,9 @@ export function AssignmentGenerationPanel({
     }
     return byStage;
   }, [current]);
+  const codexQuestionDraftReady =
+    latestStages.get("extracting_questions")?.result_payload?.capability ===
+    "codex_local";
 
   const act = async (operation: () => Promise<AssignmentGenerationJob>) => {
     setBusy(true);
@@ -344,9 +347,14 @@ export function AssignmentGenerationPanel({
             <span>风险：信息 {risk.info}</span>
             <span>警告 {risk.warning}</span>
             <span>阻断 {risk.blocking}</span>
-            {current.provider_mode === "unavailable" && (
-              <strong className="text-amber-700">等待 Codex 代生成</strong>
-            )}
+            {current.provider_mode === "unavailable" &&
+              (codexQuestionDraftReady ? (
+                <strong className="text-emerald-700">
+                  Codex 题目草稿已生成，等待教师确认
+                </strong>
+              ) : (
+                <strong className="text-amber-700">等待 Codex 代生成</strong>
+              ))}
             {ACTIVE.has(current.status) && (
               <Button
                 variant="danger"

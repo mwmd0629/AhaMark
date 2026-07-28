@@ -43,6 +43,7 @@ vi.mock("@/lib/api", async () => {
       pages: [1, 2, 3].map((page) => ({
         id: `page-${page}`,
         stored_file_id: "file-1",
+        file_name: "原试卷.pdf",
         page_number: page,
         source_page_number: page,
         rotation: 0 as const,
@@ -137,6 +138,14 @@ it("支持拖拽上传并显示文件、处理状态和成功页数", async () =
   fireEvent.click(screen.getByRole("button", { name: "开始上传" }));
   expect(await screen.findByText("上传成功")).toBeInTheDocument();
   expect(screen.getAllByText(/共 3 页/).length).toBeGreaterThan(0);
+  expect(screen.getByRole("region", { name: "已上传文件" })).toHaveTextContent(
+    "原试卷.pdf · 3 页 · 已保留",
+  );
+  expect(screen.getByText("继续添加不会删除已有文件")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "继续添加文件" }));
+  expect(screen.getByRole("region", { name: "已上传文件" })).toHaveTextContent(
+    "原试卷.pdf · 3 页 · 已保留",
+  );
 });
 
 it("拒绝非法格式并允许重新选择", async () => {

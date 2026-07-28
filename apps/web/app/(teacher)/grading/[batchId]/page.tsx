@@ -17,6 +17,38 @@ import { Button, Card, PageHeader } from "@/components/ui";
 import { SubmissionSegmentationWorkspace } from "@/components/submission-segmentation-workspace";
 
 const terminal = new Set(["completed", "partially_completed", "failed"]);
+const submissionStatusLabels: Record<string, string> = {
+  uploaded: "已上传",
+  processing: "处理中",
+  recognized: "已识别",
+  grading: "批改中",
+  finalized: "已定稿",
+  failed: "处理失败",
+  stale: "结果已失效",
+  merged: "已合并",
+  voided: "已撤销",
+};
+const releaseStatusLabels: Record<string, string> = {
+  draft: "草稿",
+  released: "已发布",
+  superseded: "已被新版本替代",
+};
+const releaseMeaningLabels: Record<string, string> = {
+  score_only: "仅发布分数",
+  score_and_feedback: "发布分数与评语",
+};
+const reportTypeLabels: Record<string, string> = {
+  gradebook_xlsx: "成绩表",
+  student_report_pdf: "学生报告",
+};
+const reportStatusLabels: Record<string, string> = {
+  queued: "排队中",
+  running: "生成中",
+  completed: "已完成",
+  partially_completed: "部分完成",
+  failed: "失败",
+  expired: "已过期",
+};
 
 export default function GradingBatchPage({
   params,
@@ -191,22 +223,19 @@ export default function GradingBatchPage({
 
   async function createRelease() {
     if (!batch) return;
-    await act(
-      "GradeRelease 已创建并固定具体 complete ScoreSnapshot",
-      async () => {
-        const value = await analyticsApi.createRelease({
-          assignment_id: batch.assignment_id,
-          class_id: batch.class_id,
-          release_mode: "score_and_feedback",
-          idempotency_key: crypto.randomUUID(),
-        });
-        setRelease(value);
-        setReleases((old) => [
-          value,
-          ...old.filter((item) => item.id !== value.id),
-        ]);
-      },
-    );
+    await act("成绩发布版本已创建，并固定当前完整成绩快照", async () => {
+      const value = await analyticsApi.createRelease({
+        assignment_id: batch.assignment_id,
+        class_id: batch.class_id,
+        release_mode: "score_and_feedback",
+        idempotency_key: crypto.randomUUID(),
+      });
+      setRelease(value);
+      setReleases((old) => [
+        value,
+        ...old.filter((item) => item.id !== value.id),
+      ]);
+    });
   }
 
   async function createReport(
@@ -261,6 +290,17 @@ export default function GradingBatchPage({
   }
 
   if (!batch) return <Card className="p-8">正在加载批次…</Card>;
+  const workflow = batch.workflow ?? {
+    stage_counts: {},
+    blocked: [],
+    completed_count: batch.reviewed_count ?? 0,
+    blocked_count: Math.max(
+      0,
+      (batch.submission_count ?? submissions.length) -
+        (batch.reviewed_count ?? 0),
+    ),
+  };
+  const submissionCount = batch.submission_count ?? submissions.length;
   return (
     <div
       className="space-y-6"
@@ -287,7 +327,96 @@ export default function GradingBatchPage({
         </Card>
       )}
 
-      <Card className="space-y-4 p-5">
+      <Card className="space-y-4 p-5" data-testid="batch-progress-overview">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="font-bold">批改进度总览</h2>
+            <p className="mt-1 text-sm text-slate-600">
+              每份作业只显示当前最先需要处理的环节，完成后会自动进入下一阶段。
+            </p>
+          </div>
+          <span className="rounded-full bg-indigo-50 px-3 py-1 text-sm text-indigo-700">
+            已完成 {workflow.completed_count}/{submissionCount}
+          </span>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+          {[
+            ["已上传", submissionCount],
+            ["已识别", batch.recognized_count ?? 0],
+            ["已有建议分", batch.graded_count ?? 0],
+            ["教师已确认", batch.reviewed_count ?? 0],
+            ["处理失败", batch.failed_count ?? 0],
+          ].map(([label, value]) => (
+            <div key={label} className="rounded-xl border bg-slate-50 p-3">
+              <div className="text-xs text-slate-500">{label}</div>
+              <div className="mt-1 text-2xl font-bold">{value}</div>
+            </div>
+          ))}
+        </div>
+        {workflow.blocked.length ? (
+          <div className="space-y-2" data-testid="batch-blockers">
+            <h3 className="font-semibold">
+              当前待处理 {workflow.blocked_count} 份
+            </h3>
+            {workflow.blocked.map((item) => (
+              <div
+                key={item.stage}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 p-3"
+                data-testid="batch-blocker"
+                data-stage={item.stage}
+              >
+                <div>
+                  <p className="font-medium">
+                    {item.stage_label} · {item.count} 份
+                  </p>
+                  <p className="text-sm text-slate-600">{item.reason}</p>
+                  <p className="text-xs text-slate-500">
+                    下一步：{item.action}
+                  </p>
+                </div>
+                {["recognition", "failed", "pages"].includes(item.stage) ? (
+                  <Button
+                    variant="outline"
+                    disabled={!submissions.length || busy}
+                    onClick={() => void startOcr()}
+                  >
+                    启动或重试识别
+                  </Button>
+                ) : item.stage === "grading" ? (
+                  <Button
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() => void gradeAll()}
+                  >
+                    生成评分建议
+                  </Button>
+                ) : item.stage === "matching" ? (
+                  <Button
+                    variant="outline"
+                    onClick={() =>
+                      document
+                        .getElementById("pending-matches")
+                        ?.scrollIntoView({ behavior: "smooth" })
+                    }
+                  >
+                    查看待匹配文件
+                  </Button>
+                ) : (
+                  <Link href={`/grading/${batch.id}/review`}>
+                    <Button variant="outline">进入教师复核</Button>
+                  </Link>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="rounded-xl bg-emerald-50 p-3 text-sm text-emerald-800">
+            当前没有阻塞项，可以进行成绩就绪检查。
+          </p>
+        )}
+      </Card>
+
+      <Card className="space-y-4 p-5" id="upload-and-pages">
         <h2 className="font-bold">1. 上传、匹配与页面整理</h2>
         <form action={upload} className="flex flex-wrap items-end gap-3">
           <label className="grid gap-1 text-sm font-medium">
@@ -314,14 +443,31 @@ export default function GradingBatchPage({
                 data-student-id={item.student_id}
               >
                 <div className="flex justify-between">
-                  <strong>合成学生提交</strong>
+                  <strong>学生作业</strong>
                   <span className="rounded-full bg-slate-100 px-3 py-1 text-xs">
-                    {item.status}
+                    {submissionStatusLabels[item.status] ?? item.status}
                   </span>
                 </div>
                 <p className="text-xs text-slate-500">
-                  页面 {item.page_count} · Submission {item.id}
+                  页面 {item.page_count} · 作业记录 {item.id}
                 </p>
+                <div
+                  className={`mt-3 rounded-lg border p-3 text-sm ${
+                    item.workflow.stage === "completed"
+                      ? "border-emerald-200 bg-emerald-50"
+                      : item.workflow.stage === "failed"
+                        ? "border-red-200 bg-red-50"
+                        : "border-amber-200 bg-amber-50"
+                  }`}
+                  data-testid="submission-workflow"
+                  data-stage={item.workflow.stage}
+                >
+                  <p className="font-medium">{item.workflow.stage_label}</p>
+                  <p className="text-slate-600">{item.workflow.reason}</p>
+                  <p className="text-xs text-slate-500">
+                    下一步：{item.workflow.action}
+                  </p>
+                </div>
                 {(() => {
                   const pageIds =
                     workspace?.items
@@ -410,6 +556,7 @@ export default function GradingBatchPage({
         </div>
         {batch.matching.items.some((item) => item.status === "pending") && (
           <div
+            id="pending-matches"
             className="space-y-3 rounded-xl border border-amber-300 bg-amber-50 p-4"
             data-testid="pending-matches"
           >
@@ -532,20 +679,20 @@ export default function GradingBatchPage({
       </Card>
 
       <Card className="space-y-4 p-5">
-        <h2 className="font-bold">3. GradeRelease 与报告</h2>
+        <h2 className="font-bold">3. 成绩发布与报告</h2>
         <div className="flex flex-wrap gap-2">
           <Button
             variant="outline"
             onClick={() => void checkReadiness()}
             disabled={busy}
           >
-            查看 grade readiness
+            检查成绩是否可发布
           </Button>
           <Button
             onClick={() => void createRelease()}
             disabled={!readiness?.releasable_count || busy}
           >
-            创建新的 GradeRelease 版本
+            创建新的成绩发布版本
           </Button>
         </div>
         {readiness && (
@@ -556,7 +703,7 @@ export default function GradingBatchPage({
         )}
         {releases.length > 0 && (
           <div className="space-y-2" data-testid="grade-release-versions">
-            <h3 className="font-semibold">历史发布版本（固定 Snapshot）</h3>
+            <h3 className="font-semibold">历史发布版本（固定成绩快照）</h3>
             {releases.map((item) => (
               <button
                 key={item.id}
@@ -571,7 +718,8 @@ export default function GradingBatchPage({
                 data-release-version={item.version}
                 onClick={() => setRelease(item)}
               >
-                v{item.version} · {item.status} · Snapshot{" "}
+                第 {item.version} 版 ·{" "}
+                {releaseStatusLabels[item.status] ?? item.status} · 成绩快照{" "}
                 {item.items
                   .map((releaseItem) => releaseItem.score_snapshot_id)
                   .join("，")}
@@ -586,7 +734,9 @@ export default function GradingBatchPage({
             data-release-id={release.id}
           >
             <p>
-              发布 v{release.version} · {release.meaning} · 固定快照{" "}
+              发布第 {release.version} 版 ·{" "}
+              {releaseMeaningLabels[release.meaning] ?? release.meaning} ·
+              固定成绩快照{" "}
               {release.items.map((item) => item.score_snapshot_id).join("，")}
             </p>
             <div className="flex flex-wrap gap-2">
@@ -594,7 +744,7 @@ export default function GradingBatchPage({
                 onClick={() => void createReport("gradebook_xlsx")}
                 disabled={busy}
               >
-                生成 XLSX
+                生成 Excel 成绩表
               </Button>
               <Button
                 onClick={() =>
@@ -625,7 +775,8 @@ export default function GradingBatchPage({
             data-report-assignment-id={batch.assignment_id}
             data-report-class-id={batch.class_id}
           >
-            {job.report_type} · {job.status} · {job.progress}%
+            {reportTypeLabels[job.report_type] ?? job.report_type} ·{" "}
+            {reportStatusLabels[job.status] ?? job.status} · {job.progress}%
             {["failed", "expired", "partially_completed"].includes(
               job.status,
             ) ? (

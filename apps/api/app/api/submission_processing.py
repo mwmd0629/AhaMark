@@ -41,6 +41,10 @@ class ProcessingStart(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=128)
 
 
+class RotatePageInput(BaseModel):
+    degrees: Literal[-90, 90, 180]
+
+
 class RegionMutation(BaseModel):
     question_id: uuid.UUID
     submission_page_id: uuid.UUID
@@ -221,10 +225,15 @@ def list_processing_pages(
     ]
 
 
-def _region_json(region: StudentAnswerRegion, answer: StudentAnswer) -> dict[str, Any]:
+def _region_json(
+    region: StudentAnswerRegion,
+    answer: StudentAnswer,
+    question: Question | None = None,
+) -> dict[str, Any]:
     return {
         "id": str(region.id),
         "question_id": str(answer.question_id),
+        "question_number": question.question_number if question else None,
         "student_answer_id": str(answer.id),
         "submission_page_id": str(region.submission_page_id),
         "x": region.x,
@@ -243,12 +252,13 @@ def _region_json(region: StudentAnswerRegion, answer: StudentAnswer) -> dict[str
 def list_regions(submission_id: uuid.UUID, db: Db, actor: Actor) -> list[dict[str, Any]]:
     _submission(db, actor.id, submission_id)
     rows = db.execute(
-        select(StudentAnswerRegion, StudentAnswer)
+        select(StudentAnswerRegion, StudentAnswer, Question)
         .join(StudentAnswer, StudentAnswer.id == StudentAnswerRegion.student_answer_id)
+        .join(Question, Question.id == StudentAnswer.question_id)
         .where(StudentAnswer.submission_id == submission_id)
         .order_by(StudentAnswerRegion.submission_page_id, StudentAnswerRegion.y)
     ).all()
-    return [_region_json(region, answer) for region, answer in rows]
+    return [_region_json(region, answer, question) for region, answer, question in rows]
 
 
 def _validate_region(
@@ -358,7 +368,7 @@ def add_region(
     _invalidate(db, answer)
     audit(db, actor.id, "submission_region.create", "student_answer_region", region.id)
     db.commit()
-    return _region_json(region, answer)
+    return _region_json(region, answer, db.get(Question, answer.question_id))
 
 
 @router.put("/submissions/{submission_id}/region-candidates/{region_id}")
@@ -396,7 +406,7 @@ def update_region(
         _invalidate(db, old_answer)
     audit(db, actor.id, "submission_region.update", "student_answer_region", region.id)
     db.commit()
-    return _region_json(region, answer)
+    return _region_json(region, answer, db.get(Question, answer.question_id))
 
 
 @router.delete("/submissions/{submission_id}/region-candidates/{region_id}", status_code=204)
@@ -495,6 +505,72 @@ def retry_page(
     if job is None or page is None:
         raise ApiProblem(404, "PROCESSING_PAGE_NOT_FOUND", "处理页面不存在")
     page.processing_status, job.status, job.stage = "pending", "queued", "page_processing"
+    db.commit()
+    if run_now:
+        run_submission_processing(db, storage, get_settings(), job.id, page.id)
+    else:
+        _dispatch(job.id, page.id)
+    return _job_json(job)
+
+
+@router.post("/submissions/{submission_id}/processing-pages/{page_id}/rotate")
+def rotate_page(
+    submission_id: uuid.UUID,
+    page_id: uuid.UUID,
+    data: RotatePageInput,
+    db: Db,
+    actor: Actor,
+    storage: Storage,
+    run_now: bool = False,
+) -> dict[str, Any]:
+    submission = _editable(db, actor.id, submission_id)
+    page = db.scalar(
+        select(SubmissionPage).where(
+            SubmissionPage.id == page_id,
+            SubmissionPage.submission_id == submission.id,
+        )
+    )
+    if page is None:
+        raise ApiProblem(404, "PROCESSING_PAGE_NOT_FOUND", "处理页面不存在")
+    job = db.scalar(
+        select(SubmissionProcessingJob)
+        .where(
+            SubmissionProcessingJob.submission_id == submission.id,
+            SubmissionProcessingJob.owner_id == actor.id,
+        )
+        .order_by(SubmissionProcessingJob.created_at.desc())
+    )
+    if job is None:
+        job = SubmissionProcessingJob(
+            owner_id=actor.id,
+            submission_id=submission.id,
+            idempotency_key=f"rotate:{submission.id}:{page.id}:{uuid.uuid4().hex}",
+            status="queued",
+            stage="page_processing",
+            config_version=PROCESSING_VERSION,
+        )
+        db.add(job)
+        db.flush()
+    page.rotation = ((page.rotation or 0) + data.degrees) % 360
+    page.processing_status, page.processing_error_code, page.processing_error_message = (
+        "pending",
+        None,
+        None,
+    )
+    job.status, job.stage, job.error_code, job.error_message = (
+        "queued",
+        "page_processing",
+        None,
+        None,
+    )
+    audit(
+        db,
+        actor.id,
+        "submission_page.rotate",
+        "submission_page",
+        page.id,
+        {"degrees": data.degrees, "rotation": page.rotation},
+    )
     db.commit()
     if run_now:
         run_submission_processing(db, storage, get_settings(), job.id, page.id)

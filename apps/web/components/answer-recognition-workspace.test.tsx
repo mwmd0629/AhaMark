@@ -90,7 +90,10 @@ it("edits, splits, merges, reorders, retries and confirms evidence", async () =>
       regionIds={["region-1"]}
     />,
   );
-  await screen.findByText("原始：first answer");
+  await screen.findByText("原始文字：first answer");
+  expect(screen.getByTestId("answer-recognition-details")).not.toHaveAttribute(
+    "open",
+  );
   fireEvent.click(screen.getAllByRole("button", { name: "编辑" })[0]);
   const dialog = screen.getByRole("dialog", { name: "编辑识别块" });
   fireEvent.click(dialog);
@@ -125,7 +128,7 @@ it("renders finalized evidence as read-only", async () => {
       readOnly
     />,
   );
-  await screen.findByText("finalized · 只读");
+  await screen.findByText("已定稿 · 只读 · 点击展开");
   expect(screen.getAllByRole("button", { name: "编辑" })[0]).toBeDisabled();
   expect(screen.getByRole("button", { name: "确认识别结果" })).toBeDisabled();
 });

@@ -367,6 +367,7 @@ export type AssignmentRecord = {
     pages: {
       id: string;
       stored_file_id: string;
+      file_name?: string;
       page_number: number;
       source_page_number?: number;
       width?: number;
@@ -618,6 +619,19 @@ export type GradingBatch = {
   graded_count: number;
   reviewed_count: number;
   failed_count: number;
+  workflow: {
+    stage_counts: Record<string, number>;
+    completed_count: number;
+    blocked_count: number;
+    blocked: Array<{
+      stage: string;
+      stage_label: string;
+      reason_code?: string;
+      reason: string;
+      action: string;
+      count: number;
+    }>;
+  };
   matching: {
     total: number;
     confirmed: number;
@@ -751,6 +765,30 @@ export const gradingApi = {
       method: "PUT",
       body: JSON.stringify(data),
     }),
+  saveCodexSuggestion: (
+    answerId: string,
+    data: {
+      score: string;
+      reasoning: string;
+      criterion_scores: Record<string, string>;
+    },
+  ) =>
+    request(`/api/student-answers/${answerId}/codex-suggestion`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  bulkAcceptEligibility: (batchId: string) =>
+    request<BulkAcceptEligibility>(
+      `/api/grading-batches/${batchId}/bulk-accept-eligibility`,
+    ),
+  bulkAccept: (batchId: string, answerIds: string[]) =>
+    request<{
+      accepted_answer_ids: string[];
+      excluded: Array<{ answer_id: string; reasons: string[] }>;
+    }>(`/api/grading-batches/${batchId}/bulk-accept`, {
+      method: "POST",
+      body: JSON.stringify({ answer_ids: answerIds }),
+    }),
   finalize: (submissionId: string) =>
     request(`/api/submissions/${submissionId}/finalize`, { method: "POST" }),
   snapshots: (assignmentId: string) =>
@@ -761,12 +799,30 @@ export const gradingApi = {
     ),
 };
 
+export type BulkAcceptEligibility = {
+  eligible_count: number;
+  excluded_count: number;
+  reason_counts: Record<string, number>;
+  items: Array<{
+    answer_id: string;
+    eligible: boolean;
+    reasons: string[];
+  }>;
+};
+
 export type SubmissionRecord = {
   id: string;
   student_id?: string;
   status: string;
   attempt_number: number;
   page_count: number;
+  workflow: {
+    stage: string;
+    stage_label: string;
+    reason_code?: string;
+    reason: string;
+    action: string;
+  };
 };
 export type SubmissionRecognitionJob = {
   id: string;
@@ -1050,6 +1106,7 @@ export type SubmissionProcessingPage = {
 export type SubmissionRegionCandidate = {
   id: string;
   question_id: string;
+  question_number?: string;
   student_answer_id: string;
   submission_page_id: string;
   x: number;
@@ -1129,6 +1186,11 @@ export const submissionProcessingApi = {
     request<SubmissionProcessingJob>(
       `/api/submissions/${submissionId}/processing-jobs/${jobId}/pages/${pageId}/retry`,
       { method: "POST" },
+    ),
+  rotatePage: (submissionId: string, pageId: string, degrees: -90 | 90 | 180) =>
+    request<SubmissionProcessingJob>(
+      `/api/submissions/${submissionId}/processing-pages/${pageId}/rotate`,
+      { method: "POST", body: JSON.stringify({ degrees }) },
     ),
 };
 

@@ -260,7 +260,7 @@ describe("AIGradingReview", () => {
     ]);
     render(<AIGradingReview answerId="answer-1" rubricVersionId="rubric-1" />);
 
-    expect(await screen.findByText(/Provider unavailable/)).toBeInTheDocument();
+    expect(await screen.findByText(/评分服务未配置/)).toBeInTheDocument();
     expect(screen.getByText("与确定性验证冲突")).toBeInTheDocument();
     expect(screen.getByText("需人工评分")).toBeInTheDocument();
     expect(screen.getAllByText(/仍可独立修改分值或拒绝/)).toHaveLength(2);
@@ -276,8 +276,8 @@ describe("AIGradingReview", () => {
       "href",
       "#answer-region-region-1",
     );
-    expect(screen.getByText(/generation 4 · matrix_exact/)).toBeInTheDocument();
-    expect(screen.getByText(/Provider 自述不视为/)).toBeInTheDocument();
+    expect(screen.getByText(/第 4 代 · matrix_exact/)).toBeInTheDocument();
+    expect(screen.getByText(/评分服务的自述不视为/)).toBeInTheDocument();
   });
 
   it("surfaces duplicate disposition errors and prevents rapid double submits", async () => {

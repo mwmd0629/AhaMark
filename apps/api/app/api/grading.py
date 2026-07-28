@@ -106,6 +106,12 @@ class ReviewInput(BaseModel):
     criterion_scores: dict[uuid.UUID, Decimal] = Field(default_factory=dict)
 
 
+class CodexSuggestionInput(BaseModel):
+    score: Decimal = Field(ge=0)
+    reasoning: str = Field(min_length=1, max_length=4000)
+    criterion_scores: dict[uuid.UUID, Decimal] = Field(default_factory=dict)
+
+
 class RecognitionStartInput(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=100)
     provider_kind: Literal[
@@ -240,6 +246,122 @@ def _batch_counts(db: Session, batch: GradingBatch) -> dict[str, int]:
     }
 
 
+def _submission_workflow(db: Session, submission: Submission) -> dict[str, Any]:
+    """Return the current teacher-facing stage and next action."""
+    if submission.status == "voided":
+        return {
+            "stage": "voided",
+            "stage_label": "已撤销",
+            "reason_code": "SUBMISSION_VOIDED",
+            "reason": "这份上传已撤销，不会进入批改。",
+            "action": "无需处理",
+        }
+    if submission.student_id is None:
+        return {
+            "stage": "matching",
+            "stage_label": "等待学生匹配",
+            "reason_code": "STUDENT_MATCH_REQUIRED",
+            "reason": "文件尚未与班级学生确认匹配。",
+            "action": "确认学生匹配",
+        }
+    pages = db.scalars(
+        select(SubmissionPage)
+        .where(SubmissionPage.submission_id == submission.id)
+        .order_by(SubmissionPage.page_number)
+    ).all()
+    if not pages:
+        return {
+            "stage": "pages",
+            "stage_label": "等待页面处理",
+            "reason_code": "PAGES_MISSING",
+            "reason": "没有可用于识别的作业页面。",
+            "action": "检查原文件并重新上传",
+        }
+    failed_pages = [page for page in pages if page.status == "failed"]
+    if failed_pages:
+        return {
+            "stage": "failed",
+            "stage_label": "页面处理失败",
+            "reason_code": "PAGE_PROCESSING_FAILED",
+            "reason": f"{len(failed_pages)} 页处理失败。",
+            "action": "重新识别失败页面",
+        }
+    pending_pages = [page for page in pages if page.status not in {"recognized", "blank"}]
+    if pending_pages:
+        return {
+            "stage": "recognition",
+            "stage_label": "等待答案识别",
+            "reason_code": "RECOGNITION_PENDING",
+            "reason": f"{len(pending_pages)} 页尚未完成识别。",
+            "action": "启动或重试答案识别",
+        }
+    answers = db.scalars(
+        select(StudentAnswer).where(StudentAnswer.submission_id == submission.id)
+    ).all()
+    if not answers:
+        return {
+            "stage": "segmentation",
+            "stage_label": "等待题目切分",
+            "reason_code": "ANSWERS_MISSING",
+            "reason": "页面已处理，但尚未形成题目答案区域。",
+            "action": "确认题目区域后继续",
+        }
+    for answer in answers:
+        region_count = db.scalar(
+            select(func.count())
+            .select_from(StudentAnswerRegion)
+            .where(StudentAnswerRegion.student_answer_id == answer.id)
+        ) or 0
+        effective_text = (
+            answer.corrected_text
+            or answer.recognized_text
+            or answer.corrected_latex
+            or answer.recognized_latex
+        )
+        if not region_count or (not effective_text and not answer.is_blank):
+            return {
+                "stage": "answer_review",
+                "stage_label": "等待答案校对",
+                "reason_code": "ANSWER_EVIDENCE_REQUIRED",
+                "reason": "至少有一道题缺少答题区域或有效识别文字。",
+                "action": "校对答案区域和识别结果",
+            }
+        result = db.scalar(
+            select(GradingResult)
+            .where(
+                GradingResult.student_answer_id == answer.id,
+                GradingResult.status != "superseded",
+            )
+            .order_by(GradingResult.created_at.desc())
+        )
+        if result is None or result.score is None:
+            return {
+                "stage": "grading",
+                "stage_label": "等待评分建议",
+                "reason_code": "GRADING_RESULT_REQUIRED",
+                "reason": "至少有一道题还没有有效评分建议。",
+                "action": "运行评分建议",
+            }
+        review = db.scalar(
+            select(TeacherReview).where(TeacherReview.student_answer_id == answer.id)
+        )
+        if review is None or review.final_score is None or answer.requires_review:
+            return {
+                "stage": "teacher_review",
+                "stage_label": "等待教师复核",
+                "reason_code": "TEACHER_REVIEW_REQUIRED",
+                "reason": "评分建议尚未由教师确认，或该题被标记为必须复核。",
+                "action": "进入教师复核",
+            }
+    return {
+        "stage": "completed",
+        "stage_label": "已完成",
+        "reason_code": None,
+        "reason": "所有题目均已有教师确认分数。",
+        "action": "可进行成绩就绪检查",
+    }
+
+
 def batch_json(db: Session, x: GradingBatch) -> dict[str, Any]:
     matches = db.scalars(
         select(SubmissionFileMatch).where(SubmissionFileMatch.grading_batch_id == x.id)
@@ -255,6 +377,33 @@ def batch_json(db: Session, x: GradingBatch) -> dict[str, Any]:
         .order_by(Student.student_number, Student.id)
     ).all()
     counts = _batch_counts(db, x)
+    submissions = db.scalars(
+        select(Submission).where(
+            Submission.grading_batch_id == x.id,
+            Submission.owner_id == x.owner_id,
+            Submission.status != "voided",
+        )
+    ).all()
+    workflow_items = [_submission_workflow(db, submission) for submission in submissions]
+    stage_counts: dict[str, int] = {}
+    for workflow in workflow_items:
+        stage = str(workflow["stage"])
+        stage_counts[stage] = stage_counts.get(stage, 0) + 1
+    blocked = []
+    for stage, count in stage_counts.items():
+        if stage == "completed":
+            continue
+        example = next(item for item in workflow_items if item["stage"] == stage)
+        blocked.append(
+            {
+                "stage": stage,
+                "stage_label": example["stage_label"],
+                "reason_code": example["reason_code"],
+                "reason": example["reason"],
+                "action": example["action"],
+                "count": count,
+            }
+        )
     return {
         "id": str(x.id),
         "assignment_id": str(x.assignment_id),
@@ -263,6 +412,12 @@ def batch_json(db: Session, x: GradingBatch) -> dict[str, Any]:
         "description": x.description,
         "status": x.status,
         **counts,
+        "workflow": {
+            "stage_counts": stage_counts,
+            "blocked": blocked,
+            "completed_count": stage_counts.get("completed", 0),
+            "blocked_count": len(submissions) - stage_counts.get("completed", 0),
+        },
         "matching": {
             "total": len(matches),
             "confirmed": sum(m.status == "confirmed" for m in matches),
@@ -822,6 +977,7 @@ def list_submissions(batch_id: uuid.UUID, db: Db, actor: Actor) -> list[dict[str
                 .where(SubmissionPage.submission_id == x.id)
             )
             or 0,
+            "workflow": _submission_workflow(db, x),
         }
         for x in rows
     ]
@@ -1602,6 +1758,155 @@ def grade_answer(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
         "score": str(result.score) if result.score is not None else None,
         "max_score": str(result.max_score),
         "confidence": str(result.confidence) if result.confidence is not None else None,
+        "requires_review": result.requires_review,
+        "status": result.status,
+        "reasoning_summary": result.reasoning_summary,
+        "criterion_count": len(rubric_items),
+        "evidence_count": len(regions),
+    }
+
+
+@router.put("/student-answers/{answer_id}/codex-suggestion")
+def save_codex_suggestion(
+    answer_id: uuid.UUID, data: CodexSuggestionInput, db: Db, actor: Actor
+) -> dict[str, Any]:
+    """Save a local Codex-assisted score as a reviewable suggestion only."""
+    answer = db.scalar(
+        select(StudentAnswer)
+        .join(Submission, Submission.id == StudentAnswer.submission_id)
+        .where(StudentAnswer.id == answer_id, Submission.owner_id == actor.id)
+    )
+    if answer is None:
+        raise ApiProblem(404, "ANSWER_NOT_FOUND", "答案不存在")
+    submission = owned_submission(db, actor.id, answer.submission_id)
+    assignment = owned_assignment(db, actor.id, submission.assignment_id)
+    question = db.get(Question, answer.question_id)
+    rubric = db.scalar(
+        select(QuestionRubric).where(
+            QuestionRubric.rubric_version_id == assignment.active_rubric_version_id,
+            QuestionRubric.question_id == answer.question_id,
+        )
+    )
+    if question is None or question.max_score is None or rubric is None:
+        raise ApiProblem(409, "RUBRIC_INCOMPLETE", "题目或评分标准不完整")
+    if data.score > Decimal(question.max_score):
+        raise ApiProblem(422, "SCORE_OUT_OF_RANGE", "建议分超出题目满分")
+    regions = db.scalars(
+        select(StudentAnswerRegion).where(
+            StudentAnswerRegion.student_answer_id == answer.id,
+            StudentAnswerRegion.status == "confirmed",
+        )
+    ).all()
+    text = answer.corrected_text or answer.recognized_text or ""
+    if not text.strip() or not regions:
+        raise ApiProblem(
+            422,
+            "CODEX_SUGGESTION_INPUT_INCOMPLETE",
+            "必须先确认答题区域并完成答案识别",
+        )
+    rubric_items = db.scalars(
+        select(RubricItem)
+        .where(RubricItem.question_rubric_id == rubric.id)
+        .order_by(RubricItem.display_order)
+    ).all()
+    if rubric_items:
+        expected_ids = {item.id for item in rubric_items}
+        if set(data.criterion_scores) != expected_ids:
+            raise ApiProblem(422, "CRITERION_SCORES_INCOMPLETE", "必须填写全部评分项")
+        for item in rubric_items:
+            awarded = data.criterion_scores[item.id]
+            if awarded < 0 or awarded > Decimal(item.points):
+                raise ApiProblem(422, "CRITERION_SCORE_OUT_OF_RANGE", "评分项建议分超出范围")
+        if sum(data.criterion_scores.values(), Decimal("0")) != data.score:
+            raise ApiProblem(422, "CRITERION_TOTAL_MISMATCH", "评分项合计必须等于建议总分")
+
+    for previous in db.scalars(
+        select(GradingResult).where(
+            GradingResult.student_answer_id == answer.id,
+            GradingResult.status.in_(["suggested", "accepted", "modified", "stale"]),
+        )
+    ).all():
+        previous.status = "superseded"
+    job = GradingJob(
+        owner_id=actor.id,
+        grading_batch_id=submission.grading_batch_id,
+        submission_id=submission.id,
+        question_id=question.id,
+        rubric_version_id=assignment.active_rubric_version_id,
+        status="completed",
+        provider="codex-assisted",
+        provider_version="local",
+        prompt_version="codex-assisted-v1",
+        config_version=get_settings().grading_config_version,
+        idempotency_key=f"codex-assisted:{uuid.uuid4().hex}",
+        started_at=now_utc(),
+        completed_at=now_utc(),
+    )
+    db.add(job)
+    db.flush()
+    result = GradingResult(
+        grading_job_id=job.id,
+        student_answer_id=answer.id,
+        question_id=question.id,
+        rubric_version_id=assignment.active_rubric_version_id,
+        grading_method="codex_assisted",
+        provider="codex-assisted",
+        provider_version="local",
+        prompt_version="codex-assisted-v1",
+        score=data.score,
+        max_score=question.max_score,
+        confidence=None,
+        recognized_answer_snapshot=text,
+        reasoning_summary=data.reasoning,
+        requires_review=True,
+        status="suggested",
+    )
+    db.add(result)
+    db.flush()
+    for item in rubric_items:
+        db.add(
+            GradingCriterionResult(
+                grading_result_id=result.id,
+                rubric_item_id=item.id,
+                status="evaluated",
+                awarded_points=data.criterion_scores[item.id],
+                max_points=item.points,
+                reason=data.reasoning,
+                confidence=None,
+            )
+        )
+    for region in regions:
+        db.add(
+            GradingEvidence(
+                grading_result_id=result.id,
+                student_answer_id=answer.id,
+                submission_page_id=region.submission_page_id,
+                evidence_type="answer_region",
+                quote=text[:500],
+                x=region.x,
+                y=region.y,
+                width=region.width,
+                height=region.height,
+                description="Codex 辅助建议引用的教师确认答题区域",
+            )
+        )
+    answer.status = "graded"
+    audit(
+        db,
+        actor.id,
+        "grading.codex_assisted_suggestion",
+        "student_answer",
+        answer.id,
+        {"score": str(data.score), "provider": "codex-assisted"},
+    )
+    db.commit()
+    db.refresh(result)
+    return {
+        "id": str(result.id),
+        "provider": result.provider,
+        "provider_version": result.provider_version,
+        "score": str(result.score),
+        "max_score": str(result.max_score),
         "requires_review": result.requires_review,
         "status": result.status,
         "reasoning_summary": result.reasoning_summary,

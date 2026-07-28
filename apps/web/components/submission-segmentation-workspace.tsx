@@ -15,6 +15,47 @@ const terminal = new Set([
   "failed",
   "cancelled",
 ]);
+const processingStatusLabels: Record<string, string> = {
+  pending: "等待处理",
+  processing: "处理中",
+  completed: "处理完成",
+  partially_completed: "部分完成",
+  blank: "疑似空白页",
+  failed: "处理失败",
+  cancelled: "已取消",
+};
+const processingStageLabels: Record<string, string> = {
+  page_processing: "页面处理",
+  segmentation: "题目切分",
+};
+const qualityWarningLabels: Record<string, string> = {
+  LOW_SHARPNESS: "图像清晰度较低",
+  TOO_DARK: "页面过暗",
+  TOO_BRIGHT: "页面过亮",
+  LOW_CONTRAST: "页面对比度较低",
+  CROP_ANOMALY: "自动裁边结果异常",
+  DUPLICATE_PAGE: "疑似重复页面",
+};
+const regionSourceLabels: Record<string, string> = {
+  manual: "教师框选",
+  template: "标准模板",
+  ocr: "题号识别",
+  alignment: "版面匹配",
+};
+const regionStatusLabels: Record<string, string> = {
+  candidate: "待确认",
+  confirmed: "已确认",
+  rejected: "已拒绝",
+  manual_required: "需人工调整",
+  stale: "已失效",
+};
+const regionReasonLabels: Record<string, string> = {
+  QUESTION_ANCHOR: "根据题号候选生成",
+  LOW_ANCHOR_CONFIDENCE: "题号置信度较低",
+  HIGH_OVERLAP_CONFLICT: "与其他题目区域重叠",
+  ALIGNED_STANDARD_REGION: "根据标准试卷版面匹配",
+  TEACHER_DRAWN: "教师手动框选",
+};
 
 export function SubmissionSegmentationWorkspace({
   submissionId,
@@ -74,6 +115,11 @@ export function SubmissionSegmentationWorkspace({
   const questionIds = Array.from(
     new Set(regions.map((item) => item.question_id)),
   );
+  const questionNumberById = new Map(
+    regions
+      .filter((item) => item.question_number)
+      .map((item) => [item.question_id, item.question_number]),
+  );
   if (questionId && !questionIds.includes(questionId))
     questionIds.push(questionId);
 
@@ -120,7 +166,8 @@ export function SubmissionSegmentationWorkspace({
       </div>
       {job && (
         <div className="rounded-lg bg-slate-50 p-2 text-sm">
-          <Badge status={job.status} /> {job.stage} · {job.progress}%
+          <Badge status={job.status} />{" "}
+          {processingStageLabels[job.stage] ?? job.stage} · {job.progress}%
           {job.error_code && (
             <span className="ml-2 text-red-700">{job.error_code}</span>
           )}
@@ -140,7 +187,9 @@ export function SubmissionSegmentationWorkspace({
                   className="w-full text-left"
                   onClick={() => setCurrentPageId(item.id)}
                 >
-                  第 {item.page_number} 页 · {item.processing_status}
+                  第 {item.page_number} 页 ·{" "}
+                  {processingStatusLabels[item.processing_status] ??
+                    item.processing_status}
                   {item.thumbnail_url && (
                     // Signed object URLs are runtime-generated and intentionally unoptimized.
                     // eslint-disable-next-line @next/next/no-img-element
@@ -152,7 +201,7 @@ export function SubmissionSegmentationWorkspace({
                   )}
                   {item.quality.warnings.map((warning) => (
                     <span key={warning} className="mt-1 block text-amber-700">
-                      {warning}
+                      {qualityWarningLabels[warning] ?? warning}
                     </span>
                   ))}
                 </button>
@@ -289,6 +338,103 @@ export function SubmissionSegmentationWorkspace({
             </div>
           </section>
           <aside className="space-y-2 text-sm">
+            {page && (
+              <div
+                className="space-y-2 rounded-lg border bg-slate-50 p-3"
+                data-testid="page-quality"
+              >
+                <strong>页面质量与方向</strong>
+                <dl className="grid grid-cols-2 gap-x-2 gap-y-1 text-xs">
+                  <dt className="text-slate-500">页面尺寸</dt>
+                  <dd>
+                    {page.width ?? "—"} × {page.height ?? "—"}
+                  </dd>
+                  <dt className="text-slate-500">当前旋转</dt>
+                  <dd>{page.rotation}°</dd>
+                  <dt className="text-slate-500">方向置信度</dt>
+                  <dd>
+                    {page.quality.orientation_confidence == null
+                      ? "未检测"
+                      : `${Math.round(
+                          Number(page.quality.orientation_confidence) * 100,
+                        )}%`}
+                  </dd>
+                  <dt className="text-slate-500">清晰度</dt>
+                  <dd>
+                    {page.quality.blur_score == null
+                      ? "未检测"
+                      : Number(page.quality.blur_score).toFixed(1)}
+                  </dd>
+                  <dt className="text-slate-500">亮度</dt>
+                  <dd>
+                    {page.quality.brightness == null
+                      ? "未检测"
+                      : Number(page.quality.brightness).toFixed(1)}
+                  </dd>
+                  <dt className="text-slate-500">对比度</dt>
+                  <dd>
+                    {page.quality.contrast == null
+                      ? "未检测"
+                      : Number(page.quality.contrast).toFixed(1)}
+                  </dd>
+                  <dt className="text-slate-500">空白概率</dt>
+                  <dd>
+                    {page.quality.blank_probability == null
+                      ? "未检测"
+                      : `${Math.round(
+                          Number(page.quality.blank_probability) * 100,
+                        )}%`}
+                  </dd>
+                </dl>
+                {page.quality.duplicate_of_page_id && (
+                  <p className="text-xs text-amber-700">
+                    疑似与另一页重复，请对照后决定是否保留。
+                  </p>
+                )}
+                {page.quality.warnings.length > 0 && (
+                  <ul className="list-inside list-disc text-xs text-amber-700">
+                    {page.quality.warnings.map((warning) => (
+                      <li key={warning}>
+                        {qualityWarningLabels[warning] ?? warning}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <div className="flex flex-wrap gap-1">
+                  <Button
+                    variant="outline"
+                    onClick={async () => {
+                      setJob(
+                        await submissionProcessingApi.rotatePage(
+                          submissionId,
+                          page.id,
+                          -90,
+                        ),
+                      );
+                    }}
+                  >
+                    向左旋转
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={async () => {
+                      setJob(
+                        await submissionProcessingApi.rotatePage(
+                          submissionId,
+                          page.id,
+                          90,
+                        ),
+                      );
+                    }}
+                  >
+                    向右旋转
+                  </Button>
+                </div>
+                <p className="text-xs text-slate-500">
+                  手动旋转后只重新处理当前页，并使相关识别与评分进入待复核状态。
+                </p>
+              </div>
+            )}
             <label className="grid gap-1">
               框选后分配给题目
               <select
@@ -298,22 +444,31 @@ export function SubmissionSegmentationWorkspace({
               >
                 {questionIds.map((id) => (
                   <option key={id} value={id}>
-                    {id}
+                    {questionNumberById.get(id)
+                      ? `第 ${questionNumberById.get(id)} 题`
+                      : id}
                   </option>
                 ))}
               </select>
             </label>
             {pageRegions.map((region) => (
               <div key={region.id} className="rounded-lg border p-2">
-                <strong>{region.question_id}</strong>
+                <strong>
+                  {region.question_number
+                    ? `第 ${region.question_number} 题`
+                    : region.question_id}
+                </strong>
                 <div>
-                  {region.source} · {region.status} ·{" "}
+                  {regionSourceLabels[region.source] ?? region.source} ·{" "}
+                  {regionStatusLabels[region.status] ?? region.status} ·{" "}
                   {region.confidence == null
                     ? "无置信度"
                     : `${Math.round(Number(region.confidence) * 100)}%`}
                 </div>
                 {region.reason && (
-                  <div className="text-amber-700">{region.reason}</div>
+                  <div className="text-amber-700">
+                    {regionReasonLabels[region.reason] ?? region.reason}
+                  </div>
                 )}
                 <div className="mt-1 flex gap-1">
                   {region.status !== "confirmed" && (

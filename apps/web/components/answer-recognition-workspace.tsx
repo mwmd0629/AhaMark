@@ -3,6 +3,28 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { answerRecognitionApi, type AnswerRecognitionBlock } from "@/lib/api";
 
+const blockTypeLabels: Record<string, string> = {
+  text: "文字",
+  formula: "公式",
+  matrix: "矩阵",
+  table: "表格",
+  diagram: "图示",
+  unknown: "未知内容",
+};
+const providerLabels: Record<string, string> = {
+  fake: "本地占位服务",
+  printed_text: "本地印刷体识别",
+  handwriting_text: "手写识别建议",
+  math_formula: "公式识别建议",
+  unavailable: "未配置识别服务",
+};
+const warningLabels: Record<string, string> = {
+  LOW_CONFIDENCE: "置信度较低",
+  FORMULA_UNAVAILABLE: "公式识别不可用",
+  MANUAL_REQUIRED: "需要人工确认",
+  STALE: "结果已失效",
+};
+
 export function AnswerRecognitionWorkspace({
   submissionId,
   answerId,
@@ -85,174 +107,186 @@ export function AnswerRecognitionWorkspace({
   }
 
   return (
-    <section
-      className="space-y-3 rounded-lg border p-3"
+    <details
+      data-testid="answer-recognition-details"
+      className="rounded-lg border p-3"
       aria-label="答案识别证据复核"
     >
-      <div className="flex items-center justify-between">
-        <h3 className="font-semibold">答案识别与结构化证据</h3>
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+        <span className="font-semibold">答案识别与校对</span>
         <span className="text-xs text-slate-500">
-          {readOnly ? "finalized · 只读" : `${visible.length} 个识别块`}
+          {readOnly
+            ? "已定稿 · 只读 · 点击展开"
+            : `${visible.length} 个识别块 · 点击展开`}
         </span>
-      </div>
-      {image && (
-        <div className="relative overflow-hidden rounded border bg-slate-50">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={image} alt="区域证据图像" className="w-full" />
-          {visible.map((block) => (
-            <button
-              key={block.id}
-              aria-label={`识别块 ${block.reading_order + 1}`}
-              className="absolute border-2 border-indigo-500 bg-indigo-300/10"
-              style={{
-                left: `${Number(block.bbox.x) * 100}%`,
-                top: `${Number(block.bbox.y) * 100}%`,
-                width: `${Number(block.bbox.width) * 100}%`,
-                height: `${Number(block.bbox.height) * 100}%`,
-              }}
-              onClick={() => open(block)}
-            />
-          ))}
-        </div>
-      )}
-      {visible.map((block, index) => (
-        <article
-          key={block.id}
-          className={`rounded border p-2 text-sm ${block.stale ? "border-amber-400 bg-amber-50" : ""}`}
-          data-testid="recognition-block"
-        >
-          <div className="flex flex-wrap items-center gap-2 text-xs">
-            <input
-              aria-label={`选择识别块 ${index + 1}`}
-              type="checkbox"
-              checked={selected.includes(block.id)}
-              disabled={readOnly || block.stale}
-              onChange={(event) =>
-                setSelected((old) =>
-                  event.target.checked
-                    ? [...old, block.id]
-                    : old.filter((id) => id !== block.id),
-                )
-              }
-            />
-            <strong>{block.block_type}</strong>
-            <span>
-              {block.provider}/{block.provider_version}
-            </span>
-            <span>置信度 {block.confidence ?? "不可用"}</span>
-            {block.stale && <span className="text-amber-800">stale</span>}
-            {block.warning_codes.map((warning) => (
-              <span key={warning} className="rounded bg-amber-100 px-1">
-                {warning}
-              </span>
+      </summary>
+      <div className="mt-3 space-y-3">
+        {image && (
+          <div className="relative overflow-hidden rounded border bg-slate-50">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={image} alt="区域证据图像" className="w-full" />
+            {visible.map((block) => (
+              <button
+                key={block.id}
+                aria-label={`识别块 ${block.reading_order + 1}`}
+                className="absolute border-2 border-indigo-500 bg-indigo-300/10"
+                style={{
+                  left: `${Number(block.bbox.x) * 100}%`,
+                  top: `${Number(block.bbox.y) * 100}%`,
+                  width: `${Number(block.bbox.width) * 100}%`,
+                  height: `${Number(block.bbox.height) * 100}%`,
+                }}
+                onClick={() => open(block)}
+              />
             ))}
           </div>
-          <p>原始：{block.raw_text || "（空）"}</p>
-          <p>规范化：{block.normalized_text || "（空）"}</p>
-          <p>LaTeX：{block.latex || "unavailable"}</p>
-          <div className="mt-2 flex gap-2">
-            <button
-              disabled={readOnly || block.stale}
-              onClick={() => open(block)}
-            >
-              编辑
-            </button>
-            <button
-              disabled={readOnly || block.stale}
-              onClick={() => void split(block)}
-            >
-              拆分
-            </button>
-            <button
-              disabled={readOnly || index === 0}
-              onClick={() => void move(index, -1)}
-            >
-              上移
-            </button>
-            <button
-              disabled={readOnly || index === visible.length - 1}
-              onClick={() => void move(index, 1)}
-            >
-              下移
-            </button>
-            {block.region_id && (
-              <button
-                disabled={readOnly}
-                onClick={() =>
-                  void answerRecognitionApi.retry(
-                    submissionId,
-                    block.region_id!,
+        )}
+        {visible.map((block, index) => (
+          <article
+            key={block.id}
+            className={`rounded border p-2 text-sm ${block.stale ? "border-amber-400 bg-amber-50" : ""}`}
+            data-testid="recognition-block"
+          >
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <input
+                aria-label={`选择识别块 ${index + 1}`}
+                type="checkbox"
+                checked={selected.includes(block.id)}
+                disabled={readOnly || block.stale}
+                onChange={(event) =>
+                  setSelected((old) =>
+                    event.target.checked
+                      ? [...old, block.id]
+                      : old.filter((id) => id !== block.id),
                   )
                 }
+              />
+              <strong>
+                {blockTypeLabels[block.block_type] ?? block.block_type}
+              </strong>
+              <span>
+                {providerLabels[block.provider] ?? block.provider} / 版本{" "}
+                {block.provider_version}
+              </span>
+              <span>置信度 {block.confidence ?? "不可用"}</span>
+              {block.stale && <span className="text-amber-800">已失效</span>}
+              {block.warning_codes.map((warning) => (
+                <span key={warning} className="rounded bg-amber-100 px-1">
+                  {warningLabels[warning] ?? warning}
+                </span>
+              ))}
+            </div>
+            <p>原始文字：{block.raw_text || "（空）"}</p>
+            <p>规范化文字：{block.normalized_text || "（空）"}</p>
+            <p>公式表达式：{block.latex || "不可用"}</p>
+            <div className="mt-2 flex gap-2">
+              <button
+                disabled={readOnly || block.stale}
+                onClick={() => open(block)}
               >
-                重试区域
+                编辑
               </button>
-            )}
-          </div>
-        </article>
-      ))}
-      {!visible.length && (
-        <p className="text-sm text-slate-500">暂无识别证据，需人工复核。</p>
-      )}
-      <div className="flex gap-2">
-        <button
-          disabled={readOnly || selected.length < 2}
-          onClick={() => void merge()}
-        >
-          合并所选
-        </button>
-        <button
-          disabled={
-            readOnly || !visible.length || visible.some((block) => block.stale)
-          }
-          onClick={() =>
-            void answerRecognitionApi
-              .confirm(submissionId, answerId)
-              .then(() => {
-                setMessage("识别结果已人工确认");
-                return reload();
-              })
-          }
-        >
-          确认识别结果
-        </button>
-      </div>
-      {message && <p role="status">{message}</p>}
-      {editing && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label="编辑识别块"
-          className="space-y-2 rounded border-2 border-indigo-300 bg-white p-3"
-          onClick={(event) => event.stopPropagation()}
-        >
-          <label className="block">
-            原始文本
-            <textarea
-              value={draft.raw_text}
-              onChange={(e) => setDraft({ ...draft, raw_text: e.target.value })}
-            />
-          </label>
-          <label className="block">
-            规范化文本
-            <textarea
-              value={draft.normalized_text}
-              onChange={(e) =>
-                setDraft({ ...draft, normalized_text: e.target.value })
-              }
-            />
-          </label>
-          <label className="block">
-            LaTeX
-            <textarea
-              value={draft.latex}
-              onChange={(e) => setDraft({ ...draft, latex: e.target.value })}
-            />
-          </label>
-          <button onClick={() => void save()}>保存</button>
-          <button onClick={() => setEditing(undefined)}>取消</button>
+              <button
+                disabled={readOnly || block.stale}
+                onClick={() => void split(block)}
+              >
+                拆分
+              </button>
+              <button
+                disabled={readOnly || index === 0}
+                onClick={() => void move(index, -1)}
+              >
+                上移
+              </button>
+              <button
+                disabled={readOnly || index === visible.length - 1}
+                onClick={() => void move(index, 1)}
+              >
+                下移
+              </button>
+              {block.region_id && (
+                <button
+                  disabled={readOnly}
+                  onClick={() =>
+                    void answerRecognitionApi.retry(
+                      submissionId,
+                      block.region_id!,
+                    )
+                  }
+                >
+                  重试区域
+                </button>
+              )}
+            </div>
+          </article>
+        ))}
+        {!visible.length && (
+          <p className="text-sm text-slate-500">暂无识别证据，需人工复核。</p>
+        )}
+        <div className="flex gap-2">
+          <button
+            disabled={readOnly || selected.length < 2}
+            onClick={() => void merge()}
+          >
+            合并所选
+          </button>
+          <button
+            disabled={
+              readOnly ||
+              !visible.length ||
+              visible.some((block) => block.stale)
+            }
+            onClick={() =>
+              void answerRecognitionApi
+                .confirm(submissionId, answerId)
+                .then(() => {
+                  setMessage("识别结果已人工确认");
+                  return reload();
+                })
+            }
+          >
+            确认识别结果
+          </button>
         </div>
-      )}
-    </section>
+        {message && <p role="status">{message}</p>}
+        {editing && (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="编辑识别块"
+            className="space-y-2 rounded border-2 border-indigo-300 bg-white p-3"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <label className="block">
+              原始文本
+              <textarea
+                value={draft.raw_text}
+                onChange={(e) =>
+                  setDraft({ ...draft, raw_text: e.target.value })
+                }
+              />
+            </label>
+            <label className="block">
+              规范化文本
+              <textarea
+                value={draft.normalized_text}
+                onChange={(e) =>
+                  setDraft({ ...draft, normalized_text: e.target.value })
+                }
+              />
+            </label>
+            <label className="block">
+              公式表达式（LaTeX）
+              <textarea
+                value={draft.latex}
+                onChange={(e) => setDraft({ ...draft, latex: e.target.value })}
+              />
+            </label>
+            <button onClick={() => void save()}>保存</button>
+            <button onClick={() => setEditing(undefined)}>取消</button>
+          </div>
+        )}
+      </div>
+    </details>
   );
 }

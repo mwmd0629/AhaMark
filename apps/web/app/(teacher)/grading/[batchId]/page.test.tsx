@@ -35,6 +35,11 @@ vi.mock("next/link", () => ({
     href: string;
   }) => <a href={href}>{children}</a>,
 }));
+vi.mock("@/components/submission-segmentation-workspace", () => ({
+  SubmissionSegmentationWorkspace: () => (
+    <div data-testid="segmentation-workspace" />
+  ),
+}));
 vi.mock("@/lib/api", () => ({
   gradingApi: {
     getBatch: mocks.getBatch,
@@ -49,6 +54,16 @@ vi.mock("@/lib/api", () => ({
     mergeSubmission: vi.fn(),
     grade: vi.fn(),
     regrade: vi.fn(),
+  },
+  submissionProcessingApi: {
+    pages: vi.fn().mockResolvedValue([]),
+    regions: vi.fn().mockResolvedValue([]),
+    incomplete: vi.fn().mockResolvedValue([]),
+    pageImage: vi.fn(),
+    createRegion: vi.fn(),
+    updateRegion: vi.fn(),
+    deleteRegion: vi.fn(),
+    confirmRegions: vi.fn(),
   },
   analyticsApi: {
     releases: mocks.releases,
@@ -125,10 +140,10 @@ it("confirms an ambiguous match and keeps historical release snapshots selectabl
     expect(mocks.confirmMatch).toHaveBeenCalledWith("b1", "m1", "s1"),
   );
   expect(
-    screen.getByText(/v2 · released · Snapshot snap-2/),
+    screen.getByText(/第 2 版 · 已发布 · 成绩快照 snap-2/),
   ).toBeInTheDocument();
   expect(
-    screen.getByText(/v1 · released · Snapshot snap-1/),
+    screen.getByText(/第 1 版 · 已发布 · 成绩快照 snap-1/),
   ).toBeInTheDocument();
 });
 
@@ -162,15 +177,15 @@ it("allows a new release version after readiness succeeds", async () => {
     </Suspense>,
   );
   fireEvent.click(
-    await screen.findByRole("button", { name: "查看 grade readiness" }),
+    await screen.findByRole("button", { name: "检查成绩是否可发布" }),
   );
   const releaseButton = screen.getByRole("button", {
-    name: "创建新的 GradeRelease 版本",
+    name: "创建新的成绩发布版本",
   });
   await waitFor(() => expect(releaseButton).toBeEnabled());
   fireEvent.click(releaseButton);
   await waitFor(() => expect(mocks.createRelease).toHaveBeenCalled());
-  expect(await screen.findByText(/固定快照 snap-1/)).toBeInTheDocument();
+  expect(await screen.findByText(/固定成绩快照 snap-1/)).toBeInTheDocument();
 });
 
 it("creates a replacement report job once and keeps the failed job terminal", async () => {
@@ -224,11 +239,72 @@ it("creates a replacement report job once and keeps the failed job terminal", as
   await waitFor(() =>
     expect(mocks.retryReport).toHaveBeenCalledWith("failed-1"),
   );
-  expect(
-    await screen.findByText(/student_report_pdf · failed · 0%/),
-  ).toBeInTheDocument();
-  expect(
-    screen.getByText(/student_report_pdf · queued · 0%/),
-  ).toBeInTheDocument();
+  expect(await screen.findByText(/学生报告 · 失败 · 0%/)).toBeInTheDocument();
+  expect(screen.getByText(/学生报告 · 排队中 · 0%/)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "已创建重试任务" })).toBeDisabled();
+});
+
+it("shows the batch progress, blocker reason, and each submission next action", async () => {
+  mocks.getBatch.mockResolvedValue({
+    id: "b1",
+    assignment_id: "a1",
+    class_id: "c1",
+    name: "识别进度批次",
+    submission_count: 1,
+    recognized_count: 0,
+    graded_count: 0,
+    reviewed_count: 0,
+    failed_count: 0,
+    workflow: {
+      stage_counts: { recognition: 1 },
+      completed_count: 0,
+      blocked_count: 1,
+      blocked: [
+        {
+          stage: "recognition",
+          stage_label: "等待答案识别",
+          reason_code: "RECOGNITION_PENDING",
+          reason: "1 页尚未完成识别。",
+          action: "启动或重试答案识别",
+          count: 1,
+        },
+      ],
+    },
+    matching: { items: [], student_options: [] },
+  });
+  mocks.submissions.mockResolvedValue([
+    {
+      id: "submission-1",
+      student_id: "student-1",
+      status: "processing",
+      attempt_number: 1,
+      page_count: 1,
+      workflow: {
+        stage: "recognition",
+        stage_label: "等待答案识别",
+        reason_code: "RECOGNITION_PENDING",
+        reason: "1 页尚未完成识别。",
+        action: "启动或重试答案识别",
+      },
+    },
+  ]);
+  mocks.reviewWorkspace.mockResolvedValue({ items: [] });
+  mocks.releases.mockResolvedValue([]);
+  mocks.reports.mockResolvedValue([]);
+
+  render(
+    <Suspense fallback={<div>测试加载中</div>}>
+      <GradingBatchPage params={Promise.resolve({ batchId: "b1" })} />
+    </Suspense>,
+  );
+
+  expect(
+    await screen.findByTestId("batch-progress-overview"),
+  ).toHaveTextContent("已完成 0/1");
+  expect(screen.getByTestId("batch-blocker")).toHaveTextContent(
+    "等待答案识别 · 1 份",
+  );
+  expect(screen.getByTestId("submission-workflow")).toHaveTextContent(
+    "下一步：启动或重试答案识别",
+  );
 });

@@ -45,7 +45,7 @@ ANCHOR_RE = re.compile(
 
 # Override the compatibility pattern above with an encoding-independent expression.
 ANCHOR_RE = re.compile(
-    r"^\s*(?:\u7b2c\s*)?[\uff08(]?\s*(\d+(?:\.\d+)?)"
+    r"^\s*(?:(?:\u7b2c|\u9898|[Qq])\s*)?[\uff08(]?\s*(\d+(?:\.\d+)?)"
     r"(?:[\uff08(]?\s*([a-zA-Z])\s*[\uff09)]?)?\s*[\uff09)]?"
     r"(?:\s*\u9898)?(?:[.\u3001:\uff1a)\s]|$)",
     re.IGNORECASE,

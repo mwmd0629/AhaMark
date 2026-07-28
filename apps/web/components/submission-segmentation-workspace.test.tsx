@@ -86,7 +86,7 @@ beforeEach(() => {
 
 it("draws, confirms, deletes, and retries answer regions", async () => {
   render(<SubmissionSegmentationWorkspace submissionId="submission-1" />);
-  await screen.findByText("LOW_SHARPNESS");
+  await screen.findAllByText("图像清晰度较低");
 
   fireEvent.click(screen.getByRole("button", { name: "确认" }));
   await waitFor(() => expect(mocks.updateRegion).toHaveBeenCalled());

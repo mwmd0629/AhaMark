@@ -312,6 +312,18 @@ def detail(db: Session, item: Assignment) -> dict[str, Any]:
         if pv
         else []
     )
+    stored_file_names = {
+        stored_file.id: stored_file.original_name
+        for stored_file in (
+            db.scalars(
+                select(StoredFile).where(
+                    StoredFile.id.in_({page.stored_file_id for page in pages})
+                )
+            ).all()
+            if pages
+            else []
+        )
+    }
     qs = (
         db.scalars(
             select(Question)
@@ -421,6 +433,7 @@ def detail(db: Session, item: Assignment) -> dict[str, Any]:
                     {
                         "id": str(x.id),
                         "stored_file_id": str(x.stored_file_id),
+                        "file_name": stored_file_names.get(x.stored_file_id),
                         "page_number": x.page_number,
                         "source_page_number": x.source_page_number,
                         "width": x.width,

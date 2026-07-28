@@ -19,6 +19,14 @@ const terminal = new Set([
 ]);
 
 const statusLabels: Record<string, string> = {
+  queued: "排队中",
+  running: "处理中",
+  completed: "已完成",
+  partially_completed: "部分完成",
+  abstained: "已放弃判断",
+  cancelled: "已取消",
+  review_pending: "待教师复核",
+  confirmed: "已确认",
   scored: "可评分建议",
   abstain: "AI 放弃判断",
   manual: "需人工评分",
@@ -31,6 +39,17 @@ const statusLabels: Record<string, string> = {
   unsupported: "自动验证不支持",
   manual_required: "需人工验证",
 };
+
+const providerLabels: Record<string, string> = {
+  unavailable: "未配置评分服务",
+  fake: "本地占位服务",
+  codex: "本地 Codex",
+  manual: "教师人工评分",
+};
+
+function providerLabel(value: string) {
+  return providerLabels[value] ?? value;
+}
 
 function badge(status: string) {
   if (["conflict", "failed", "stale"].includes(status))
@@ -59,7 +78,7 @@ function errorMessage(error: unknown) {
     if (error.body.code === "VALIDATION_STALE")
       return "数学验证版本已变化，请刷新或重新验证后再处理。";
     if (error.body.code === "SUBMISSION_FINALIZED")
-      return "提交已 Finalize，当前页面只能查看审计记录。";
+      return "提交已定稿，当前页面只能查看审计记录。";
     return `${error.body.message}（${error.body.code}）`;
   }
   return "操作失败，请刷新后重试；仍失败时改用人工评分。";
@@ -157,7 +176,7 @@ function SuggestionCard({
         {suggestion.confidence ?? "未提供"}
       </p>
       <p className="mt-1 text-sm text-slate-700">
-        {suggestion.reason ?? "Provider 未提供理由；不得据此自动定分。"}
+        {suggestion.reason ?? "评分服务未提供理由；不得据此自动定分。"}
       </p>
       {suggestion.error_codes.length > 0 && (
         <p className="mt-1 text-sm text-red-800">
@@ -178,9 +197,9 @@ function SuggestionCard({
                 href={`#${item.target_id}`}
                 className="mt-1 block text-sm text-indigo-700 underline"
               >
-                {item.kind === "recognition" ? "识别证据" : "答题区域"} · v
-                {item.version} · {item.status}
-                {item.stale ? " · stale" : ""}
+                {item.kind === "recognition" ? "识别证据" : "答题区域"} · 版本
+                {item.version} · {statusLabels[item.status] ?? item.status}
+                {item.stale ? " · 已失效" : ""}
               </a>
             ))
           ) : (
@@ -197,7 +216,7 @@ function SuggestionCard({
             数学验证（确定性）
           </h4>
           <p className="mt-1 text-xs text-slate-500">
-            Provider 自述不视为确定性验证。
+            评分服务的自述不视为确定性验证。
           </p>
           {validationResults.length ? (
             validationResults.map((item) => (
@@ -205,13 +224,13 @@ function SuggestionCard({
                 <span className={`rounded px-1 ${badge(item.result)}`}>
                   {statusLabels[item.result] ?? item.result}
                 </span>{" "}
-                generation {item.generation} · {item.comparison_method}
-                {item.stale ? " · stale" : ""}
+                第 {item.generation} 代 · {item.comparison_method}
+                {item.stale ? " · 已失效" : ""}
               </p>
             ))
           ) : (
             <p className="mt-1 text-sm text-slate-600">
-              无当前数学验证引用；Provider 自述不视为确定性验证。
+              无当前数学验证引用；评分服务的自述不视为确定性验证。
             </p>
           )}
         </section>
@@ -344,7 +363,7 @@ export function AIGradingReview({
   const create = async () => {
     if (!effectiveRubricVersionId) {
       setMessage(
-        "当前页没有可用的结构化 Rubric 版本，请先打开数学验证页创建任务。",
+        "当前页没有可用的结构化评分标准版本，请先打开数学验证页创建任务。",
       );
       return;
     }
@@ -392,26 +411,25 @@ export function AIGradingReview({
       )}
       {finalized && (
         <p className="mt-2 rounded bg-slate-100 p-2 text-sm">
-          已 Finalize：本区只读，不能创建或采纳建议。
+          已定稿：本区只读，不能创建或采纳建议。
         </p>
       )}
       {current ? (
         <>
           <div className="mt-3 grid gap-2 rounded bg-violet-50 p-3 text-sm md:grid-cols-3">
-            <span>状态：{current.status}</span>
-            <span>Provider：{current.provider}</span>
-            <span>Generation：{current.generation}</span>
-            <span>Rubric：{current.rubric_version_id}</span>
+            <span>状态：{statusLabels[current.status] ?? current.status}</span>
+            <span>评分来源：{providerLabel(current.provider)}</span>
+            <span>生成代次：第 {current.generation} 代</span>
+            <span>评分标准版本：{current.rubric_version_id}</span>
             <span>标准答案：{current.reference_answer_version_id}</span>
             <span>
-              验证 generation：{current.validation?.generation ?? "无"}
+              验证代次：第 {current.validation?.generation ?? "无"} 代
             </span>
           </div>
           {(current.provider === "unavailable" ||
             current.error_code === "PROVIDER_UNAVAILABLE") && (
             <p className="mt-3 rounded bg-amber-100 p-3">
-              Provider unavailable：AI
-              未给出有效评分，人工批改流程仍可正常使用。
+              评分服务未配置：AI 未给出有效评分，人工批改流程仍可正常使用。
             </p>
           )}
           {current.status === "failed" && (
@@ -422,17 +440,17 @@ export function AIGradingReview({
           )}
           {current.stale && (
             <p className="mt-3 rounded bg-amber-100 p-3">
-              stale：版本或证据已变化，此 generation 仅供审计，不可处置。
+              已失效：版本或证据已变化，此次生成结果仅供审计，不可处置。
             </p>
           )}
           {current.validation?.stale && (
             <p className="mt-3 rounded bg-amber-100 p-3">
-              数学验证已 stale：不可将旧验证结果用于采纳，请重新验证。
+              数学验证已失效：不可将旧验证结果用于采纳，请重新验证。
             </p>
           )}
           {validationMismatch && (
             <p className="mt-3 rounded bg-red-100 p-3">
-              Rubric/标准答案版本与数学验证引用不一致：已禁用 AI
+              评分标准/标准答案版本与数学验证引用不一致：已禁用 AI
               处置，请刷新、重新验证或改用人工评分。
             </p>
           )}
@@ -496,11 +514,12 @@ export function AIGradingReview({
           </button>
           {jobs.length > 1 && (
             <details className="mt-4 rounded border p-3">
-              <summary>历史 generation</summary>
+              <summary>历史生成记录</summary>
               {jobs.map((job) => (
                 <p key={job.id} className="mt-1 text-sm">
-                  #{job.generation} · {job.status} ·{" "}
-                  {job.stale ? "stale" : "current"}
+                  第 {job.generation} 代 ·{" "}
+                  {statusLabels[job.status] ?? job.status} ·{" "}
+                  {job.stale ? "已失效" : "当前版本"}
                 </p>
               ))}
             </details>
@@ -508,7 +527,7 @@ export function AIGradingReview({
         </>
       ) : (
         <p className="mt-3 text-sm">
-          尚无 AI 建议。人工批改不受影响；可在确认识别与结构化 Rubric
+          尚无 AI 建议。人工批改不受影响；可在确认识别与结构化评分标准
           后创建任务。
         </p>
       )}
