@@ -99,7 +99,9 @@ manual/unsupported 遵从率 100%、状态准确率至少 95%，并保留人工�
 
 新版 details schema 包含题目 ID/题号/题型、最终分/满分、TeacherReview ID、最终错误代码/评语、知识点 ID、评分方法和确认时间；校验题目不重复、分值范围、题目存在、顶层分数与分题和一致。旧快照缺少必填字段时不会进入发布或统计。
 
-`GradeRelease` 以作业/班级递增 version 保存发布记录，`GradeReleaseItem` 固定具体 ScoreSnapshot ID。released 的产品含义仅是“教师已确认发布数据，尚未发送到学生端”，不是学生已收到。修改成绩后需重新打开提交并通过批改批次的 `confirm-results` 生成新快照和新发布版本，旧版本不变。旧 `POST /api/grade-releases` 创建入口已退役并稳定返回 `410 GRADE_RELEASE_CREATION_RETIRED`。
+`GradeRelease` 以作业/班级递增 version 保存发布记录，`GradeReleaseItem` 固定具体 ScoreSnapshot ID。released 的产品含义仅是“教师已确认发布数据，尚未发送到学生端”，不是学生已收到。修改单个学生后，`confirm-results` 会列出学生与变化题目，只生成该学生的新快照并复用其他学生的旧快照；新发布版本保留完整历史。旧 `POST /api/grade-releases` 已标记 deprecated 并稳定返回 `410 GRADE_RELEASE_CREATION_RETIRED`，每次调用会记录客户端来源和替代入口，不产生正式成绩写入。
+
+主观题建议按 Rubric 分项保存简短理由和答案区域依据；零分、满分及置信度临界结果会自动二次复核。同题同版本的相同答案若出现分数或分项差异，只进入教师“需检查”队列，不会自动改分或形成正式成绩。
 
 Excel 是真实 `.xlsx`，包含“成绩总表、题目统计、知识点统计、导出说明”。学号强制文本，缺失成绩不写零，外部文本防公式注入。API 只创建 ReportJob 并派发 job ID；`workers/tasks/reports.py` 幂等生成、写对象存储、登记 StoredFile。该边界已有自动化测试及真实 Celery/MinIO 冒烟。个人与批量学生 PDF 使用仓库内 Noto Sans SC TTF，来源、许可证和校验值见 `apps/api/assets/fonts/SOURCE.md`。
 

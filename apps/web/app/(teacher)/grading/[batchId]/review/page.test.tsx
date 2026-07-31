@@ -83,6 +83,7 @@ function workspace({
               status: stale ? "stale" : "suggested",
               rubric_version_id: stale ? "rubric-2" : "rubric-1",
               requires_review: false,
+              quality_flags: [] as string[],
             },
             review: stale ? undefined : { final_score: "10", feedback: "" },
             criteria: [] as Array<{
@@ -90,7 +91,10 @@ function workspace({
               status: string;
               awarded_points?: string;
               max_points: string;
+              title?: string;
+              description?: string;
               reason?: string;
+              evidence_quotes?: string[];
             }>,
             evidence: [],
           },
@@ -361,7 +365,7 @@ it("shows readiness blockers and prevents a formal write", async () => {
   expect(mocks.confirmResults).not.toHaveBeenCalled();
 });
 
-it("moves the current selection to the first answer visible in a new filter", async () => {
+it("opens the exception queue first and moves across filters", async () => {
   mockReadiness(false);
   const data = workspace();
   const firstAnswer = data.items[0].answers[0];
@@ -381,14 +385,24 @@ it("moves the current selection to the first answer visible in a new filter", as
     },
     review: undefined,
   });
+  data.items.push({
+    ...structuredClone(data.items[0]),
+    submission_id: "sub-2",
+    answers: [
+      { ...structuredClone(firstAnswer), id: "ans-3" },
+      {
+        ...structuredClone(data.items[0].answers[1]),
+        id: "ans-4",
+        question: {
+          ...structuredClone(firstAnswer.question),
+          number: 4,
+          content: "另一名学生的异常题",
+        },
+      },
+    ],
+  });
   mocks.reviewWorkspace.mockResolvedValue(data);
   render(<ReviewPage />);
-
-  expect(await screen.findByTestId("review-answer")).toHaveAttribute(
-    "data-answer-id",
-    "ans-1",
-  );
-  fireEvent.click(screen.getByRole("button", { name: "已失效" }));
 
   await waitFor(() =>
     expect(screen.getByTestId("review-answer")).toHaveAttribute(
@@ -396,10 +410,89 @@ it("moves the current selection to the first answer visible in a new filter", as
       "ans-2",
     ),
   );
+  expect(screen.getByRole("button", { name: "需检查" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   expect(
     screen.queryByRole("button", { name: /第 1 题/ }),
   ).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: /第 2 题/ })).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "学生 2" }));
+  await waitFor(() =>
+    expect(screen.getByTestId("review-answer")).toHaveAttribute(
+      "data-answer-id",
+      "ans-4",
+    ),
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "已复核" }));
+  await waitFor(() =>
+    expect(screen.getByTestId("review-answer")).toHaveAttribute(
+      "data-answer-id",
+      "ans-1",
+    ),
+  );
+});
+
+it("moves to the next exception after saving a score", async () => {
+  mockReadiness(false);
+  const data = workspace({ reviewed: 0 });
+  const first = data.items[0].answers[0];
+  first.status = "review_required";
+  first.requires_review = true;
+  first.review = undefined;
+  data.items[0].answers.push({
+    ...first,
+    id: "ans-2",
+    question: { ...first.question, number: 2, content: "第二道异常题" },
+  });
+  const refreshed = structuredClone(data);
+  refreshed.items[0].answers[0].status = "reviewed";
+  refreshed.items[0].answers[0].requires_review = false;
+  refreshed.items[0].answers[0].review = { final_score: "10", feedback: "" };
+  mocks.reviewWorkspace
+    .mockResolvedValueOnce(data)
+    .mockResolvedValue(refreshed);
+  mocks.review.mockResolvedValue({});
+  render(<ReviewPage />);
+
+  expect(await screen.findByTestId("review-answer")).toHaveAttribute(
+    "data-answer-id",
+    "ans-1",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "手动评分" }));
+  fireEvent.click(screen.getByRole("button", { name: "保存最终评分" }));
+
+  await waitFor(() =>
+    expect(screen.getByTestId("review-answer")).toHaveAttribute(
+      "data-answer-id",
+      "ans-2",
+    ),
+  );
+  expect(screen.getByRole("status")).toHaveTextContent("已保存，已进入下一题");
+});
+
+it("regrades automatically after the teacher corrects an answer", async () => {
+  mockReadiness();
+  const data = workspace();
+  mocks.reviewWorkspace.mockResolvedValue(data);
+  mocks.correctAnswer.mockResolvedValue({});
+  mocks.grade.mockResolvedValue({});
+  const prompt = vi.spyOn(window, "prompt").mockReturnValue("B");
+  render(<ReviewPage />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "修正答案" }));
+
+  await waitFor(() =>
+    expect(mocks.correctAnswer).toHaveBeenCalledWith("ans-1", {
+      corrected_text: "B",
+    }),
+  );
+  expect(mocks.grade).toHaveBeenCalledWith("ans-1");
+  expect(screen.getByRole("status")).toHaveTextContent("答案已修改并重新批改");
+  prompt.mockRestore();
 });
 
 it("uses one confirm-results command and reports the released formal chain", async () => {
@@ -455,15 +548,26 @@ it("previews a one-submission reopen plan before the sole formal confirmation", 
     plan: [
       {
         submission_id: "sub-reopened",
+        student_id: "student-reopened",
+        student_name: "张同学",
+        student_number: "2026001",
         action: "create_snapshot",
         snapshot_id: null,
         snapshot_version: null,
+        changed_questions: [
+          { question_id: "question-2", question_number: "2" },
+          { question_id: "question-5", question_number: "5" },
+        ],
       },
       {
         submission_id: "sub-reused",
+        student_id: "student-reused",
+        student_name: "李同学",
+        student_number: "2026002",
         action: "reuse_snapshot",
         snapshot_id: "snapshot-reused",
         snapshot_version: 1,
+        changed_questions: [],
       },
     ],
     confirmed_result: null,
@@ -476,6 +580,12 @@ it("previews a one-submission reopen plan before the sole formal confirmation", 
   );
   expect(screen.getByTestId("confirm-results-plan")).toHaveTextContent(
     "未修改的结果保持不变",
+  );
+  expect(screen.getByTestId("confirm-results-plan")).toHaveTextContent(
+    "张同学（2026001）：第 2、5 题有变化",
+  );
+  expect(screen.getByTestId("confirm-results-plan")).not.toHaveTextContent(
+    "李同学",
   );
   expect(screen.getAllByRole("button", { name: "确认结果" })).toHaveLength(1);
   expect(mocks.confirmResults).not.toHaveBeenCalled();
@@ -615,4 +725,49 @@ it("rotates the idempotency key when refreshed readiness changes review_hash", a
   expect(mocks.confirmResults.mock.calls[1][1].idempotency_key).not.toBe(
     mocks.confirmResults.mock.calls[0][1].idempotency_key,
   );
+});
+
+it("puts consistency differences in the exception queue", async () => {
+  mockReadiness(false);
+  const data = workspace({ reviewed: 0 });
+  const answer = data.items[0].answers[0];
+  answer.review = undefined;
+  answer.result.quality_flags = ["CONSISTENCY_REVIEW_REQUIRED"];
+  mocks.reviewWorkspace.mockResolvedValue(data);
+
+  render(<ReviewPage />);
+
+  expect(
+    await screen.findByText("相同答案出现不同评分，请检查。"),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "需检查" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+});
+
+it("shows concise rubric evidence for each scoring item", async () => {
+  mockReadiness();
+  const data = workspace();
+  data.items[0].answers[0].criteria = [
+    {
+      rubric_item_id: "criterion-1",
+      title: "方法正确",
+      status: "evaluated",
+      awarded_points: "4",
+      max_points: "5",
+      reason: "方法正确，计算有一处遗漏。",
+      evidence_quotes: ["先列出方程，再代入求解。"],
+    },
+  ];
+  mocks.reviewWorkspace.mockResolvedValue(data);
+
+  render(<ReviewPage />);
+
+  expect(await screen.findByText("评分依据")).toBeInTheDocument();
+  expect(screen.getByText("方法正确")).toBeInTheDocument();
+  expect(screen.getByText("4 / 5")).toBeInTheDocument();
+  expect(
+    screen.getByText("依据：先列出方程，再代入求解。"),
+  ).toBeInTheDocument();
 });

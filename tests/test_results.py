@@ -173,23 +173,43 @@ def test_chinese_student_pdf_embeds_font_and_is_parseable(monkeypatch: pytest.Mo
     assert b"NotoSansSC" in content
 
 
-def test_grade_release_creation_is_retired_and_has_no_writes() -> None:
+def test_grade_release_creation_is_retired_and_audits_the_call_source() -> None:
     db, _storage, _batch_id, _submission_id, _question_id = workflow()
     try:
         releases_before = db.scalar(select(func.count()).select_from(GradeRelease))
         audits_before = db.scalar(select(func.count()).select_from(AuditLog))
 
-        response = client.post("/api/grade-releases", json={"arbitrary": "ignored"})
+        response = client.post(
+            "/api/grade-releases",
+            json={"arbitrary": "ignored"},
+            headers={"X-AhaMark-Client": "legacy-test-client"},
+        )
 
         assert response.status_code == 410
         assert response.json()["code"] == "GRADE_RELEASE_CREATION_RETIRED"
+        assert client.get("/openapi.json").json()["paths"]["/api/grade-releases"]["post"][
+            "deprecated"
+        ] is True
+        assert response.headers["Deprecation"] == "true"
+        assert (
+            response.headers["X-AhaMark-Replacement"]
+            == "POST /api/grading-batches/{batch_id}/confirm-results"
+        )
         assert (
             response.json()["details"]["replacement"]
             == "POST /api/grading-batches/{batch_id}/confirm-results"
         )
         db.expire_all()
         assert db.scalar(select(func.count()).select_from(GradeRelease)) == releases_before
-        assert db.scalar(select(func.count()).select_from(AuditLog)) == audits_before
+        assert db.scalar(select(func.count()).select_from(AuditLog)) == audits_before + 1
+        audit_row = db.scalar(
+            select(AuditLog)
+            .where(AuditLog.action == "grade_release.legacy_create_attempt")
+            .order_by(AuditLog.created_at.desc())
+        )
+        assert audit_row is not None
+        assert audit_row.metadata_["client"] == "legacy-test-client"
+        assert audit_row.metadata_["replacement"].endswith("/confirm-results")
     finally:
         app.dependency_overrides.pop(get_storage, None)
         db.close()

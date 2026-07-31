@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 from app.core.config import get_settings
+from app.grading.providers import GradeSuggestion
 from app.main import app
 from app.models import (
     Assignment,
@@ -760,6 +761,92 @@ def test_criteria_evidence_bulk_eligibility_and_consistency() -> None:
             f"/api/grading-batches/{batch_id}/questions/{answer.question_id}/consistency"
         )
         assert consistency.status_code == 200 and consistency.json()["total"] == 1
+    finally:
+        settings.recognition_provider = previous
+        settings.answer_recognition_provider = previous_answer
+        app.dependency_overrides.pop(get_storage, None)
+        db.close()
+
+
+def test_subjective_boundary_recheck_disagreement_enters_review_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db, _storage, batch_id, submission_id, question_id = workflow()
+    settings = get_settings()
+    previous = settings.recognition_provider
+    previous_answer = settings.answer_recognition_provider
+    settings.recognition_provider = "fake"
+    settings.answer_recognition_provider = "fake"
+
+    class SequenceProvider:
+        name = "quality-test"
+        version = "v1"
+        is_demo = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def grade(
+            self, answer: str, max_score: Decimal, context: dict | None = None
+        ) -> GradeSuggestion:
+            del answer
+            self.calls += 1
+            assert context is not None
+            criterion_id = context["rubric_items"][0]["id"]
+            evidence_id = context["evidence_regions"][0]["id"]
+            score = max_score if self.calls == 1 else max_score - Decimal("1")
+            return GradeSuggestion(
+                score=score,
+                confidence=Decimal("0.99"),
+                summary="边界答案复核",
+                criterion_scores={criterion_id: score},
+                criterion_reasons={criterion_id: "答案步骤支持该得分。"},
+                criterion_evidence_refs={criterion_id: [evidence_id]},
+            )
+
+    provider = SequenceProvider()
+    monkeypatch.setattr("app.api.grading.provider_from_settings", lambda _settings: provider)
+    try:
+        question = db.get(Question, uuid.UUID(question_id))
+        assert question is not None
+        question.question_type = "short_answer"
+        db.commit()
+        assert (
+            client.post(
+                f"/api/submissions/{submission_id}/processing-jobs?run_now=true",
+                json={"idempotency_key": "boundary-processing"},
+            ).status_code
+            == 201
+        )
+        confirm_answer_regions(db, submission_id)
+        assert (
+            client.post(
+                f"/api/submissions/{submission_id}/recognition-jobs?run_now=true",
+                json={"idempotency_key": "boundary-recognition"},
+            ).status_code
+            == 201
+        )
+        answer = db.scalar(
+            select(StudentAnswer).where(StudentAnswer.submission_id == submission_id)
+        )
+        assert answer is not None
+        answer.requires_review = False
+        answer.status = "ready_for_grading"
+        db.commit()
+
+        graded = client.post(f"/api/student-answers/{answer.id}/grade")
+
+        assert graded.status_code == 200, graded.text
+        assert provider.calls == 2
+        assert graded.json()["quality_flags"] == ["BOUNDARY_RECHECK_DISAGREEMENT"]
+        assert graded.json()["requires_review"] is True
+        workspace = client.get(f"/api/grading-batches/{batch_id}/review-workspace").json()
+        projected = workspace["items"][0]["answers"][0]
+        assert projected["result"]["quality_flags"] == [
+            "BOUNDARY_RECHECK_DISAGREEMENT"
+        ]
+        assert projected["criteria"][0]["title"] == "答案正确"
+        assert projected["criteria"][0]["evidence_quotes"]
     finally:
         settings.recognition_provider = previous
         settings.answer_recognition_provider = previous_answer

@@ -2,7 +2,9 @@ import hashlib
 import io
 import json
 import re
+import unicodedata
 import uuid
+from dataclasses import replace
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
@@ -68,6 +70,104 @@ Db = Annotated[Session, Depends(get_db)]
 Storage = Annotated[ObjectStorage, Depends(get_storage)]
 
 _CURRENT_RECOGNITION_STATUSES = {"recognized", "requires_review", "confirmed"}
+
+
+def _normalized_consistency_answer(value: str | None) -> str:
+    normalized = unicodedata.normalize("NFKC", value or "").casefold()
+    return "".join(
+        character
+        for character in normalized
+        if not character.isspace() and not unicodedata.category(character).startswith("P")
+    )
+
+
+def _criterion_signature(db: Session, result_id: uuid.UUID) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (str(item.rubric_item_id), str(item.awarded_points))
+        for item in db.scalars(
+            select(GradingCriterionResult)
+            .where(GradingCriterionResult.grading_result_id == result_id)
+            .order_by(GradingCriterionResult.rubric_item_id)
+        )
+    )
+
+
+def _consistency_differs(
+    db: Session, answer: StudentAnswer, result: GradingResult
+) -> bool:
+    submission = db.get(Submission, answer.submission_id)
+    if submission is None:
+        return False
+    peers = db.execute(
+        select(StudentAnswer, GradingResult)
+        .join(Submission, Submission.id == StudentAnswer.submission_id)
+        .join(GradingResult, GradingResult.student_answer_id == StudentAnswer.id)
+        .where(
+            Submission.grading_batch_id == submission.grading_batch_id,
+            Submission.owner_id == submission.owner_id,
+            StudentAnswer.question_id == answer.question_id,
+            GradingResult.rubric_version_id == result.rubric_version_id,
+            GradingResult.status.in_(["suggested", "accepted", "modified"]),
+        )
+    ).all()
+    normalized = _normalized_consistency_answer(_effective_answer_content(answer))
+    comparable = [
+        (peer, peer_result)
+        for peer, peer_result in peers
+        if _normalized_consistency_answer(_effective_answer_content(peer)) == normalized
+    ]
+    if len(comparable) < 2:
+        return False
+    scores = {str(peer_result.score) for _, peer_result in comparable}
+    criteria = {
+        _criterion_signature(db, peer_result.id) for _, peer_result in comparable
+    }
+    return len(scores) > 1 or len(criteria) > 1
+
+
+def _needs_boundary_recheck(
+    score: Decimal | None,
+    confidence: Decimal | None,
+    maximum: Decimal,
+) -> bool:
+    if score is None:
+        return False
+    threshold = Decimal(str(get_settings().grading_auto_accept_confidence))
+    return score in {Decimal("0"), maximum} or (
+        confidence is not None
+        and threshold - Decimal("0.08") <= confidence <= threshold
+    )
+
+
+def _apply_consistency_quality_flags(items: list[dict[str, Any]]) -> None:
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for item in items:
+        for answer_item in item["answers"]:
+            result_item = answer_item.get("result")
+            if result_item is None:
+                continue
+            key = (
+                str(answer_item["question"]["id"]),
+                _normalized_consistency_answer(answer_item.get("effective_text")),
+                str(result_item["rubric_version_id"]),
+            )
+            groups.setdefault(key, []).append(answer_item)
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        scores = {item["result"]["score"] for item in group}
+        criterion_signatures = {
+            tuple(
+                (criterion["rubric_item_id"], criterion["awarded_points"])
+                for criterion in answer_item["criteria"]
+            )
+            for answer_item in group
+        }
+        if len(scores) > 1 or len(criterion_signatures) > 1:
+            for answer_item in group:
+                answer_item["result"]["quality_flags"].append(
+                    "CONSISTENCY_REVIEW_REQUIRED"
+                )
 
 
 class BatchInput(BaseModel):
@@ -1980,6 +2080,9 @@ def grade_answer(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
                     else None
                 ),
                 "requires_review": previous_result.requires_review,
+                "quality_flags": (
+                    [previous_job.error_code] if previous_job.error_code else []
+                ),
                 "status": previous_result.status,
                 "reasoning_summary": previous_result.reasoning_summary,
                 "criterion_count": db.scalar(
@@ -2028,48 +2131,87 @@ def grade_answer(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
             question.question_type,
         )
         method, provider, version = "objective_rule", "objective-rule", "v1"
+        boundary_recheck_failed = False
     else:
         chosen = provider_from_settings(get_settings())
+        grading_context = {
+            "question": {
+                "id": str(question.id),
+                "content_text": question.content_text,
+                "content_latex": question.content_latex,
+            },
+            "standard_answer": rubric.standard_answer,
+            "alternative_answers": rubric.alternative_answers,
+            "rubric_items": [
+                {
+                    "id": str(item.id),
+                    "title": item.title,
+                    "description": item.description,
+                    "max_points": str(item.points),
+                }
+                for item in rubric_items
+            ],
+            "answer_latex": answer.corrected_latex or answer.recognized_latex,
+            "evidence_regions": [
+                {
+                    "id": str(region.id),
+                    "submission_page_id": str(region.submission_page_id),
+                    "x": str(region.x),
+                    "y": str(region.y),
+                    "width": str(region.width),
+                    "height": str(region.height),
+                }
+                for region in regions
+            ],
+            "versions": {
+                "paper": str(assignment.active_paper_version_id),
+                "rubric": str(assignment.active_rubric_version_id),
+                "prompt": get_settings().grading_prompt_version,
+                "config": get_settings().grading_config_version,
+            },
+        }
         suggestion = chosen.grade(
             text,
             Decimal(question.max_score),
-            {
-                "question": {
-                    "id": str(question.id),
-                    "content_text": question.content_text,
-                    "content_latex": question.content_latex,
-                },
-                "standard_answer": rubric.standard_answer,
-                "alternative_answers": rubric.alternative_answers,
-                "rubric_items": [
-                    {
-                        "id": str(item.id),
-                        "title": item.title,
-                        "description": item.description,
-                        "max_points": str(item.points),
-                    }
-                    for item in rubric_items
-                ],
-                "answer_latex": answer.corrected_latex or answer.recognized_latex,
-                "evidence_regions": [
-                    {
-                        "id": str(region.id),
-                        "submission_page_id": str(region.submission_page_id),
-                        "x": str(region.x),
-                        "y": str(region.y),
-                        "width": str(region.width),
-                        "height": str(region.height),
-                    }
-                    for region in regions
-                ],
-                "versions": {
-                    "paper": str(assignment.active_paper_version_id),
-                    "rubric": str(assignment.active_rubric_version_id),
-                    "prompt": get_settings().grading_prompt_version,
-                    "config": get_settings().grading_config_version,
-                },
-            },
+            grading_context,
         )
+        boundary_recheck_failed = False
+        if _needs_boundary_recheck(
+            suggestion.score,
+            suggestion.confidence,
+            Decimal(question.max_score),
+        ):
+            second = chosen.grade(
+                text,
+                Decimal(question.max_score),
+                {
+                    **grading_context,
+                    "review_mode": "boundary_recheck",
+                    "previous_suggestion": {
+                        "score": str(suggestion.score),
+                        "criterion_scores": {
+                            key: str(value)
+                            for key, value in suggestion.criterion_scores.items()
+                        },
+                    },
+                },
+            )
+            boundary_recheck_failed = (
+                second.score is None
+                or second.confidence is None
+                or second.score != suggestion.score
+                or second.criterion_scores != suggestion.criterion_scores
+            )
+            if boundary_recheck_failed:
+                suggestion = replace(
+                    suggestion,
+                    summary=(suggestion.summary.rstrip("。") + "；二次复核不一致，请教师检查。"),
+                )
+            elif second.confidence is not None and suggestion.confidence is not None:
+                suggestion = replace(
+                    suggestion,
+                    confidence=min(suggestion.confidence, second.confidence),
+                )
         method, provider, version = (
             ("ai_provider" if suggestion.score is not None else "unavailable"),
             chosen.name,
@@ -2081,11 +2223,14 @@ def grade_answer(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
         version,
         now_utc(),
     )
+    if boundary_recheck_failed:
+        job.error_code = "BOUNDARY_RECHECK_DISAGREEMENT"
     requires = (
         answer.requires_review
         or suggestion.score is None
         or suggestion.confidence is None
         or suggestion.confidence < Decimal(str(get_settings().grading_auto_accept_confidence))
+        or boundary_recheck_failed
     )
     for previous in db.scalars(
         select(GradingResult).where(
@@ -2135,7 +2280,7 @@ def grade_answer(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
                 status="evaluated" if awarded is not None else "unavailable",
                 awarded_points=awarded,
                 max_points=item.points,
-                reason=suggestion.summary,
+                reason=suggestion.criterion_reasons.get(str(item.id), suggestion.summary),
                 confidence=suggestion.confidence,
             )
         )
@@ -2152,6 +2297,11 @@ def grade_answer(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
             or values[1] + values[3] > 1
         ):
             raise ApiProblem(422, "EVIDENCE_REGION_INVALID", "证据区域必须位于页面 0–1 坐标内")
+        mapped_rubric_items = sorted(
+            item_id
+            for item_id, evidence_refs in suggestion.criterion_evidence_refs.items()
+            if str(region.id) in evidence_refs
+        )
         db.add(
             GradingEvidence(
                 grading_result_id=result.id,
@@ -2163,7 +2313,11 @@ def grade_answer(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
                 y=region.y,
                 width=region.width,
                 height=region.height,
-                description="OCR/教师标注答案区域",
+                description=(
+                    "rubric_items:" + ",".join(mapped_rubric_items)
+                    if mapped_rubric_items
+                    else "OCR/教师标注答案区域"
+                ),
             )
         )
     db.commit()
@@ -2178,6 +2332,7 @@ def grade_answer(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
         "max_score": str(result.max_score),
         "confidence": str(result.confidence) if result.confidence is not None else None,
         "requires_review": result.requires_review,
+        "quality_flags": ([job.error_code] if job.error_code else []),
         "status": result.status,
         "reasoning_summary": result.reasoning_summary,
         "criterion_count": len(rubric_items),
@@ -2370,6 +2525,8 @@ def acceptance_eligibility(
         reasons.append("CONFIDENCE_LOW")
     if answer.requires_review or result.requires_review:
         reasons.append("REQUIRES_REVIEW")
+    if _consistency_differs(db, answer, result):
+        reasons.append("CONSISTENCY_REVIEW_REQUIRED")
     if result.provider in {"fake", "unavailable"}:
         reasons.append("PROVIDER_NOT_ELIGIBLE")
     effective = (
@@ -2494,6 +2651,90 @@ def _snapshot_matches_confirm_plan(
         and Decimal(snapshot.total_score) == total
         and Decimal(snapshot.max_score) == maximum
     )
+
+
+def _changed_questions_for_confirm_plan(plan: dict[str, Any]) -> list[dict[str, str]]:
+    previous: SubmissionScoreSnapshot | None = plan.get("previous_snapshot")
+    previous_details = {
+        str(detail.get("question_id")): detail
+        for detail in (previous.details if previous is not None else [])
+        if isinstance(detail, dict) and detail.get("question_id")
+    }
+    changed: list[dict[str, str]] = []
+    for question, answer, review, result, _auto_accept in plan["answers"]:
+        detail = previous_details.get(str(question.id))
+        current_score = (
+            review.final_score if review is not None else result.score if result else None
+        )
+        current = {
+            "question_number": question.question_number,
+            "question_type": str(question.question_type),
+            "student_answer_id": str(answer.id),
+            "teacher_review_id": str(review.id) if review is not None else None,
+            "score": str(Decimal(current_score)) if current_score is not None else None,
+            "max_score": str(Decimal(question.max_score)),
+            "final_error_type": review.final_error_type if review is not None else None,
+            "final_feedback": review.final_feedback if review is not None else None,
+            "knowledge_point_ids": sorted(plan["knowledge_point_ids"].get(question.id, [])),
+            "grading_method": result.grading_method if result is not None else "manual",
+        }
+        prior = None
+        if detail is not None:
+            try:
+                prior = {
+                    "question_number": detail["question_number"],
+                    "question_type": str(detail["question_type"]),
+                    "student_answer_id": str(detail["student_answer_id"]),
+                    "teacher_review_id": str(detail["teacher_review_id"]),
+                    "score": str(Decimal(str(detail["score"]))),
+                    "max_score": str(Decimal(str(detail["max_score"]))),
+                    "final_error_type": detail["final_error_type"],
+                    "final_feedback": detail["final_feedback"],
+                    "knowledge_point_ids": sorted(
+                        str(value) for value in detail["knowledge_point_ids"]
+                    ),
+                    "grading_method": detail["grading_method"],
+                }
+            except (KeyError, TypeError, ValueError):
+                prior = None
+        answer_changed_after_snapshot = (
+            previous is not None
+            and answer.updated_at is not None
+            and answer.updated_at.replace(tzinfo=None)
+            > previous.generated_at.replace(tzinfo=None)
+        )
+        review_changed_after_snapshot = (
+            previous is not None
+            and review is not None
+            and review.updated_at is not None
+            and review.updated_at.replace(tzinfo=None) > previous.generated_at.replace(tzinfo=None)
+        )
+        if prior != current or answer_changed_after_snapshot or review_changed_after_snapshot:
+            changed.append(
+                {
+                    "question_id": str(question.id),
+                    "question_number": str(question.question_number),
+                }
+            )
+    return changed
+
+
+def _confirm_results_plan_view(db: Session, plan: dict[str, Any]) -> dict[str, Any]:
+    submission: Submission = plan["submission"]
+    student = db.get(Student, submission.student_id) if submission.student_id is not None else None
+    reused_snapshot: SubmissionScoreSnapshot | None = plan.get("reuse_snapshot")
+    return {
+        "submission_id": str(submission.id),
+        "student_id": str(submission.student_id) if submission.student_id is not None else None,
+        "student_name": student.name if student is not None else None,
+        "student_number": student.student_number if student is not None else None,
+        "action": "reuse_snapshot" if reused_snapshot is not None else "create_snapshot",
+        "snapshot_id": str(reused_snapshot.id) if reused_snapshot is not None else None,
+        "snapshot_version": reused_snapshot.version if reused_snapshot is not None else None,
+        "changed_questions": (
+            [] if reused_snapshot is not None else _changed_questions_for_confirm_plan(plan)
+        ),
+    }
 
 
 def _confirm_results_state(
@@ -2625,7 +2866,8 @@ def _confirm_results_state(
                     "question_id": "",
                 }
             )
-        plan["reuse_snapshot"] = reusable_snapshots.get(submission.id) if finalized else None
+        plan["previous_snapshot"] = reusable_snapshots.get(submission.id)
+        plan["reuse_snapshot"] = plan["previous_snapshot"] if finalized else None
         answer_query = (
             select(StudentAnswer)
             .where(StudentAnswer.submission_id == submission.id)
@@ -3187,21 +3429,7 @@ def confirm_results_readiness(batch_id: uuid.UUID, db: Db, actor: Actor) -> dict
         "new_snapshot_count": len(plans) - reused_snapshot_count,
         "reused_snapshot_count": reused_snapshot_count,
         "previous_grade_release_id": previous_grade_release_id,
-        "plan": [
-            {
-                "submission_id": str(plan["submission"].id),
-                "action": "reuse_snapshot"
-                if plan.get("reuse_snapshot") is not None
-                else "create_snapshot",
-                "snapshot_id": str(plan["reuse_snapshot"].id)
-                if plan.get("reuse_snapshot") is not None
-                else None,
-                "snapshot_version": plan["reuse_snapshot"].version
-                if plan.get("reuse_snapshot") is not None
-                else None,
-            }
-            for plan in plans
-        ],
+        "plan": [_confirm_results_plan_view(db, plan) for plan in plans],
         "confirmed_result": (
             _existing_confirm_results(db, actor.id, batch) if already_current else None
         ),
@@ -3523,6 +3751,11 @@ def review_workspace(
                 if result
                 else []
             )
+            grading_job = db.get(GradingJob, result.grading_job_id) if result else None
+            criterion_rubric_items = {
+                item.rubric_item_id: db.get(RubricItem, item.rubric_item_id)
+                for item in criteria
+            }
             regions = db.scalars(
                 select(StudentAnswerRegion).where(
                     StudentAnswerRegion.student_answer_id == answer.id
@@ -3552,6 +3785,11 @@ def review_workspace(
                         else None,
                         "requires_review": result.requires_review,
                         "reasoning": result.reasoning_summary,
+                        "quality_flags": (
+                            [grading_job.error_code]
+                            if grading_job is not None and grading_job.error_code
+                            else []
+                        ),
                     }
                     if result
                     else None,
@@ -3568,12 +3806,38 @@ def review_workspace(
                     "criteria": [
                         {
                             "rubric_item_id": str(item.rubric_item_id),
+                            "title": (
+                                criterion_rubric_items[item.rubric_item_id].title
+                                if criterion_rubric_items[item.rubric_item_id]
+                                else None
+                            ),
+                            "description": (
+                                criterion_rubric_items[item.rubric_item_id].description
+                                if criterion_rubric_items[item.rubric_item_id]
+                                else None
+                            ),
                             "status": item.status,
                             "awarded_points": str(item.awarded_points)
                             if item.awarded_points is not None
                             else None,
                             "max_points": str(item.max_points),
                             "reason": item.reason,
+                            "evidence_quotes": list(
+                                dict.fromkeys(
+                                    evidence_item.quote
+                                    for evidence_item in evidence
+                                    if evidence_item.quote
+                                    and (
+                                        not (evidence_item.description or "").startswith(
+                                            "rubric_items:"
+                                        )
+                                        or str(item.rubric_item_id)
+                                        in (evidence_item.description or "").removeprefix(
+                                            "rubric_items:"
+                                        ).split(",")
+                                    )
+                                )
+                            ),
                         }
                         for item in criteria
                     ],
@@ -3635,6 +3899,7 @@ def review_workspace(
                 "answers": answer_items,
             }
         )
+    _apply_consistency_quality_flags(items)
     total_answers = sum(len(item["answers"]) for item in items)
     reviewed_answers = sum(
         sum(
@@ -3728,12 +3993,7 @@ def question_consistency(
     ).all()
     grouped: dict[str, list[tuple[StudentAnswer, GradingResult]]] = {}
     for answer, result in rows:
-        text = (
-            answer.corrected_text
-            if answer.corrected_text is not None
-            else (answer.recognized_text or "")
-        )
-        normalized = "".join(text.casefold().split())
+        normalized = _normalized_consistency_answer(_effective_answer_content(answer))
         grouped.setdefault(normalized, []).append((answer, result))
     items: list[dict[str, Any]] = []
     for normalized, group in grouped.items():
@@ -3756,9 +4016,16 @@ def question_consistency(
                 "normalized_answer": normalized,
                 "answer_ids": [str(answer.id) for answer, _ in group],
                 "rubric_version_ids": sorted(rubric_versions),
+                "scores": sorted(scores),
                 "score_difference": len(scores) > 1 and len(rubric_versions) == 1,
                 "error_type_difference": len(errors) > 1 and len(rubric_versions) == 1,
                 "criterion_difference": len(criterion_signatures) > 1 and len(rubric_versions) == 1,
+                "requires_review": len(rubric_versions) == 1
+                and (
+                    len(scores) > 1
+                    or len(errors) > 1
+                    or len(criterion_signatures) > 1
+                ),
             }
         )
     start = (page - 1) * page_size

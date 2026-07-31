@@ -80,11 +80,54 @@ function hasManualOrIncompleteCriteria(answer: ReviewAnswer) {
 }
 
 function needsTeacherReview(answer: ReviewAnswer) {
+  const stale = answer.status === "stale" || answer.result?.status === "stale";
+  if (answer.review && !stale) return false;
   return (
+    stale ||
     answer.requires_review ||
     Boolean(answer.result?.requires_review) ||
+    Boolean(answer.result?.quality_flags?.length) ||
     answer.result?.score == null ||
     hasManualOrIncompleteCriteria(answer)
+  );
+}
+
+type ReviewTarget = {
+  submissionIndex: number;
+  answerIndex: number;
+  answerId: string;
+};
+
+function reviewTargets(
+  data: ReviewWorkspace,
+  filter: ReviewFilter,
+): ReviewTarget[] {
+  return data.items.flatMap((submission, submissionIndex) =>
+    submission.answers.flatMap((answer, answerIndex) =>
+      matchesReviewFilter(answer, filter)
+        ? [{ submissionIndex, answerIndex, answerId: answer.id }]
+        : [],
+    ),
+  );
+}
+
+function nextReviewTarget(
+  data: ReviewWorkspace,
+  filter: ReviewFilter,
+  currentSubmissionIndex: number,
+  currentAnswerIndex: number,
+  currentAnswerId: string,
+) {
+  const targets = reviewTargets(data, filter).filter(
+    (target) => target.answerId !== currentAnswerId,
+  );
+  return (
+    targets.find(
+      (target) =>
+        target.submissionIndex > currentSubmissionIndex ||
+        (target.submissionIndex === currentSubmissionIndex &&
+          target.answerIndex > currentAnswerIndex),
+    ) ?? targets[0]
   );
 }
 
@@ -149,9 +192,18 @@ export default function ReviewPage() {
       gradingApi.confirmResultsReadiness(batchId),
     ])
       .then(([workspace, nextReadiness]) => {
+        const preferredFilter = reviewTargets(workspace, "needs_review").length
+          ? "needs_review"
+          : "all";
+        const firstTarget = reviewTargets(workspace, preferredFilter)[0];
         setData(workspace);
         setReadiness(nextReadiness);
         setConfirmedResult(nextReadiness.confirmed_result ?? undefined);
+        setReviewFilter(preferredFilter);
+        if (firstTarget) {
+          setSubmissionIndex(firstTarget.submissionIndex);
+          setAnswerIndex(firstTarget.answerIndex);
+        }
       })
       .catch(() => setError("无法加载复核工作台"));
   }, [batchId]);
@@ -184,15 +236,15 @@ export default function ReviewPage() {
   }, [answer]);
 
   useEffect(() => {
-    if (!submission || answer) return;
-    const firstVisibleIndex = submission.answers.findIndex((item) =>
-      matchesReviewFilter(item, reviewFilter),
-    );
-    if (firstVisibleIndex >= 0) {
-      setAnswerIndex(firstVisibleIndex);
+    if (!data || answer) return;
+    const firstTarget = reviewTargets(data, reviewFilter)[0];
+    if (firstTarget) {
+      setSubmissionIndex(firstTarget.submissionIndex);
+      setAnswerIndex(firstTarget.answerIndex);
+      setPageIndex(0);
       setActiveEvidence(undefined);
     }
-  }, [answer, reviewFilter, submission]);
+  }, [answer, data, reviewFilter]);
 
   const maxScore = Number(
     answer?.question.max_score ?? answer?.result?.score ?? 0,
@@ -229,6 +281,8 @@ export default function ReviewPage() {
     readiness?.new_snapshot_count !== undefined ||
     readiness?.reused_snapshot_count !== undefined ||
     readiness?.plan !== undefined;
+  const changedSubmissionPlans =
+    readiness?.plan?.filter((item) => item.action === "create_snapshot") ?? [];
   const readinessProblems = Array.from(
     new Set(
       readiness?.blockers.map((blocker) =>
@@ -272,10 +326,30 @@ export default function ReviewPage() {
     setSaving(true);
     setMessage("");
     try {
-      await gradingApi.review(answer.id, payload);
-      await load();
+      const currentAnswerId = answer.id;
+      await gradingApi.review(currentAnswerId, payload);
+      const next = await load();
+      const target = nextReviewTarget(
+        next,
+        reviewFilter,
+        submissionIndex,
+        answerIndex,
+        currentAnswerId,
+      );
+      if (target) {
+        setSubmissionIndex(target.submissionIndex);
+        setAnswerIndex(target.answerIndex);
+        setPageIndex(0);
+        setActiveEvidence(undefined);
+      }
       setScoringDecision(null);
-      setMessage("复核结果已保存");
+      setMessage(
+        target
+          ? "已保存，已进入下一题"
+          : reviewFilter === "needs_review"
+            ? "异常已处理完"
+            : "复核结果已保存",
+      );
     } catch (reason) {
       setMessage(
         reason instanceof Error && reason.message.trim()
@@ -351,10 +425,22 @@ export default function ReviewPage() {
     setSaving(true);
     try {
       await gradingApi.correctAnswer(answer.id, { corrected_text: corrected });
-      await load();
-      setMessage("答案已修改，请重新批改");
     } catch {
       setMessage("答案修正失败");
+      setSaving(false);
+      return;
+    }
+    try {
+      await gradingApi.grade(answer.id);
+      await load();
+      setMessage("答案已修改并重新批改");
+    } catch {
+      try {
+        await load();
+      } catch {
+        // Keep the actionable grading failure visible.
+      }
+      setMessage("答案已修改，自动批改失败，请检查评分标准");
     } finally {
       setSaving(false);
     }
@@ -484,6 +570,27 @@ export default function ReviewPage() {
             {readinessReusedSnapshotCount > 0 && (
               <p className="mt-1">未修改的结果保持不变。</p>
             )}
+            {readiness.previous_grade_release_id &&
+              changedSubmissionPlans.length > 0 && (
+                <ul className="mt-2 space-y-1">
+                  {changedSubmissionPlans.map((item) => {
+                    const student = item.student_name
+                      ? `${item.student_name}${item.student_number ? `（${item.student_number}）` : ""}`
+                      : item.student_number || "学生";
+                    const questions = item.changed_questions
+                      ?.map((question) => question.question_number)
+                      .join("、");
+                    return (
+                      <li key={item.submission_id}>
+                        {student}：
+                        {questions
+                          ? `第 ${questions} 题有变化`
+                          : "需要重新确认"}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
           </div>
         )}
         <div className="mt-3 flex flex-wrap gap-2" aria-label="答案筛选">
@@ -589,19 +696,27 @@ export default function ReviewPage() {
         </section>
         <nav aria-label="复核导航" className="rounded-xl border bg-white p-3">
           <h2 className="mb-2 font-semibold">学生 / 题目</h2>
-          {data.items.map((item, index) => (
-            <button
-              key={item.submission_id}
-              onClick={() => {
-                setSubmissionIndex(index);
-                setAnswerIndex(0);
-                setPageIndex(0);
-              }}
-              className={`mb-2 block w-full rounded-lg p-2 text-left text-sm ${index === submissionIndex ? "bg-indigo-50 text-indigo-700" : "hover:bg-slate-50"}`}
-            >
-              学生 {index + 1}
-            </button>
-          ))}
+          {data.items.map((item, index) =>
+            !item.answers.some((answer) =>
+              matchesReviewFilter(answer, reviewFilter),
+            ) ? null : (
+              <button
+                key={item.submission_id}
+                onClick={() => {
+                  const firstVisibleAnswer = item.answers.findIndex((answer) =>
+                    matchesReviewFilter(answer, reviewFilter),
+                  );
+                  setSubmissionIndex(index);
+                  setAnswerIndex(Math.max(firstVisibleAnswer, 0));
+                  setPageIndex(0);
+                  setActiveEvidence(undefined);
+                }}
+                className={`mb-2 block w-full rounded-lg p-2 text-left text-sm ${index === submissionIndex ? "bg-indigo-50 text-indigo-700" : "hover:bg-slate-50"}`}
+              >
+                学生 {index + 1}
+              </button>
+            ),
+          )}
           <hr className="my-3" />
           {submission?.answers.map((item, index) => {
             if (!matchesReviewFilter(item, reviewFilter)) return null;
@@ -668,6 +783,26 @@ export default function ReviewPage() {
                     {answer.result.reasoning}
                   </p>
                   <p className="mt-2 text-xs text-slate-600">仅供参考。</p>
+                </div>
+              )}
+              {answer.result?.quality_flags?.includes(
+                "CONSISTENCY_REVIEW_REQUIRED",
+              ) && (
+                <div
+                  role="alert"
+                  className="rounded border border-amber-300 bg-amber-50 p-3 text-sm"
+                >
+                  相同答案出现不同评分，请检查。
+                </div>
+              )}
+              {answer.result?.quality_flags?.includes(
+                "BOUNDARY_RECHECK_DISAGREEMENT",
+              ) && (
+                <div
+                  role="alert"
+                  className="rounded border border-amber-300 bg-amber-50 p-3 text-sm"
+                >
+                  两次评分结果不同，请教师判断。
                 </div>
               )}
               <details className="rounded border p-3 text-sm">
@@ -765,21 +900,37 @@ export default function ReviewPage() {
                 </div>
               </details>
               <div>
-                <h3 className="font-semibold">评分项</h3>
+                <h3 className="font-semibold">评分依据</h3>
                 {answer.criteria.map((item) => (
                   <div
                     key={item.rubric_item_id}
                     className="mt-2 rounded border p-2 text-sm"
                   >
-                    {item.awarded_points ?? "—"} / {item.max_points} ·{" "}
-                    {item.reason}
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="font-medium">
+                        {item.title || "评分项"}
+                      </span>
+                      <span>
+                        {item.awarded_points ?? "—"} / {item.max_points}
+                      </span>
+                    </div>
+                    {item.reason && (
+                      <p className="mt-1 text-slate-700">{item.reason}</p>
+                    )}
+                    {item.evidence_quotes?.[0] && (
+                      <p className="mt-1 text-slate-500">
+                        依据：{item.evidence_quotes[0]}
+                      </p>
+                    )}
                   </div>
                 ))}
               </div>
-              <div>
-                <h3 className="font-semibold">评分证据</h3>
-                {answer.evidence.length ? (
-                  answer.evidence.map((item) => (
+              {answer.evidence.length > 0 && (
+                <details className="rounded border p-3 text-sm">
+                  <summary className="cursor-pointer font-semibold">
+                    查看原图依据
+                  </summary>
+                  {answer.evidence.map((item) => (
                     <button
                       key={item.id}
                       onClick={() => {
@@ -790,15 +941,13 @@ export default function ReviewPage() {
                         );
                         if (index >= 0) setPageIndex(index);
                       }}
-                      className="mt-2 block w-full rounded border p-2 text-left text-sm hover:bg-indigo-50"
+                      className="mt-2 block w-full rounded border p-2 text-left hover:bg-indigo-50"
                     >
                       {item.quote || "证据区域"}
                     </button>
-                  ))
-                ) : (
-                  <p className="text-sm text-slate-500">暂无评分证据</p>
-                )}
-              </div>
+                  ))}
+                </details>
+              )}
               {scoringDecision && (
                 <section
                   aria-label="教师评分表单"
@@ -911,7 +1060,22 @@ export default function ReviewPage() {
               )}
             </>
           ) : (
-            <p className="text-slate-500">请选择待复核答案</p>
+            <div className="space-y-3 text-slate-500">
+              <p>
+                {reviewFilter === "needs_review"
+                  ? "当前没有需要检查的答案"
+                  : "请选择答案"}
+              </p>
+              {message && <p role="status">{message}</p>}
+              {reviewFilter === "needs_review" && (
+                <button
+                  className="rounded border px-3 py-2 text-sm text-slate-900"
+                  onClick={() => setReviewFilter("all")}
+                >
+                  查看全部
+                </button>
+              )}
+            </div>
           )}
         </section>
       </div>

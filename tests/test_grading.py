@@ -3,6 +3,11 @@ import urllib.error
 from decimal import Decimal
 
 import pytest
+from app.api.grading import (
+    _apply_consistency_quality_flags,
+    _needs_boundary_recheck,
+    _normalized_consistency_answer,
+)
 from app.core.config import Settings
 from app.grading.providers import (
     FakeGradingProvider,
@@ -48,6 +53,40 @@ def test_objective_rule_does_not_guess_ambiguous_choice_text() -> None:
 def test_objective_rule_keeps_exact_text_fallback_for_legacy_question_types() -> None:
     result = grade_objective(" 1. 测试题 ", ["1.测试题"], Decimal("5"), "single_choice")
     assert result.score == Decimal("5")
+
+
+def test_quality_checks_normalize_harmless_punctuation_and_recheck_boundaries() -> None:
+    assert _normalized_consistency_answer("解：x = 1。") == _normalized_consistency_answer(
+        "解 x = 1"
+    )
+    assert _needs_boundary_recheck(Decimal("0"), Decimal("0.99"), Decimal("10"))
+    assert _needs_boundary_recheck(Decimal("10"), Decimal("0.99"), Decimal("10"))
+    assert not _needs_boundary_recheck(Decimal("6"), Decimal("0.99"), Decimal("10"))
+
+
+def test_same_answer_score_difference_is_added_to_quality_queue() -> None:
+    def projected(score: str) -> dict:
+        return {
+            "effective_text": "解：x = 1。",
+            "question": {"id": "question-1"},
+            "result": {
+                "score": score,
+                "rubric_version_id": "rubric-1",
+                "quality_flags": [],
+            },
+            "criteria": [
+                {"rubric_item_id": "criterion-1", "awarded_points": score}
+            ],
+        }
+
+    first, second = projected("5"), projected("4")
+    second["effective_text"] = "解 x = 1"
+    items = [{"answers": [first]}, {"answers": [second]}]
+
+    _apply_consistency_quality_flags(items)
+
+    assert first["result"]["quality_flags"] == ["CONSISTENCY_REVIEW_REQUIRED"]
+    assert second["result"]["quality_flags"] == ["CONSISTENCY_REVIEW_REQUIRED"]
 
 
 def test_unavailable_provider_never_invents_score() -> None:
@@ -198,6 +237,7 @@ def test_subjective_provider_accepts_complete_rubric_with_traceable_evidence(
             {
                 "rubric_item_id": "criterion-1",
                 "score": 4,
+                "reason": "方法正确。",
                 "evidence_refs": ["evidence-1"],
             },
             {
@@ -234,4 +274,6 @@ def test_subjective_provider_accepts_complete_rubric_with_traceable_evidence(
         "criterion-1": Decimal("4"),
         "criterion-2": Decimal("3"),
     }
+    assert result.criterion_reasons["criterion-1"] == "方法正确。"
+    assert result.criterion_evidence_refs["criterion-1"] == ["evidence-1"]
     assert result.abstain_reason is None

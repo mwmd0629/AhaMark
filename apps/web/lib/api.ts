@@ -945,9 +945,16 @@ export type ConfirmResultsReadiness = {
   previous_grade_release_id?: string | null;
   plan?: Array<{
     submission_id: string;
+    student_id?: string | null;
+    student_name?: string | null;
+    student_number?: string | null;
     action: "create_snapshot" | "reuse_snapshot";
     snapshot_id?: string | null;
     snapshot_version?: number | null;
+    changed_questions?: Array<{
+      question_id: string;
+      question_number: string;
+    }>;
   }>;
   confirmed_result?: ConfirmResultsResult | null;
 };
@@ -1237,6 +1244,7 @@ export type ReviewWorkspace = {
         confidence?: string;
         requires_review: boolean;
         reasoning?: string;
+        quality_flags?: string[];
       };
       review?: {
         decision: string;
@@ -1246,10 +1254,13 @@ export type ReviewWorkspace = {
       };
       criteria: Array<{
         rubric_item_id: string;
+        title?: string;
+        description?: string;
         status: string;
         awarded_points?: string;
         max_points: string;
         reason?: string;
+        evidence_quotes?: string[];
       }>;
       evidence: Array<{
         id: string;

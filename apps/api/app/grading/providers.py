@@ -20,6 +20,8 @@ class GradeSuggestion:
     feedback: str | None = None
     error_type: str | None = None
     criterion_scores: dict[str, Decimal] = field(default_factory=dict)
+    criterion_reasons: dict[str, str] = field(default_factory=dict)
+    criterion_evidence_refs: dict[str, list[str]] = field(default_factory=dict)
     evidence: list[dict[str, Any]] = field(default_factory=list)
     abstain_reason: str | None = None
 
@@ -27,6 +29,7 @@ class GradeSuggestion:
 class ProviderCriterion(BaseModel):
     rubric_item_id: str
     score: Decimal = Field(ge=0)
+    reason: str | None = Field(None, min_length=1, max_length=1000)
     evidence_refs: list[str] = Field(default_factory=list)
 
 
@@ -115,6 +118,7 @@ class OpenAICompatibleGradingProvider:
                     "content": (
                         "你是评分建议系统。只返回 JSON；建议不直接成为正式成绩。"
                         "逐项依据 rubric_items 评分，每个评分项必须且只能出现一次，不能漏项。"
+                        "每个评分项用 reason 简要说明得分依据。"
                         "每个评分项只引用 evidence_regions 中存在的 id；"
                         "没有充分证据时必须 abstain。"
                         "不要因为最终答案正确就默认过程分满分，也不要猜测无法识别的内容。"
@@ -200,6 +204,11 @@ class OpenAICompatibleGradingProvider:
                 output.feedback,
                 output.error_type,
                 {item.rubric_item_id: item.score for item in output.criteria},
+                {
+                    item.rubric_item_id: item.reason or output.reasoning_summary
+                    for item in output.criteria
+                },
+                {item.rubric_item_id: item.evidence_refs for item in output.criteria},
                 output.evidence,
             )
         except (TimeoutError, urllib.error.URLError):

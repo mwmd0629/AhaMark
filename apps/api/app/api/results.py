@@ -29,7 +29,8 @@ from app.models import (
 from app.results.services import FinalScoreService, create_analytics, release_scores
 from app.storage.base import ObjectStorage
 from app.storage.dependencies import get_storage
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -214,13 +215,37 @@ def readiness(
     return result
 
 
-@router.post("/grade-releases")
-def create_release(_actor: Actor) -> None:
-    raise ApiProblem(
-        410,
-        "GRADE_RELEASE_CREATION_RETIRED",
-        "成绩发布创建入口已退役，请通过批改批次的“确认结果”完成正式授权",
-        {"replacement": "POST /api/grading-batches/{batch_id}/confirm-results"},
+@router.post("/grade-releases", deprecated=True)
+def create_release(request: Request, db: Db, actor: Actor) -> JSONResponse:
+    replacement = "POST /api/grading-batches/{batch_id}/confirm-results"
+    audit(
+        db,
+        actor.id,
+        "grade_release.legacy_create_attempt",
+        "api_endpoint",
+        actor.id,
+        {
+            "endpoint": "POST /api/grade-releases",
+            "replacement": replacement,
+            "client": request.headers.get("x-ahamark-client", "")[:160] or None,
+            "user_agent": request.headers.get("user-agent", "")[:500] or None,
+            "referer": request.headers.get("referer", "")[:500] or None,
+            "request_id": getattr(request.state, "request_id", None),
+        },
+    )
+    db.commit()
+    return JSONResponse(
+        {
+            "code": "GRADE_RELEASE_CREATION_RETIRED",
+            "message": "成绩发布创建入口已退役，请通过批改批次的“确认结果”完成正式授权",
+            "details": {"replacement": replacement},
+            "request_id": getattr(request.state, "request_id", None),
+        },
+        status_code=410,
+        headers={
+            "Deprecation": "true",
+            "X-AhaMark-Replacement": replacement,
+        },
     )
 
 

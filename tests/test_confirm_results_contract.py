@@ -342,21 +342,35 @@ def test_reopen_one_submission_reuses_unchanged_snapshot_and_versions_release() 
             json={"reason": "Correct one synthetic submission"},
         )
         assert reopened.status_code == 200, reopened.text
+        changed_answer = case.db.get(StudentAnswer, case.answer_id)
+        assert changed_answer is not None
+        changed_review = case.db.scalar(
+            select(TeacherReview).where(TeacherReview.student_answer_id == case.answer_id)
+        )
+        assert changed_review is not None
+        changed_review.final_feedback = "Corrected synthetic feedback"
+        case.db.commit()
         partial = _readiness(case)
         assert partial["ready"] is True
         assert partial["confirmed_result"] is None
         assert partial["previous_grade_release_id"] == str(first_release_id)
         assert partial["new_snapshot_count"] == 1
         assert partial["reused_snapshot_count"] == 1
-        reused_plan = [
-            item for item in partial["plan"] if item["action"] == "reuse_snapshot"
-        ]
-        assert reused_plan == [
+        reused_plan = [item for item in partial["plan"] if item["action"] == "reuse_snapshot"]
+        assert len(reused_plan) == 1
+        assert reused_plan[0]["submission_id"] == str(second_submission_id)
+        assert reused_plan[0]["snapshot_id"] == str(first_items[second_submission_id])
+        assert reused_plan[0]["snapshot_version"] == 1
+        assert reused_plan[0]["changed_questions"] == []
+        changed_plan = [item for item in partial["plan"] if item["action"] == "create_snapshot"]
+        assert len(changed_plan) == 1
+        assert changed_plan[0]["submission_id"] == str(case.submission_id)
+        assert changed_plan[0]["student_name"]
+        assert changed_plan[0]["student_number"]
+        assert changed_plan[0]["changed_questions"] == [
             {
-                "submission_id": str(second_submission_id),
-                "action": "reuse_snapshot",
-                "snapshot_id": str(first_items[second_submission_id]),
-                "snapshot_version": 1,
+                "question_id": str(changed_answer.question_id),
+                "question_number": "1",
             }
         ]
 
