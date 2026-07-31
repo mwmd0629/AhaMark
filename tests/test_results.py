@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from app.main import app
+from app.models import AuditLog, GradeRelease
 from app.results.services import (
     SnapshotPayload,
     ValidatedScore,
@@ -13,9 +15,12 @@ from app.results.services import (
     gradebook_xlsx,
     student_report_pdf,
 )
+from app.storage.dependencies import get_storage
 from openpyxl import load_workbook
 from pydantic import ValidationError
 from pypdf import PdfReader
+from sqlalchemy import func, select
+from test_submission_workflow import client, workflow
 
 
 def payload(
@@ -166,3 +171,25 @@ def test_chinese_student_pdf_embeds_font_and_is_parseable(monkeypatch: pytest.Mo
     assert len(reader.pages) >= 2
     assert "AhaMark" in text and "合成测试学生" in text and "函数综合练习" in text
     assert b"NotoSansSC" in content
+
+
+def test_grade_release_creation_is_retired_and_has_no_writes() -> None:
+    db, _storage, _batch_id, _submission_id, _question_id = workflow()
+    try:
+        releases_before = db.scalar(select(func.count()).select_from(GradeRelease))
+        audits_before = db.scalar(select(func.count()).select_from(AuditLog))
+
+        response = client.post("/api/grade-releases", json={"arbitrary": "ignored"})
+
+        assert response.status_code == 410
+        assert response.json()["code"] == "GRADE_RELEASE_CREATION_RETIRED"
+        assert (
+            response.json()["details"]["replacement"]
+            == "POST /api/grading-batches/{batch_id}/confirm-results"
+        )
+        db.expire_all()
+        assert db.scalar(select(func.count()).select_from(GradeRelease)) == releases_before
+        assert db.scalar(select(func.count()).select_from(AuditLog)) == audits_before
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+        db.close()

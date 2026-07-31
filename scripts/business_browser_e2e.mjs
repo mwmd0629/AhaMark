@@ -1,6 +1,7 @@
 import { chromium } from "file:///C:/Users/Lenovo/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
@@ -33,8 +34,7 @@ const markerSuffix =
 const composeProject =
   process.env.BUSINESS_E2E_COMPOSE_PROJECT ?? "ahamark-business-e2e";
 const exceptionBootstrap = process.env.BUSINESS_E2E_EXCEPTION_BOOTSTRAP === "1";
-const skipDbProvenance =
-  process.env.BUSINESS_E2E_SKIP_DB_PROVENANCE === "1";
+const skipDbProvenance = process.env.BUSINESS_E2E_SKIP_DB_PROVENANCE === "1";
 const singleContinueProof = true;
 const runTimeoutMs = Number(process.env.BUSINESS_E2E_TIMEOUT_MS ?? "240000");
 const requestedStopAfter = process.env.BUSINESS_E2E_STOP_AFTER;
@@ -59,11 +59,62 @@ const evidencePath = path.resolve(
 fs.mkdirSync(artifactDir, { recursive: true });
 fs.mkdirSync(path.dirname(evidencePath), { recursive: true });
 
+const worktreeStatus = execFileSync(
+  "git",
+  ["status", "--porcelain=v1", "--untracked-files=all"],
+  { encoding: "utf8" },
+);
+const trackedDiff = execFileSync("git", ["diff", "--binary", "HEAD", "--"], {
+  encoding: "buffer",
+});
+function composeImageId(service) {
+  try {
+    const containerId = execFileSync(
+      "docker",
+      [
+        "compose",
+        "-p",
+        composeProject,
+        "-f",
+        "docker-compose.business-e2e.yml",
+        "ps",
+        "-q",
+        service,
+      ],
+      { encoding: "utf8" },
+    ).trim();
+    if (!containerId) return null;
+    return (
+      execFileSync("docker", ["inspect", "--format={{.Image}}", containerId], {
+        encoding: "utf8",
+      }).trim() || null
+    );
+  } catch {
+    return null;
+  }
+}
+
 const evidence = {
   result: "failed",
   code_version: execFileSync("git", ["rev-parse", "HEAD"], {
     encoding: "utf8",
   }).trim(),
+  source_provenance: {
+    worktree_dirty: worktreeStatus.trim().length > 0,
+    worktree_status_sha256: createHash("sha256")
+      .update(worktreeStatus)
+      .digest("hex"),
+    tracked_diff_sha256: createHash("sha256").update(trackedDiff).digest("hex"),
+    untracked_file_count: worktreeStatus
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("?? ")).length,
+    container_image_ids: Object.fromEntries(
+      ["api", "worker", "web"].map((service) => [
+        service,
+        composeImageId(service),
+      ]),
+    ),
+  },
   environment: {
     kind: "isolated_compose",
     compose_project: composeProject,
@@ -3663,49 +3714,83 @@ try {
     }
   }
   await page.getByText(/^\s*已复核\s+4\/4\s*$/).waitFor();
-  await page.getByRole("button", { name: "全部定稿", exact: true }).click();
-  if (exceptionBootstrap) {
-    const incompleteSnapshot = page.locator(
-      '[data-testid="score-snapshot"][data-status="incomplete"]',
-    );
-    await incompleteSnapshot.waitFor();
-    evidence.objects.incomplete_snapshot_id =
-      await incompleteSnapshot.getAttribute("data-snapshot-id");
-    stage("F", "incomplete_merged_submission_blocked_without_false_success");
-  }
-  const snapshotNodes = page.locator(
-    '[data-testid="score-snapshot"][data-status="complete"]',
-  );
-  await pollUntil("two complete score snapshots", 60_000, async () => {
-    const count = await snapshotNodes.count();
-    return {
-      done: count === 2,
-      value: count,
-      state: `count=${count}`,
-    };
+  const confirmResultsButton = page.getByRole("button", {
+    name: "确认结果",
+    exact: true,
   });
   assert.equal(
-    await snapshotNodes.count(),
-    2,
-    "F must render exactly two complete score snapshots",
+    await confirmResultsButton.count(),
+    1,
+    "review UI must expose exactly one confirm-results authorization",
   );
-  evidence.objects.complete_snapshot_ids = await snapshotNodes.evaluateAll(
-    (nodes) => nodes.map((node) => node.getAttribute("data-snapshot-id")),
+  await confirmResultsButton.waitFor();
+  assert.equal(
+    await confirmResultsButton.isEnabled(),
+    true,
+    "confirm-results authorization must be ready after every review is complete",
   );
-  assert.equal(evidence.objects.complete_snapshot_ids.length, 2);
+  evidence.confirm_results_ui = {
+    label: "确认结果",
+    count: await confirmResultsButton.count(),
+    enabled: await confirmResultsButton.isEnabled(),
+    clicked: false,
+  };
+
+  const beforeFinalizeResponse = await apiJson(reviewWorkspaceUrl);
+  assert.equal(beforeFinalizeResponse.status, 200);
+  const activeSubmissions = beforeFinalizeResponse.body.items.filter((item) =>
+    evidence.objects.submission_ids.includes(item.submission_id),
+  );
+  assert.equal(activeSubmissions.length, 2);
   assert.ok(
-    evidence.objects.complete_snapshot_ids.every(Boolean),
-    "complete score snapshots must expose IDs",
+    activeSubmissions.every((item) => item.status !== "finalized"),
+    "compatibility finalize must only be called for non-finalized submissions",
   );
   assert.equal(
-    new Set(evidence.objects.complete_snapshot_ids).size,
-    2,
-    "complete score snapshot IDs must be unique",
+    new Set(evidence.objects.submission_ids).size,
+    evidence.objects.submission_ids.length,
+    "compatibility finalize scope must not contain duplicate submissions",
   );
-  evidence.reconciliation.snapshot_scores = await snapshotNodes.evaluateAll(
-    (nodes) =>
-      nodes.map((node) => Number(node.getAttribute("data-total-score"))),
-  );
+  evidence.compatibility_finalization = [];
+  for (const submissionId of evidence.objects.submission_ids) {
+    const finalizePath = `/api/submissions/${submissionId}/finalize`;
+    const finalizeResponse = await apiJson(finalizePath, { method: "POST" });
+    assert.equal(
+      finalizeResponse.status,
+      200,
+      `compatibility finalize failed: ${submissionId}:${finalizeResponse.error_code}`,
+    );
+    assert.equal(finalizeResponse.body.submission_id, submissionId);
+    assert.equal(finalizeResponse.body.status, "complete");
+    assert.ok(finalizeResponse.body.id);
+
+    const snapshotReadResponse = await apiJson(
+      `/api/assignments/${assignmentId}/score-snapshots?status=complete`,
+    );
+    assert.equal(snapshotReadResponse.status, 200);
+    const snapshotRead = snapshotReadResponse.body.find(
+      (snapshot) => snapshot.id === finalizeResponse.body.id,
+    );
+    assert.ok(
+      snapshotRead,
+      `finalize write-after-GET must expose snapshot ${finalizeResponse.body.id}`,
+    );
+    assert.equal(snapshotRead.submission_id, submissionId);
+    assert.equal(snapshotRead.status, "complete");
+    assert.equal(snapshotRead.version, finalizeResponse.body.version);
+    evidence.compatibility_finalization.push({
+      submission_id: submissionId,
+      snapshot_id: finalizeResponse.body.id,
+      snapshot_status: finalizeResponse.body.status,
+      snapshot_version: finalizeResponse.body.version,
+      write_status: finalizeResponse.status,
+      write_error_code: finalizeResponse.error_code,
+      write_request_id: finalizeResponse.request_id,
+      read_status: snapshotReadResponse.status,
+      read_error_code: snapshotReadResponse.error_code,
+      read_request_id: snapshotReadResponse.request_id,
+    });
+  }
   stage(
     "F",
     "unavailable_subjective_baseline_verified_before_local_suggestion",
@@ -3718,16 +3803,27 @@ try {
     `/api/assignments/${assignmentId}/score-snapshots?status=complete`,
   );
   assert.equal(completeSnapshotsResponse.status, 200);
-  assert.ok(
-    completeSnapshotsResponse.body.length >= 2,
-    "F must create complete snapshots before its safe stop",
+  assert.equal(
+    completeSnapshotsResponse.body.length,
+    2,
+    "F must create exactly two complete snapshots before its safe stop",
   );
   const completeSnapshotIds = completeSnapshotsResponse.body.map(
     (snapshot) => snapshot.id,
   );
+  assert.equal(
+    new Set(completeSnapshotIds).size,
+    2,
+    "complete score snapshot IDs must be unique",
+  );
+  evidence.objects.complete_snapshot_ids =
+    evidence.compatibility_finalization.map((item) => item.snapshot_id);
   assert.deepEqual(
     [...evidence.objects.complete_snapshot_ids].sort(),
     [...completeSnapshotIds].sort(),
+  );
+  evidence.reconciliation.snapshot_scores = completeSnapshotsResponse.body.map(
+    (snapshot) => Number(snapshot.total_score),
   );
   evidence.snapshot_verification = {
     response_status: completeSnapshotsResponse.status,
@@ -3740,158 +3836,71 @@ try {
       version: snapshot.version,
     })),
   };
+  const finalizedBatchResponse = await apiJson(
+    `/api/grading-batches/${evidence.objects.grading_batch_id}`,
+  );
+  assert.equal(finalizedBatchResponse.status, 200);
+  assert.equal(
+    finalizedBatchResponse.body.workflow.completed_count,
+    2,
+    "finalized submissions with complete snapshots must be teacher-facing completed",
+  );
+  assert.deepEqual(
+    finalizedBatchResponse.body.workflow.blocked,
+    [],
+    "finalized submissions must not retain page-processing blockers",
+  );
+  const finalizedSubmissionsResponse = await apiJson(
+    `/api/grading-batches/${evidence.objects.grading_batch_id}/submissions`,
+  );
+  assert.equal(finalizedSubmissionsResponse.status, 200);
+  const finalizedSubmissions = finalizedSubmissionsResponse.body.filter(
+    (item) => evidence.objects.submission_ids.includes(item.id),
+  );
+  assert.equal(finalizedSubmissions.length, 2);
+  assert.ok(
+    finalizedSubmissions.every(
+      (item) =>
+        item.status === "finalized" && item.workflow.stage === "completed",
+    ),
+    "each finalized submission must expose the completed workflow stage",
+  );
+  evidence.finalized_workflow_verification = {
+    batch_read_status: finalizedBatchResponse.status,
+    batch_request_id: finalizedBatchResponse.request_id,
+    completed_count: finalizedBatchResponse.body.workflow.completed_count,
+    blocked_count: finalizedBatchResponse.body.workflow.blocked_count,
+    submissions_read_status: finalizedSubmissionsResponse.status,
+    submissions_request_id: finalizedSubmissionsResponse.request_id,
+    submissions: finalizedSubmissions.map((item) => ({
+      id: item.id,
+      student_name: item.student_name,
+      student_number: item.student_number,
+      status: item.status,
+      workflow_stage: item.workflow.stage,
+    })),
+  };
+  const releasesResponse = await apiJson(
+    `/api/grade-releases?assignment_id=${assignmentId}`,
+  );
+  assert.equal(releasesResponse.status, 200);
+  assert.deepEqual(
+    releasesResponse.body,
+    [],
+    "safe grading E2E must not create a GradeRelease",
+  );
+  evidence.grade_release_absence = {
+    response_status: releasesResponse.status,
+    request_id: releasesResponse.request_id,
+    assignment_id: assignmentId,
+    count: releasesResponse.body.length,
+  };
   evidence.execution.completed_through = "F";
   evidence.execution.completed_stage_count = 6;
   if (stopAfterF) {
-    const releasesResponse = await apiJson(
-      `/api/grade-releases?assignment_id=${assignmentId}`,
-    );
-    assert.equal(releasesResponse.status, 200);
-    assert.deepEqual(
-      releasesResponse.body,
-      [],
-      "STOP_AFTER=F assignment must not have a GradeRelease",
-    );
-    evidence.grade_release_absence = {
-      response_status: releasesResponse.status,
-      request_id: releasesResponse.request_id,
-      assignment_id: assignmentId,
-      count: releasesResponse.body.length,
-    };
     evidence.objects.student_numbers = studentNumbers;
     evidence.result = "passed_through_F";
   }
-
-  // BUSINESS_E2E_GH_GUARD_START
-  if (!stopAfterF) {
-    currentStage = "G";
-    await page.getByRole("link", { name: "返回批次工作台" }).click();
-    await page.getByRole("button", { name: "查看 grade readiness" }).click();
-    await page.getByText("可发布 2 · 未完成 1").waitFor();
-    evidence.execution.grade_release_write_attempted = true;
-    await page
-      .getByRole("button", { name: "创建新的 GradeRelease 版本" })
-      .click();
-    await page.getByTestId("grade-release").waitFor();
-    evidence.objects.grade_release_id = await page
-      .getByTestId("grade-release")
-      .getAttribute("data-release-id");
-    await page.getByRole("button", { name: "生成 XLSX" }).click();
-    await page
-      .getByText(/gradebook_xlsx 报告任务已完成/)
-      .waitFor({ timeout: 150_000 });
-    await page.getByRole("button", { name: "生成首名学生中文 PDF" }).click();
-    await page
-      .getByText(/student_report_pdf 报告任务已完成/)
-      .waitFor({ timeout: 150_000 });
-    const reportNodes = page.getByTestId("report-job");
-    evidence.objects.report_jobs = await reportNodes.evaluateAll((nodes) =>
-      nodes.map((node) => ({
-        id: node.getAttribute("data-report-id"),
-        type: node.getAttribute("data-report-type"),
-        status: node.getAttribute("data-report-status"),
-      })),
-    );
-    for (let index = 0; index < 2; index++) {
-      await reportNodes
-        .nth(index)
-        .getByRole("button", { name: "请求短期下载地址" })
-        .click();
-      await page
-        .getByText(/已通过 UI 获取新的 15 分钟短期签名下载地址/)
-        .waitFor();
-      const signed = await page
-        .getByTestId("signed-download")
-        .getAttribute("href");
-      if (!signed || !new URL(signed).search)
-        throw new Error("SIGNED_DOWNLOAD_QUERY_MISSING");
-    }
-    evidence.reconciliation.release_snapshot_ids = await page
-      .getByTestId("grade-release")
-      .locator("p")
-      .first()
-      .textContent()
-      .then((text) =>
-        evidence.objects.complete_snapshot_ids.filter((id) =>
-          text?.includes(id),
-        ),
-      );
-    stage("G", "readiness_excludes_one_unfinished_student");
-    stage("G", "release_pins_complete_snapshot_ids");
-    stage("G", "xlsx_and_chinese_pdf_completed_and_signed_download_requested");
-    evidence.stages.G.status = "passed";
-
-    currentStage = "H";
-    await page.goto(`${base}/analytics`);
-    await selectByLabel("作业", assignmentName);
-    await page.getByLabel("发布版本").selectOption({ index: 1 });
-    await page.getByRole("button", { name: /生成 \/ 刷新分析/ }).click();
-    await page.getByText("分数分布").waitFor();
-    const metrics = page.getByTestId("analytics-metrics");
-    evidence.objects.analytics_snapshot_id =
-      await metrics.getAttribute("data-snapshot-id");
-    const metricText = await metrics.textContent();
-    const expectedAverage =
-      evidence.reconciliation.snapshot_scores.reduce(
-        (total, score) => total + score,
-        0,
-      ) / evidence.reconciliation.snapshot_scores.length;
-    if (
-      !metricText?.includes("参与人数2") ||
-      !metricText.includes(`平均分${expectedAverage}`)
-    )
-      throw new Error("ANALYTICS_RECONCILIATION_FAILED");
-    await page.getByRole("button", { name: "0-59" }).click();
-    await page.getByText(/分数段 0-59/).waitFor();
-    await page.getByRole("link", { name: "查看学生详情" }).first().click();
-    await page.waitForURL("**/analytics/students/*");
-    await page.getByText("当前发布成绩").waitFor();
-    stage("H", "score_band_drilldown_and_student_detail");
-    await page.goBack();
-    await selectByLabel("作业", assignmentName);
-    await page.getByLabel("发布版本").selectOption({ index: 1 });
-    await page.getByRole("button", { name: /生成 \/ 刷新分析/ }).click();
-    await page.getByText("知识点掌握率").waitFor();
-    const knowledgeButton = page
-      .getByText("知识点掌握率")
-      .locator("xpath=following::table[1]")
-      .getByRole("button")
-      .first();
-    await knowledgeButton.click();
-    await page.getByText("知识点下钻").waitFor();
-    stage("H", "knowledge_point_drilldown_and_class_trend");
-    await page.getByRole("button", { name: "生成规则建议" }).click();
-    await page.getByLabel("建议内容").fill(`规则建议已由教师编辑 ${runId}`);
-    await page.getByRole("button", { name: "保存草稿" }).click();
-    await page.getByText("建议草稿已保存").waitFor();
-    await page.getByRole("button", { name: "确认", exact: true }).click();
-    await page.getByText("建议已确认").waitFor();
-    if (!(await page.getByText("类型：规则型教学建议").isVisible()))
-      throw new Error("RULE_BASED_INSIGHT_LABEL_MISSING");
-    stage(
-      "H",
-      "fixed_release_metrics_distribution_questions_knowledge_points_trend",
-    );
-    stage("H", "rule_based_insight_edit_and_confirm");
-    evidence.stages.H.status = "passed";
-
-    evidence.reconciliation = {
-      ...evidence.reconciliation,
-      participant_count: 2,
-      unfinished_student_count: 1,
-      unfinished_counted_as_zero: false,
-      analytics_average: expectedAverage,
-      reports_source_grade_release_id: evidence.objects.grade_release_id,
-      analytics_source_grade_release_id:
-        await metrics.getAttribute("data-release-id"),
-      consistent: true,
-    };
-    evidence.objects.student_numbers = studentNumbers;
-    evidence.result = "passed";
-    evidence.execution.completed_through = "H";
-    evidence.execution.completed_stage_count = 8;
-  }
-  // BUSINESS_E2E_GH_GUARD_END
 } catch (error) {
   hasPrimaryFailure = true;
   primaryFailure = error;
@@ -3975,7 +3984,5 @@ try {
 }
 
 console.log(
-  stopAfterF
-    ? `BUSINESS_BROWSER_E2E_STOPPED run_id=${runId} stages=6 completed_through=F`
-    : `BUSINESS_BROWSER_E2E_PASSED run_id=${runId} stages=8`,
+  `BUSINESS_BROWSER_E2E_STOPPED run_id=${runId} stages=6 completed_through=F`,
 );

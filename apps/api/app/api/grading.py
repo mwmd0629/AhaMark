@@ -18,6 +18,8 @@ from app.models import (
     AssignmentStatus,
     ClassStudent,
     FileStatus,
+    GradeRelease,
+    GradeReleaseItem,
     GradingBatch,
     GradingCriterionResult,
     GradingEvidence,
@@ -56,7 +58,7 @@ from app.security.files import UnsafeFile, inspect_upload, safe_filename
 from app.storage.base import ObjectStorage
 from app.storage.dependencies import get_storage
 from fastapi import APIRouter, Depends, File, Query, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -153,6 +155,23 @@ class RegradeInput(BaseModel):
     submission_ids: list[uuid.UUID] = Field(default_factory=list, max_length=500)
     only_unreviewed: bool = False
     only_stale: bool = False
+
+
+class ConfirmResultsInput(BaseModel):
+    idempotency_key: str = Field(min_length=1, max_length=100)
+    expected_review_hash: str = Field(min_length=64, max_length=64)
+
+
+class ReopenSubmissionInput(BaseModel):
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("reason")
+    @classmethod
+    def normalized_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("reason must not be blank")
+        return normalized
 
 
 def owned_assignment(db: Session, owner: uuid.UUID, assignment_id: uuid.UUID) -> Assignment:
@@ -423,6 +442,28 @@ def _submission_workflow(db: Session, submission: Submission) -> dict[str, Any]:
             "reason_code": "SUBMISSION_VOIDED",
             "reason": "这份上传已撤销，不会进入批改。",
             "action": "无需处理",
+        }
+    if submission.status == "finalized" or submission.finalized_at is not None:
+        complete_snapshot_id = db.scalar(
+            select(SubmissionScoreSnapshot.id).where(
+                SubmissionScoreSnapshot.submission_id == submission.id,
+                SubmissionScoreSnapshot.status == "complete",
+            )
+        )
+        if complete_snapshot_id is not None:
+            return {
+                "stage": "completed",
+                "stage_label": "批改完成",
+                "reason_code": None,
+                "reason": "可以检查结果。",
+                "action": "检查结果",
+            }
+        return {
+            "stage": "failed",
+            "stage_label": "结果状态异常",
+            "reason_code": "FINALIZED_SNAPSHOT_MISSING",
+            "reason": "作业已锁定，但缺少完整成绩快照。",
+            "action": "联系管理员恢复结果",
         }
     if submission.student_id is None:
         return {
@@ -1126,27 +1167,53 @@ def list_submissions(batch_id: uuid.UUID, db: Db, actor: Actor) -> list[dict[str
         .where(Submission.grading_batch_id == batch.id)
         .order_by(Submission.created_at)
     ).all()
-    return [
+    student_ids = {row.student_id for row in rows if row.student_id is not None}
+    students = (
         {
-            "id": str(x.id),
-            "student_id": str(x.student_id) if x.student_id else None,
-            "status": x.status,
-            "attempt_number": x.attempt_number,
-            "page_count": db.scalar(
-                select(func.count())
-                .select_from(SubmissionPage)
-                .where(SubmissionPage.submission_id == x.id)
+            student.id: student
+            for student in db.scalars(
+                select(Student).where(
+                    Student.id.in_(student_ids),
+                    Student.owner_id == actor.id,
+                )
             )
-            or 0,
-            "workflow": _submission_workflow(db, x),
         }
-        for x in rows
-    ]
+        if student_ids
+        else {}
+    )
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        student = students.get(row.student_id)
+        result.append(
+            {
+                "id": str(row.id),
+                "student_id": str(row.student_id) if row.student_id else None,
+                "student_name": student.name if student else None,
+                "student_number": student.student_number if student else None,
+                "status": row.status,
+                "attempt_number": row.attempt_number,
+                "page_count": db.scalar(
+                    select(func.count())
+                    .select_from(SubmissionPage)
+                    .where(SubmissionPage.submission_id == row.id)
+                )
+                or 0,
+                "workflow": _submission_workflow(db, row),
+            }
+        )
+    return result
 
 
 def _editable_submission(db: Session, owner: uuid.UUID, submission_id: uuid.UUID) -> Submission:
-    submission = owned_submission(db, owner, submission_id)
-    if submission.status == "finalized":
+    submission = db.scalar(
+        select(Submission)
+        .where(Submission.id == submission_id, Submission.owner_id == owner)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if submission is None:
+        raise ApiProblem(404, "SUBMISSION_NOT_FOUND", "提交不存在")
+    if submission.status == "finalized" or submission.finalized_at is not None:
         raise ApiProblem(409, "SUBMISSION_FINALIZED", "已完成提交不能修改页面结构")
     if submission.status == "voided":
         raise ApiProblem(409, "SUBMISSION_VOIDED", "已作废提交不能修改")
@@ -1667,7 +1734,7 @@ def merge_submission(
 def create_answer(
     submission_id: uuid.UUID, data: AnswerInput, db: Db, actor: Actor
 ) -> dict[str, Any]:
-    submission = owned_submission(db, actor.id, submission_id)
+    submission = _editable_submission(db, actor.id, submission_id)
     assignment = owned_assignment(db, actor.id, submission.assignment_id)
     question = db.scalar(
         select(Question).where(
@@ -1733,13 +1800,7 @@ def answer_json(x: StudentAnswer) -> dict[str, Any]:
 
 @router.patch("/student-answers/{answer_id}")
 def patch_answer(answer_id: uuid.UUID, data: AnswerPatch, db: Db, actor: Actor) -> dict[str, Any]:
-    answer = db.scalar(
-        select(StudentAnswer)
-        .join(Submission, Submission.id == StudentAnswer.submission_id)
-        .where(StudentAnswer.id == answer_id, Submission.owner_id == actor.id)
-    )
-    if answer is None:
-        raise ApiProblem(404, "ANSWER_NOT_FOUND", "答案不存在")
+    _, answer = _locked_mutable_answer(db, actor.id, answer_id)
     answer.corrected_text, answer.corrected_latex, answer.status, answer.requires_review = (
         data.corrected_text,
         data.corrected_latex,
@@ -1815,7 +1876,7 @@ def _stale_answer_derivatives(db: Session, answer: StudentAnswer) -> None:
 def create_answer_region(
     answer_id: uuid.UUID, data: AnswerRegionInput, db: Db, actor: Actor
 ) -> dict[str, Any]:
-    answer = _owned_answer(db, actor.id, answer_id)
+    _, answer = _locked_mutable_answer(db, actor.id, answer_id)
     page = db.scalar(
         select(SubmissionPage).where(
             SubmissionPage.id == data.submission_page_id,
@@ -1850,7 +1911,7 @@ def create_answer_region(
 
 @router.delete("/student-answers/{answer_id}/regions/{region_id}", status_code=204)
 def delete_answer_region(answer_id: uuid.UUID, region_id: uuid.UUID, db: Db, actor: Actor) -> None:
-    answer = _owned_answer(db, actor.id, answer_id)
+    _, answer = _locked_mutable_answer(db, actor.id, answer_id)
     region = db.scalar(
         select(StudentAnswerRegion).where(
             StudentAnswerRegion.id == region_id,
@@ -1964,6 +2025,7 @@ def grade_answer(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
             text,
             [rubric.standard_answer or "", *rubric.alternative_answers],
             Decimal(question.max_score),
+            question.question_type,
         )
         method, provider, version = "objective_rule", "objective-rule", "v1"
     else:
@@ -1991,6 +2053,7 @@ def grade_answer(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
                 "answer_latex": answer.corrected_latex or answer.recognized_latex,
                 "evidence_regions": [
                     {
+                        "id": str(region.id),
                         "submission_page_id": str(region.submission_page_id),
                         "x": str(region.x),
                         "y": str(region.y),
@@ -2136,14 +2199,7 @@ def save_codex_suggestion(
 
 @router.put("/student-answers/{answer_id}/review")
 def review_answer(answer_id: uuid.UUID, data: ReviewInput, db: Db, actor: Actor) -> dict[str, Any]:
-    answer = db.scalar(
-        select(StudentAnswer)
-        .join(Submission, Submission.id == StudentAnswer.submission_id)
-        .where(StudentAnswer.id == answer_id, Submission.owner_id == actor.id)
-    )
-    if answer is None:
-        raise ApiProblem(404, "ANSWER_NOT_FOUND", "答案不存在")
-    submission = owned_submission(db, actor.id, answer.submission_id)
+    submission, answer = _locked_mutable_answer(db, actor.id, answer_id)
     assignment = owned_assignment(db, actor.id, submission.assignment_id)
     question = db.get(Question, answer.question_id)
     result = db.scalar(
@@ -2352,6 +2408,1037 @@ def acceptance_eligibility(
     if actual != expected:
         reasons.append("CRITERION_INCOMPLETE")
     return list(dict.fromkeys(reasons)), result
+
+
+def _canonical_digest(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _snapshot_matches_confirm_plan(
+    snapshot: SubmissionScoreSnapshot,
+    assignment: Assignment,
+    plan: dict[str, Any],
+) -> bool:
+    submission: Submission = plan["submission"]
+    if (
+        snapshot.status != "complete"
+        or snapshot.submission_id != submission.id
+        or snapshot.assignment_id != assignment.id
+        or snapshot.student_id != submission.student_id
+        or snapshot.paper_version_id != assignment.active_paper_version_id
+        or snapshot.rubric_version_id != assignment.active_rubric_version_id
+    ):
+        return False
+    details = {
+        str(detail.get("question_id")): detail
+        for detail in snapshot.details
+        if isinstance(detail, dict) and detail.get("question_id")
+    }
+    if len(details) != len(plan["answers"]):
+        return False
+    total = Decimal("0")
+    maximum = Decimal("0")
+    for question, answer, review, result, auto_accept in plan["answers"]:
+        if auto_accept or review is None or review.final_score is None:
+            return False
+        detail = details.get(str(question.id))
+        if detail is None:
+            return False
+        expected = {
+            "question_id": str(question.id),
+            "question_number": question.question_number,
+            "question_type": str(question.question_type),
+            "student_answer_id": str(answer.id),
+            "teacher_review_id": str(review.id),
+            "score": str(Decimal(review.final_score)),
+            "max_score": str(Decimal(question.max_score)),
+            "error_type": review.final_error_type,
+            "feedback": review.final_feedback,
+            "final_error_type": review.final_error_type,
+            "final_feedback": review.final_feedback,
+            "knowledge_point_ids": sorted(
+                plan["knowledge_point_ids"].get(question.id, [])
+            ),
+            "grading_method": result.grading_method if result is not None else "manual",
+        }
+        try:
+            actual = {
+                "question_id": str(detail["question_id"]),
+                "question_number": detail["question_number"],
+                "question_type": str(detail["question_type"]),
+                "student_answer_id": str(detail["student_answer_id"]),
+                "teacher_review_id": str(detail["teacher_review_id"]),
+                "score": str(Decimal(str(detail["score"]))),
+                "max_score": str(Decimal(str(detail["max_score"]))),
+                "error_type": detail["error_type"],
+                "feedback": detail["feedback"],
+                "final_error_type": detail["final_error_type"],
+                "final_feedback": detail["final_feedback"],
+                "knowledge_point_ids": sorted(
+                    str(value) for value in detail["knowledge_point_ids"]
+                ),
+                "grading_method": detail["grading_method"],
+            }
+        except (KeyError, TypeError, ValueError):
+            return False
+        if set(detail) != {*expected, "finalized_at"} or _canonical_digest(
+            actual
+        ) != _canonical_digest(expected):
+            return False
+        total += Decimal(review.final_score)
+        maximum += Decimal(question.max_score)
+    return (
+        snapshot.total_score is not None
+        and Decimal(snapshot.total_score) == total
+        and Decimal(snapshot.max_score) == maximum
+    )
+
+
+def _confirm_results_state(
+    db: Session,
+    batch: GradingBatch,
+    assignment: Assignment,
+    *,
+    lock: bool = False,
+) -> tuple[str, list[dict[str, str]], list[dict[str, Any]]]:
+    submission_query = (
+        select(Submission)
+        .where(
+            Submission.grading_batch_id == batch.id,
+            Submission.owner_id == batch.owner_id,
+        )
+        .order_by(Submission.id)
+    )
+    if lock:
+        submission_query = submission_query.with_for_update()
+    submissions = db.scalars(submission_query).all()
+    question_query = (
+        select(Question)
+        .where(
+            Question.paper_version_id == assignment.active_paper_version_id,
+            Question.status == QuestionStatus.active,
+        )
+        .order_by(Question.id)
+    )
+    if lock:
+        question_query = question_query.with_for_update()
+    questions = db.scalars(question_query).all()
+    previous = _existing_confirm_results_release(db, batch.owner_id, batch)
+    previous_release: GradeRelease | None = None
+    previous_notes: dict[str, Any] | None = None
+    reusable_snapshots: dict[uuid.UUID, SubmissionScoreSnapshot] = {}
+    if previous is not None:
+        previous_release, previous_notes = previous
+        for item in db.scalars(
+            select(GradeReleaseItem).where(
+                GradeReleaseItem.grade_release_id == previous_release.id
+            )
+        ):
+            snapshot = db.get(SubmissionScoreSnapshot, item.score_snapshot_id)
+            if snapshot is not None:
+                reusable_snapshots[item.submission_id] = snapshot
+    active_rubric_query = (
+        select(RubricVersion).where(
+            RubricVersion.id == assignment.active_rubric_version_id
+        )
+        if assignment.active_rubric_version_id
+        else None
+    )
+    if active_rubric_query is not None and lock:
+        active_rubric_query = active_rubric_query.with_for_update()
+    active_rubric = (
+        db.scalar(active_rubric_query) if active_rubric_query is not None else None
+    )
+    blockers: list[dict[str, str]] = []
+    plans: list[dict[str, Any]] = []
+    state: dict[str, Any] = {
+        "batch_id": str(batch.id),
+        "assignment_id": str(assignment.id),
+        "paper_version_id": str(assignment.active_paper_version_id),
+        "rubric_version_id": str(assignment.active_rubric_version_id),
+        "rubric_status": str(active_rubric.status) if active_rubric else None,
+        "rubric_created_at": active_rubric.created_at.isoformat()
+        if active_rubric
+        else None,
+        "previous_confirmation": {
+            "grade_release_id": str(previous_release.id),
+            "version": previous_release.version,
+            "review_hash": previous_notes.get("review_hash") if previous_notes else None,
+        }
+        if previous_release is not None
+        else None,
+        "submissions": [],
+    }
+    if not submissions:
+        blockers.append({"code": "SUBMISSION_MISSING", "submission_id": "", "question_id": ""})
+    if not questions:
+        blockers.append({"code": "QUESTION_MISSING", "submission_id": "", "question_id": ""})
+    if active_rubric is None or active_rubric.status != "confirmed":
+        blockers.append(
+            {"code": "RUBRIC_VERSION_NOT_CONFIRMED", "submission_id": "", "question_id": ""}
+        )
+    for submission in submissions:
+        submission_state: dict[str, Any] = {
+            "id": str(submission.id),
+            "student_id": str(submission.student_id),
+            "status": submission.status,
+            "finalized_at": submission.finalized_at.isoformat()
+            if submission.finalized_at
+            else None,
+            "answers": [],
+        }
+        state["submissions"].append(submission_state)
+        plan: dict[str, Any] = {
+            "submission": submission,
+            "answers": [],
+            "knowledge_point_ids": {},
+        }
+        plans.append(plan)
+        if (
+            submission.student_id is None
+            or assignment.active_paper_version_id is None
+            or assignment.active_rubric_version_id is None
+        ):
+            blockers.append(
+                {
+                    "code": "SUBMISSION_VERSION_INCOMPLETE",
+                    "submission_id": str(submission.id),
+                    "question_id": "",
+                }
+            )
+        if submission.assignment_id != assignment.id or submission.class_id != batch.class_id:
+            blockers.append(
+                {
+                    "code": "SUBMISSION_SCOPE_MISMATCH",
+                    "submission_id": str(submission.id),
+                    "question_id": "",
+                }
+            )
+        finalized = submission.status == "finalized" and submission.finalized_at is not None
+        if (submission.status == "finalized") != (submission.finalized_at is not None):
+            blockers.append(
+                {
+                    "code": "SUBMISSION_FINALIZATION_INCONSISTENT",
+                    "submission_id": str(submission.id),
+                    "question_id": "",
+                }
+            )
+        plan["reuse_snapshot"] = reusable_snapshots.get(submission.id) if finalized else None
+        answer_query = (
+            select(StudentAnswer)
+            .where(StudentAnswer.submission_id == submission.id)
+            .order_by(StudentAnswer.id)
+        )
+        if lock:
+            answer_query = answer_query.with_for_update()
+        answers = db.scalars(answer_query).all()
+        by_question = {answer.question_id: answer for answer in answers}
+        for question in questions:
+            knowledge_point_query = (
+                select(QuestionKnowledgePoint)
+                .where(QuestionKnowledgePoint.question_id == question.id)
+                .order_by(QuestionKnowledgePoint.knowledge_point_id)
+            )
+            if lock:
+                knowledge_point_query = knowledge_point_query.with_for_update()
+            knowledge_point_ids = [
+                str(item.knowledge_point_id)
+                for item in db.scalars(knowledge_point_query)
+            ]
+            plan["knowledge_point_ids"][question.id] = knowledge_point_ids
+            question_rubric_query = select(QuestionRubric).where(
+                QuestionRubric.rubric_version_id == assignment.active_rubric_version_id,
+                QuestionRubric.question_id == question.id,
+            )
+            if lock:
+                question_rubric_query = question_rubric_query.with_for_update()
+            question_rubric = db.scalar(question_rubric_query)
+            if question_rubric is not None:
+                rubric_item_query = (
+                    select(RubricItem)
+                    .where(RubricItem.question_rubric_id == question_rubric.id)
+                    .order_by(RubricItem.id)
+                )
+                if lock:
+                    rubric_item_query = rubric_item_query.with_for_update()
+                rubric_items = list(db.scalars(rubric_item_query))
+            else:
+                rubric_items = []
+            question_state = {
+                "id": str(question.id),
+                "number": question.question_number,
+                "type": question.question_type,
+                "max_score": str(question.max_score),
+                "knowledge_point_ids": knowledge_point_ids,
+                "rubric": {
+                    "id": str(question_rubric.id) if question_rubric else None,
+                    "standard_answer": question_rubric.standard_answer
+                    if question_rubric
+                    else None,
+                    "alternative_answers": question_rubric.alternative_answers
+                    if question_rubric
+                    else [],
+                    "scoring_notes": question_rubric.scoring_notes
+                    if question_rubric
+                    else None,
+                    "items": [
+                        {
+                            "id": str(item.id),
+                            "title": item.title,
+                            "description": item.description,
+                            "points": str(item.points),
+                            "item_type": item.item_type,
+                            "required": item.required,
+                            "deduction_rule": item.deduction_rule,
+                        }
+                        for item in rubric_items
+                    ],
+                },
+            }
+            answer = by_question.get(question.id)
+            if question.max_score is None or Decimal(question.max_score) <= 0:
+                blockers.append(
+                    {
+                        "code": "QUESTION_SCORE_REQUIRED",
+                        "submission_id": str(submission.id),
+                        "question_id": str(question.id),
+                    }
+                )
+                continue
+            if question_rubric is None:
+                blockers.append(
+                    {
+                        "code": "RUBRIC_INCOMPLETE",
+                        "submission_id": str(submission.id),
+                        "question_id": str(question.id),
+                    }
+                )
+            if answer is None:
+                blockers.append(
+                    {
+                        "code": "ANSWER_MISSING",
+                        "submission_id": str(submission.id),
+                        "question_id": str(question.id),
+                    }
+                )
+                continue
+            review_query = select(TeacherReview).where(
+                TeacherReview.student_answer_id == answer.id
+            )
+            if lock:
+                review_query = review_query.with_for_update()
+            review = db.scalar(review_query)
+            result_query = (
+                select(GradingResult)
+                .where(
+                    GradingResult.student_answer_id == answer.id,
+                    GradingResult.status != "superseded",
+                )
+                .order_by(GradingResult.created_at.desc(), GradingResult.id.desc())
+            )
+            if lock:
+                result_query = result_query.with_for_update()
+            result = db.scalar(result_query)
+            criterion_rows: list[GradingCriterionResult] = []
+            grading_evidence: list[GradingEvidence] = []
+            if result is not None:
+                criterion_query = (
+                    select(GradingCriterionResult)
+                    .where(GradingCriterionResult.grading_result_id == result.id)
+                    .order_by(GradingCriterionResult.id)
+                )
+                evidence_query = (
+                    select(GradingEvidence)
+                    .where(GradingEvidence.grading_result_id == result.id)
+                    .order_by(GradingEvidence.id)
+                )
+                if lock:
+                    criterion_query = criterion_query.with_for_update()
+                    evidence_query = evidence_query.with_for_update()
+                criterion_rows = list(db.scalars(criterion_query))
+                grading_evidence = list(db.scalars(evidence_query))
+            region_query = (
+                select(StudentAnswerRegion)
+                .where(StudentAnswerRegion.student_answer_id == answer.id)
+                .order_by(StudentAnswerRegion.id)
+            )
+            recognition_evidence_query = (
+                select(QuestionRecognitionEvidence)
+                .where(QuestionRecognitionEvidence.student_answer_id == answer.id)
+                .order_by(QuestionRecognitionEvidence.id)
+            )
+            if lock:
+                region_query = region_query.with_for_update()
+                recognition_evidence_query = recognition_evidence_query.with_for_update()
+            regions = list(db.scalars(region_query))
+            recognition_evidence = list(db.scalars(recognition_evidence_query))
+            answer_state = {
+                "id": str(answer.id),
+                "question": question_state,
+                "question_version_reference": answer.question_version_reference,
+                "status": answer.status,
+                "requires_review": answer.requires_review,
+                "recognized_text": answer.recognized_text,
+                "recognized_latex": answer.recognized_latex,
+                "corrected_text": answer.corrected_text,
+                "corrected_latex": answer.corrected_latex,
+                "result": {
+                    "id": str(result.id),
+                    "status": result.status,
+                    "score": str(result.score),
+                    "max_score": str(result.max_score),
+                    "confidence": str(result.confidence),
+                    "rubric_version_id": str(result.rubric_version_id),
+                    "recognized_answer_snapshot": result.recognized_answer_snapshot,
+                    "requires_review": result.requires_review,
+                    "provider": result.provider,
+                    "provider_version": result.provider_version,
+                    "prompt_version": result.prompt_version,
+                    "grading_method": result.grading_method,
+                    "reasoning_summary": result.reasoning_summary,
+                    "error_type": result.error_type,
+                    "student_feedback": result.student_feedback,
+                    "criteria": [
+                        {
+                            "id": str(item.id),
+                            "rubric_item_id": str(item.rubric_item_id),
+                            "status": item.status,
+                            "awarded_points": str(item.awarded_points),
+                            "max_points": str(item.max_points),
+                            "reason": item.reason,
+                            "confidence": str(item.confidence),
+                        }
+                        for item in criterion_rows
+                    ],
+                    "evidence": [
+                        {
+                            "id": str(item.id),
+                            "submission_page_id": str(item.submission_page_id),
+                            "type": item.evidence_type,
+                            "quote": item.quote,
+                            "x": str(item.x),
+                            "y": str(item.y),
+                            "width": str(item.width),
+                            "height": str(item.height),
+                            "description": item.description,
+                        }
+                        for item in grading_evidence
+                    ],
+                }
+                if result
+                else None,
+                "review": {
+                    "id": str(review.id),
+                    "grading_result_id": str(review.grading_result_id),
+                    "decision": review.decision,
+                    "final_score": str(review.final_score),
+                    "final_feedback": review.final_feedback,
+                    "final_error_type": review.final_error_type,
+                    "review_notes": review.review_notes,
+                    "confirmed_at": review.confirmed_at.isoformat()
+                    if review.confirmed_at
+                    else None,
+                }
+                if review
+                else None,
+                "regions": [
+                    {
+                        "id": str(item.id),
+                        "submission_page_id": str(item.submission_page_id),
+                        "status": item.status,
+                        "x": str(item.x),
+                        "y": str(item.y),
+                        "width": str(item.width),
+                        "height": str(item.height),
+                    }
+                    for item in regions
+                ],
+                "recognition_evidence": [
+                    {
+                        "id": str(item.id),
+                        "status": item.status,
+                        "input_hash": item.input_hash,
+                        "output_hash": item.output_hash,
+                        "recognition_version": item.recognition_version,
+                        "requires_review": item.requires_review,
+                        "stale_at": item.stale_at.isoformat() if item.stale_at else None,
+                        "block_sources": item.block_sources,
+                    }
+                    for item in recognition_evidence
+                ],
+            }
+            submission_state["answers"].append(answer_state)
+            binding_reasons: list[str] = []
+            if answer.question_version_reference != str(assignment.active_paper_version_id):
+                binding_reasons.append("PAPER_VERSION_MISMATCH")
+            if result is not None and result.question_id != question.id:
+                binding_reasons.append("RESULT_QUESTION_MISMATCH")
+            if result is not None and Decimal(result.max_score) != Decimal(question.max_score):
+                binding_reasons.append("RESULT_MAX_SCORE_MISMATCH")
+            if review is not None and review.final_score is not None and not answer.requires_review:
+                manually_reconfirmed = (
+                    review.decision in {"modified", "manual_scored"}
+                    and review.confirmed_at is not None
+                    and active_rubric is not None
+                    and review.confirmed_at >= active_rubric.created_at
+                    and (result is None or review.confirmed_at >= result.created_at)
+                )
+                if review.decision not in {"accepted", "modified", "manual_scored"}:
+                    reasons = ["REVIEW_DECISION_INVALID"]
+                elif review.confirmed_at is None:
+                    reasons = ["REVIEW_NOT_CONFIRMED"]
+                elif review.final_score < 0 or review.final_score > Decimal(question.max_score):
+                    reasons = ["SCORE_OUT_OF_RANGE"]
+                elif (
+                    result is not None
+                    and review.grading_result_id != result.id
+                    and not manually_reconfirmed
+                ):
+                    reasons = ["REVIEW_RESULT_MISMATCH"]
+                elif (
+                    result is not None
+                    and (
+                        result.status == "stale"
+                        or result.rubric_version_id != assignment.active_rubric_version_id
+                    )
+                    and not manually_reconfirmed
+                ):
+                    reasons = ["STALE_RUBRIC"]
+                else:
+                    reasons = []
+                plan["answers"].append((question, answer, review, result, False))
+            else:
+                reasons, result = acceptance_eligibility(db, answer, assignment)
+                plan["answers"].append((question, answer, review, result, True))
+            reasons = list(dict.fromkeys([*binding_reasons, *reasons]))
+            for reason in reasons:
+                blockers.append(
+                    {
+                        "code": reason,
+                        "submission_id": str(submission.id),
+                        "question_id": str(question.id),
+                    }
+                )
+        reusable = plan["reuse_snapshot"]
+        if finalized:
+            if reusable is None:
+                blockers.append(
+                    {
+                        "code": "FINALIZED_SNAPSHOT_NOT_REUSABLE",
+                        "submission_id": str(submission.id),
+                        "question_id": "",
+                    }
+                )
+            elif not _snapshot_matches_confirm_plan(reusable, assignment, plan):
+                plan["reuse_snapshot"] = None
+                blockers.append(
+                    {
+                        "code": "SNAPSHOT_REUSE_MISMATCH",
+                        "submission_id": str(submission.id),
+                        "question_id": "",
+                    }
+                )
+            else:
+                submission_state["reused_snapshot"] = {
+                    "id": str(reusable.id),
+                    "version": reusable.version,
+                    "paper_version_id": str(reusable.paper_version_id),
+                    "rubric_version_id": str(reusable.rubric_version_id),
+                }
+        else:
+            plan["reuse_snapshot"] = None
+    if previous_release is not None and plans and all(
+        plan.get("reuse_snapshot") is not None for plan in plans
+    ):
+        blockers.append(
+            {
+                "code": "CONFIRM_RESULTS_ALREADY_CURRENT",
+                "submission_id": "",
+                "question_id": "",
+            }
+        )
+    state["blockers"] = sorted(
+        blockers,
+        key=lambda item: (
+            item.get("code", ""),
+            item.get("submission_id", ""),
+            item.get("question_id", ""),
+        ),
+    )
+    return _canonical_digest(state), blockers, plans
+
+
+def _confirm_results_notes(release: GradeRelease) -> dict[str, Any] | None:
+    try:
+        value = json.loads(release.notes or "")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(value, dict) or value.get("kind") != "confirm_results":
+        return None
+    return value
+
+
+def _confirm_results_storage_key(actor_id: uuid.UUID, idempotency_key: str) -> str:
+    return _canonical_digest(
+        {
+            "operation": "confirm_results",
+            "owner_id": str(actor_id),
+            "idempotency_key": idempotency_key,
+        }
+    )
+
+
+def _confirm_results_response(release: GradeRelease, notes: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "grade_release_id": str(release.id),
+        "status": release.status,
+        "review_hash": notes["review_hash"],
+        "submission_count": notes["submission_count"],
+        "auto_accepted_count": notes["auto_accepted_count"],
+        "teacher_review_ids": notes["teacher_review_ids"],
+        "snapshot_ids": notes["snapshot_ids"],
+        "grade_release_version": release.version,
+        "new_snapshot_count": notes.get("new_snapshot_count", notes["submission_count"]),
+        "reused_snapshot_count": notes.get("reused_snapshot_count", 0),
+        "previous_grade_release_id": notes.get("previous_grade_release_id"),
+        "new_snapshot_ids": notes.get("new_snapshot_ids", notes["snapshot_ids"]),
+        "reused_snapshot_ids": notes.get("reused_snapshot_ids", []),
+    }
+
+
+def _validated_confirm_results_release(
+    db: Session,
+    actor_id: uuid.UUID,
+    batch_id: uuid.UUID,
+    release: GradeRelease,
+    notes: dict[str, Any],
+) -> dict[str, Any]:
+    batch = db.scalar(
+        select(GradingBatch).where(
+            GradingBatch.id == batch_id,
+            GradingBatch.owner_id == actor_id,
+        )
+    )
+    items = list(
+        db.scalars(
+            select(GradeReleaseItem)
+            .where(GradeReleaseItem.grade_release_id == release.id)
+            .order_by(GradeReleaseItem.submission_id)
+        )
+    )
+    snapshots = [
+        db.get(SubmissionScoreSnapshot, item.score_snapshot_id) for item in items
+    ]
+    submissions = [db.get(Submission, item.submission_id) for item in items]
+    snapshot_ids = [str(item.score_snapshot_id) for item in items]
+    detail_rows = [
+        detail
+        for snapshot in snapshots
+        if snapshot is not None
+        for detail in snapshot.details
+        if isinstance(detail, dict)
+    ]
+    teacher_review_ids = sorted(
+        {
+            str(detail["teacher_review_id"])
+            for detail in detail_rows
+            if detail.get("teacher_review_id")
+        }
+    )
+    reviews = {
+        str(review_id): db.get(TeacherReview, review_id)
+        for review_id in (uuid.UUID(value) for value in teacher_review_ids)
+    }
+    noted_new_snapshot_ids = notes.get("new_snapshot_ids", notes.get("snapshot_ids", []))
+    noted_reused_snapshot_ids = notes.get("reused_snapshot_ids", [])
+    if (
+        batch is None
+        or release.owner_id != actor_id
+        or release.status != "released"
+        or release.assignment_id != batch.assignment_id
+        or release.class_id != batch.class_id
+        or notes.get("batch_id") != str(batch.id)
+        or len(items) != notes.get("submission_count")
+        or any(
+            snapshot is None
+            or snapshot.status != "complete"
+            or snapshot.submission_id != item.submission_id
+            or snapshot.assignment_id != release.assignment_id
+            or snapshot.student_id != item.student_id
+            for item, snapshot in zip(items, snapshots, strict=True)
+        )
+        or any(
+            submission is None
+            or submission.grading_batch_id != batch.id
+            or submission.owner_id != actor_id
+            or submission.assignment_id != release.assignment_id
+            or submission.class_id != release.class_id
+            or submission.student_id != item.student_id
+            for item, submission in zip(items, submissions, strict=True)
+        )
+        or sorted(snapshot_ids) != sorted(notes.get("snapshot_ids", []))
+        or set(noted_new_snapshot_ids) & set(noted_reused_snapshot_ids)
+        or sorted([*noted_new_snapshot_ids, *noted_reused_snapshot_ids])
+        != sorted(snapshot_ids)
+        or len(noted_new_snapshot_ids)
+        != notes.get("new_snapshot_count", notes.get("submission_count"))
+        or len(noted_reused_snapshot_ids) != notes.get("reused_snapshot_count", 0)
+        or teacher_review_ids != sorted(notes.get("teacher_review_ids", []))
+        or any(
+            reviews.get(str(detail.get("teacher_review_id"))) is None
+            or str(
+                reviews[str(detail["teacher_review_id"])].student_answer_id
+            )
+            != str(detail.get("student_answer_id"))
+            for detail in detail_rows
+            if detail.get("teacher_review_id")
+        )
+    ):
+        raise ApiProblem(409, "CONFIRM_RESULTS_REPLAY_INVALID", "确认结果记录不完整")
+    return _confirm_results_response(release, notes)
+
+
+def _existing_confirm_results_release(
+    db: Session,
+    actor_id: uuid.UUID,
+    batch: GradingBatch,
+) -> tuple[GradeRelease, dict[str, Any]] | None:
+    releases = db.scalars(
+        select(GradeRelease)
+        .where(
+            GradeRelease.owner_id == actor_id,
+            GradeRelease.assignment_id == batch.assignment_id,
+            GradeRelease.class_id == batch.class_id,
+            GradeRelease.status == "released",
+        )
+        .order_by(GradeRelease.version.desc(), GradeRelease.created_at.desc())
+    )
+    for release in releases:
+        notes = _confirm_results_notes(release)
+        if notes is not None and notes.get("batch_id") == str(batch.id):
+            _validated_confirm_results_release(db, actor_id, batch.id, release, notes)
+            return release, notes
+    return None
+
+
+def _existing_confirm_results(
+    db: Session,
+    actor_id: uuid.UUID,
+    batch: GradingBatch,
+) -> dict[str, Any] | None:
+    existing = _existing_confirm_results_release(db, actor_id, batch)
+    if existing is None:
+        return None
+    release, notes = existing
+    return _confirm_results_response(release, notes)
+
+
+def _confirm_results_replay(
+    db: Session,
+    actor_id: uuid.UUID,
+    batch_id: uuid.UUID,
+    data: ConfirmResultsInput,
+) -> dict[str, Any] | None:
+    storage_key = _confirm_results_storage_key(actor_id, data.idempotency_key)
+    release = db.scalar(
+        select(GradeRelease).where(GradeRelease.idempotency_key == storage_key)
+    )
+    if release is None:
+        return None
+    notes = _confirm_results_notes(release)
+    request_hash = _canonical_digest(
+        {
+            "batch_id": str(batch_id),
+            "expected_review_hash": data.expected_review_hash,
+        }
+    )
+    if (
+        release.owner_id != actor_id
+        or notes is None
+        or notes.get("batch_id") != str(batch_id)
+        or notes.get("request_hash") != request_hash
+    ):
+        raise ApiProblem(409, "IDEMPOTENCY_KEY_CONFLICT", "幂等键已用于不同的确认结果请求")
+    return _validated_confirm_results_release(
+        db, actor_id, batch_id, release, notes
+    )
+
+
+@router.get("/grading-batches/{batch_id}/confirm-results/readiness")
+def confirm_results_readiness(batch_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
+    batch = owned_batch(db, actor.id, batch_id)
+    assignment = owned_assignment(db, actor.id, batch.assignment_id)
+    review_hash, blockers, plans = _confirm_results_state(db, batch, assignment)
+    reused_snapshot_count = sum(
+        plan.get("reuse_snapshot") is not None for plan in plans
+    )
+    previous = _existing_confirm_results_release(db, actor.id, batch)
+    previous_grade_release_id = str(previous[0].id) if previous is not None else None
+    already_current = any(
+        blocker["code"] == "CONFIRM_RESULTS_ALREADY_CURRENT" for blocker in blockers
+    )
+    return {
+        "review_hash": review_hash,
+        "ready": not blockers,
+        "blockers": blockers,
+        "submission_count": len(plans),
+        "new_snapshot_count": len(plans) - reused_snapshot_count,
+        "reused_snapshot_count": reused_snapshot_count,
+        "previous_grade_release_id": previous_grade_release_id,
+        "plan": [
+            {
+                "submission_id": str(plan["submission"].id),
+                "action": "reuse_snapshot"
+                if plan.get("reuse_snapshot") is not None
+                else "create_snapshot",
+                "snapshot_id": str(plan["reuse_snapshot"].id)
+                if plan.get("reuse_snapshot") is not None
+                else None,
+                "snapshot_version": plan["reuse_snapshot"].version
+                if plan.get("reuse_snapshot") is not None
+                else None,
+            }
+            for plan in plans
+        ],
+        "confirmed_result": (
+            _existing_confirm_results(db, actor.id, batch) if already_current else None
+        ),
+    }
+
+
+@router.post("/grading-batches/{batch_id}/confirm-results", status_code=201)
+def confirm_results(
+    batch_id: uuid.UUID, data: ConfirmResultsInput, db: Db, actor: Actor
+) -> dict[str, Any]:
+    replay = _confirm_results_replay(db, actor.id, batch_id, data)
+    if replay is not None:
+        return replay
+    batch = db.scalar(
+        select(GradingBatch)
+        .where(GradingBatch.id == batch_id, GradingBatch.owner_id == actor.id)
+        .with_for_update()
+    )
+    if batch is None:
+        raise ApiProblem(404, "GRADING_BATCH_NOT_FOUND", "批改批次不存在")
+    replay = _confirm_results_replay(db, actor.id, batch_id, data)
+    if replay is not None:
+        return replay
+    assignment = db.scalar(
+        select(Assignment)
+        .where(Assignment.id == batch.assignment_id, Assignment.owner_id == actor.id)
+        .with_for_update()
+    )
+    if assignment is None:
+        raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    review_hash, blockers, plans = _confirm_results_state(
+        db, batch, assignment, lock=True
+    )
+    if review_hash != data.expected_review_hash:
+        raise ApiProblem(
+            409,
+            "CONFIRM_RESULTS_STALE",
+            "批改内容已变化，请刷新后重新确认",
+            {"current_review_hash": review_hash},
+        )
+    if blockers:
+        raise ApiProblem(
+            409,
+            "CONFIRM_RESULTS_BLOCKED",
+            "仍有答案需要教师处理",
+            {"blockers": blockers},
+        )
+    previous = _existing_confirm_results_release(db, actor.id, batch)
+    previous_grade_release_id = str(previous[0].id) if previous is not None else None
+
+    teacher_review_ids: list[str] = []
+    snapshot_ids: list[str] = []
+    auto_accepted_count = 0
+    new_snapshot_count = 0
+    reused_snapshot_count = 0
+    new_snapshot_ids: list[str] = []
+    reused_snapshot_ids: list[str] = []
+    snapshot_rows: list[tuple[Submission, SubmissionScoreSnapshot]] = []
+    confirmed_at = now_utc()
+    for plan in plans:
+        submission: Submission = plan["submission"]
+        reused_snapshot: SubmissionScoreSnapshot | None = plan.get("reuse_snapshot")
+        if reused_snapshot is not None:
+            teacher_review_ids.extend(
+                str(review.id)
+                for _question, _answer, review, _result, _auto_accept in plan["answers"]
+                if review is not None
+            )
+            snapshot_ids.append(str(reused_snapshot.id))
+            reused_snapshot_ids.append(str(reused_snapshot.id))
+            snapshot_rows.append((submission, reused_snapshot))
+            reused_snapshot_count += 1
+            continue
+        total = Decimal("0")
+        maximum = Decimal("0")
+        details: list[dict[str, Any]] = []
+        for question, answer, review, result, auto_accept in plan["answers"]:
+            if auto_accept:
+                assert result is not None
+                review = TeacherReview(
+                    id=uuid.uuid4(),
+                    student_answer_id=answer.id,
+                    grading_result_id=result.id,
+                    reviewer_id=actor.id,
+                    decision="accepted",
+                    final_score=result.score,
+                    confirmed_at=confirmed_at,
+                )
+                db.add(review)
+                result.status = "accepted"
+                auto_accepted_count += 1
+            assert review is not None and review.final_score is not None
+            teacher_review_ids.append(str(review.id))
+            total += Decimal(review.final_score)
+            maximum += Decimal(question.max_score)
+            details.append(
+                {
+                    "question_id": str(question.id),
+                    "question_number": question.question_number,
+                    "question_type": question.question_type,
+                    "student_answer_id": str(answer.id),
+                    "teacher_review_id": str(review.id),
+                    "score": str(review.final_score),
+                    "max_score": str(question.max_score),
+                    "error_type": review.final_error_type,
+                    "feedback": review.final_feedback,
+                    "final_error_type": review.final_error_type,
+                    "final_feedback": review.final_feedback,
+                    "knowledge_point_ids": [
+                        str(value)
+                        for value in db.scalars(
+                            select(QuestionKnowledgePoint.knowledge_point_id).where(
+                                QuestionKnowledgePoint.question_id == question.id
+                            )
+                        )
+                    ],
+                    "grading_method": result.grading_method if result else "manual",
+                    "finalized_at": confirmed_at.isoformat(),
+                }
+            )
+        version = (
+            db.scalar(
+                select(func.max(SubmissionScoreSnapshot.version)).where(
+                    SubmissionScoreSnapshot.submission_id == submission.id
+                )
+            )
+            or 0
+        ) + 1
+        snapshot = SubmissionScoreSnapshot(
+            id=uuid.uuid4(),
+            submission_id=submission.id,
+            assignment_id=assignment.id,
+            student_id=submission.student_id,
+            paper_version_id=assignment.active_paper_version_id,
+            rubric_version_id=assignment.active_rubric_version_id,
+            total_score=total,
+            max_score=maximum,
+            status="complete",
+            generated_by=actor.id,
+            version=version,
+            details=details,
+        )
+        db.add(snapshot)
+        snapshot_ids.append(str(snapshot.id))
+        new_snapshot_ids.append(str(snapshot.id))
+        snapshot_rows.append((submission, snapshot))
+        new_snapshot_count += 1
+        submission.status = "finalized"
+        submission.finalized_at = confirmed_at
+
+    release_version = (
+        db.scalar(
+            select(func.max(GradeRelease.version)).where(
+                GradeRelease.assignment_id == assignment.id,
+                GradeRelease.class_id == batch.class_id,
+            )
+        )
+        or 0
+    ) + 1
+    request_hash = _canonical_digest(
+        {
+            "batch_id": str(batch.id),
+            "expected_review_hash": data.expected_review_hash,
+        }
+    )
+    notes = {
+        "kind": "confirm_results",
+        "batch_id": str(batch.id),
+        "request_hash": request_hash,
+        "review_hash": review_hash,
+        "submission_count": len(snapshot_rows),
+        "auto_accepted_count": auto_accepted_count,
+        "new_snapshot_count": new_snapshot_count,
+        "reused_snapshot_count": reused_snapshot_count,
+        "new_snapshot_ids": new_snapshot_ids,
+        "reused_snapshot_ids": reused_snapshot_ids,
+        "teacher_review_ids": teacher_review_ids,
+        "snapshot_ids": snapshot_ids,
+        "previous_grade_release_id": previous_grade_release_id,
+    }
+    release = GradeRelease(
+        id=uuid.uuid4(),
+        owner_id=actor.id,
+        assignment_id=assignment.id,
+        class_id=batch.class_id,
+        version=release_version,
+        status="released",
+        release_mode="score_and_feedback",
+        released_at=confirmed_at,
+        created_by=actor.id,
+        notes=json.dumps(notes, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        idempotency_key=_confirm_results_storage_key(actor.id, data.idempotency_key),
+    )
+    db.add(release)
+    for submission, snapshot in snapshot_rows:
+        db.add(
+            GradeReleaseItem(
+                grade_release_id=release.id,
+                student_id=submission.student_id,
+                submission_id=submission.id,
+                score_snapshot_id=snapshot.id,
+            )
+        )
+    audit(
+        db,
+        actor.id,
+        "grading.confirm_results",
+        "grading_batch",
+        batch.id,
+        {
+            "grade_release_id": str(release.id),
+            "submission_count": len(snapshot_rows),
+            "auto_accepted_count": auto_accepted_count,
+            "new_snapshot_count": new_snapshot_count,
+            "reused_snapshot_count": reused_snapshot_count,
+            "new_snapshot_ids": new_snapshot_ids,
+            "reused_snapshot_ids": reused_snapshot_ids,
+            "previous_grade_release_id": previous_grade_release_id,
+            "review_hash": review_hash,
+            "request_hash": request_hash,
+            "teacher_authorized": True,
+            "suggestion_only_before_confirmation": True,
+        },
+    )
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        replay = _confirm_results_replay(db, actor.id, batch_id, data)
+        if replay is not None:
+            return replay
+        raise ApiProblem(
+            409,
+            "CONFIRM_RESULTS_CONFLICT",
+            "确认结果期间数据已被其他请求更新，请刷新后重试",
+        ) from exc
+    return _confirm_results_response(release, notes)
 
 
 @router.get("/grading-batches/{batch_id}/bulk-accept-eligibility")
@@ -2708,7 +3795,15 @@ def regrade_batch(batch_id: uuid.UUID, data: RegradeInput, db: Db, actor: Actor)
 
 @router.post("/submissions/{submission_id}/finalize")
 def finalize_submission(submission_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
-    submission = owned_submission(db, actor.id, submission_id)
+    submission = db.scalar(
+        select(Submission)
+        .where(Submission.id == submission_id, Submission.owner_id == actor.id)
+        .with_for_update()
+    )
+    if submission is None:
+        raise ApiProblem(404, "SUBMISSION_NOT_FOUND", "提交不存在")
+    if submission.status == "finalized" or submission.finalized_at is not None:
+        raise ApiProblem(409, "SUBMISSION_FINALIZED", "已完成提交只读")
     assignment = owned_assignment(db, actor.id, submission.assignment_id)
     questions = db.scalars(
         select(Question).where(
@@ -2869,6 +3964,59 @@ def finalize_submission(submission_id: uuid.UUID, db: Db, actor: Actor) -> dict[
         "max_score": str(maximum),
         "details": details,
         "problems": problems,
+    }
+
+
+@router.post("/submissions/{submission_id}/reopen")
+def reopen_submission(
+    submission_id: uuid.UUID,
+    data: ReopenSubmissionInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    submission = db.scalar(
+        select(Submission)
+        .where(Submission.id == submission_id, Submission.owner_id == actor.id)
+        .with_for_update()
+    )
+    if submission is None:
+        raise ApiProblem(404, "SUBMISSION_NOT_FOUND", "提交不存在")
+    if submission.status != "finalized" or submission.finalized_at is None:
+        raise ApiProblem(409, "SUBMISSION_NOT_FINALIZED", "只有已完成提交可以重新打开")
+    latest_snapshot = db.scalar(
+        select(SubmissionScoreSnapshot)
+        .where(
+            SubmissionScoreSnapshot.submission_id == submission.id,
+            SubmissionScoreSnapshot.status == "complete",
+        )
+        .order_by(
+            SubmissionScoreSnapshot.version.desc(),
+            SubmissionScoreSnapshot.generated_at.desc(),
+        )
+        .with_for_update()
+    )
+    if latest_snapshot is None:
+        raise ApiProblem(409, "COMPLETE_SNAPSHOT_MISSING", "已完成提交缺少完整成绩快照")
+    submission.status = "reviewed"
+    submission.finalized_at = None
+    audit(
+        db,
+        actor.id,
+        "submission.reopen",
+        "submission",
+        submission.id,
+        {
+            "reason": data.reason.strip(),
+            "previous_snapshot_id": str(latest_snapshot.id),
+            "previous_snapshot_version": latest_snapshot.version,
+        },
+    )
+    db.commit()
+    return {
+        "submission_id": str(submission.id),
+        "status": submission.status,
+        "previous_snapshot_id": str(latest_snapshot.id),
+        "previous_snapshot_version": latest_snapshot.version,
     }
 
 

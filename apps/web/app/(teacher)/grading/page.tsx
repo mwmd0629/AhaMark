@@ -80,7 +80,7 @@ export default function GradingPage() {
     <div className="space-y-6">
       <PageHeader
         title="作业批改"
-        description="从已发布作业创建批次，经页面整理、工作流测试 OCR、规则初批和教师复核形成最终成绩。"
+        description="选择作业，创建批次并检查结果。"
       />
       <Card className="space-y-4 p-5">
         <Select
@@ -127,24 +127,20 @@ export default function GradingPage() {
             data-testid="grading-batch"
             data-batch-id={batch.id}
           >
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <strong>{batch.name || "未命名批次"}</strong>
-                <p className="mt-1 text-xs text-slate-500">
-                  提交 {batch.submission_count} · 已识别{" "}
-                  {batch.recognized_count} · 已复核 {batch.reviewed_count}
-                </p>
-              </div>
-              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs">
-                {batch.status}
-              </span>
+            <div>
+              <strong>{batch.name || "未命名批次"}</strong>
+              <p className="mt-1 text-xs text-slate-500">
+                共 {batch.submission_count} 份 · 已复核 {batch.reviewed_count}{" "}
+                份
+              </p>
             </div>
-            <p className="mt-3 text-xs">
-              匹配：已确认 {batch.matching.confirmed}/{batch.matching.total} ·
-              待匹配 {batch.matching.unmatched}
-            </p>
+            {batch.matching.unmatched > 0 && (
+              <p className="mt-3 text-xs text-amber-700">
+                {batch.matching.unmatched} 份待匹配
+              </p>
+            )}
             <Link href={`/grading/${batch.id}`}>
-              <Button className="mt-4">进入批次工作台</Button>
+              <Button className="mt-4">打开批次</Button>
             </Link>
           </Card>
         ))}
@@ -154,11 +150,6 @@ export default function GradingPage() {
           暂无批次，请通过上方表单创建。
         </Card>
       )}
-      <Card className="p-5 text-sm leading-6 text-slate-600">
-        <strong className="text-slate-900">最终成绩边界：</strong>
-        GradingResult 只是建议；只有教师逐题确认、Submission finalize
-        后生成的最新 complete ScoreSnapshot 才是正式成绩。
-      </Card>
     </div>
   );
 }

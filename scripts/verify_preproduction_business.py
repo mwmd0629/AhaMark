@@ -101,6 +101,30 @@ class Api:
             raise RuntimeError(f"{method} {path} omitted X-Request-ID")
         return payload, response_request_id
 
+    def request_problem(
+        self, method: str, path: str, body: dict[str, Any]
+    ) -> tuple[int, dict[str, Any]]:
+        self.sequence += 1
+        headers = {
+            "Origin": ORIGIN,
+            "X-Request-ID": f"business-{self.sequence:03d}",
+            "Content-Type": "application/json",
+        }
+        if self.csrf:
+            headers["X-CSRF-Token"] = self.csrf
+        request = urllib.request.Request(
+            f"{BASE_URL}{path}",
+            data=json.dumps(body).encode(),
+            headers=headers,
+            method=method,
+        )
+        try:
+            self.opener.open(request, timeout=60)
+        except urllib.error.HTTPError as exc:
+            payload = json.loads(exc.read())
+            return exc.code, payload
+        raise RuntimeError(f"{method} {path} unexpectedly succeeded")
+
     def login(self) -> None:
         payload, _ = self.request("POST", "/auth/login", {"email": EMAIL, "password": PASSWORD})
         self.csrf = payload["csrf_token"]
@@ -305,25 +329,56 @@ def main() -> None:
                     "final_feedback": "Synthetic objective verification",
                 },
             )
-        snapshot, _ = api.request("POST", f"/api/submissions/{submission_id}/finalize")
-        if snapshot["status"] != "complete":
-            raise RuntimeError(f"incomplete snapshot: {snapshot}")
+    confirmation_readiness, _ = api.request(
+        "GET", f"/api/grading-batches/{batch['id']}/confirm-results/readiness"
+    )
+    blocker_codes = {
+        blocker.get("code") for blocker in confirmation_readiness.get("blockers", [])
+    }
+    if confirmation_readiness["ready"]:
+        confirmation, _ = api.request(
+            "POST",
+            f"/api/grading-batches/{batch['id']}/confirm-results",
+            {
+                "idempotency_key": f"part8-confirm-results-{assignment['id']}",
+                "expected_review_hash": confirmation_readiness["review_hash"],
+            },
+        )
+    elif (
+        "CONFIRM_RESULTS_ALREADY_CURRENT" in blocker_codes
+        and confirmation_readiness.get("confirmed_result") is not None
+    ):
+        confirmation = confirmation_readiness["confirmed_result"]
+    elif "FINALIZED_SNAPSHOT_NOT_REUSABLE" in blocker_codes:
+        raise RuntimeError(
+            "confirm-results cannot migrate this legacy finalized batch: "
+            "no auditable confirm-results source exists; use a fresh synthetic marker "
+            "or explicitly reopen and reconfirm the synthetic submissions"
+        )
+    else:
+        raise RuntimeError(f"confirm-results blocked: {confirmation_readiness}")
+    release, _ = api.request(
+        "GET", f"/api/grade-releases/{confirmation['grade_release_id']}"
+    )
     readiness, _ = api.request(
         "GET",
         (f"/api/assignments/{assignment['id']}/classes/{school_class['id']}/grade-readiness"),
     )
     if readiness["releasable_count"] != 2 or len(readiness["missing_student_ids"]) != 1:
         raise RuntimeError(f"readiness denominator mismatch: {readiness}")
-    release, _ = api.request(
-        "POST",
-        "/api/grade-releases",
-        {
-            "assignment_id": assignment["id"],
-            "class_id": school_class["id"],
-            "release_mode": "score_and_feedback",
-            "idempotency_key": f"part8-final-release-{assignment['id']}",
-        },
+    releases_before, _ = api.request("GET", "/api/grade-releases")
+    retired_status, retired_problem = api.request_problem(
+        "POST", "/api/grade-releases", {"arbitrary": "ignored"}
     )
+    releases_after, _ = api.request("GET", "/api/grade-releases")
+    if (
+        retired_status != 410
+        or retired_problem.get("code") != "GRADE_RELEASE_CREATION_RETIRED"
+        or [item["id"] for item in releases_after] != [item["id"] for item in releases_before]
+    ):
+        raise RuntimeError(
+            f"retired grade release creation contract failed: {retired_status} {retired_problem}"
+        )
     analytics, _ = api.request("POST", f"/api/grade-releases/{release['id']}/analytics")
     if analytics["metrics"]["participant_count"] != 2:
         raise RuntimeError(f"missing student entered analytics: {analytics['metrics']}")

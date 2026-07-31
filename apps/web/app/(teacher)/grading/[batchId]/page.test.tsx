@@ -26,7 +26,6 @@ const mocks = vi.hoisted(() => ({
   confirmMatch: vi.fn(),
   releases: vi.fn(),
   readiness: vi.fn(),
-  createRelease: vi.fn(),
   reports: vi.fn(),
   retryReport: vi.fn(),
   continueProcessing: vi.fn(),
@@ -38,10 +37,15 @@ vi.mock("next/link", () => ({
   default: ({
     children,
     href,
+    ...props
   }: {
     children: React.ReactNode;
     href: string;
-  }) => <a href={href}>{children}</a>,
+  } & React.AnchorHTMLAttributes<HTMLAnchorElement>) => (
+    <a href={href} {...props}>
+      {children}
+    </a>
+  ),
 }));
 vi.mock("@/components/submission-segmentation-workspace", () => ({
   SubmissionSegmentationWorkspace: ({
@@ -86,7 +90,6 @@ vi.mock("@/lib/api", () => ({
   analyticsApi: {
     releases: mocks.releases,
     readiness: mocks.readiness,
-    createRelease: mocks.createRelease,
     reports: mocks.reports,
     createReport: vi.fn(),
     report: vi.fn(),
@@ -190,9 +193,7 @@ it("confirms an ambiguous match and keeps historical release snapshots selectabl
   expect(uploadPanel).toContainElement(
     screen.getByRole("button", { name: "上传并自动匹配" }),
   );
-  expect(
-    screen.getByText(/先上传学生作业，系统将自动匹配学生/),
-  ).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "学生作业" })).toBeInTheDocument();
   expect(screen.queryByText("未选择任何文件")).not.toBeInTheDocument();
   const selectedFiles = [
     new File(["first"], "001-张三.pdf", { type: "application/pdf" }),
@@ -221,52 +222,64 @@ it("confirms an ambiguous match and keeps historical release snapshots selectabl
     expect(mocks.confirmMatch).toHaveBeenCalledWith("b1", "m1", "s1"),
   );
   expect(
-    screen.getByText(/第 2 版 · 已发布 · 成绩快照 snap-2/),
+    screen.getByText(/第 2 版 · 已发布 · 已确认 1 份/),
   ).toBeInTheDocument();
   expect(
-    screen.getByText(/第 1 版 · 已发布 · 成绩快照 snap-1/),
+    screen.getByText(/第 1 版 · 已发布 · 已确认 1 份/),
   ).toBeInTheDocument();
+  expect(screen.getByText(/成绩快照 snap-2/)).toHaveClass("sr-only");
+  expect(screen.getByText(/成绩快照 snap-1/)).toHaveClass("sr-only");
 });
 
-it("allows a new release version after readiness succeeds", async () => {
+it("keeps result confirmation in the teacher review flow", async () => {
   mocks.getBatch.mockResolvedValue({
     id: "b1",
     assignment_id: "a1",
     class_id: "c1",
     name: "版本批次",
+    submission_count: 1,
+    workflow: {
+      stage_counts: {},
+      completed_count: 1,
+      blocked_count: 0,
+      blocked: [],
+    },
     matching: { items: [], student_options: [] },
   });
-  mocks.submissions.mockResolvedValue([]);
+  mocks.submissions.mockResolvedValue([
+    {
+      id: "submission-1",
+      student_id: "student-1",
+      status: "finalized",
+      attempt_number: 1,
+      page_count: 1,
+      workflow: {
+        stage: "completed",
+        stage_label: "处理完成",
+        reason: "可以复核。",
+        action: "进入教师复核",
+      },
+    },
+  ]);
+  mocks.reviewWorkspace.mockResolvedValue({ items: [] });
   mocks.releases.mockResolvedValue([]);
   mocks.reports.mockResolvedValue([]);
-  mocks.readiness.mockResolvedValue({
-    releasable_count: 1,
-    unreleasable_count: 0,
-  });
-  mocks.createRelease.mockResolvedValue({
-    id: "r1",
-    class_id: "c1",
-    version: 1,
-    status: "released",
-    meaning: "score_and_feedback",
-    items: [{ student_id: "s1", score_snapshot_id: "snap-1" }],
-  });
-
   render(
     <Suspense fallback={<div>测试加载中</div>}>
       <GradingBatchPage params={Promise.resolve({ batchId: "b1" })} />
     </Suspense>,
   );
-  fireEvent.click(
-    await screen.findByRole("button", { name: "检查成绩是否可发布" }),
-  );
-  const releaseButton = screen.getByRole("button", {
-    name: "创建新的成绩发布版本",
-  });
-  await waitFor(() => expect(releaseButton).toBeEnabled());
-  fireEvent.click(releaseButton);
-  await waitFor(() => expect(mocks.createRelease).toHaveBeenCalled());
-  expect(await screen.findByText(/固定成绩快照 snap-1/)).toBeInTheDocument();
+  expect(await screen.findByText(/尚未确认正式结果/)).toBeInTheDocument();
+  expect(
+    screen.getByTestId("open-teacher-review").closest("a"),
+  ).toHaveAttribute("href", "/grading/b1/review");
+  expect(
+    screen.queryByRole("button", { name: "检查成绩是否可发布" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "创建新的成绩发布版本" }),
+  ).not.toBeInTheDocument();
+  expect(mocks.readiness).not.toHaveBeenCalled();
 });
 
 it("creates a replacement report job once and keeps the failed job terminal", async () => {
@@ -357,6 +370,8 @@ it("shows the batch progress, blocker reason, and each submission next action", 
     {
       id: "submission-1",
       student_id: "student-1",
+      student_name: "合成学生甲",
+      student_number: "S001",
       status: "processing",
       attempt_number: 1,
       page_count: 1,
@@ -381,14 +396,28 @@ it("shows the batch progress, blocker reason, and each submission next action", 
 
   expect(
     await screen.findByTestId("batch-progress-overview"),
-  ).toHaveTextContent("已完成 0/1");
+  ).toHaveTextContent("0/1 份已完成处理");
   expect(screen.getByTestId("batch-blocker")).toHaveTextContent(
     "等待答案识别 · 1 份",
   );
   expect(screen.getByTestId("submission-workflow")).toHaveTextContent(
-    "下一步：启动或重试答案识别",
+    "启动或重试答案识别",
   );
+  expect(
+    screen.getByRole("heading", { name: "合成学生甲" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("学号 S001 · 1 页")).toBeInTheDocument();
   expect(screen.getByTestId("submission-ocr-start")).toBeEnabled();
+  expect(
+    screen.getByText("高级处理工具").closest("details"),
+  ).not.toHaveAttribute("open");
+  expect(
+    screen.getByText("页面与高级操作").closest("details"),
+  ).not.toHaveAttribute("open");
+  expect(
+    screen.getByTestId("continue-processing-to-teacher-review"),
+  ).toHaveTextContent("继续处理");
+  expect(screen.queryByText("服务端连续处理")).not.toBeInTheDocument();
 });
 
 it("prepares grading inputs once and exposes a stable teacher-review entry", async () => {
@@ -566,9 +595,39 @@ function setupProcessingPage() {
     assignment_id: "a1",
     class_id: "c1",
     name: "连续处理批次",
+    submission_count: 1,
+    workflow: {
+      stage_counts: { recognition: 1 },
+      completed_count: 0,
+      blocked_count: 1,
+      blocked: [
+        {
+          stage: "recognition",
+          stage_label: "等待答案识别",
+          reason: "答案尚未识别。",
+          action: "继续处理",
+          count: 1,
+        },
+      ],
+    },
     matching: { items: [], student_options: [] },
   });
-  mocks.submissions.mockResolvedValue([]);
+  mocks.submissions.mockResolvedValue([
+    {
+      id: "submission-1",
+      student_id: "student-1",
+      status: "processing",
+      attempt_number: 1,
+      page_count: 1,
+      workflow: {
+        stage: "recognition",
+        stage_label: "等待答案识别",
+        reason: "答案尚未识别。",
+        action: "继续处理",
+      },
+    },
+  ]);
+  mocks.reviewWorkspace.mockResolvedValue({ items: [] });
   mocks.releases.mockResolvedValue([]);
   mocks.reports.mockResolvedValue([]);
   render(
@@ -594,11 +653,12 @@ it("starts one server-side plan and labels Codex output as suggestion-only", asy
     expect.any(String),
   );
   expect(await screen.findByTestId("processing-run-status")).toHaveTextContent(
-    "等待 Codex-assisted",
+    "正在评分",
   );
   expect(screen.getByTestId("processing-run-status")).toHaveTextContent(
     "suggestion-only",
   );
+  expect(screen.queryByTestId("open-teacher-review")).not.toBeInTheDocument();
   expect(screen.getByText("技术详情")).toBeInTheDocument();
 });
 
@@ -641,12 +701,9 @@ it("keeps reconciling active processing states until teacher review and then sto
     expect(screen.getByTestId("processing-run-status")).toHaveTextContent(
       "等待教师复核",
     );
-    expect(screen.getByRole("link", { name: "进入教师复核" })).toHaveAttribute(
-      "href",
-      "/grading/b1/review",
-    );
-    expect(mocks.createRelease).not.toHaveBeenCalled();
-
+    expect(
+      screen.getByTestId("open-teacher-review").closest("a"),
+    ).toHaveAttribute("href", "/grading/b1/review");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(6000);
     });
@@ -667,7 +724,7 @@ it("falls back to safe copy for an unknown processing status", async () => {
   );
 
   expect(await screen.findByTestId("processing-run-status")).toHaveTextContent(
-    "服务端正在推进处理计划，请稍候查看最新状态。",
+    "请稍候。",
   );
 });
 
@@ -749,12 +806,10 @@ it("links to explicit teacher review without presenting suggestions as final gra
     await screen.findByTestId("continue-processing-to-teacher-review"),
   );
 
-  const reviewLink = await screen.findByRole("link", {
-    name: "进入教师复核",
-  });
-  expect(reviewLink).toHaveAttribute("href", "/grading/b1/review");
-  expect(screen.getByTestId("processing-run-status")).toHaveTextContent(
-    "这不是正式成绩",
+  const reviewButton = await screen.findByTestId("open-teacher-review");
+  expect(reviewButton.closest("a")).toHaveAttribute(
+    "href",
+    "/grading/b1/review",
   );
-  expect(mocks.createRelease).not.toHaveBeenCalled();
+  expect(reviewButton).toHaveTextContent("检查结果");
 });

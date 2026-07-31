@@ -927,6 +927,45 @@ export type ProcessingRun = {
   steps: ProcessingStep[];
 };
 
+export type ConfirmResultsBlocker = {
+  code: string;
+  submission_id?: string | null;
+  question_id?: string | null;
+  answer_id?: string | null;
+  message?: string | null;
+};
+
+export type ConfirmResultsReadiness = {
+  ready: boolean;
+  review_hash: string;
+  blockers: ConfirmResultsBlocker[];
+  submission_count?: number;
+  new_snapshot_count?: number;
+  reused_snapshot_count?: number;
+  previous_grade_release_id?: string | null;
+  plan?: Array<{
+    submission_id: string;
+    action: "create_snapshot" | "reuse_snapshot";
+    snapshot_id?: string | null;
+    snapshot_version?: number | null;
+  }>;
+  confirmed_result?: ConfirmResultsResult | null;
+};
+
+export type ConfirmResultsResult = {
+  status: "released";
+  review_hash: string;
+  submission_count: number;
+  auto_accepted_count: number;
+  new_snapshot_count?: number;
+  reused_snapshot_count?: number;
+  previous_grade_release_id?: string | null;
+  teacher_review_ids: string[];
+  snapshot_ids: string[];
+  grade_release_id: string;
+  grade_release_version?: number | null;
+};
+
 export const gradingApi = {
   batches: (assignmentId: string, query = "") =>
     request<Page<GradingBatch>>(
@@ -1087,6 +1126,21 @@ export const gradingApi = {
       method: "POST",
       body: JSON.stringify({ answer_ids: answerIds }),
     }),
+  confirmResultsReadiness: (batchId: string) =>
+    request<ConfirmResultsReadiness>(
+      `/api/grading-batches/${batchId}/confirm-results/readiness`,
+    ),
+  confirmResults: (
+    batchId: string,
+    data: { idempotency_key: string; expected_review_hash: string },
+  ) =>
+    request<ConfirmResultsResult>(
+      `/api/grading-batches/${batchId}/confirm-results`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    ),
   finalize: (submissionId: string) =>
     request(`/api/submissions/${submissionId}/finalize`, { method: "POST" }),
   snapshots: (assignmentId: string) =>
@@ -1110,7 +1164,9 @@ export type BulkAcceptEligibility = {
 
 export type SubmissionRecord = {
   id: string;
-  student_id?: string;
+  student_id?: string | null;
+  student_name?: string | null;
+  student_number?: string | null;
   status: string;
   attempt_number: number;
   page_count: number;
@@ -1265,11 +1321,6 @@ export const analyticsApi = {
     request<GradeReadiness>(
       `/api/assignments/${assignmentId}/classes/${classId}/grade-readiness`,
     ),
-  createRelease: (data: Record<string, unknown>) =>
-    request<GradeRelease>("/api/grade-releases", {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
   createReport: (
     releaseId: string,
     reportType: ReportJob["report_type"],

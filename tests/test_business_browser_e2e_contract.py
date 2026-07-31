@@ -5,12 +5,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = (ROOT / "scripts" / "business_browser_e2e.mjs").read_text(encoding="utf-8")
 COMPOSE = (ROOT / "docker-compose.business-e2e.yml").read_text(encoding="utf-8")
-GUARD_START = "// BUSINESS_E2E_GH_GUARD_START"
-GUARD_END = "// BUSINESS_E2E_GH_GUARD_END"
-
-
-def guarded_gh_source() -> str:
-    return SCRIPT.split(GUARD_START, 1)[1].split(GUARD_END, 1)[0]
+WEB_API = (ROOT / "apps" / "web" / "lib" / "api.ts").read_text(encoding="utf-8")
+REVIEW_PAGE = (
+    ROOT / "apps" / "web" / "app" / "(teacher)" / "grading" / "[batchId]" / "review" / "page.tsx"
+).read_text(encoding="utf-8")
+BATCH_PAGE = (
+    ROOT / "apps" / "web" / "app" / "(teacher)" / "grading" / "[batchId]" / "page.tsx"
+).read_text(encoding="utf-8")
 
 
 def extract_js_function(source: str, function_name: str) -> str:
@@ -143,51 +144,38 @@ def page_mutation_violations(source: str) -> list[str]:
 def object_calls(function_source: str, owner: str, method: str) -> list[str]:
     pattern = re.compile(rf"\b{re.escape(owner)}\s*\.\s*{re.escape(method)}\s*\(")
     return [
-        extract_balanced_call(
-            function_source, function_source.index("(", match.start())
-        )
+        extract_balanced_call(function_source, function_source.index("(", match.start()))
         for match in pattern.finditer(function_source)
     ]
 
 
 def has_scoped_click(function_source: str, owner: str, test_id: str) -> bool:
-    for match in re.finditer(
-        rf"\b{re.escape(owner)}\s*\.\s*getByTestId\s*\(", function_source
-    ):
+    for match in re.finditer(rf"\b{re.escape(owner)}\s*\.\s*getByTestId\s*\(", function_source):
         opening = function_source.index("(", match.start())
         call = extract_balanced_call(function_source, opening)
         call_end = opening + len(call)
-        if test_id in call and re.match(
-            r"\s*\.\s*click\s*\(", function_source[call_end:]
-        ):
+        if test_id in call and re.match(r"\s*\.\s*click\s*\(", function_source[call_end:]):
             return True
     return False
 
 
-def segmentation_scope_violations(
-    delete_helper: str, draw_helper: str
-) -> list[str]:
+def segmentation_scope_violations(delete_helper: str, draw_helper: str) -> list[str]:
     violations: list[str] = []
     delete_locators = object_calls(delete_helper, "submissionCard", "locator")
     if not any(
-        "submission-processing-page" in call and "data-page-id" in call
-        for call in delete_locators
+        "submission-processing-page" in call and "data-page-id" in call for call in delete_locators
     ):
         violations.append("delete-page-not-submission-scoped")
     if not any(
-        "submission-region-card" in call and "data-region-id" in call
-        for call in delete_locators
+        "submission-region-card" in call and "data-region-id" in call for call in delete_locators
     ):
         violations.append("delete-region-not-id-scoped")
-    if not has_scoped_click(
-        delete_helper, "regionCard", "submission-region-delete"
-    ):
+    if not has_scoped_click(delete_helper, "regionCard", "submission-region-delete"):
         violations.append("delete-control-not-region-scoped")
 
     draw_locators = object_calls(draw_helper, "submissionCard", "locator")
     if not any(
-        "submission-processing-page" in call and "data-page-id" in call
-        for call in draw_locators
+        "submission-processing-page" in call and "data-page-id" in call for call in draw_locators
     ):
         violations.append("draw-page-not-submission-scoped")
     draw_controls = object_calls(draw_helper, "submissionCard", "getByTestId")
@@ -205,9 +193,9 @@ def draw_readiness_violations(draw_helper: str) -> list[str]:
     if readiness_position == -1 or readiness_position > mouse_position:
         violations.append("readiness-poll-must-precede-mouse")
     for required, violation in (
-        ('cardSubmissionId === submissionId', "submission-not-verified"),
-        ('canvasPageId === pageId', "page-not-verified"),
-        ('selectedQuestionId === questionId', "question-not-verified"),
+        ("cardSubmissionId === submissionId", "submission-not-verified"),
+        ("canvasPageId === pageId", "page-not-verified"),
+        ("selectedQuestionId === questionId", "question-not-verified"),
         ("currentBox.width >= 200", "minimum-canvas-width-missing"),
         ("currentBox.height >= 100", "minimum-canvas-height-missing"),
         ("image.complete", "image-complete-missing"),
@@ -271,48 +259,45 @@ def test_stop_after_is_disabled_by_default_and_only_accepts_exact_f() -> None:
     assert "const requestedStopAfter = process.env.BUSINESS_E2E_STOP_AFTER;" in SCRIPT
     assert 'requestedStopAfter !== undefined && requestedStopAfter !== "F"' in SCRIPT
     assert "const singleContinueProof = true;" in SCRIPT
-    assert (
-        'const stopAfterF = requestedStopAfter === "F" || singleContinueProof;'
-        in SCRIPT
-    )
+    assert 'const stopAfterF = requestedStopAfter === "F" || singleContinueProof;' in SCRIPT
 
 
-def test_f_verification_precedes_guard_and_guard_contains_all_gh_writes() -> None:
-    assert SCRIPT.count(GUARD_START) == 1
-    assert SCRIPT.count(GUARD_END) == 1
-    guard_position = SCRIPT.index(GUARD_START)
-    guard_end_position = SCRIPT.index(GUARD_END)
-    assert SCRIPT.index("/score-snapshots?status=complete") < guard_position
-    assert SCRIPT.index("passed_through_F") < guard_position
-
-    guarded = guarded_gh_source()
-    assert "if (!stopAfterF)" in guarded
-    assert 'currentStage = "G"' in guarded
-    assert 'currentStage = "H"' in guarded
-    assert "创建新的 GradeRelease 版本" in guarded
-    assert "生成 XLSX" in guarded
-    assert "生成首名学生中文 PDF" in guarded
-    assert "await page.goto(`${base}/analytics`)" in guarded
-    assert "name: /生成 \\/ 刷新分析/" in guarded
-    assert "grade_release_write_attempted = true" in guarded
-    for operation in (
-        "创建新的 GradeRelease 版本",
-        "生成 XLSX",
-        "生成首名学生中文 PDF",
-        "await page.goto(`${base}/analytics`)",
-    ):
-        position = SCRIPT.index(operation)
-        assert guard_position < position < guard_end_position
+def test_script_has_no_dormant_post_f_release_or_analytics_write_branch() -> None:
+    assert "BUSINESS_E2E_GH_GUARD" not in SCRIPT
+    assert "if (!stopAfterF)" not in SCRIPT
+    assert 'currentStage = "G"' not in SCRIPT
+    assert 'currentStage = "H"' not in SCRIPT
+    assert "创建新的 GradeRelease 版本" not in SCRIPT
+    assert "生成 XLSX" not in SCRIPT
+    assert "生成首名学生中文 PDF" not in SCRIPT
+    assert "await page.goto(`${base}/analytics`)" not in SCRIPT
+    assert "grade_release_write_attempted = true" not in SCRIPT
 
 
 def test_stopped_evidence_and_terminal_output_do_not_claim_full_pass() -> None:
-    stopped_branch = SCRIPT.split("if (stopAfterF) {", 1)[1].split(GUARD_START, 1)[0]
+    stopped_branch = SCRIPT.split("if (stopAfterF) {", 1)[1].split("} catch", 1)[0]
     assert 'evidence.result = "passed_through_F"' in stopped_branch
     assert "completed_stage_count = 6" in SCRIPT
     assert 'scope: stopAfterF ? "snapshot_only"' in SCRIPT
     assert "grade_release_write_attempted: false" in SCRIPT
     assert "BUSINESS_BROWSER_E2E_STOPPED" in SCRIPT
     assert "stages=6 completed_through=F" in SCRIPT
+    assert "BUSINESS_BROWSER_E2E_PASSED" not in SCRIPT
+
+
+def test_evidence_fingerprints_dirty_source_and_compose_images_without_diff_content() -> None:
+    assert '["status", "--porcelain=v1", "--untracked-files=all"]' in SCRIPT
+    assert '["diff", "--binary", "HEAD", "--"]' in SCRIPT
+    assert 'createHash("sha256")' in SCRIPT
+    assert "worktree_dirty: worktreeStatus.trim().length > 0" in SCRIPT
+    assert "worktree_status_sha256:" in SCRIPT
+    assert "tracked_diff_sha256:" in SCRIPT
+    assert "untracked_file_count:" in SCRIPT
+    assert '["api", "worker", "web"].map' in SCRIPT
+    assert 'execFileSync("docker", ["inspect", "--format={{.Image}}", containerId]' in SCRIPT
+    provenance = SCRIPT.split("source_provenance:", 1)[1].split("environment:", 1)[0]
+    assert "trackedDiff.toString" not in provenance
+    assert "worktreeStatus," not in provenance
 
 
 def test_stop_branch_uses_authenticated_gets_for_snapshots_and_release_absence() -> None:
@@ -321,7 +306,27 @@ def test_stop_branch_uses_authenticated_gets_for_snapshots_and_release_absence()
     assert 'credentials: "include"' in SCRIPT
     assert "/score-snapshots?status=complete" in SCRIPT
     assert "/api/grade-releases?assignment_id=${assignmentId}" in SCRIPT
-    assert "STOP_AFTER=F assignment must not have a GradeRelease" in SCRIPT
+    assert "safe grading E2E must not create a GradeRelease" in SCRIPT
+
+
+def test_frontend_and_safe_e2e_never_post_the_legacy_grade_release_endpoint() -> None:
+    frontend = "\n".join((WEB_API, REVIEW_PAGE, BATCH_PAGE))
+    direct_release_post = re.compile(
+        r'(?:request|apiJson)(?:<[^>]+>)?\(\s*[`"\']/api/grade-releases[`"\']'
+        r'\s*,\s*\{[^}]*method:\s*"POST"',
+        re.DOTALL,
+    )
+    assert direct_release_post.search(frontend) is None
+    assert direct_release_post.search(SCRIPT) is None
+    assert "createRelease" not in frontend
+    assert SCRIPT.count("/api/grade-releases") == 1
+    release_read = SCRIPT.split("const releasesResponse = await apiJson(", 1)[1].split(
+        "assert.equal(releasesResponse.status", 1
+    )[0]
+    assert "?assignment_id=${assignmentId}" in release_read
+    assert 'method: "POST"' not in release_read
+    assert "grade_release_write_attempted: false" in SCRIPT
+    assert "grade_release_write_attempted = true" not in SCRIPT
 
 
 def test_api_requests_use_explicit_absolute_api_origin_and_auditable_response_metadata() -> None:
@@ -333,9 +338,7 @@ def test_api_requests_use_explicit_absolute_api_origin_and_auditable_response_me
     assert "resolved.origin" in SCRIPT
     assert '"API URL must remain on configured origin"' in SCRIPT
 
-    helper = SCRIPT.split("async function apiJson", 1)[1].split(
-        "function workspaceAnswers", 1
-    )[0]
+    helper = SCRIPT.split("async function apiJson", 1)[1].split("function workspaceAnswers", 1)[0]
     assert "const absoluteUrl = absoluteApiUrl(apiPath);" in helper
     assert "requestUrl: absoluteUrl" in helper
     assert "requestUrl: apiPath" not in helper
@@ -357,11 +360,11 @@ def test_api_url_guard_rejects_normalized_path_escape_and_non_http_protocols() -
     guard = SCRIPT.split("function absoluteApiUrl(requestPath)", 1)[1].split(
         "async function apiJson", 1
     )[0]
-    assert 'new URL(requestPath, `${apiBase}/`)' in guard
+    assert "new URL(requestPath, `${apiBase}/`)" in guard
     assert 'resolved.pathname === "/api"' in guard
     assert 'resolved.pathname.startsWith("/api/")' in guard
     assert "normalized API path escaped /api" in guard
-    assert 'assert.equal(\n    resolved.origin,\n    apiOrigin' in guard
+    assert "assert.equal(\n    resolved.origin,\n    apiOrigin" in guard
 
     # `/api/../auth/me` passes the raw prefix check, then normalizes to
     # `/auth/me`; the post-resolution pathname assertion is the rejecting guard.
@@ -374,13 +377,11 @@ def test_codex_processing_write_read_and_teacher_review_order() -> None:
     if "single_continue_from_uploaded_unconfirmed_submission" in SCRIPT:
         codex_continue = SCRIPT.index("let continueResponse")
         technical_poll = SCRIPT.index("const waitingCodex", codex_continue)
-        claim = SCRIPT.index(
-            "/api/internal/codex-local/work-items/claim", technical_poll
-        )
+        claim = SCRIPT.index("/api/internal/codex-local/work-items/claim", technical_poll)
         submit = SCRIPT.index("/submit`", claim)
         apply = SCRIPT.index("/apply`", submit)
         teacher_review = SCRIPT.index("const initialWorkspaceResponse", apply)
-        finalize = SCRIPT.index('name: "全部定稿", exact: true', teacher_review)
+        finalize = SCRIPT.index("`/api/submissions/${submissionId}/finalize`", teacher_review)
         assert codex_continue < technical_poll < claim < submit < apply
         assert apply < teacher_review < finalize
         assert "manual_submission_processing_start_count: 0" in SCRIPT
@@ -395,9 +396,7 @@ def test_codex_processing_write_read_and_teacher_review_order() -> None:
         "business-e2e-recognition-reconcile-", recognition_continue
     )
     confirmation = SCRIPT.index("/recognition/confirm`", recognition_reconcile)
-    confirmation_read = SCRIPT.index(
-        "/question-recognition-evidence`", confirmation
-    )
+    confirmation_read = SCRIPT.index("/question-recognition-evidence`", confirmation)
     codex_continue = SCRIPT.index("const continueResponse", confirmation_read)
     claim = SCRIPT.index("/api/internal/codex-local/work-items/claim", codex_continue)
     submit = SCRIPT.index("/submit`", claim)
@@ -417,7 +416,7 @@ def test_codex_processing_write_read_and_teacher_review_order() -> None:
         'panel.getByRole("button", { name: "修改", exact: true }).click()',
         teacher_accept,
     )
-    finalize = SCRIPT.index('name: "全部定稿", exact: true', teacher_modify)
+    finalize = SCRIPT.index("`/api/submissions/${submissionId}/finalize`", teacher_modify)
 
     assert "/codex-suggestion" not in SCRIPT
     assert recognition_continue < recognition_reconcile < confirmation
@@ -432,7 +431,7 @@ def test_codex_processing_write_read_and_teacher_review_order() -> None:
     assert 'step.kind === "recognition"' in SCRIPT
     assert 'step.status === "blocked_review"' in SCRIPT
     assert 'step.error_code === "RECOGNITION_CONFIRMATION_REQUIRED"' in SCRIPT
-    assert "currentEvidence.status, \"confirmed\"" in SCRIPT
+    assert 'currentEvidence.status, "confirmed"' in SCRIPT
     assert "processingRun.generation > recognitionRun.generation" in SCRIPT
     assert "assert.ok(processingRun.pending_codex_count > 0)" in SCRIPT
     assert 'assert.equal(runReadResponse.body.status, "awaiting_teacher_review")' in SCRIPT
@@ -448,8 +447,7 @@ def test_codex_processing_write_read_and_teacher_review_order() -> None:
     assert "answer.requires_review,\n      false," in SCRIPT
     assert "verified.requires_review,\n      false," in SCRIPT
     assert (
-        "StudentAnswer recognition must not inherit GradingResult suggestion review state"
-        in SCRIPT
+        "StudentAnswer recognition must not inherit GradingResult suggestion review state" in SCRIPT
     )
     assert "assert.equal(answer.requires_review, true)" not in SCRIPT
     assert "assert.equal(verified.requires_review, true)" not in SCRIPT
@@ -478,14 +476,14 @@ def test_f_decimal_score_assertions_normalize_only_valid_decimal_strings() -> No
     assertion = extract_js_function(SCRIPT, "assertDecimalStringsEqual")
     f_stage = SCRIPT.split('currentStage = "F";', 1)[1]
 
-    assert 'total_suggested_points: hasManual ? null : String(total)' in SCRIPT
+    assert "total_suggested_points: hasManual ? null : String(total)" in SCRIPT
     assert "assertDecimalStringsEqual(\n          reviewedAnswer.review.final_score," in f_stage
     assert "assertDecimalStringsEqual(\n            criterion.awarded_points," in f_stage
     assert "String(verified.result.score)" not in f_stage
     assert "String(reviewedAnswer.review.final_score)" not in f_stage
     assert "String(criterion.awarded_points)" not in f_stage
 
-    node_source = f'''\
+    node_source = f"""\
 import assert from "node:assert/strict";
 {normalizer}
 {comparator}
@@ -498,7 +496,7 @@ for (const invalid of ["", " 4", "4 ", "4e0", "Infinity", "NaN", "1_0", ".", "+"
 }}
 assert.throws(() => normalizeDecimalString(4), TypeError);
 assert.throws(() => assertDecimalStringsEqual("4x", "4"), TypeError);
-'''
+"""
     result = subprocess.run(
         ["node", "--input-type=module", "--eval", node_source],
         text=True,
@@ -520,7 +518,7 @@ def test_f_uses_stable_controls_and_a_single_prepare_click_before_review() -> No
         assert "/processing-runs" in single_branch
         assert "const waitingCodex" in single_branch
         assert 'run.status === "awaiting_teacher_review"' in single_branch
-        assert 'page.goto(`${base}/grading/${batchId}/review`)' in single_branch
+        assert "page.goto(`${base}/grading/${batchId}/review`)" in single_branch
         assert 'page.getByTestId("prepare-grading-inputs")' not in single_branch
         return
     prepare = f_stage.index('page.getByTestId("prepare-grading-inputs")')
@@ -540,34 +538,50 @@ def test_f_uses_stable_controls_and_a_single_prepare_click_before_review() -> No
     assert "after_answers" in f_stage
 
 
-def test_f_waits_for_review_completion_then_two_complete_snapshot_nodes() -> None:
+def test_f_uses_safe_compatibility_finalize_without_confirming_results() -> None:
     f_stage = SCRIPT.split('currentStage = "F";', 1)[1]
 
-    progress_wait = 'page.getByText(/^\\s*已复核\\s+4\\/4\\s*$/).waitFor()'
-    finalize = 'page.getByRole("button", { name: "全部定稿", exact: true }).click()'
-    snapshot_locator = '[data-testid="score-snapshot"][data-status="complete"]'
-    snapshot_wait = 'await pollUntil("two complete score snapshots", 60_000'
+    progress_wait = "page.getByText(/^\\s*已复核\\s+4\\/4\\s*$/).waitFor()"
+    confirm_button = 'name: "确认结果"'
+    finalize = "`/api/submissions/${submissionId}/finalize`"
+    final_snapshot_get = "const completeSnapshotsResponse = await apiJson("
     grade_release_check = "`/api/grade-releases?assignment_id=${assignmentId}`"
 
     assert progress_wait in f_stage
     assert "进度 4/4" not in f_stage
-    assert "完成全部 finalize" not in f_stage
-    assert "全部 Submission 已 finalize" not in SCRIPT
-    assert 'const snapshotNodes = page.locator(' in f_stage
-    assert snapshot_locator in f_stage
-    assert snapshot_wait in f_stage
-    assert "done: count === 2" in f_stage
-    assert 'state: `count=${count}`' in f_stage
-    assert '"F must render exactly two complete score snapshots"' in f_stage
-    assert "complete score snapshots must expose IDs" in f_stage
+    assert confirm_button in f_stage
+    assert '"review UI must expose exactly one confirm-results authorization"' in f_stage
+    assert '"confirm-results authorization must be ready' in f_stage
+    assert "clicked: false" in f_stage
+    confirm_block = f_stage.split("const confirmResultsButton", 1)[1].split(
+        "const beforeFinalizeResponse", 1
+    )[0]
+    assert ".click()" not in confirm_block
+    assert 'name: "全部定稿"' not in SCRIPT
+    assert "beforeFinalizeResponse.body.items.filter" in f_stage
+    assert 'item.status !== "finalized"' in f_stage
+    assert '"compatibility finalize scope must not contain duplicate submissions"' in f_stage
+    assert "for (const submissionId of evidence.objects.submission_ids)" in f_stage
+    assert SCRIPT.count(finalize) == 1
+    assert "compatibility finalize failed:" in f_stage
+    assert 'assert.equal(finalizeResponse.body.status, "complete")' in f_stage
+    assert "finalize write-after-GET must expose snapshot" in f_stage
+    assert "write_request_id: finalizeResponse.request_id" in f_stage
+    assert "read_request_id: snapshotReadResponse.request_id" in f_stage
+    assert '"F must create exactly two complete snapshots' in f_stage
     assert "complete score snapshot IDs must be unique" in f_stage
+    assert "finalizedBatchResponse.body.workflow.completed_count" in f_stage
+    assert 'finalizedBatchResponse.body.workflow.blocked' in f_stage
+    assert 'item.status === "finalized" && item.workflow.stage === "completed"' in f_stage
+    assert 'evidence.finalized_workflow_verification' in f_stage
     assert (
         f_stage.index(progress_wait)
+        < f_stage.index(confirm_button)
         < f_stage.index(finalize)
-        < f_stage.index(snapshot_locator)
-        < f_stage.index(snapshot_wait)
+        < f_stage.index(final_snapshot_get)
         < f_stage.index(grade_release_check)
     )
+    assert "safe grading E2E must not create a GradeRelease" in f_stage
 
 
 def test_f_workspace_readiness_requires_all_provider_and_evidence_branches() -> None:
@@ -691,9 +705,7 @@ def test_browser_close_failure_is_secondary_to_a_primary_business_error() -> Non
 def test_evidence_write_failure_keeps_priority_over_browser_close_failure() -> None:
     terminal_start = SCRIPT.rindex("} catch (error) {\n  hasPrimaryFailure = true;")
     terminal = SCRIPT[terminal_start:]
-    evidence_guard = terminal.index(
-        "evidenceWriteFailure !== null && !hasPrimaryFailure"
-    )
+    evidence_guard = terminal.index("evidenceWriteFailure !== null && !hasPrimaryFailure")
     evidence_throw = terminal.index("throw evidenceWriteFailure;", evidence_guard)
     close_guard = terminal.index("browserCloseFailure !== null", evidence_throw)
     close_throw = terminal.index("throw browserCloseFailure;", close_guard)
@@ -909,9 +921,7 @@ def test_publication_has_api_and_ui_hard_preconditions() -> None:
 
 
 def test_stage_e_processes_and_teacher_segments_before_recognition() -> None:
-    stage_e = SCRIPT.split('currentStage = "E";', 1)[1].split(
-        'currentStage = "F";', 1
-    )[0]
+    stage_e = SCRIPT.split('currentStage = "E";', 1)[1].split('currentStage = "F";', 1)[0]
     processing = stage_e.index("processAndSegmentSyntheticSubmission(")
     processing_stage = stage_e.index(
         'stage("E", "submission_processing_completed_before_recognition")',
@@ -921,21 +931,12 @@ def test_stage_e_processes_and_teacher_segments_before_recognition() -> None:
         'stage("E", "processing_page_order_read_before_recognition")',
         processing_stage,
     )
-    recognition = stage_e.index(
-        'page.getByTestId("submission-ocr-start").click()', page_order_read
-    )
-    evidence_assertions = stage_e.index(
-        "latest.block_sources.length > 0", recognition
-    )
-    passed = stage_e.index("evidence.stages.E.status = \"passed\"", evidence_assertions)
+    recognition = stage_e.index('page.getByTestId("submission-ocr-start").click()', page_order_read)
+    evidence_assertions = stage_e.index("latest.block_sources.length > 0", recognition)
+    passed = stage_e.index('evidence.stages.E.status = "passed"', evidence_assertions)
 
     assert (
-        processing
-        < processing_stage
-        < page_order_read
-        < recognition
-        < evidence_assertions
-        < passed
+        processing < processing_stage < page_order_read < recognition < evidence_assertions < passed
     )
     assert "[subjectiveQuestionId, objectiveQuestionId]" in stage_e
     assert ':not([data-status="finalized"])' in stage_e
@@ -946,14 +947,12 @@ def test_stage_e_processes_and_teacher_segments_before_recognition() -> None:
     assert "segmentation-incomplete" in SCRIPT
     assert "question-recognition-evidence" in stage_e
     assert "recognition-blocks" in stage_e
-    assert 'assert.equal(latest.stale, false)' in stage_e
+    assert "assert.equal(latest.stale, false)" in stage_e
     assert '["recognized", "requires_review", "confirmed"]' in stage_e
 
 
 def test_recognition_completion_forbids_later_page_mutation_helpers_or_clicks() -> None:
-    stage_e = SCRIPT.split('currentStage = "E";', 1)[1].split(
-        'currentStage = "F";', 1
-    )[0]
+    stage_e = SCRIPT.split('currentStage = "E";', 1)[1].split('currentStage = "F";', 1)[0]
     recognition = stage_e.index('page.getByTestId("submission-ocr-start").click()')
     after_recognition = stage_e[recognition:]
 
@@ -962,9 +961,7 @@ def test_recognition_completion_forbids_later_page_mutation_helpers_or_clicks() 
 
 
 def test_page_mutation_contract_rejects_post_recognition_ui_click_and_helper() -> None:
-    stage_e = SCRIPT.split('currentStage = "E";', 1)[1].split(
-        'currentStage = "F";', 1
-    )[0]
+    stage_e = SCRIPT.split('currentStage = "E";', 1)[1].split('currentStage = "F";', 1)[0]
     recognition = stage_e.index('page.getByTestId("submission-ocr-start").click()')
     after_recognition = stage_e[recognition:]
 
@@ -987,9 +984,7 @@ def test_segmentation_writes_are_ui_driven_and_followed_by_gets() -> None:
 
     delete_helper = extract_js_function(SCRIPT, "deleteSyntheticRegionThroughUi")
     draw_helper = extract_js_function(SCRIPT, "drawSyntheticRegionThroughUi")
-    processing_helper = extract_js_function(
-        SCRIPT, "processAndSegmentSyntheticSubmission"
-    )
+    processing_helper = extract_js_function(SCRIPT, "processAndSegmentSyntheticSubmission")
 
     assert 'getByTestId("submission-region-delete").click()' in delete_helper
     assert 'response.request().method() === "DELETE"' in delete_helper
@@ -1053,34 +1048,26 @@ def test_region_draw_pointer_safety_contract_rejects_unscrolled_or_unclipped_dra
     helper = extract_js_function(SCRIPT, "drawSyntheticRegionThroughUi")
 
     unscrolled = helper.replace("await canvas.scrollIntoViewIfNeeded()", "", 1)
-    assert "scroll-into-view-must-precede-mouse" in draw_pointer_safety_violations(
-        unscrolled
-    )
+    assert "scroll-into-view-must-precede-mouse" in draw_pointer_safety_violations(unscrolled)
 
     unbounded = helper.replace(
         "page.mouse.move(dragStart.x, dragStart.y)",
         "page.mouse.move(box.x + box.width * 0.03, box.y + box.height * 0.03)",
         1,
     )
-    assert "start-mouse-not-visible-rect-based" in draw_pointer_safety_violations(
-        unbounded
-    )
+    assert "start-mouse-not-visible-rect-based" in draw_pointer_safety_violations(unbounded)
 
 
 def test_segmentation_scope_contract_rejects_unscoped_ui_mutations() -> None:
     delete_helper = extract_js_function(SCRIPT, "deleteSyntheticRegionThroughUi")
     draw_helper = extract_js_function(SCRIPT, "drawSyntheticRegionThroughUi")
 
-    global_delete = delete_helper.replace(
-        "regionCard.getByTestId", "page.getByTestId", 1
-    )
+    global_delete = delete_helper.replace("regionCard.getByTestId", "page.getByTestId", 1)
     assert "delete-control-not-region-scoped" in segmentation_scope_violations(
         global_delete, draw_helper
     )
 
-    region_without_id = delete_helper.replace(
-        '[data-region-id="${region.id}"]', "", 1
-    )
+    region_without_id = delete_helper.replace('[data-region-id="${region.id}"]', "", 1)
     assert "delete-region-not-id-scoped" in segmentation_scope_violations(
         region_without_id, draw_helper
     )
@@ -1092,12 +1079,10 @@ def test_segmentation_scope_contract_rejects_unscoped_ui_mutations() -> None:
 
 
 def test_stage_e_records_processing_regions_and_current_evidence_metadata() -> None:
-    helper = SCRIPT.split(
-        "async function processAndSegmentSyntheticSubmission", 1
-    )[1].split("\ntry {", 1)[0]
-    stage_e = SCRIPT.split('currentStage = "E";', 1)[1].split(
-        'currentStage = "F";', 1
+    helper = SCRIPT.split("async function processAndSegmentSyntheticSubmission", 1)[1].split(
+        "\ntry {", 1
     )[0]
+    stage_e = SCRIPT.split('currentStage = "E";', 1)[1].split('currentStage = "F";', 1)[0]
 
     assert "/processing-jobs/${startBody.id}" in helper
     assert "/processing-pages" in helper
@@ -1118,7 +1103,7 @@ def test_stage_e_records_processing_regions_and_current_evidence_metadata() -> N
     assert "block_sources: latest.block_sources" in stage_e
     assert "provider_versions: latest.provider_versions" in stage_e
     assert 'assert.equal(block.provider, "fake")' in stage_e
-    assert 'assert.equal(block.stale, false)' in stage_e
+    assert "assert.equal(block.stale, false)" in stage_e
     if "single_continue_from_uploaded_unconfirmed_submission" in SCRIPT:
         single_branch = SCRIPT.split("if (singleContinueProof) {", 2)[2].split(
             "\n  } else {\n    const beforePreparationResponse", 1

@@ -39,18 +39,6 @@ Db = Annotated[Session, Depends(get_db)]
 Storage = Annotated[ObjectStorage, Depends(get_storage)]
 
 
-class ReleaseInput(BaseModel):
-    assignment_id: uuid.UUID
-    class_id: uuid.UUID
-    release_mode: Literal["score_and_feedback", "feedback_only", "score_only", "internal_only"] = (
-        "score_and_feedback"
-    )
-    exclude_student_ids: list[uuid.UUID] = Field(default_factory=list)
-    scheduled_at: datetime | None = None
-    notes: str | None = Field(None, max_length=2000)
-    idempotency_key: str | None = Field(None, max_length=100)
-
-
 class InsightEdit(BaseModel):
     recommendations: list[str] = Field(min_length=1, max_length=20)
 
@@ -116,15 +104,17 @@ def released_release(db: Session, actor_id: uuid.UUID, release_id: uuid.UUID) ->
     return release
 
 
-@router.get("/assignments/{assignment_id}/classes/{class_id}/grade-readiness")
-def readiness(
-    assignment_id: uuid.UUID, class_id: uuid.UUID, db: Db, actor: Actor
+def _readiness_data(
+    assignment_id: uuid.UUID,
+    class_id: uuid.UUID,
+    db: Session,
+    actor_id: uuid.UUID,
 ) -> dict[str, Any]:
     assignment = db.scalar(
-        select(Assignment).where(Assignment.id == assignment_id, Assignment.owner_id == actor.id)
+        select(Assignment).where(Assignment.id == assignment_id, Assignment.owner_id == actor_id)
     )
     school_class = db.scalar(
-        select(SchoolClass).where(SchoolClass.id == class_id, SchoolClass.owner_id == actor.id)
+        select(SchoolClass).where(SchoolClass.id == class_id, SchoolClass.owner_id == actor_id)
     )
     linked = db.scalar(
         select(AssignmentClass).where(
@@ -142,7 +132,7 @@ def readiness(
     )
     submissions = db.scalars(
         select(Submission).where(
-            Submission.owner_id == actor.id,
+            Submission.owner_id == actor_id,
             Submission.assignment_id == assignment_id,
             Submission.class_id == class_id,
         )
@@ -152,7 +142,7 @@ def readiness(
         if submission.student_id in student_ids:
             submissions_by_student.setdefault(submission.student_id, []).append(submission)
     valid, invalid = [], []
-    service = FinalScoreService(db, actor.id)
+    service = FinalScoreService(db, actor_id)
     latest_complete_by_student: dict[uuid.UUID, Any] = {}
     for score_row in service.latest(assignment_id, class_id):
         student_id = score_row.payload.student_id
@@ -194,15 +184,6 @@ def readiness(
                 }
             )
     missing = sorted(str(x) for x in student_ids - set(submissions_by_student))
-    audit(
-        db,
-        actor.id,
-        "grade_release.check",
-        "assignment",
-        assignment_id,
-        {"ready": len(valid), "invalid": len(invalid), "missing": len(missing)},
-    )
-    db.commit()
     return {
         "releasable_count": len(valid),
         "unreleasable_count": len(invalid) + len(missing),
@@ -212,65 +193,35 @@ def readiness(
     }
 
 
-@router.post("/grade-releases", status_code=201)
-def create_release(data: ReleaseInput, db: Db, actor: Actor) -> dict[str, Any]:
-    if data.idempotency_key:
-        existing = db.scalar(
-            select(GradeRelease).where(
-                GradeRelease.idempotency_key == data.idempotency_key,
-                GradeRelease.owner_id == actor.id,
-            )
-        )
-        if existing:
-            return release_view(db, existing)
-    check = readiness(data.assignment_id, data.class_id, db, actor)
-    excluded = set(data.exclude_student_ids)
-    ready = [x for x in check["ready"] if uuid.UUID(x["student_id"]) not in excluded]
-    if not ready:
-        raise ApiProblem(422, "NO_RELEASABLE_SCORES", "没有可发布的完整成绩")
-    version = (
-        db.scalar(
-            select(func.max(GradeRelease.version)).where(
-                GradeRelease.assignment_id == data.assignment_id,
-                GradeRelease.class_id == data.class_id,
-            )
-        )
-        or 0
-    ) + 1
-    release = GradeRelease(
-        owner_id=actor.id,
-        assignment_id=data.assignment_id,
-        class_id=data.class_id,
-        version=version,
-        status="scheduled" if data.scheduled_at else "released",
-        release_mode=data.release_mode,
-        scheduled_at=data.scheduled_at,
-        released_at=None if data.scheduled_at else now_utc(),
-        created_by=actor.id,
-        notes=data.notes,
-        idempotency_key=data.idempotency_key,
-    )
-    db.add(release)
-    db.flush()
-    for row in ready:
-        db.add(
-            GradeReleaseItem(
-                grade_release_id=release.id,
-                student_id=uuid.UUID(row["student_id"]),
-                submission_id=uuid.UUID(row["submission_id"]),
-                score_snapshot_id=uuid.UUID(row["score_snapshot_id"]),
-            )
-        )
+@router.get("/assignments/{assignment_id}/classes/{class_id}/grade-readiness")
+def readiness(
+    assignment_id: uuid.UUID, class_id: uuid.UUID, db: Db, actor: Actor
+) -> dict[str, Any]:
+    result = _readiness_data(assignment_id, class_id, db, actor.id)
     audit(
         db,
         actor.id,
-        "grade_release.create",
-        "grade_release",
-        release.id,
-        {"version": version, "item_count": len(ready), "status": release.status},
+        "grade_release.check",
+        "assignment",
+        assignment_id,
+        {
+            "ready": result["releasable_count"],
+            "invalid": len(result["errors"]),
+            "missing": len(result["missing_student_ids"]),
+        },
     )
     db.commit()
-    return release_view(db, release)
+    return result
+
+
+@router.post("/grade-releases")
+def create_release(_actor: Actor) -> None:
+    raise ApiProblem(
+        410,
+        "GRADE_RELEASE_CREATION_RETIRED",
+        "成绩发布创建入口已退役，请通过批改批次的“确认结果”完成正式授权",
+        {"replacement": "POST /api/grading-batches/{batch_id}/confirm-results"},
+    )
 
 
 def release_view(db: Session, release: GradeRelease) -> dict[str, Any]:

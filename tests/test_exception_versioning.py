@@ -13,6 +13,7 @@ from app.models import (
     GradeReleaseItem,
     GradingResult,
     MembershipStatus,
+    Question,
     ReportJob,
     RubricVersion,
     ScoreRevision,
@@ -131,7 +132,7 @@ def test_ambiguous_match_requires_manual_confirmation_and_is_idempotent() -> Non
 def test_score_release_report_analytics_and_insight_versions_remain_fixed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    db, _storage, _batch_id, submission_id, question_id = workflow()
+    db, _storage, batch_id, submission_id, question_id = workflow()
     settings = get_settings()
     previous_provider = settings.recognition_provider
     previous_answer_provider = settings.answer_recognition_provider
@@ -169,24 +170,29 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
             json={"decision": "accepted"},
         )
         assert review_v1.status_code == 200
-        snapshot_v1 = client.post(f"/api/submissions/{submission_id}/finalize")
-        assert snapshot_v1.status_code == 200
-        assert snapshot_v1.json()["status"] == "complete"
-        assert snapshot_v1.json()["version"] == 1
-        assert snapshot_v1.json()["total_score"] == "10.00"
-        snapshot_v1_details = copy.deepcopy(snapshot_v1.json()["details"])
-
         submission = db.get(Submission, submission_id)
         assert submission is not None
-        release_v1 = client.post(
-            "/api/grade-releases",
+        readiness_v1 = client.get(f"/api/grading-batches/{batch_id}/confirm-results/readiness")
+        assert readiness_v1.status_code == 200 and readiness_v1.json()["ready"] is True
+        confirm_v1 = client.post(
+            f"/api/grading-batches/{batch_id}/confirm-results",
             json={
-                "assignment_id": str(submission.assignment_id),
-                "class_id": str(submission.class_id),
                 "idempotency_key": "exceptions-release-v1",
+                "expected_review_hash": readiness_v1.json()["review_hash"],
             },
         )
-        assert release_v1.status_code == 201, release_v1.text
+        assert confirm_v1.status_code == 201, confirm_v1.text
+        snapshot_v1_id = confirm_v1.json()["snapshot_ids"][0]
+        stored_snapshot_v1 = db.get(SubmissionScoreSnapshot, uuid.UUID(snapshot_v1_id))
+        assert stored_snapshot_v1 is not None
+        assert stored_snapshot_v1.status == "complete"
+        assert stored_snapshot_v1.version == 1
+        assert stored_snapshot_v1.total_score == Decimal("10")
+        snapshot_v1_details = copy.deepcopy(stored_snapshot_v1.details)
+        release_v1 = client.get(
+            f"/api/grade-releases/{confirm_v1.json()['grade_release_id']}"
+        )
+        assert release_v1.status_code == 200
         analytics_v1 = client.post(f"/api/grade-releases/{release_v1.json()['id']}/analytics")
         assert analytics_v1.status_code == 201
         metrics_v1 = copy.deepcopy(analytics_v1.json()["metrics"])
@@ -217,6 +223,18 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
         assert confirmed.status_code == 200 and confirmed.json()["status"] == "confirmed"
         confirmed_content = copy.deepcopy(confirmed.json()["content"])
 
+        reopened = client.post(
+            f"/api/submissions/{submission_id}/reopen",
+            json={"reason": "第三部分版本一致性测试：创建新的成绩版本"},
+        )
+        assert reopened.status_code == 200, reopened.text
+        assert reopened.json()["previous_snapshot_id"] == snapshot_v1_id
+
+        db.expire_all()
+        release_1_model = db.get(GradeRelease, uuid.UUID(release_v1.json()["id"]))
+        assert release_1_model is not None
+        assert release_scores(db, release_1_model.id)[0].payload.total_score == Decimal("10")
+
         review_v2 = client.put(
             f"/api/student-answers/{answer.id}/review",
             json={
@@ -227,26 +245,54 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
             },
         )
         assert review_v2.status_code == 200
-        snapshot_v2 = client.post(f"/api/submissions/{submission_id}/finalize")
-        assert snapshot_v2.status_code == 200
-        assert snapshot_v2.json()["status"] == "complete"
-        assert snapshot_v2.json()["version"] == 2
-        assert snapshot_v2.json()["total_score"] == "8.00"
         assert db.scalar(select(func.count()).select_from(ScoreRevision)) == 1
 
-        release_v2 = client.post(
-            "/api/grade-releases",
+        readiness_v2 = client.get(f"/api/grading-batches/{batch_id}/confirm-results/readiness")
+        assert readiness_v2.status_code == 200 and readiness_v2.json()["ready"] is True
+        confirm_v2 = client.post(
+            f"/api/grading-batches/{batch_id}/confirm-results",
             json={
-                "assignment_id": str(submission.assignment_id),
-                "class_id": str(submission.class_id),
                 "idempotency_key": "exceptions-release-v2",
+                "expected_review_hash": readiness_v2.json()["review_hash"],
             },
         )
-        assert release_v2.status_code == 201
+        assert confirm_v2.status_code == 201, confirm_v2.text
+        snapshot_v2_id = confirm_v2.json()["snapshot_ids"][0]
+        stored_snapshot_v2 = db.get(SubmissionScoreSnapshot, uuid.UUID(snapshot_v2_id))
+        assert stored_snapshot_v2 is not None
+        assert stored_snapshot_v2.status == "complete"
+        assert stored_snapshot_v2.version == 2
+        assert stored_snapshot_v2.total_score == Decimal("8")
+        release_v2 = client.get(
+            f"/api/grade-releases/{confirm_v2.json()['grade_release_id']}"
+        )
+        assert release_v2.status_code == 200
         analytics_v2 = client.post(f"/api/grade-releases/{release_v2.json()['id']}/analytics")
         assert analytics_v2.status_code == 201
         assert analytics_v2.json()["metrics"]["average_score"] == 8
 
+        question = db.get(Question, uuid.UUID(question_id))
+        assert question is not None
+        original_question_metadata = (
+            question.question_number,
+            question.question_type,
+            question.max_score,
+        )
+        question.question_number = "renumbered-after-release"
+        question.question_type = "subjective"
+        question.max_score = Decimal("12")
+        db.flush()
+        assert release_scores(db, uuid.UUID(release_v1.json()["id"]))[
+            0
+        ].payload.total_score == Decimal("10")
+        (
+            question.question_number,
+            question.question_type,
+            question.max_score,
+        ) = original_question_metadata
+        db.commit()
+
+        db.expire_all()
         release_1_model = db.get(GradeRelease, uuid.UUID(release_v1.json()["id"]))
         release_2_model = db.get(GradeRelease, uuid.UUID(release_v2.json()["id"]))
         assert release_1_model is not None and release_2_model is not None
@@ -257,11 +303,11 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
             select(GradeReleaseItem).where(GradeReleaseItem.grade_release_id == release_2_model.id)
         )
         assert item_v1 is not None and item_v2 is not None
-        assert str(item_v1.score_snapshot_id) == snapshot_v1.json()["id"]
-        assert str(item_v2.score_snapshot_id) == snapshot_v2.json()["id"]
+        assert str(item_v1.score_snapshot_id) == snapshot_v1_id
+        assert str(item_v2.score_snapshot_id) == snapshot_v2_id
         assert release_scores(db, release_1_model.id)[0].payload.total_score == Decimal("10")
         assert release_scores(db, release_2_model.id)[0].payload.total_score == Decimal("8")
-        stored_v1 = db.get(SubmissionScoreSnapshot, uuid.UUID(snapshot_v1.json()["id"]))
+        stored_v1 = db.get(SubmissionScoreSnapshot, uuid.UUID(snapshot_v1_id))
         assert stored_v1 is not None and stored_v1.details == snapshot_v1_details
         old_analytics = db.get(AnalyticsSnapshot, uuid.UUID(analytics_v1.json()["id"]))
         assert old_analytics is not None and old_analytics.metrics == metrics_v1
@@ -341,7 +387,7 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
             json={"decision": "accepted"},
         )
         assert stale_accept.status_code == 409
-        assert stale_accept.json()["code"] == "GRADING_RESULT_STALE"
+        assert stale_accept.json()["code"] == "SUBMISSION_FINALIZED"
         republish = client.post(f"/api/assignments/{submission.assignment_id}/publish")
         # A published assignment cannot bypass the new readiness contract.
         # Re-publication requires a fresh teacher review flow rather than
@@ -361,17 +407,8 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
         changed_rubric.confirmed_at = now_utc()
         db.commit()
         blocked = client.post(f"/api/submissions/{submission_id}/finalize")
-        assert blocked.status_code == 200
-        assert blocked.json()["status"] == "incomplete"
-        assert all(
-            snapshot.status != "complete"
-            for snapshot in db.scalars(
-                select(SubmissionScoreSnapshot).where(
-                    SubmissionScoreSnapshot.version == blocked.json()["version"],
-                    SubmissionScoreSnapshot.submission_id == submission_id,
-                )
-            )
-        )
+        assert blocked.status_code == 409
+        assert blocked.json()["code"] == "SUBMISSION_FINALIZED"
 
         finalized_regrade = client.post(f"/api/student-answers/{answer.id}/grade")
         assert finalized_regrade.status_code == 409
@@ -451,8 +488,8 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
         assert len(latest) == 1
         assert str(latest[0].snapshot.id) == snapshot_current.json()["id"]
         assert stored_v1.details == snapshot_v1_details
-        assert item_v1.score_snapshot_id == uuid.UUID(snapshot_v1.json()["id"])
-        assert item_v2.score_snapshot_id == uuid.UUID(snapshot_v2.json()["id"])
+        assert item_v1.score_snapshot_id == uuid.UUID(snapshot_v1_id)
+        assert item_v2.score_snapshot_id == uuid.UUID(snapshot_v2_id)
         assert old_analytics.metrics == metrics_v1
     finally:
         settings.recognition_provider = previous_provider

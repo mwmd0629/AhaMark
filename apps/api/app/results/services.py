@@ -262,6 +262,101 @@ class FinalScoreService:
                 raise ValueError("SNAPSHOT_KNOWLEDGE_POINT_MISMATCH")
         return ValidatedScore(snapshot, submission, payload)
 
+    def validate_released(
+        self, snapshot: SubmissionScoreSnapshot, submission: Submission
+    ) -> ValidatedScore:
+        """Validate an immutable release source without consulting mutable workflow state."""
+        if submission.owner_id != self.owner_id:
+            raise ValueError("SUBMISSION_OWNER_MISMATCH")
+        if snapshot.status != "complete":
+            raise ValueError("SNAPSHOT_NOT_COMPLETE")
+        if snapshot.generated_by != self.owner_id:
+            raise ValueError("SNAPSHOT_OWNER_MISMATCH")
+        raw = {
+            "schema_version": "1.0",
+            "submission_id": snapshot.submission_id,
+            "assignment_id": snapshot.assignment_id,
+            "student_id": snapshot.student_id,
+            "paper_version_id": snapshot.paper_version_id,
+            "rubric_version_id": snapshot.rubric_version_id,
+            "total_score": snapshot.total_score,
+            "max_score": snapshot.max_score,
+            "question_count": len(snapshot.details),
+            "details": snapshot.details,
+        }
+        try:
+            payload = SnapshotPayload.model_validate(raw)
+        except (ValidationError, InvalidOperation) as exc:
+            raise ValueError(f"SNAPSHOT_SCHEMA_INVALID: {exc}") from exc
+        if (
+            payload.submission_id != submission.id
+            or payload.assignment_id != submission.assignment_id
+            or payload.student_id != submission.student_id
+        ):
+            raise ValueError("SNAPSHOT_RELATION_MISMATCH")
+        paper = self.db.get(PaperVersion, payload.paper_version_id)
+        rubric = self.db.get(RubricVersion, payload.rubric_version_id)
+        if (
+            paper is None
+            or paper.assignment_id != payload.assignment_id
+            or rubric is None
+            or rubric.assignment_id != payload.assignment_id
+        ):
+            raise ValueError("SNAPSHOT_VERSION_RELATION_MISMATCH")
+        question_ids = {detail.question_id for detail in payload.details}
+        questions = set(
+            self.db.scalars(
+                select(Question.id).where(
+                    Question.id.in_(question_ids),
+                    Question.paper_version_id == payload.paper_version_id,
+                )
+            )
+        )
+        if questions != question_ids:
+            raise ValueError("SNAPSHOT_QUESTION_MISSING")
+        reviews = {
+            review.id: review
+            for review in self.db.scalars(
+                select(TeacherReview).where(
+                    TeacherReview.id.in_([x.teacher_review_id for x in payload.details])
+                )
+            )
+        }
+        answers = {
+            answer.id: answer
+            for answer in self.db.scalars(
+                select(StudentAnswer).where(
+                    StudentAnswer.id.in_([x.student_answer_id for x in reviews.values()])
+                )
+            )
+        }
+        for detail in payload.details:
+            review = reviews.get(detail.teacher_review_id)
+            answer = answers.get(review.student_answer_id) if review else None
+            if (
+                review is None
+                or review.confirmed_at is None
+                or answer is None
+                or answer.submission_id != submission.id
+                or answer.question_id != detail.question_id
+            ):
+                raise ValueError("SNAPSHOT_REVIEW_RELATION_MISMATCH")
+        knowledge_ids = {
+            value for detail in payload.details for value in detail.knowledge_point_ids
+        }
+        if knowledge_ids:
+            known = set(
+                self.db.scalars(
+                    select(KnowledgePoint.id).where(
+                        KnowledgePoint.id.in_(knowledge_ids),
+                        KnowledgePoint.owner_id == self.owner_id,
+                    )
+                )
+            )
+            if known != knowledge_ids:
+                raise ValueError("SNAPSHOT_KNOWLEDGE_POINT_MISMATCH")
+        return ValidatedScore(snapshot, submission, payload)
+
 
 def compute_metrics(scores: list[ValidatedScore]) -> dict[str, Any]:
     totals = [float(x.payload.total_score) for x in scores]
@@ -359,6 +454,10 @@ def release_scores(db: Session, release_id: uuid.UUID) -> list[ValidatedScore]:
     release = db.get(GradeRelease, release_id)
     if release is None:
         raise ValueError("RELEASE_NOT_FOUND")
+    if release.status != "released":
+        raise ValueError("RELEASE_NOT_ACTIVE")
+    if release.created_by != release.owner_id:
+        raise ValueError("RELEASE_OWNER_MISMATCH")
     service = FinalScoreService(db, release.owner_id)
     rows: list[ValidatedScore] = []
     for item in db.scalars(
@@ -372,7 +471,7 @@ def release_scores(db: Session, release_id: uuid.UUID) -> list[ValidatedScore]:
         )
         if snapshot is None or submission is None:
             raise ValueError("RELEASE_SOURCE_MISSING")
-        score = service.validate(snapshot, submission)
+        score = service.validate_released(snapshot, submission)
         if (
             item.student_id != score.payload.student_id
             or item.submission_id != score.payload.submission_id

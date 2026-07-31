@@ -157,6 +157,37 @@ def confirm_answer_regions(db: Session, submission_id: uuid.UUID) -> None:
     db.commit()
 
 
+def test_batch_submissions_include_optional_student_identity() -> None:
+    db, _storage, batch_id, submission_id, _question_id = workflow()
+    try:
+        matched = db.get(Submission, submission_id)
+        assert matched is not None
+        unmatched = Submission(
+            owner_id=matched.owner_id,
+            grading_batch_id=matched.grading_batch_id,
+            assignment_id=matched.assignment_id,
+            class_id=matched.class_id,
+            student_id=None,
+            attempt_number=1,
+            status="uploaded",
+        )
+        db.add(unmatched)
+        db.commit()
+
+        response = client.get(f"/api/grading-batches/{batch_id}/submissions")
+
+        assert response.status_code == 200, response.text
+        rows = {row["id"]: row for row in response.json()}
+        assert rows[str(submission_id)]["student_name"] == "合成学生"
+        assert rows[str(submission_id)]["student_number"] == "0001"
+        assert rows[str(unmatched.id)]["student_id"] is None
+        assert rows[str(unmatched.id)]["student_name"] is None
+        assert rows[str(unmatched.id)]["student_number"] is None
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+        db.close()
+
+
 def test_submission_ocr_worker_is_idempotent_and_writes_answers() -> None:
     db, storage, _batch_id, submission_id, _question_id = workflow()
     settings = get_settings()
@@ -432,6 +463,64 @@ def test_student_number_filename_separators_and_manual_pdf_confirmation_keep_all
             .order_by(SubmissionPage.page_number)
         ).all()
         assert [page.source_page_number for page in pages] == [1, 2, 3, 4]
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+        db.close()
+
+
+def test_finalized_workflow_prioritizes_complete_snapshot_over_pending_pages() -> None:
+    db, _storage, batch_id, submission_id, _question_id = workflow()
+    try:
+        submission = db.get(Submission, submission_id)
+        assert submission is not None and submission.student_id is not None
+        assignment = db.get(Assignment, submission.assignment_id)
+        assert assignment is not None
+        assert assignment.active_paper_version_id is not None
+        assert assignment.active_rubric_version_id is not None
+        assert db.scalar(
+            select(func.count())
+            .select_from(SubmissionPage)
+            .where(
+                SubmissionPage.submission_id == submission.id,
+                SubmissionPage.status == "ready",
+            )
+        )
+        db.add(
+            SubmissionScoreSnapshot(
+                submission_id=submission.id,
+                assignment_id=assignment.id,
+                student_id=submission.student_id,
+                paper_version_id=assignment.active_paper_version_id,
+                rubric_version_id=assignment.active_rubric_version_id,
+                total_score=Decimal("10"),
+                max_score=Decimal("10"),
+                status="complete",
+                generated_by=submission.owner_id,
+                version=1,
+                details=[],
+            )
+        )
+        submission.status = "finalized"
+        submission.finalized_at = now_utc()
+        db.commit()
+
+        batch = client.get(f"/api/grading-batches/{batch_id}")
+        assert batch.status_code == 200, batch.text
+        assert batch.json()["workflow"] == {
+            "stage_counts": {"completed": 1},
+            "blocked": [],
+            "completed_count": 1,
+            "blocked_count": 0,
+        }
+        submissions = client.get(f"/api/grading-batches/{batch_id}/submissions")
+        assert submissions.status_code == 200, submissions.text
+        assert submissions.json()[0]["workflow"] == {
+            "stage": "completed",
+            "stage_label": "批改完成",
+            "reason_code": None,
+            "reason": "可以检查结果。",
+            "action": "检查结果",
+        }
     finally:
         app.dependency_overrides.pop(get_storage, None)
         db.close()
@@ -1070,6 +1159,156 @@ def test_modified_without_result_requires_manual_scored_decision() -> None:
         settings.recognition_provider = previous
         app.dependency_overrides.pop(get_storage, None)
         db.close()
+
+
+def test_finalized_submission_rejects_answer_and_review_mutations() -> None:
+    db, _storage, _batch_id, submission_id, question_id = workflow()
+    try:
+        submission = db.get(Submission, submission_id)
+        assert submission is not None
+        answer = StudentAnswer(
+            submission_id=submission.id,
+            question_id=uuid.UUID(question_id),
+            question_version_reference="finalized-mutation-guard-v1",
+            status="manually_entered",
+            recognized_text="original recognized answer",
+            corrected_text="original corrected answer",
+            requires_review=False,
+        )
+        db.add(answer)
+        db.flush()
+        review = TeacherReview(
+            student_answer_id=answer.id,
+            reviewer_id=submission.owner_id,
+            decision="manual_scored",
+            final_score=Decimal("7"),
+            final_feedback="original feedback",
+            review_notes="original notes",
+            confirmed_at=now_utc(),
+        )
+        db.add(review)
+        page = db.scalar(
+            select(SubmissionPage).where(SubmissionPage.submission_id == submission.id)
+        )
+        assert page is not None
+        region = StudentAnswerRegion(
+            student_answer_id=answer.id,
+            submission_page_id=page.id,
+            x=Decimal("0"),
+            y=Decimal("0"),
+            width=Decimal("1"),
+            height=Decimal("1"),
+            source="manual",
+            status="confirmed",
+            confirmed_by=submission.owner_id,
+            confirmed_at=now_utc(),
+        )
+        db.add(region)
+        submission.status = "finalized"
+        submission.finalized_at = now_utc()
+        db.commit()
+
+        patched = client.patch(
+            f"/api/student-answers/{answer.id}",
+            json={
+                "corrected_text": "mutated corrected answer",
+                "corrected_latex": "x=2",
+            },
+        )
+        assert patched.status_code == 409
+        assert patched.json()["code"] == "SUBMISSION_FINALIZED"
+
+        reviewed = client.put(
+            f"/api/student-answers/{answer.id}/review",
+            json={
+                "decision": "manual_scored",
+                "final_score": 3,
+                "final_feedback": "mutated feedback",
+                "review_notes": "mutated notes",
+            },
+        )
+        assert reviewed.status_code == 409
+        assert reviewed.json()["code"] == "SUBMISSION_FINALIZED"
+
+        created_region = client.post(
+            f"/api/student-answers/{answer.id}/regions",
+            json={
+                "submission_page_id": str(page.id),
+                "x": 0,
+                "y": 0,
+                "width": 1,
+                "height": 1,
+                "source": "manual",
+                "confirmed": True,
+            },
+        )
+        assert created_region.status_code == 409
+        assert created_region.json()["code"] == "SUBMISSION_FINALIZED"
+
+        deleted_region = client.delete(
+            f"/api/student-answers/{answer.id}/regions/{region.id}"
+        )
+        assert deleted_region.status_code == 409
+        assert deleted_region.json()["code"] == "SUBMISSION_FINALIZED"
+
+        finalized_again = client.post(f"/api/submissions/{submission.id}/finalize")
+        assert finalized_again.status_code == 409
+        assert finalized_again.json()["code"] == "SUBMISSION_FINALIZED"
+
+        created_answer = client.post(
+            f"/api/submissions/{submission.id}/answers",
+            json={
+                "question_id": question_id,
+                "recognized_text": "must not be added after finalization",
+            },
+        )
+        assert created_answer.status_code == 409
+        assert created_answer.json()["code"] == "SUBMISSION_FINALIZED"
+
+        db.expire_all()
+        unchanged_answer = db.get(StudentAnswer, answer.id)
+        unchanged_review = db.get(TeacherReview, review.id)
+        assert unchanged_answer is not None
+        assert unchanged_answer.corrected_text == "original corrected answer"
+        assert unchanged_answer.corrected_latex is None
+        assert unchanged_answer.status == "manually_entered"
+        assert unchanged_answer.requires_review is False
+        assert unchanged_review is not None
+        assert unchanged_review.decision == "manual_scored"
+        assert unchanged_review.final_score == Decimal("7")
+        assert unchanged_review.final_feedback == "original feedback"
+        assert unchanged_review.review_notes == "original notes"
+        assert db.get(StudentAnswerRegion, region.id) is not None
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+        db.close()
+
+
+def test_voided_submission_rejects_new_answer() -> None:
+    db, _storage, _batch_id, submission_id, question_id = workflow()
+    try:
+        submission = db.get(Submission, submission_id)
+        assert submission is not None
+        submission.status = "voided"
+        db.commit()
+
+        response = client.post(
+            f"/api/submissions/{submission.id}/answers",
+            json={"question_id": question_id, "recognized_text": "must not be added"},
+        )
+        assert response.status_code == 409
+        assert response.json()["code"] == "SUBMISSION_VOIDED"
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+        db.close()
+
+
+def test_reopen_submission_rejects_blank_reason_before_mutation() -> None:
+    response = client.post(
+        f"/api/submissions/{uuid.uuid4()}/reopen",
+        json={"reason": "   "},
+    )
+    assert response.status_code == 422
 
 
 def test_local_codex_suggestion_is_review_only_and_supersedes_previous_result() -> None:

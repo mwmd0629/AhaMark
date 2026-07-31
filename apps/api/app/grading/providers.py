@@ -1,4 +1,6 @@
 import json
+import re
+import unicodedata
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -112,6 +114,10 @@ class OpenAICompatibleGradingProvider:
                     "role": "system",
                     "content": (
                         "你是评分建议系统。只返回 JSON；建议不直接成为正式成绩。"
+                        "逐项依据 rubric_items 评分，每个评分项必须且只能出现一次，不能漏项。"
+                        "每个评分项只引用 evidence_regions 中存在的 id；"
+                        "没有充分证据时必须 abstain。"
+                        "不要因为最终答案正确就默认过程分满分，也不要猜测无法识别的内容。"
                         "字段必须包含 criteria,total_suggested_score,evidence,"
                         "reasoning_summary,feedback,error_type,confidence,abstain_reason。"
                     ),
@@ -147,16 +153,6 @@ class OpenAICompatibleGradingProvider:
             output = ProviderOutput.model_validate(json.loads(raw))
             if output.total_suggested_score > max_score:
                 raise ValueError("total score exceeds question maximum")
-            criterion_maxima = {
-                str(item["id"]): Decimal(str(item["max_points"]))
-                for item in (context or {}).get("rubric_items", [])
-            }
-            for criterion in output.criteria:
-                if (
-                    criterion.rubric_item_id not in criterion_maxima
-                    or criterion.score > criterion_maxima[criterion.rubric_item_id]
-                ):
-                    raise ValueError("criterion is unknown or exceeds maximum")
             if output.abstain_reason:
                 return GradeSuggestion(
                     None,
@@ -175,6 +171,28 @@ class OpenAICompatibleGradingProvider:
                     output.error_type,
                     abstain_reason="evidence_required",
                 )
+            criterion_maxima = {
+                str(item["id"]): Decimal(str(item["max_points"]))
+                for item in (context or {}).get("rubric_items", [])
+            }
+            criterion_ids = [item.rubric_item_id for item in output.criteria]
+            if len(criterion_ids) != len(set(criterion_ids)) or set(criterion_ids) != set(
+                criterion_maxima
+            ):
+                raise ValueError("criteria must cover every rubric item exactly once")
+            evidence_ids = {
+                str(item["id"])
+                for item in (context or {}).get("evidence_regions", [])
+                if isinstance(item, dict) and item.get("id")
+            }
+            for criterion in output.criteria:
+                if (
+                    criterion.rubric_item_id not in criterion_maxima
+                    or criterion.score > criterion_maxima[criterion.rubric_item_id]
+                ):
+                    raise ValueError("criterion is unknown or exceeds maximum")
+                if not criterion.evidence_refs or not set(criterion.evidence_refs) <= evidence_ids:
+                    raise ValueError("criterion evidence reference is missing or unknown")
             return GradeSuggestion(
                 output.total_suggested_score,
                 output.confidence,
@@ -207,12 +225,71 @@ def provider_from_settings(settings: Settings) -> GradingProvider:
 
 
 def normalize_objective(value: str) -> str:
-    return "".join(value.casefold().split())
+    """Normalize harmless OCR/typing differences without changing mathematical meaning."""
+    return "".join(unicodedata.normalize("NFKC", value).casefold().split())
 
 
-def grade_objective(answer: str, accepted: list[str], max_score: Decimal) -> GradeSuggestion:
+def _choice_value(value: str, *, multiple: bool) -> str | None:
+    normalized = normalize_objective(value)
+    normalized = re.sub(r"^(?:答案|选择|选)[:：]?", "", normalized)
+    labels = re.findall(r"[a-z]", normalized)
+    residue = re.sub(r"[a-z,，、;；/|+&.。:：()（）\[\]【】]", "", normalized)
+    if residue or not labels:
+        return None
+    if not multiple and len(labels) != 1:
+        return None
+    return "".join(sorted(set(labels))) if multiple else labels[0]
+
+
+def _truth_value(value: str) -> bool | None:
+    normalized = normalize_objective(value).strip(".。()（）")
+    if normalized in {"true", "t", "1", "对", "正确", "是", "√", "✓"}:
+        return True
+    if normalized in {"false", "f", "0", "错", "错误", "否", "×", "✗", "x"}:
+        return False
+    return None
+
+
+def _numeric_value(value: str) -> Decimal | None:
+    normalized = normalize_objective(value).replace("，", ",")
+    if not re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)", normalized):
+        return None
+    try:
+        return Decimal(normalized)
+    except ArithmeticError:
+        return None
+
+
+def objective_answers_match(answer: str, expected: str, question_type: str | None) -> bool:
+    if normalize_objective(answer) == normalize_objective(expected):
+        return True
+    if question_type in {"single_choice", "multiple_choice"}:
+        multiple = question_type == "multiple_choice"
+        left = _choice_value(answer, multiple=multiple)
+        right = _choice_value(expected, multiple=multiple)
+        return left is not None and right is not None and left == right
+    if question_type == "true_false":
+        left = _truth_value(answer)
+        right = _truth_value(expected)
+        return left is not None and right is not None and left == right
+    if question_type == "fill_blank":
+        left = _numeric_value(answer)
+        right = _numeric_value(expected)
+        if left is not None and right is not None:
+            return left == right
+    return False
+
+
+def grade_objective(
+    answer: str,
+    accepted: list[str],
+    max_score: Decimal,
+    question_type: str | None = None,
+) -> GradeSuggestion:
     normalized = normalize_objective(answer)
-    correct = bool(normalized) and normalized in {normalize_objective(x) for x in accepted}
+    correct = bool(normalized) and any(
+        objective_answers_match(answer, expected, question_type) for expected in accepted
+    )
     return GradeSuggestion(
         max_score if correct else Decimal("0"),
         Decimal("1"),

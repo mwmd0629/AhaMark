@@ -1,17 +1,17 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import {
   gradingApi,
-  type BulkAcceptEligibility,
+  type ConfirmResultsReadiness,
+  type ConfirmResultsResult,
   type ReviewWorkspace,
 } from "@/lib/api";
 import { AnswerRecognitionWorkspace } from "@/components/answer-recognition-workspace";
-import { AIGradingReview } from "@/components/ai-grading-review";
 
-type Decision = "accepted" | "modified" | "rejected" | "manual_scored";
+type Decision = "modified" | "manual_scored";
 
 const statusLabels: Record<string, string> = {
   pending: "待复核",
@@ -31,58 +31,44 @@ const statusLabels: Record<string, string> = {
   unavailable: "不可用",
 };
 
-const questionTypeLabels: Record<string, string> = {
-  single_choice: "单项选择题",
-  multiple_choice: "多项选择题",
-  fill_blank: "填空题",
-  short_answer: "简答题",
-  proof: "证明题",
-  calculation: "计算题",
-  essay: "论述题",
-};
-
-const gradingSourceLabels: Record<string, string> = {
-  "objective-rule": "客观题规则引擎",
-  "codex-assisted": "Codex 批改建议",
-  unavailable: "未配置评分服务",
-  fake: "本地占位服务",
-  manual: "教师人工评分",
-};
-
-const eligibilityReasonLabels: Record<string, string> = {
-  RESULT_REQUIRED: "尚无建议评分",
-  RESULT_NOT_SUGGESTED: "建议已处理或不可接受",
-  RUBRIC_VERSION_STALE: "评分标准版本已变化",
-  ANSWER_SNAPSHOT_STALE: "答案在建议生成后已修改",
-  REVIEW_REQUIRED: "存在高风险项，必须逐题复核",
-  EVIDENCE_REQUIRED: "缺少可定位的评分证据",
-  SCORE_REQUIRED: "建议中没有有效分数",
-};
 const finalizeProblemLabels: Record<string, string> = {
-  ANSWER_NOT_REVIEWED: "仍有题目未完成教师复核",
+  ANSWER_NOT_REVIEWED: "仍有题目未检查",
+  SUBMISSION_MISSING: "没有可确认的作业",
+  SUBMISSION_VERSION_INCOMPLETE: "作业信息不完整",
+  RUBRIC_VERSION_NOT_CONFIRMED: "评分标准未确认",
+  QUESTION_SCORE_REQUIRED: "题目缺少有效满分",
+  ANSWER_MISSING: "提交缺少对应题目的答案",
   SCORE_MISSING: "最终分数缺失",
+  SCORE_OUT_OF_RANGE: "最终分数超出题目满分范围",
   RUBRIC_VERSION_STALE: "评分标准版本已变化",
-  ANSWER_SNAPSHOT_STALE: "答案在评分后已修改",
-  GRADING_RESULT_MISSING: "缺少建议评分结果",
-  REGION_NOT_CONFIRMED: "答题区域尚未确认",
+  STALE_RUBRIC: "评分标准已变化，请重新批改",
+  ANSWER_SNAPSHOT_STALE: "答案已修改，请重新批改",
+  GRADING_RESULT_MISSING: "缺少评分建议",
+  REGION_NOT_CONFIRMED: "答题区域未确认",
+  RESULT_REQUIRED: "尚无建议评分",
+  RESULT_NOT_SUGGESTED: "该建议需要检查",
+  REVIEW_REQUIRED: "需要逐题检查",
+  EVIDENCE_REQUIRED: "缺少评分证据",
+  SCORE_REQUIRED: "建议中没有有效分数",
+  SUBMISSION_FINALIZED: "该批次结果已经确认",
+  FINALIZED_SNAPSHOT_NOT_REUSABLE: "已有结果需要重新确认",
+  SNAPSHOT_REUSE_MISMATCH: "已有结果已变化，请重新确认",
 };
 
-function problemLabel(code: string) {
-  return finalizeProblemLabels[code] ?? `阻塞代码：${code}`;
+function problemLabel(code: string, fallback?: string | null) {
+  return finalizeProblemLabels[code] ?? fallback ?? "请检查未完成项";
+}
+
+function resultSummary(result: ConfirmResultsResult) {
+  const created = result.new_snapshot_count ?? result.snapshot_ids.length;
+  const reused = result.reused_snapshot_count ?? 0;
+  return `更新 ${created} 份，保留 ${reused} 份`;
 }
 
 type ReviewFilter = "all" | "suggested" | "needs_review" | "reviewed" | "stale";
 
 function statusLabel(value?: string) {
   return value ? (statusLabels[value] ?? value) : "未提供";
-}
-
-function questionTypeLabel(value?: string) {
-  return value ? (questionTypeLabels[value] ?? value) : "未提供题型";
-}
-
-function gradingSourceLabel(value?: string) {
-  return value ? (gradingSourceLabels[value] ?? value) : "教师人工评分";
 }
 
 type ReviewAnswer = ReviewWorkspace["items"][number]["answers"][number];
@@ -102,18 +88,15 @@ function needsTeacherReview(answer: ReviewAnswer) {
   );
 }
 
-function acceptanceBlockReasons(answer: ReviewAnswer) {
-  const reasons: string[] = [];
-  if (answer.requires_review || answer.result?.requires_review) {
-    reasons.push("当前建议已标记为需要教师复核");
-  }
-  if (answer.result?.score == null) {
-    reasons.push("建议中没有有效分数");
-  }
-  if (hasManualOrIncompleteCriteria(answer)) {
-    reasons.push("存在需要人工处理或尚未完成的评分项");
-  }
-  return reasons;
+function matchesReviewFilter(answer: ReviewAnswer, filter: ReviewFilter) {
+  return (
+    filter === "all" ||
+    (filter === "suggested" && answer.result?.status === "suggested") ||
+    (filter === "needs_review" && needsTeacherReview(answer)) ||
+    (filter === "reviewed" && Boolean(answer.review)) ||
+    (filter === "stale" &&
+      (answer.status === "stale" || answer.result?.status === "stale"))
+  );
 }
 
 export default function ReviewPage() {
@@ -136,42 +119,49 @@ export default function ReviewPage() {
   const [scoringDecision, setScoringDecision] = useState<
     "modified" | "manual_scored" | null
   >(null);
-  const [snapshots, setSnapshots] = useState<
-    Array<{
-      id: string;
-      submission_id: string;
-      status: string;
-      total_score?: string;
-      problems?: Array<{ code: string; question_id: string }>;
-    }>
-  >([]);
-  const [eligibility, setEligibility] = useState<BulkAcceptEligibility>();
+  const [readiness, setReadiness] = useState<ConfirmResultsReadiness>();
+  const [confirmedResult, setConfirmedResult] =
+    useState<ConfirmResultsResult>();
+  const confirmCommand = useRef<
+    | {
+        reviewHash: string;
+        idempotencyKey: string;
+      }
+    | undefined
+  >(undefined);
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all");
 
   const load = async () => {
-    const [next, nextEligibility] = await Promise.all([
+    const [next, nextReadiness] = await Promise.all([
       gradingApi.reviewWorkspace(batchId),
-      gradingApi.bulkAcceptEligibility(batchId),
+      gradingApi.confirmResultsReadiness(batchId),
     ]);
     setData(next);
-    setEligibility(nextEligibility);
+    setReadiness(nextReadiness);
+    setConfirmedResult((current) => nextReadiness.confirmed_result ?? current);
     return next;
   };
   useEffect(() => {
+    setConfirmedResult(undefined);
+    confirmCommand.current = undefined;
     Promise.all([
       gradingApi.reviewWorkspace(batchId),
-      gradingApi.bulkAcceptEligibility(batchId),
+      gradingApi.confirmResultsReadiness(batchId),
     ])
-      .then(([workspace, nextEligibility]) => {
+      .then(([workspace, nextReadiness]) => {
         setData(workspace);
-        setEligibility(nextEligibility);
+        setReadiness(nextReadiness);
+        setConfirmedResult(nextReadiness.confirmed_result ?? undefined);
       })
       .catch(() => setError("无法加载复核工作台"));
   }, [batchId]);
 
   const submission = data?.items[submissionIndex];
-  const answer = submission?.answers[answerIndex];
-  const acceptanceBlocks = answer ? acceptanceBlockReasons(answer) : [];
+  const selectedAnswer = submission?.answers[answerIndex];
+  const answer =
+    selectedAnswer && matchesReviewFilter(selectedAnswer, reviewFilter)
+      ? selectedAnswer
+      : undefined;
   const page = submission?.pages[pageIndex];
   const evidence = useMemo(
     () => answer?.evidence.find((item) => item.id === activeEvidence),
@@ -193,6 +183,17 @@ export default function ReviewPage() {
     setScoringDecision(null);
   }, [answer]);
 
+  useEffect(() => {
+    if (!submission || answer) return;
+    const firstVisibleIndex = submission.answers.findIndex((item) =>
+      matchesReviewFilter(item, reviewFilter),
+    );
+    if (firstVisibleIndex >= 0) {
+      setAnswerIndex(firstVisibleIndex);
+      setActiveEvidence(undefined);
+    }
+  }, [answer, reviewFilter, submission]);
+
   const maxScore = Number(
     answer?.question.max_score ?? answer?.result?.score ?? 0,
   );
@@ -211,6 +212,29 @@ export default function ReviewPage() {
         numeric > Number(criterion.max_points)
       );
     }),
+  );
+  const readinessNewSnapshotCount =
+    readiness?.new_snapshot_count ??
+    readiness?.plan?.filter((item) => item.action === "create_snapshot")
+      .length ??
+    readiness?.submission_count ??
+    0;
+  const readinessReusedSnapshotCount =
+    readiness?.reused_snapshot_count ??
+    readiness?.plan?.filter((item) => item.action === "reuse_snapshot")
+      .length ??
+    0;
+  const hasReadinessPlan =
+    readiness?.submission_count !== undefined ||
+    readiness?.new_snapshot_count !== undefined ||
+    readiness?.reused_snapshot_count !== undefined ||
+    readiness?.plan !== undefined;
+  const readinessProblems = Array.from(
+    new Set(
+      readiness?.blockers.map((blocker) =>
+        problemLabel(blocker.code, blocker.message),
+      ) ?? [],
+    ),
   );
 
   async function submitReview(decision: Decision) {
@@ -263,63 +287,55 @@ export default function ReviewPage() {
     }
   }
 
-  async function finalizeAll() {
-    if (!data || saving) return;
+  async function confirmResults() {
+    if (!readiness || saving) return;
+    if (confirmCommand.current?.reviewHash !== readiness.review_hash) {
+      confirmCommand.current = {
+        reviewHash: readiness.review_hash,
+        idempotencyKey: crypto.randomUUID(),
+      };
+    }
     setSaving(true);
     setMessage("");
     try {
-      const values = [];
-      for (const item of data.items) {
-        values.push(
-          (await gradingApi.finalize(item.submission_id)) as {
-            id: string;
-            submission_id: string;
-            status: string;
-            total_score?: string;
-            problems?: Array<{ code: string; question_id: string }>;
-          },
-        );
+      const result = await gradingApi.confirmResults(batchId, {
+        idempotency_key: confirmCommand.current.idempotencyKey,
+        expected_review_hash: readiness.review_hash,
+      });
+      setConfirmedResult(result);
+      const successMessage = `已确认 ${result.submission_count} 份作业，${resultSummary(result)}`;
+      try {
+        await load();
+        setMessage(successMessage);
+      } catch {
+        setMessage(`${successMessage}。页面刷新失败，请手动刷新`);
       }
-      setSnapshots(values);
-      await load();
-      const blocked = values.filter((item) => item.status !== "complete");
+    } catch (reason) {
+      const body =
+        typeof reason === "object" && reason !== null && "body" in reason
+          ? (reason.body as {
+              code?: string;
+              message?: string;
+              details?: {
+                current_review_hash?: string;
+                blockers?: Array<{ code?: string }>;
+              };
+            })
+          : undefined;
+      const blockerText = body?.details?.blockers
+        ?.map((item) => problemLabel(item.code ?? "UNKNOWN"))
+        .join("；");
+      const staleText = body?.details?.current_review_hash
+        ? "内容已变化，请重新检查"
+        : "";
       setMessage(
-        blocked.length
-          ? `定稿已阻止 ${blocked.length} 份未完成提交：${blocked
-              .flatMap(
-                (item) =>
-                  item.problems?.map((problem) => problemLabel(problem.code)) ??
-                  [],
-              )
-              .join("；")}`
-          : "全部提交已定稿，并生成新的完整成绩快照版本",
+        `无法确认：${blockerText || staleText || body?.message || (reason instanceof Error ? reason.message : "请刷新后重试")}`,
       );
-    } catch {
-      setMessage("定稿失败：仍有题目未完成教师复核");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function bulkAcceptEligible() {
-    if (!eligibility || saving) return;
-    const answerIds = eligibility.items
-      .filter((item) => item.eligible)
-      .map((item) => item.answer_id);
-    if (!answerIds.length) {
-      setMessage("当前没有可批量接受的低风险建议");
-      return;
-    }
-    setSaving(true);
-    setMessage("");
-    try {
-      const result = await gradingApi.bulkAccept(batchId, answerIds);
-      await load();
-      setMessage(
-        `已批量接受 ${result.accepted_answer_ids.length} 题；高风险或失效建议仍保留为逐题复核`,
-      );
-    } catch {
-      setMessage("批量接受失败，请刷新后重试；系统不会自动绕过复核条件");
+      try {
+        await load();
+      } catch {
+        // Preserve the actionable command error when the follow-up refresh fails.
+      }
     } finally {
       setSaving(false);
     }
@@ -336,7 +352,7 @@ export default function ReviewPage() {
     try {
       await gradingApi.correctAnswer(answer.id, { corrected_text: corrected });
       await load();
-      setMessage("答案已修正；旧评分建议已失效，请重新批改或人工评分");
+      setMessage("答案已修改，请重新批改");
     } catch {
       setMessage("答案修正失败");
     } finally {
@@ -350,9 +366,9 @@ export default function ReviewPage() {
     try {
       await gradingApi.grade(answer.id);
       await load();
-      setMessage("已创建新的评分任务和结果；旧结果已标记为替代或失效");
+      setMessage("已重新批改");
     } catch {
-      setMessage("重新批改失败，请检查当前评分标准是否完整");
+      setMessage("重新批改失败，请检查评分标准");
     } finally {
       setSaving(false);
     }
@@ -391,7 +407,7 @@ export default function ReviewPage() {
         confirmed: true,
       });
       await load();
-      setMessage("答题区域已确认；旧 OCR 和评分已标记 stale，请重新识别");
+      setMessage("答题区域已更新，请重新识别");
     } catch {
       setMessage("答题区域保存失败");
     } finally {
@@ -412,26 +428,17 @@ export default function ReviewPage() {
       <header className="flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-white p-4">
         <div>
           <h1 className="text-xl font-bold">教师评分复核</h1>
-          <p className="text-sm text-slate-500">
-            {data.provider_notice
-              .replaceAll("Provider unavailable", "评分服务不可用")
-              .replaceAll("Provider", "评分服务")}
-          </p>
         </div>
         <div className="flex items-center gap-3 text-sm font-medium">
           <span>
-            已复核 {data.progress.reviewed}/{data.progress.total}
+            已检查 {data.progress.reviewed}/{data.progress.total}
           </span>
           <button
             className="rounded bg-indigo-700 px-3 py-2 text-white disabled:opacity-50"
-            disabled={
-              saving ||
-              data.progress.reviewed !== data.progress.total ||
-              data.progress.total === 0
-            }
-            onClick={() => void finalizeAll()}
+            disabled={saving || !readiness?.ready || Boolean(confirmedResult)}
+            onClick={() => void confirmResults()}
           >
-            全部定稿
+            {confirmedResult ? "结果已确认" : "确认结果"}
           </button>
           <Link
             className="rounded border px-3 py-2"
@@ -447,32 +454,35 @@ export default function ReviewPage() {
       >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h2 className="font-semibold">集中审查</h2>
-            <p className="text-sm text-slate-600">
-              可批量接受 {eligibility?.eligible_count ?? 0} 题；需逐题处理{" "}
-              {eligibility?.excluded_count ?? 0}{" "}
-              题。只有证据、答案快照和评分标准版本均一致的低风险建议才可批量接受。
-            </p>
+            <h2 className="font-semibold">检查结果</h2>
+            <p className="text-sm text-slate-600">系统已筛出需要检查的答案。</p>
           </div>
-          <button
-            className="rounded bg-emerald-600 px-3 py-2 text-sm text-white disabled:opacity-50"
-            disabled={saving || !eligibility?.eligible_count}
-            onClick={() => void bulkAcceptEligible()}
-          >
-            批量接受低风险建议
-          </button>
         </div>
-        {eligibility && Object.keys(eligibility.reason_counts).length > 0 && (
-          <div className="mt-3 flex flex-wrap gap-2 text-xs">
-            {Object.entries(eligibility.reason_counts).map(
-              ([reason, count]) => (
-                <span
-                  key={reason}
-                  className="rounded-full bg-amber-50 px-3 py-1"
-                >
-                  {eligibilityReasonLabels[reason] ?? reason}：{count}
-                </span>
-              ),
+        {readiness && !readiness.ready && !confirmedResult && (
+          <div
+            role="alert"
+            className="mt-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
+            data-testid="confirm-results-blockers"
+          >
+            <p className="font-medium">暂不能确认结果，请先处理：</p>
+            <ul className="mt-1 list-disc pl-5">
+              {readinessProblems.map((problem) => (
+                <li key={problem}>{problem}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {readiness?.ready && !confirmedResult && hasReadinessPlan && (
+          <div
+            className="mt-3 rounded border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-900"
+            data-testid="confirm-results-plan"
+          >
+            <p className="font-medium">
+              本次更新 {readinessNewSnapshotCount} 份，保留{" "}
+              {readinessReusedSnapshotCount} 份
+            </p>
+            {readinessReusedSnapshotCount > 0 && (
+              <p className="mt-1">未修改的结果保持不变。</p>
             )}
           </div>
         )}
@@ -480,8 +490,8 @@ export default function ReviewPage() {
           {(
             [
               ["all", "全部"],
-              ["suggested", "待确认建议"],
-              ["needs_review", "必须逐题复核"],
+              ["suggested", "待确认"],
+              ["needs_review", "需检查"],
               ["reviewed", "已复核"],
               ["stale", "已失效"],
             ] as Array<[ReviewFilter, string]>
@@ -499,29 +509,20 @@ export default function ReviewPage() {
           ))}
         </div>
       </section>
-      {snapshots.length > 0 && (
+      {confirmedResult && (
         <div
           className="rounded-xl border border-emerald-300 bg-emerald-50 p-4"
-          data-testid="score-snapshots"
+          data-testid="confirmed-results"
+          data-release-id={confirmedResult.grade_release_id}
+          data-previous-release-id={
+            confirmedResult.previous_grade_release_id ?? undefined
+          }
         >
-          {snapshots.map((snapshot) => (
-            <p
-              key={snapshot.id}
-              data-testid="score-snapshot"
-              data-snapshot-id={snapshot.id}
-              data-submission-id={snapshot.submission_id}
-              data-status={snapshot.status}
-              data-total-score={snapshot.total_score}
-            >
-              {statusLabel(snapshot.status)} · 成绩快照 {snapshot.id} · 总分{" "}
-              {snapshot.total_score ?? "未生成"}{" "}
-              {snapshot.problems?.length
-                ? `· 阻塞：${snapshot.problems
-                    .map((item) => problemLabel(item.code))
-                    .join("；")}`
-                : ""}
-            </p>
-          ))}
+          <p className="font-medium">结果已确认</p>
+          <p className="text-sm">
+            已确认 {confirmedResult.submission_count} 份作业，
+            {resultSummary(confirmedResult)}。
+          </p>
         </div>
       )}
       <div className="grid min-h-[70vh] gap-4 xl:grid-cols-[minmax(0,1.4fr)_220px_minmax(320px,1fr)]">
@@ -598,21 +599,12 @@ export default function ReviewPage() {
               }}
               className={`mb-2 block w-full rounded-lg p-2 text-left text-sm ${index === submissionIndex ? "bg-indigo-50 text-indigo-700" : "hover:bg-slate-50"}`}
             >
-              提交 {index + 1}
-              <span className="block text-xs">{statusLabel(item.status)}</span>
+              学生 {index + 1}
             </button>
           ))}
           <hr className="my-3" />
           {submission?.answers.map((item, index) => {
-            const visible =
-              reviewFilter === "all" ||
-              (reviewFilter === "suggested" &&
-                item.result?.status === "suggested") ||
-              (reviewFilter === "needs_review" && needsTeacherReview(item)) ||
-              (reviewFilter === "reviewed" && Boolean(item.review)) ||
-              (reviewFilter === "stale" &&
-                (item.status === "stale" || item.result?.status === "stale"));
-            if (!visible) return null;
+            if (!matchesReviewFilter(item, reviewFilter)) return null;
             return (
               <button
                 key={item.id}
@@ -620,7 +612,7 @@ export default function ReviewPage() {
                 onClick={() => setAnswerIndex(index)}
                 className={`mb-1 block w-full rounded p-2 text-left text-sm ${index === answerIndex ? "bg-amber-50" : ""}`}
               >
-                第 {item.question.number} 题 · {statusLabel(item.status)}
+                第 {item.question.number} 题
               </button>
             );
           })}
@@ -649,45 +641,25 @@ export default function ReviewPage() {
           data-final-score={answer?.review?.final_score}
           className="space-y-4 overflow-auto rounded-xl border bg-white p-4"
         >
-          {answer ? (
+          {answer && submission ? (
             <>
               <div>
                 <span className="text-xs text-slate-500">题目</span>
                 <h2 className="text-lg font-bold">
-                  第 {answer.question.number} 题 ·{" "}
-                  {questionTypeLabel(answer.question.type)}
+                  第 {answer.question.number} 题
                 </h2>
                 <p>{answer.question.content}</p>
               </div>
               <div className="grid gap-3 sm:grid-cols-2">
-                <Info label="文字识别原始值" value={answer.recognized_text} />
-                <Info label="教师修正值" value={answer.corrected_text} />
+                <Info
+                  label="学生答案"
+                  value={answer.corrected_text ?? answer.recognized_text}
+                />
                 <Info
                   label="建议分 / 满分"
                   value={`${answer.result?.score ?? "—"} / ${answer.question.max_score ?? "—"}`}
                 />
                 <Info label="教师最终分" value={answer.review?.final_score} />
-                <Info label="置信度" value={answer.result?.confidence} />
-                <Info
-                  label="评分来源"
-                  value={
-                    answer.result
-                      ? `${gradingSourceLabel(answer.result.provider)} / 版本 ${answer.result.provider_version}`
-                      : "人工评分"
-                  }
-                />
-                <Info
-                  label="状态"
-                  value={
-                    needsTeacherReview(answer)
-                      ? "需要教师复核"
-                      : statusLabel(answer.status)
-                  }
-                />
-                <Info
-                  label="评分结果状态"
-                  value={statusLabel(answer.result?.status)}
-                />
               </div>
               {answer.result?.reasoning && (
                 <div className="rounded border border-indigo-200 bg-indigo-50 p-3 text-sm">
@@ -695,17 +667,20 @@ export default function ReviewPage() {
                   <p className="mt-1 whitespace-pre-wrap">
                     {answer.result.reasoning}
                   </p>
-                  <p className="mt-2 text-xs text-slate-600">
-                    以上内容仅为本地辅助建议，不会自动写入教师最终分，也不会自动发布成绩。
-                  </p>
+                  <p className="mt-2 text-xs text-slate-600">仅供参考。</p>
                 </div>
               )}
-              <Link
-                href={`/grading/${batchId}/review/${answer.id}/validation`}
-                className="inline-flex rounded border px-3 py-2 text-sm font-medium"
-              >
-                查看数学验证证据
-              </Link>
+              <details className="rounded border p-3 text-sm">
+                <summary className="cursor-pointer font-semibold">
+                  更多工具
+                </summary>
+                <Link
+                  href={`/grading/${batchId}/review/${answer.id}/validation`}
+                  className="mt-2 inline-flex rounded border px-3 py-2 font-medium"
+                >
+                  查看验证
+                </Link>
+              </details>
               <div id="answer-recognition-workspace">
                 <AnswerRecognitionWorkspace
                   submissionId={submission.submission_id}
@@ -721,8 +696,7 @@ export default function ReviewPage() {
                   className="rounded border border-amber-300 bg-amber-50 p-3 text-sm"
                   data-testid="regrade-required"
                 >
-                  答案或评分标准
-                  已变化，旧建议不能继续接受。请重新批改或由教师重新人工评分。
+                  内容已变化，请重新批改。
                 </div>
               )}
               {(answer.status === "manual_segmentation_required" ||
@@ -731,17 +705,19 @@ export default function ReviewPage() {
                   role="alert"
                   className="rounded border border-red-300 bg-red-50 p-3 text-sm"
                 >
-                  未找到可靠题号区域，必须人工切题后才能继续。系统不会用页码猜测题号。
+                  未找到答题区域，请手动标记。
                 </div>
               )}
               {(answer.recognized_text === undefined ||
                 Number(answer.confidence ?? 0) < 0.9) && (
                 <div className="rounded border border-amber-300 bg-amber-50 p-3 text-sm">
-                  文字识别为空或置信度不足，必须人工复核。公式识别未配置时不可用。
+                  答案识别不清，请检查。
                 </div>
               )}
-              <div>
-                <h3 className="font-semibold">答题区域</h3>
+              <details className="rounded border p-3 text-sm">
+                <summary className="cursor-pointer font-semibold">
+                  识别调整
+                </summary>
                 <button
                   className="mt-2 rounded border px-3 py-2 text-sm"
                   disabled={saving || !page}
@@ -749,48 +725,45 @@ export default function ReviewPage() {
                 >
                   在当前页增加区域
                 </button>
-                {(answer.regions ?? []).map((region) => (
-                  <div
-                    key={region.id}
-                    id={`answer-region-${region.id}`}
-                    className="mt-2 flex items-center gap-2 text-sm"
-                  >
-                    <span>
-                      {statusLabel(region.source)} /{" "}
-                      {statusLabel(region.status)} · 坐标 {region.x},{region.y},
-                      {region.width},{region.height}
-                    </span>
-                    <button
-                      className="text-red-700 underline"
-                      disabled={saving}
-                      onClick={() =>
-                        void (async () => {
-                          setSaving(true);
-                          try {
-                            await gradingApi.deleteAnswerRegion(
-                              answer.id,
-                              region.id,
-                            );
-                            await load();
-                            setMessage(
-                              "区域已删除；旧文字识别和评分已标记失效",
-                            );
-                          } finally {
-                            setSaving(false);
-                          }
-                        })()
-                      }
+                <div className="mt-2">
+                  {(answer.regions ?? []).map((region) => (
+                    <div
+                      key={region.id}
+                      id={`answer-region-${region.id}`}
+                      className="mt-2 flex items-center gap-2 text-sm"
                     >
-                      删除
-                    </button>
-                  </div>
-                ))}
-              </div>
-              <AIGradingReview
-                key={answer.id}
-                answerId={answer.id}
-                finalized={submission.status === "finalized"}
-              />
+                      <span>
+                        {statusLabel(region.source)} /{" "}
+                        {statusLabel(region.status)} · 坐标 {region.x},
+                        {region.y},{region.width},{region.height}
+                      </span>
+                      <button
+                        className="text-red-700 underline"
+                        disabled={saving}
+                        onClick={() =>
+                          void (async () => {
+                            setSaving(true);
+                            try {
+                              await gradingApi.deleteAnswerRegion(
+                                answer.id,
+                                region.id,
+                              );
+                              await load();
+                              setMessage(
+                                "区域已删除；旧文字识别和评分已标记失效",
+                              );
+                            } finally {
+                              setSaving(false);
+                            }
+                          })()
+                        }
+                      >
+                        删除
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </details>
               <div>
                 <h3 className="font-semibold">评分项</h3>
                 {answer.criteria.map((item) => (
@@ -823,7 +796,7 @@ export default function ReviewPage() {
                     </button>
                   ))
                 ) : (
-                  <p className="text-sm text-slate-500">没有伪造证据框</p>
+                  <p className="text-sm text-slate-500">暂无评分证据</p>
                 )}
               </div>
               {scoringDecision && (
@@ -835,7 +808,7 @@ export default function ReviewPage() {
                     <div>
                       <h3 className="font-semibold">教师最终评分</h3>
                       <p className="text-sm text-slate-600">
-                        这是正式成绩输入；AI 建议只作为参考，不会自动写入。
+                        请确认或修改分数。
                       </p>
                     </div>
                     <span className="text-sm font-medium">
@@ -909,19 +882,9 @@ export default function ReviewPage() {
                   </div>
                 </section>
               )}
-              {acceptanceBlocks.length > 0 && (
-                <div
-                  role="alert"
-                  className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
-                  data-testid="acceptance-blocked-hint"
-                >
-                  不能直接接受：{acceptanceBlocks.join("；")}
-                  。请修改建议或手动评分。
-                </div>
-              )}
               <div className="grid grid-cols-2 gap-2">
                 <Action
-                  label="修正 OCR 答案"
+                  label="修正答案"
                   onClick={() => void correctCurrentAnswer()}
                   disabled={saving}
                 />
@@ -931,23 +894,8 @@ export default function ReviewPage() {
                   disabled={saving}
                 />
                 <Action
-                  label="接受"
-                  primary
-                  onClick={() => submitReview("accepted")}
-                  disabled={
-                    saving ||
-                    answer.result?.status !== "suggested" ||
-                    acceptanceBlocks.length > 0
-                  }
-                />
-                <Action
                   label="修改"
                   onClick={() => setScoringDecision("modified")}
-                  disabled={saving}
-                />
-                <Action
-                  label="拒绝"
-                  onClick={() => submitReview("rejected")}
                   disabled={saving}
                 />
                 <Action
