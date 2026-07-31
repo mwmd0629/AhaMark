@@ -447,7 +447,9 @@ def run_submission_processing(
                     "scale_x": rendered.width / matched_width,
                     "scale_y": rendered.height / matched_height,
                 }
-                page.alignment_confidence = Decimal("0.88")
+                page.alignment_confidence = (
+                    Decimal("0.99") if provider.is_demo else Decimal("0.88")
+                )
                 page.alignment_failure_reason = None
             else:
                 page.aligned_paper_page_id = None
@@ -472,7 +474,9 @@ def run_submission_processing(
                 "blank" if page.blank_probability >= Decimal("0.95") else "completed"
             )
             blocks_by_page[page.id] = (
-                [] if page.processing_status == "blank" else provider.recognize(processed)
+                []
+                if page.processing_status == "blank" or provider.is_demo
+                else provider.recognize(processed)
             )
             job.progress = math.floor((index + 1) * 70 / max(1, len(pages)))
             db.commit()

@@ -55,14 +55,15 @@ def test_docker_build_context_excludes_sensitive_runtime_artifacts() -> None:
     assert not {rule for rule in rules if rule.startswith("!")}
 
 
-def test_web_docker_swc_matches_the_exact_next_version() -> None:
-    package = json.loads((REPOSITORY_ROOT / "apps/web/package.json").read_text(encoding="utf-8"))
-    next_version = package["dependencies"]["next"]
-    assert re.fullmatch(r"\d+\.\d+\.\d+", next_version)
+def test_web_docker_swc_matches_the_version_declared_by_next() -> None:
+    lock = json.loads((REPOSITORY_ROOT / "package-lock.json").read_text(encoding="utf-8"))
+    next_package = lock["packages"]["node_modules/next"]
+    swc_version = next_package["optionalDependencies"]["@next/swc-linux-x64-musl"]
+    assert re.fullmatch(r"\d+\.\d+\.\d+", swc_version)
     dockerfile = (REPOSITORY_ROOT / "apps/web/Dockerfile").read_text(encoding="utf-8")
     match = re.search(r"@next/swc-linux-x64-musl@(\d+\.\d+\.\d+)", dockerfile)
     assert match is not None
-    assert match.group(1) == next_version
+    assert match.group(1) == swc_version
 
 
 def test_migration_tests_contain_no_machine_specific_repository_path() -> None:

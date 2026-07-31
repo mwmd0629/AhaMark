@@ -378,6 +378,7 @@ def confirm_answer(
     evidence.status, evidence.requires_review = "confirmed", False
     stale_for_answer(db, answer.id, "RECOGNITION_CONFIRMATION_CHANGED")
     evidence.confirmed_at, evidence.confirmed_by = now_utc(), actor.id
+    evidence.confirmation_origin = "teacher_explicit"
     evidence.confirmed_revision = (evidence.confirmed_revision or 0) + 1
     region_ids = select(StudentAnswerRegion.id).where(
         StudentAnswerRegion.student_answer_id == answer.id

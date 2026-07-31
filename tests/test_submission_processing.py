@@ -2,6 +2,7 @@ import io
 import uuid
 from decimal import Decimal
 
+import pytest
 from app.core.config import get_settings
 from app.main import app
 from app.models import (
@@ -10,8 +11,10 @@ from app.models import (
     QuestionStatus,
     StudentAnswer,
     StudentAnswerRegion,
+    Submission,
     SubmissionPage,
     SubmissionProcessingJob,
+    now_utc,
 )
 from app.recognition.pipeline import PageArtifact, ProviderBlock
 from app.recognition.submission_processing import (
@@ -23,7 +26,7 @@ from app.recognition.submission_processing import (
 from app.storage.dependencies import get_storage
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
-from sqlalchemy import select
+from sqlalchemy import func, select
 from test_submission_workflow import workflow
 
 client = TestClient(app)
@@ -131,8 +134,7 @@ def test_processing_job_is_idempotent_and_region_bounds_are_enforced() -> None:
         )
         assert invalid.status_code == 422
         rotated = client.post(
-            f"/api/submissions/{submission_id}/processing-pages/{pages[0].id}/rotate"
-            "?run_now=true",
+            f"/api/submissions/{submission_id}/processing-pages/{pages[0].id}/rotate?run_now=true",
             json={"degrees": 90},
         )
         assert rotated.status_code == 200, rotated.text
@@ -140,6 +142,178 @@ def test_processing_job_is_idempotent_and_region_bounds_are_enforced() -> None:
         rotated_page = db.get(SubmissionPage, pages[0].id)
         assert rotated_page is not None
         assert rotated_page.rotation == (initial_rotation + 90) % 360
+    finally:
+        settings.recognition_provider = previous
+        app.dependency_overrides.pop(get_storage, None)
+        db.close()
+
+
+@pytest.mark.parametrize(
+    ("terminal_status", "has_finalized_at"),
+    [
+        ("finalized", True),
+        ("merged", False),
+        ("voided", False),
+        ("recognized", True),
+    ],
+    ids=["finalized", "merged", "voided", "finalized-at"],
+)
+def test_terminal_submission_rejects_all_processing_mutations_without_writes(
+    terminal_status: str,
+    has_finalized_at: bool,
+) -> None:
+    db, _storage, _batch_id, submission_id, question_id = workflow()
+    settings = get_settings()
+    previous = settings.recognition_provider
+    settings.recognition_provider = "fake"
+    try:
+        processed = client.post(
+            f"/api/submissions/{submission_id}/processing-jobs?run_now=true",
+            json={"idempotency_key": f"terminal-prime-{terminal_status}-{has_finalized_at}"},
+        )
+        assert processed.status_code == 201, processed.text
+        submission = db.get(Submission, submission_id)
+        page = db.scalar(
+            select(SubmissionPage)
+            .where(SubmissionPage.submission_id == submission_id)
+            .order_by(SubmissionPage.page_number)
+        )
+        assert submission is not None and page is not None
+        answer = db.scalar(
+            select(StudentAnswer).where(StudentAnswer.submission_id == submission_id)
+        )
+        if answer is None:
+            answer = StudentAnswer(
+                submission_id=submission_id,
+                question_id=uuid.UUID(question_id),
+                question_version_reference="terminal-editable-guard",
+            )
+            db.add(answer)
+            db.flush()
+        region = db.scalar(
+            select(StudentAnswerRegion).where(StudentAnswerRegion.student_answer_id == answer.id)
+        )
+        if region is None:
+            region = StudentAnswerRegion(
+                student_answer_id=answer.id,
+                submission_page_id=page.id,
+                x=Decimal("0"),
+                y=Decimal("0"),
+                width=Decimal("1"),
+                height=Decimal("1"),
+                source="manual",
+                confidence=Decimal("0.95"),
+                status="candidate",
+            )
+            db.add(region)
+            db.commit()
+        job = db.get(SubmissionProcessingJob, uuid.UUID(processed.json()["id"]))
+        assert region is not None and job is not None
+        submission.status = terminal_status
+        submission.finalized_at = now_utc() if has_finalized_at else None
+        db.commit()
+
+        job_count = db.scalar(
+            select(func.count())
+            .select_from(SubmissionProcessingJob)
+            .where(SubmissionProcessingJob.submission_id == submission_id)
+        )
+        region_count = db.scalar(
+            select(func.count())
+            .select_from(StudentAnswerRegion)
+            .join(StudentAnswer, StudentAnswer.id == StudentAnswerRegion.student_answer_id)
+            .where(StudentAnswer.submission_id == submission_id)
+        )
+        job_state = (job.status, job.stage, job.attempt)
+        page_state = (page.rotation, page.processing_status, page.page_version)
+        region_state = (region.status, region.region_version)
+        region_payload = {
+            "question_id": str(answer.question_id),
+            "submission_page_id": str(page.id),
+            "x": float(region.x),
+            "y": float(region.y),
+            "width": float(region.width),
+            "height": float(region.height),
+            "source": "manual",
+            "status": "confirmed",
+        }
+        responses = [
+            client.post(
+                f"/api/submissions/{submission_id}/processing-jobs",
+                json={"idempotency_key": f"terminal-new-{terminal_status}-{has_finalized_at}"},
+            ),
+            client.post(
+                f"/api/submissions/{submission_id}/processing-jobs/{job.id}/pages/{page.id}/retry"
+            ),
+            client.post(
+                f"/api/submissions/{submission_id}/processing-pages/{page.id}/rotate",
+                json={"degrees": 90},
+            ),
+            client.post(
+                f"/api/submissions/{submission_id}/region-candidates",
+                json=region_payload,
+            ),
+            client.put(
+                f"/api/submissions/{submission_id}/region-candidates/{region.id}",
+                json=region_payload,
+            ),
+            client.delete(f"/api/submissions/{submission_id}/region-candidates/{region.id}"),
+            client.post(
+                f"/api/submissions/{submission_id}/region-candidates/confirm-high-confidence"
+            ),
+        ]
+        for response in responses:
+            assert response.status_code == 409, response.text
+            assert response.json()["code"] == "FINALIZED_SUBMISSION_IMMUTABLE"
+            assert response.json()["details"]["status"] == terminal_status
+
+        db.expire_all()
+        assert (
+            db.scalar(
+                select(func.count())
+                .select_from(SubmissionProcessingJob)
+                .where(SubmissionProcessingJob.submission_id == submission_id)
+            )
+            == job_count
+        )
+        assert (
+            db.scalar(
+                select(func.count())
+                .select_from(StudentAnswerRegion)
+                .join(StudentAnswer, StudentAnswer.id == StudentAnswerRegion.student_answer_id)
+                .where(StudentAnswer.submission_id == submission_id)
+            )
+            == region_count
+        )
+        current_job = db.get(SubmissionProcessingJob, job.id)
+        current_page = db.get(SubmissionPage, page.id)
+        current_region = db.get(StudentAnswerRegion, region.id)
+        assert (
+            current_job is not None
+            and (
+                current_job.status,
+                current_job.stage,
+                current_job.attempt,
+            )
+            == job_state
+        )
+        assert (
+            current_page is not None
+            and (
+                current_page.rotation,
+                current_page.processing_status,
+                current_page.page_version,
+            )
+            == page_state
+        )
+        assert (
+            current_region is not None
+            and (
+                current_region.status,
+                current_region.region_version,
+            )
+            == region_state
+        )
     finally:
         settings.recognition_provider = previous
         app.dependency_overrides.pop(get_storage, None)

@@ -10,9 +10,12 @@ from app.api.assignment_central_review import router as assignment_central_revie
 from app.api.assignment_generation import router as assignment_generation_router
 from app.api.assignments import router as assignments_router
 from app.api.auth import router as auth_router
+from app.api.codex_local import router as codex_local_router
+from app.api.demo_reset import router as demo_reset_router
 from app.api.domain import router as domain_router
 from app.api.grading import router as grading_router
 from app.api.math_validation import router as math_validation_router
+from app.api.processing import router as processing_router
 from app.api.recognition import router as recognition_router
 from app.api.results import router as results_router
 from app.api.structured_rubrics import router as structured_rubrics_router
@@ -31,7 +34,9 @@ from sqlalchemy.orm import Session
 
 router = APIRouter()
 router.include_router(auth_router)
+router.include_router(codex_local_router)
 router.include_router(domain_router)
+router.include_router(demo_reset_router)
 router.include_router(assignments_router)
 router.include_router(assignment_generation_router)
 router.include_router(assignment_answer_rubric_router)
@@ -41,6 +46,7 @@ router.include_router(ai_grading_router)
 router.include_router(recognition_router)
 router.include_router(grading_router)
 router.include_router(math_validation_router)
+router.include_router(processing_router)
 router.include_router(submission_processing_router)
 router.include_router(structured_rubrics_router)
 router.include_router(results_router)

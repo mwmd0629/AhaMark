@@ -312,3 +312,49 @@ describe("AIGradingReview", () => {
     expect(screen.getByRole("button", { name: "生成新建议" })).toBeDisabled();
   });
 });
+
+describe("aiGradingApi retry request contract", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("sends the required idempotency key and expected generation to both retry endpoints", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () =>
+        new Response(JSON.stringify(job()), {
+          status: 202,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+    const { aiGradingApi: actualApi } =
+      await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
+    const fullRetry = {
+      idempotency_key: "web-ai-retry:full:stable-operation",
+      expected_generation: 2,
+    };
+    const criterionRetry = {
+      idempotency_key: "web-ai-retry:criterion:stable-operation",
+      expected_generation: 2,
+    };
+
+    await actualApi.retry("job-1", fullRetry);
+    await actualApi.retryCriterion("job-1", "matrix/result", criterionRetry);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://localhost:8000/api/ai-grading/jobs/job-1/retry",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(fullRetry),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://localhost:8000/api/ai-grading/jobs/job-1/criteria/matrix%2Fresult/retry",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(criterionRetry),
+      }),
+    );
+  });
+});

@@ -1,13 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button, Card, Select, useToast } from "@/components/ui";
 import {
   ApiError,
   assignmentGenerationApi,
+  assignmentReviewApi,
+  structuredRubricApi,
   type AnswerDraftCandidate,
   type AssignmentDraftRevision,
+  type AssignmentReviewBundle,
   type RubricDraftCandidate,
   type RubricDraftValidation,
 } from "@/lib/api";
@@ -18,6 +21,11 @@ const sourceLabels: Record<string, string> = {
   teacher_provided: "教师提供",
   third_party: "第三方",
   ai_generated: "AI 生成",
+  teacher_authored: "教师编写",
+  official_solution: "官方答案",
+  imported_reference: "导入的参考答案",
+  ai_draft: "AI 草稿",
+  other: "其他",
   unknown: "未知",
 };
 
@@ -61,6 +69,8 @@ export function AnswerRubricGenerationReview({
   );
   const [answers, setAnswers] = useState<AnswerDraftCandidate[]>([]);
   const [rubrics, setRubrics] = useState<RubricDraftCandidate[]>([]);
+  const [bundle, setBundle] = useState<AssignmentReviewBundle>();
+  const [bundleError, setBundleError] = useState("");
   const [selectedQuestion, setSelectedQuestion] = useState(
     questions[0]?.id ?? "",
   );
@@ -74,26 +84,42 @@ export function AnswerRubricGenerationReview({
   const [validationJson, setValidationJson] = useState("{}");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const loadGeneration = useRef(0);
 
   const load = useCallback(async () => {
+    const generation = ++loadGeneration.current;
     try {
-      const revisions =
-        await assignmentGenerationApi.listRevisions(assignmentId);
+      const [revisions, nextBundle] = await Promise.all([
+        assignmentGenerationApi.listRevisions(assignmentId),
+        assignmentReviewApi.bundle(assignmentId),
+      ]);
+      if (generation !== loadGeneration.current) return;
+      setBundle(nextBundle);
+      setBundleError("");
       const current = revisions[0] ?? null;
       setRevision(current);
       if (!current) {
         setAnswers([]);
         setRubrics([]);
+        setMessage("");
         return;
       }
       const [nextAnswers, nextRubrics] = await Promise.all([
         assignmentGenerationApi.listAnswerCandidates(current.id),
         assignmentGenerationApi.listRubricCandidates(current.id),
       ]);
+      if (generation !== loadGeneration.current) return;
       setAnswers(nextAnswers);
       setRubrics(nextRubrics);
       setMessage("");
     } catch (error) {
+      if (generation !== loadGeneration.current) return;
+      setBundle(undefined);
+      setRevision(null);
+      setAnswers([]);
+      setRubrics([]);
+      setValidations([]);
+      setBundleError("无法取得当前审查内容，请重试后再确认。");
       setMessage(
         error instanceof ApiError
           ? error.message
@@ -102,7 +128,12 @@ export function AnswerRubricGenerationReview({
     }
   }, [assignmentId]);
 
-  useEffect(() => void load(), [load]);
+  useEffect(() => {
+    void load();
+    return () => {
+      loadGeneration.current += 1;
+    };
+  }, [load]);
   const answer = useMemo(
     () => answers.find((item) => item.question_id === selectedQuestion),
     [answers, selectedQuestion],
@@ -111,6 +142,45 @@ export function AnswerRubricGenerationReview({
     () => rubrics.find((item) => item.question_id === selectedQuestion),
     [rubrics, selectedQuestion],
   );
+  const bundleQuestion = bundle?.questions.find(
+    (question) => question.id === selectedQuestion,
+  );
+  const answerSuggestion = bundleQuestion
+    ? answers.find((item) => item.id === bundleQuestion.answer.candidate?.id)
+    : answer;
+  const rubricSuggestion = bundleQuestion
+    ? rubrics.find((item) => item.id === bundleQuestion.rubric.candidate?.id)
+    : rubric;
+  const formalAnswer =
+    bundleQuestion?.answer.selected ??
+    (bundleQuestion?.answer.materialized?.status === "draft"
+      ? bundleQuestion.answer.materialized
+      : null);
+  const formalRubric =
+    bundleQuestion?.rubric.selected ??
+    (bundleQuestion?.rubric.materialized?.status === "draft"
+      ? bundleQuestion.rubric.materialized
+      : null);
+  const pendingAnswer =
+    bundleQuestion?.answer.materialized?.status === "draft" &&
+    bundleQuestion.answer.materialized.id !== formalAnswer?.id
+      ? bundleQuestion.answer.materialized
+      : null;
+  const pendingRubric =
+    bundleQuestion?.rubric.materialized?.status === "draft" &&
+    bundleQuestion.rubric.materialized.id !== formalRubric?.id
+      ? bundleQuestion.rubric.materialized
+      : null;
+  const displayQuestions = bundleError ? [] : (bundle?.questions ?? questions);
+
+  useEffect(() => {
+    if (
+      bundle?.questions.length &&
+      !bundle.questions.some((question) => question.id === selectedQuestion)
+    ) {
+      setSelectedQuestion(bundle.questions[0].id);
+    }
+  }, [bundle, selectedQuestion]);
 
   useEffect(() => {
     setAnswerText(answer?.raw_content ?? "");
@@ -166,10 +236,14 @@ export function AnswerRubricGenerationReview({
     }
   };
 
-  if (!revision)
+  if (!revision && !bundle?.questions.length)
     return (
-      <Card className="p-4" data-testid="answer-rubric-empty">
-        尚无第四部分生成草稿。请先运行生成任务并确认题目；系统不会伪造答案。
+      <Card className="space-y-3 p-4" data-testid="answer-rubric-empty">
+        <p>
+          {bundleError ||
+            "尚无第四部分生成草稿。请先运行生成任务并确认题目；系统不会伪造答案。"}
+        </p>
+        {bundleError && <Button onClick={() => void load()}>重试</Button>}
       </Card>
     );
 
@@ -179,8 +253,8 @@ export function AnswerRubricGenerationReview({
       aria-label="标准答案与 Structured Rubric 草稿"
     >
       <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm">
-        AI/第三方答案不等于官方答案；接受只会物化未确认的 draft。indeterminate
-        不是 verified，系统不会自动发布或写最终分数。
+        AI 或外部参考内容不等于教师确认答案；接受后仍需教师明确确认。
+        无法确定的校验结果不会被当作已验证，系统不会自动发布或写入最终分数。
       </div>
       {message && (
         <p
@@ -190,11 +264,27 @@ export function AnswerRubricGenerationReview({
           {message}
         </p>
       )}
+      {bundleError && (
+        <p
+          role="alert"
+          className="rounded-xl border border-red-300 bg-red-50 p-3"
+        >
+          {bundleError}
+          <Button
+            className="ml-3"
+            variant="outline"
+            onClick={() => void load()}
+          >
+            重试
+          </Button>
+        </p>
+      )}
       <div className="flex flex-wrap gap-2">
         <Button
           variant="outline"
-          disabled={busy}
+          disabled={busy || !revision}
           onClick={() =>
+            revision &&
             void perform(
               () =>
                 assignmentGenerationApi.acceptEligibleAnswers(revision.id, {
@@ -206,12 +296,13 @@ export function AnswerRubricGenerationReview({
             )
           }
         >
-          批量接受 eligible 答案
+          批量接受可用答案
         </Button>
         <Button
           variant="outline"
-          disabled={busy}
+          disabled={busy || !revision}
           onClick={() =>
+            revision &&
             void perform(
               () =>
                 assignmentGenerationApi.acceptEligibleRubrics(revision.id, {
@@ -219,11 +310,11 @@ export function AnswerRubricGenerationReview({
                     revision.teacher_edit_version,
                   expected_source_snapshot: revision.source_snapshot_hash,
                 }),
-              "服务器判定的低风险 Rubric 已物化为 draft",
+              "服务器判定的低风险评分标准已保存，等待教师确认",
             )
           }
         >
-          批量接受 eligible Rubric
+          批量接受可用评分标准
         </Button>
         <Button variant="outline" disabled={busy} onClick={() => void load()}>
           刷新草稿
@@ -232,9 +323,14 @@ export function AnswerRubricGenerationReview({
       <div className="grid gap-4 xl:grid-cols-[15rem_minmax(0,1fr)_minmax(0,1.2fr)]">
         <Card className="space-y-2 p-4">
           <h3 className="font-bold">题目与风险</h3>
-          {questions.map((question) => {
-            const a = answers.find((item) => item.question_id === question.id);
-            const r = rubrics.find((item) => item.question_id === question.id);
+          {displayQuestions.map((question) => {
+            const questionNumber =
+              "number" in question ? question.number : question.question_number;
+            const savedQuestion = bundle?.questions.find(
+              (entry) => entry.id === question.id,
+            );
+            const savedAnswer = savedQuestion?.answer.selected;
+            const savedRubric = savedQuestion?.rubric.selected;
             return (
               <button
                 key={question.id}
@@ -242,23 +338,30 @@ export function AnswerRubricGenerationReview({
                 onClick={() => setSelectedQuestion(question.id)}
                 aria-pressed={selectedQuestion === question.id}
               >
-                <span className="font-semibold">
-                  第 {question.question_number} 题
+                <span className="font-semibold">第 {questionNumber} 题</span>
+                <span className="block text-xs">
+                  参考答案：
+                  {savedAnswer?.status === "confirmed"
+                    ? "已确认"
+                    : savedAnswer?.status === "draft"
+                      ? "等待确认"
+                      : savedQuestion?.answer.candidate
+                        ? "有生成建议"
+                        : "尚未生成"}
                 </span>
                 <span className="block text-xs">
-                  答案：{a?.status ?? "无草稿"}
+                  评分标准：
+                  {savedRubric?.status === "confirmed"
+                    ? "已确认"
+                    : savedRubric?.status === "draft"
+                      ? "等待确认"
+                      : savedQuestion?.rubric.candidate
+                        ? "有生成建议"
+                        : "尚未生成"}
                 </span>
                 <span className="block text-xs">
-                  Rubric：{r?.status ?? "无草稿"}
+                  来源：{savedQuestion?.source.label ?? "题目信息加载中"}
                 </span>
-                <span className="block text-xs">
-                  模式：{r?.scoring_mode ?? "—"}
-                </span>
-                {(a?.manual_required || r?.manual_required) && (
-                  <span className="block text-xs text-amber-700">
-                    需要人工处理
-                  </span>
-                )}
               </button>
             );
           })}
@@ -266,13 +369,138 @@ export function AnswerRubricGenerationReview({
 
         <Card className="space-y-3 p-4" data-testid="answer-candidate-panel">
           <h3 className="font-bold">标准答案草稿与证据</h3>
-          {!answer ? (
+          {formalAnswer ? (
+            <div className="space-y-3" data-testid="saved-reference-answer">
+              <div className="flex flex-wrap gap-2 text-sm">
+                <span className="rounded-full bg-slate-100 px-3 py-1">
+                  来源：
+                  {formalAnswer.source.label}
+                </span>
+                <span>版本 {formalAnswer.version}</span>
+                <span>
+                  {formalAnswer.status === "confirmed" ? "已确认" : "待确认"}
+                </span>
+              </div>
+              <div className="whitespace-pre-wrap rounded-lg border bg-slate-50 p-3 text-sm">
+                {formalAnswer.content}
+              </div>
+              {formalAnswer.status === "draft" ? (
+                <Button
+                  disabled={busy}
+                  onClick={() =>
+                    void perform(
+                      () =>
+                        structuredRubricApi.confirmReference(formalAnswer.id),
+                      "参考答案已确认",
+                    )
+                  }
+                >
+                  确认此参考答案
+                </Button>
+              ) : (
+                <p className="text-sm text-emerald-700">
+                  ✓ 此参考答案已经教师确认
+                </p>
+              )}
+              {pendingAnswer && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm">
+                  <p className="font-medium">有一份较新的参考答案等待确认</p>
+                  <p className="mt-1 whitespace-pre-wrap">
+                    {pendingAnswer.content}
+                  </p>
+                  <Button
+                    className="mt-2"
+                    disabled={busy}
+                    onClick={() =>
+                      void perform(
+                        () =>
+                          structuredRubricApi.confirmReference(
+                            pendingAnswer.id,
+                          ),
+                        "参考答案已确认",
+                      )
+                    }
+                  >
+                    确认这份参考答案
+                  </Button>
+                </div>
+              )}
+              {bundleQuestion?.answer.history.some(
+                (entry) => entry.status === "retired",
+              ) && (
+                <details className="rounded-lg border p-3 text-sm">
+                  <summary className="cursor-pointer">查看历史参考答案</summary>
+                  <ul className="mt-2 space-y-2">
+                    {bundleQuestion?.answer.history
+                      .filter((entry) => entry.status === "retired")
+                      .map((entry) => (
+                        <li key={entry.id} className="rounded bg-slate-50 p-2">
+                          {entry.content}
+                        </li>
+                      ))}
+                  </ul>
+                </details>
+              )}
+              {answerSuggestion && (
+                <details className="rounded-lg border p-3 text-sm">
+                  <summary className="cursor-pointer">
+                    查看生成建议并处理
+                  </summary>
+                  <p className="mt-2 whitespace-pre-wrap">
+                    {answerSuggestion.raw_content}
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <Button
+                      disabled={busy}
+                      onClick={() =>
+                        void perform(
+                          () =>
+                            assignmentGenerationApi.dispositionAnswerCandidate(
+                              answerSuggestion.id,
+                              {
+                                action: "accept",
+                                ...expected(answerSuggestion),
+                              },
+                            ),
+                          "参考答案已保存，等待教师确认",
+                        )
+                      }
+                    >
+                      接受建议
+                    </Button>
+                    <Button
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() =>
+                        void perform(
+                          () =>
+                            assignmentGenerationApi.dispositionAnswerCandidate(
+                              answerSuggestion.id,
+                              {
+                                action: "reject",
+                                ...expected(answerSuggestion),
+                              },
+                            ),
+                          "建议已拒绝",
+                        )
+                      }
+                    >
+                      拒绝建议
+                    </Button>
+                  </div>
+                </details>
+              )}
+            </div>
+          ) : !answer ? (
             <p>Provider unavailable 或题目尚未确认；没有伪造答案。</p>
           ) : (
             <>
               <div className="flex flex-wrap gap-2 text-sm">
                 <span className="rounded-full bg-slate-100 px-3 py-1">
-                  来源：{sourceLabels[answer.source_type] ?? answer.source_type}
+                  来源：
+                  {bundleQuestion?.answer.candidate?.source.label ??
+                    sourceLabels[answer.source_type] ??
+                    "参考答案建议"}
                 </span>
                 <span>confidence {answer.confidence.toFixed(2)}</span>
                 <span>{answer.status}</span>
@@ -324,7 +552,7 @@ export function AnswerRubricGenerationReview({
                           answer.id,
                           { action: "accept", ...expected(answer) },
                         ),
-                      "答案已接受并物化为未确认 draft",
+                      "答案已保存，等待教师确认",
                     )
                   }
                 >
@@ -357,7 +585,7 @@ export function AnswerRubricGenerationReview({
                             },
                           },
                         ),
-                      "教师修改已保存并物化为未确认 draft",
+                      "教师修改已保存，等待确认",
                     )
                   }
                 >
@@ -373,7 +601,7 @@ export function AnswerRubricGenerationReview({
                           answer.id,
                           { action: "reject", ...expected(answer) },
                         ),
-                      "答案候选已拒绝",
+                      "答案建议已拒绝",
                     )
                   }
                 >
@@ -405,8 +633,127 @@ export function AnswerRubricGenerationReview({
 
         <Card className="space-y-3 p-4" data-testid="rubric-candidate-panel">
           <h3 className="font-bold">Structured Rubric 草稿</h3>
-          {!rubric ? (
-            <p>暂无 Rubric 候选。</p>
+          {formalRubric ? (
+            <div className="space-y-3" data-testid="saved-structured-rubric">
+              <div>
+                <p className="font-semibold">{formalRubric.title}</p>
+                <p className="text-sm">
+                  总分：{formalRubric.total_points} · 版本{" "}
+                  {formalRubric.version} ·{" "}
+                  {formalRubric.status === "confirmed"
+                    ? "已确认"
+                    : formalRubric.status === "draft"
+                      ? "待确认"
+                      : "已停用"}
+                </p>
+              </div>
+              <div className="space-y-2" aria-label="正式 Rubric 评分项">
+                {formalRubric.criteria.map((criterion) => (
+                  <div
+                    key={criterion.id}
+                    className="rounded-lg border p-3 text-sm"
+                  >
+                    <strong>
+                      {criterion.key} · {criterion.title}
+                    </strong>
+                    <p>
+                      分值 {criterion.points} · {criterion.criterion_type} ·{" "}
+                      {criterion.required ? "必要" : "可选"}
+                    </p>
+                    {criterion.description && (
+                      <p className="mt-1 whitespace-pre-wrap text-slate-700">
+                        {criterion.description}
+                      </p>
+                    )}
+                    <p className="mt-1 text-xs text-slate-500">
+                      验证方式：
+                      {criterion.validation_mode === "deterministic"
+                        ? "确定性核查"
+                        : "教师人工核查"}
+                    </p>
+                  </div>
+                ))}
+              </div>
+              {formalRubric.status === "draft" ? (
+                <Button
+                  disabled={busy}
+                  onClick={() =>
+                    void perform(
+                      () => structuredRubricApi.confirm(formalRubric.id),
+                      "Structured Rubric 已确认",
+                    )
+                  }
+                >
+                  确认此评分标准
+                </Button>
+              ) : formalRubric.status === "confirmed" ? (
+                <p className="text-sm text-emerald-700">
+                  ✓ 此评分标准已经教师确认
+                </p>
+              ) : null}
+              {pendingRubric && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm">
+                  <p className="font-medium">有一份较新的评分标准等待确认</p>
+                  <p>
+                    {pendingRubric.title} · 总分 {pendingRubric.total_points}
+                  </p>
+                  <Button
+                    className="mt-2"
+                    disabled={busy}
+                    onClick={() =>
+                      void perform(
+                        () => structuredRubricApi.confirm(pendingRubric.id),
+                        "评分标准已确认",
+                      )
+                    }
+                  >
+                    确认这份评分标准
+                  </Button>
+                </div>
+              )}
+              {bundleQuestion?.rubric.history.some(
+                (entry) => entry.status === "retired",
+              ) && (
+                <details className="rounded-lg border p-3 text-sm">
+                  <summary className="cursor-pointer">查看历史评分标准</summary>
+                  <ul className="mt-2 space-y-2">
+                    {bundleQuestion?.rubric.history
+                      .filter((entry) => entry.status === "retired")
+                      .map((entry) => (
+                        <li key={entry.id} className="rounded bg-slate-50 p-2">
+                          {entry.title}
+                        </li>
+                      ))}
+                  </ul>
+                </details>
+              )}
+              {rubricSuggestion && (
+                <details className="rounded-lg border p-3 text-sm">
+                  <summary className="cursor-pointer">
+                    查看生成建议并处理
+                  </summary>
+                  <p className="mt-2">{rubricSuggestion.title}</p>
+                  <Button
+                    className="mt-2"
+                    disabled={busy}
+                    onClick={() =>
+                      void perform(
+                        () =>
+                          assignmentGenerationApi.dispositionRubricCandidate(
+                            rubricSuggestion.id,
+                            { action: "accept", ...expected(rubricSuggestion) },
+                          ),
+                        "评分标准已保存，等待教师确认",
+                      )
+                    }
+                  >
+                    接受建议
+                  </Button>
+                </details>
+              )}
+            </div>
+          ) : !rubric ? (
+            <p>暂无评分标准建议，也没有已生成的 Structured Rubric。</p>
           ) : (
             <>
               <label className="grid gap-1 text-sm font-medium">
@@ -598,7 +945,7 @@ export function AnswerRubricGenerationReview({
                           rubric.id,
                           { action: "reject", ...expected(rubric) },
                         ),
-                      "Rubric 候选已拒绝",
+                      "评分标准建议已拒绝",
                     )
                   }
                 >

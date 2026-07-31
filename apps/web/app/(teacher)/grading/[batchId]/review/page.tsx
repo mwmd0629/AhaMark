@@ -43,7 +43,7 @@ const questionTypeLabels: Record<string, string> = {
 
 const gradingSourceLabels: Record<string, string> = {
   "objective-rule": "客观题规则引擎",
-  "codex-assisted": "本地 Codex 辅助",
+  "codex-assisted": "Codex 批改建议",
   unavailable: "未配置评分服务",
   fake: "本地占位服务",
   manual: "教师人工评分",
@@ -83,6 +83,37 @@ function questionTypeLabel(value?: string) {
 
 function gradingSourceLabel(value?: string) {
   return value ? (gradingSourceLabels[value] ?? value) : "教师人工评分";
+}
+
+type ReviewAnswer = ReviewWorkspace["items"][number]["answers"][number];
+
+function hasManualOrIncompleteCriteria(answer: ReviewAnswer) {
+  return answer.criteria.some((criterion) =>
+    ["manual", "incomplete"].includes(criterion.status),
+  );
+}
+
+function needsTeacherReview(answer: ReviewAnswer) {
+  return (
+    answer.requires_review ||
+    Boolean(answer.result?.requires_review) ||
+    answer.result?.score == null ||
+    hasManualOrIncompleteCriteria(answer)
+  );
+}
+
+function acceptanceBlockReasons(answer: ReviewAnswer) {
+  const reasons: string[] = [];
+  if (answer.requires_review || answer.result?.requires_review) {
+    reasons.push("当前建议已标记为需要教师复核");
+  }
+  if (answer.result?.score == null) {
+    reasons.push("建议中没有有效分数");
+  }
+  if (hasManualOrIncompleteCriteria(answer)) {
+    reasons.push("存在需要人工处理或尚未完成的评分项");
+  }
+  return reasons;
 }
 
 export default function ReviewPage() {
@@ -140,6 +171,7 @@ export default function ReviewPage() {
 
   const submission = data?.items[submissionIndex];
   const answer = submission?.answers[answerIndex];
+  const acceptanceBlocks = answer ? acceptanceBlockReasons(answer) : [];
   const page = submission?.pages[pageIndex];
   const evidence = useMemo(
     () => answer?.evidence.find((item) => item.id === activeEvidence),
@@ -220,8 +252,12 @@ export default function ReviewPage() {
       await load();
       setScoringDecision(null);
       setMessage("复核结果已保存");
-    } catch {
-      setMessage("保存失败，请检查分数范围后重试");
+    } catch (reason) {
+      setMessage(
+        reason instanceof Error && reason.message.trim()
+          ? `保存失败：${reason.message}`
+          : "保存失败，请检查分数范围后重试",
+      );
     } finally {
       setSaving(false);
     }
@@ -572,7 +608,7 @@ export default function ReviewPage() {
               reviewFilter === "all" ||
               (reviewFilter === "suggested" &&
                 item.result?.status === "suggested") ||
-              (reviewFilter === "needs_review" && item.requires_review) ||
+              (reviewFilter === "needs_review" && needsTeacherReview(item)) ||
               (reviewFilter === "reviewed" && Boolean(item.review)) ||
               (reviewFilter === "stale" &&
                 (item.status === "stale" || item.result?.status === "stale"));
@@ -643,8 +679,8 @@ export default function ReviewPage() {
                 <Info
                   label="状态"
                   value={
-                    answer.requires_review
-                      ? "强制复核"
+                    needsTeacherReview(answer)
+                      ? "需要教师复核"
                       : statusLabel(answer.status)
                   }
                 />
@@ -873,6 +909,16 @@ export default function ReviewPage() {
                   </div>
                 </section>
               )}
+              {acceptanceBlocks.length > 0 && (
+                <div
+                  role="alert"
+                  className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
+                  data-testid="acceptance-blocked-hint"
+                >
+                  不能直接接受：{acceptanceBlocks.join("；")}
+                  。请修改建议或手动评分。
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-2">
                 <Action
                   label="修正 OCR 答案"
@@ -888,7 +934,11 @@ export default function ReviewPage() {
                   label="接受"
                   primary
                   onClick={() => submitReview("accepted")}
-                  disabled={saving || answer.result?.status !== "suggested"}
+                  disabled={
+                    saving ||
+                    answer.result?.status !== "suggested" ||
+                    acceptanceBlocks.length > 0
+                  }
                 />
                 <Action
                   label="修改"

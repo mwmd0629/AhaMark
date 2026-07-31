@@ -16,6 +16,7 @@ export type AssignmentReviewSessionRecord = {
   review_version: number;
   status: string;
   counts: { blocking: number; warning: number; info: number };
+  confirmations?: string[];
 };
 
 export type AssignmentReviewItemRecord = {
@@ -49,12 +50,223 @@ export type AssignmentReadinessRecord = {
   legacy_rubric_version_id: string;
 };
 
+export type AssignmentRubricBindingRecord = {
+  id: string;
+  status: "draft" | "validated" | "confirmed";
+  source_binding_hash: string;
+  source_semantic_hash: string | null;
+  target_legacy_hash: string | null;
+  projection_profile: string | null;
+  projection_version: string | null;
+  loss_report: AssignmentReviewBundleBindingLoss[] | null;
+  loss_report_hash: string | null;
+  mapping: unknown[];
+  conversion_warnings: string[];
+  manual_review_required: boolean;
+};
+
+/** Read-only, teacher-facing review contract returned by review-bundle v1. */
+export type AssignmentReviewBundleVersion = {
+  generation: number;
+  draft_revision_id: string;
+  paper_version_id: string;
+  source_snapshot_hash: string;
+  bundle_hash: string;
+};
+
+export type AssignmentReviewBundleSource = {
+  kind: string;
+  label: string;
+};
+
+export type AssignmentReviewBundleQuestionProvenance = {
+  id: string;
+  status: string;
+  candidate_version: number;
+  source_snapshot_hash: string;
+  materialized_question_id: string | null;
+  source: AssignmentReviewBundleSource;
+  visibility: "teacher";
+};
+
+export type AssignmentReviewBundleCandidateBase = {
+  id: string;
+  candidate_version: number;
+  teacher_edit_version: number;
+  status: string;
+  source_snapshot_hash: string;
+  materialized_formal_id: string | null;
+  source: AssignmentReviewBundleSource;
+  confidence: string;
+  visibility: "teacher";
+};
+
+export type AssignmentReviewBundleAnswerCandidate =
+  AssignmentReviewBundleCandidateBase & {
+    content: string;
+  };
+
+export type AssignmentReviewBundleRubricCandidate =
+  AssignmentReviewBundleCandidateBase & {
+    title: string;
+    total_points: string | null;
+  };
+
+export type AssignmentReviewBundleAnswer = {
+  id: string;
+  status: "draft" | "confirmed" | "retired" | string;
+  version: number;
+  content_hash: string;
+  source: AssignmentReviewBundleSource;
+  content: string;
+  content_payload: {
+    source_type: string;
+    source_file: string | null;
+    source_page: number | null;
+    source_region: Record<string, unknown> | null;
+    raw_content: string;
+    normalized_content: string;
+    structured_content: Record<string, unknown>;
+    provenance: Record<string, unknown>;
+  };
+  visibility: "teacher";
+};
+
+export type AssignmentReviewBundleCriterion = {
+  id: string;
+  key: string;
+  title: string;
+  description: string | null;
+  points: string;
+  display_order: number;
+  criterion_type: string;
+  required: boolean;
+  dependencies: string[];
+  expected_evidence: Record<string, unknown>;
+  validation_mode: string;
+  validation_rule: Record<string, unknown>;
+  manual_review_policy: Record<string, unknown>;
+  partial_credit_policy: Record<string, unknown>;
+  error_category: string | null;
+  metadata: Record<string, unknown>;
+};
+
+export type AssignmentReviewBundleRubric = {
+  id: string;
+  status: "draft" | "confirmed" | "retired" | string;
+  version: number;
+  content_hash: string;
+  reference_answer_version_id: string;
+  source: AssignmentReviewBundleSource;
+  title: string;
+  total_points: string;
+  criteria: AssignmentReviewBundleCriterion[];
+  visibility: "teacher";
+};
+
+export type AssignmentReviewBundleLifecycle<T, C> = {
+  candidate: C | null;
+  candidate_history: C[];
+  materialized: T | null;
+  selected: T | null;
+  history: T[];
+  visibility: "teacher";
+};
+
+export type AssignmentReviewBundleQuestion = {
+  id: string;
+  number: string;
+  content_hash: string;
+  content: string | null;
+  source: AssignmentReviewBundleSource;
+  provenance: AssignmentReviewBundleQuestionProvenance | null;
+  visibility: "teacher";
+  answer: AssignmentReviewBundleLifecycle<
+    AssignmentReviewBundleAnswer,
+    AssignmentReviewBundleAnswerCandidate
+  >;
+  rubric: AssignmentReviewBundleLifecycle<
+    AssignmentReviewBundleRubric,
+    AssignmentReviewBundleRubricCandidate
+  >;
+};
+
+export type AssignmentReviewBundleBlocker = {
+  id: string | null;
+  code: string;
+  section: string;
+  message: string;
+  entity: string;
+  entity_id: string | null;
+  severity: "blocking" | "warning";
+  source_hash: string;
+  status: string;
+  visibility: "teacher";
+};
+
+export type AssignmentReviewBundleConfirmation = {
+  id: string;
+  type: string;
+  status: "confirmed";
+  source_hash: string;
+  origin: "origin" | "inherited" | "system_auto" | string;
+  inherited: boolean;
+  fingerprint_schema_version: string | null;
+  binding_id: string | null;
+  source_binding_hash: string | null;
+  confirmed_at: string;
+  visibility: "teacher";
+};
+
+export type AssignmentReviewBundleBindingLoss = {
+  code: string;
+  question_id: string;
+  question_number: string;
+  criterion_key: string;
+  teacher_message: string;
+  technical: Record<string, unknown>;
+};
+
+export type AssignmentReviewBundleBinding = {
+  id: string;
+  status: "draft" | "validated" | "confirmed" | "stale";
+  binding_version: number;
+  source_binding_hash: string;
+  source_semantic_hash: string | null;
+  target_legacy_hash: string | null;
+  projection_profile: string | null;
+  projection_version: string | null;
+  mapping: unknown[];
+  loss_report: AssignmentReviewBundleBindingLoss[] | null;
+  loss_report_hash: string | null;
+  manual_review_required: boolean;
+  projection_current: boolean;
+  projection_reason: string | null;
+  expected_source_binding_hash: string | null;
+  visibility: "teacher";
+};
+
+export type AssignmentReviewBundle = {
+  schema_version: "assignment-review-bundle-v1";
+  assignment_id: string;
+  version: AssignmentReviewBundleVersion;
+  status: "missing_review" | "action_required" | "ready_to_publish";
+  questions: AssignmentReviewBundleQuestion[];
+  blockers: AssignmentReviewBundleBlocker[];
+  confirmations: AssignmentReviewBundleConfirmation[];
+  binding: AssignmentReviewBundleBinding | null;
+};
+
 const reviewAction = (reviewVersion: number) => ({
   expected_review_version: reviewVersion,
   explicit_confirmation: true,
 });
 
 export const assignmentReviewApi = {
+  bundle: (assignmentId: string) =>
+    request<AssignmentReviewBundle>(
+      `/api/assignments/${assignmentId}/review-bundle`,
+    ),
   list: (assignmentId: string) =>
     request<{ items: AssignmentReviewSessionRecord[] }>(
       `/api/assignments/${assignmentId}/review-sessions`,
@@ -98,9 +310,13 @@ export const assignmentReviewApi = {
       },
     ),
   createBinding: (sessionId: string, reviewVersion: number) =>
-    request<{ id: string; status: string; mapping: unknown[] }>(
+    request<AssignmentRubricBindingRecord>(
       `/api/assignment-review-sessions/${sessionId}/rubric-binding`,
       { method: "POST", body: JSON.stringify(reviewAction(reviewVersion)) },
+    ),
+  getBinding: (sessionId: string) =>
+    request<AssignmentRubricBindingRecord>(
+      `/api/assignment-review-sessions/${sessionId}/rubric-binding`,
     ),
   confirmBinding: (bindingId: string, reviewVersion: number) =>
     request<{ review_version: number }>(
@@ -654,6 +870,63 @@ export type GradingBatch = {
   };
   actions: string[];
 };
+
+export type ProcessingStep = {
+  id: string;
+  submission_id: string;
+  student_answer_id?: string | null;
+  scope_key: string;
+  kind: "recognition" | "codex_suggestion" | "review_readiness";
+  status:
+    | "pending"
+    | "dispatched"
+    | "running"
+    | "succeeded"
+    | "blocked_review"
+    | "retryable_failed"
+    | "terminal_failed"
+    | "stale"
+    | "cancelled";
+  generation: number;
+  attempt: number;
+  max_attempts: number;
+  retryable: boolean;
+  error_code?: string | null;
+  error_message?: string | null;
+};
+
+export type ProcessingRun = {
+  id: string;
+  grading_batch_id: string;
+  generation: number;
+  status:
+    | "queued"
+    | "running"
+    | "waiting_input"
+    | "waiting_codex"
+    | "awaiting_teacher_review"
+    | "partially_failed"
+    | "failed"
+    | "stale"
+    | "cancelled";
+  provider: "codex_local";
+  provider_label: "Codex-assisted";
+  suggestion_only: true;
+  target_state: "awaiting_teacher_review";
+  input_version: string;
+  request_hash: string;
+  input_manifest: Record<string, unknown>;
+  submission_count: number;
+  step_count: number;
+  completed_step_count: number;
+  failed_step_count: number;
+  pending_codex_count: number;
+  retryable: boolean;
+  error_code?: string | null;
+  error_message?: string | null;
+  steps: ProcessingStep[];
+};
+
 export const gradingApi = {
   batches: (assignmentId: string, query = "") =>
     request<Page<GradingBatch>>(
@@ -765,18 +1038,43 @@ export const gradingApi = {
       method: "PUT",
       body: JSON.stringify(data),
     }),
-  saveCodexSuggestion: (
-    answerId: string,
+  continueProcessing: (batchId: string, idempotencyKey: string) =>
+    request<ProcessingRun>(`/api/grading-batches/${batchId}/processing-runs`, {
+      method: "POST",
+      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    }),
+  processingRun: (batchId: string, runId: string) =>
+    request<ProcessingRun>(
+      `/api/grading-batches/${batchId}/processing-runs/${runId}`,
+    ),
+  retryProcessing: (
+    batchId: string,
+    runId: string,
     data: {
-      score: string;
-      reasoning: string;
-      criterion_scores: Record<string, string>;
+      idempotency_key: string;
+      expected_generation: number;
+      step_ids: string[];
     },
   ) =>
-    request(`/api/student-answers/${answerId}/codex-suggestion`, {
-      method: "PUT",
-      body: JSON.stringify(data),
-    }),
+    request<ProcessingRun>(
+      `/api/grading-batches/${batchId}/processing-runs/${runId}/retry`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    ),
+  reconcileProcessing: (
+    batchId: string,
+    runId: string,
+    data: { idempotency_key: string; expected_generation: number },
+  ) =>
+    request<ProcessingRun>(
+      `/api/grading-batches/${batchId}/processing-runs/${runId}/reconcile`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    ),
   bulkAcceptEligibility: (batchId: string) =>
     request<BulkAcceptEligibility>(
       `/api/grading-batches/${batchId}/bulk-accept-eligibility`,
@@ -1535,6 +1833,11 @@ export type AIScoringJob = {
   }>;
 };
 
+export type AIRetryInput = {
+  idempotency_key: string;
+  expected_generation: number;
+};
+
 export const aiGradingApi = {
   listForAnswer: (answerId: string) =>
     request<AIScoringJob[]>(`/api/ai-grading/student-answers/${answerId}/jobs`),
@@ -1547,14 +1850,15 @@ export const aiGradingApi = {
         idempotency_key: `web:${answerId}:${crypto.randomUUID()}`,
       }),
     }),
-  retry: (jobId: string) =>
+  retry: (jobId: string, data: AIRetryInput) =>
     request<AIScoringJob>(`/api/ai-grading/jobs/${jobId}/retry`, {
       method: "POST",
+      body: JSON.stringify(data),
     }),
-  retryCriterion: (jobId: string, criterionKey: string) =>
+  retryCriterion: (jobId: string, criterionKey: string, data: AIRetryInput) =>
     request<AIScoringJob>(
       `/api/ai-grading/jobs/${jobId}/criteria/${encodeURIComponent(criterionKey)}/retry`,
-      { method: "POST" },
+      { method: "POST", body: JSON.stringify(data) },
     ),
   cancel: (jobId: string) =>
     request<AIScoringJob>(`/api/ai-grading/jobs/${jobId}/cancel`, {

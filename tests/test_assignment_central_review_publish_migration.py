@@ -32,6 +32,18 @@ def load_migration() -> ModuleType:
     return module
 
 
+def load_semantic_projection_migration() -> ModuleType:
+    path = (
+        Path(__file__).parents[1]
+        / "apps/api/alembic/versions/0027_semantic_confirmation_projection.py"
+    )
+    spec = importlib.util.spec_from_file_location("migration_0027", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def base_metadata() -> sa.MetaData:
     metadata = sa.MetaData()
     for name in (
@@ -51,6 +63,7 @@ def test_0022_upgrade_downgrade_upgrade_and_orm_parity(tmp_path: Path) -> None:
     engine = sa.create_engine(target.database_url)
     base_metadata().create_all(engine)
     migration = load_migration()
+    semantic_projection = load_semantic_projection_migration()
     models = (
         AssignmentReviewSession,
         AssignmentReviewItem,
@@ -61,14 +74,18 @@ def test_0022_upgrade_downgrade_upgrade_and_orm_parity(tmp_path: Path) -> None:
     with engine.begin() as connection:
         migration.op = Operations(MigrationContext.configure(connection))
         migration.upgrade()
+        semantic_projection.op = Operations(MigrationContext.configure(connection))
+        semantic_projection.upgrade()
         for model in models:
             migrated = {
                 column["name"] for column in sa.inspect(connection).get_columns(model.__tablename__)
             }
             assert migrated == set(model.__table__.columns.keys())
+        semantic_projection.downgrade()
         migration.downgrade()
         assert "assignment_review_sessions" not in sa.inspect(connection).get_table_names()
         migration.upgrade()
+        semantic_projection.upgrade()
         assert "assignment_publish_readiness_snapshots" in sa.inspect(connection).get_table_names()
 
 

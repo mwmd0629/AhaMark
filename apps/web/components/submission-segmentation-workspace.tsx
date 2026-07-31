@@ -65,6 +65,7 @@ export function SubmissionSegmentationWorkspace({
   const [job, setJob] = useState<SubmissionProcessingJob>();
   const [pages, setPages] = useState<SubmissionProcessingPage[]>([]);
   const [regions, setRegions] = useState<SubmissionRegionCandidate[]>([]);
+  const [questionIds, setQuestionIds] = useState<string[]>([]);
   const [currentPageId, setCurrentPageId] = useState("");
   const [questionId, setQuestionId] = useState("");
   const [showProcessed, setShowProcessed] = useState(true);
@@ -77,34 +78,55 @@ export function SubmissionSegmentationWorkspace({
   }>();
   const startPoint = useRef<{ x: number; y: number } | undefined>(undefined);
   const canvas = useRef<HTMLDivElement>(null);
+  const reloadGeneration = useRef(0);
 
   const reload = useCallback(async () => {
+    const generation = ++reloadGeneration.current;
     const [nextPages, nextRegions, incomplete] = await Promise.all([
       submissionProcessingApi.pages(submissionId),
       submissionProcessingApi.regions(submissionId),
       submissionProcessingApi.incomplete(submissionId),
     ]);
+    if (generation !== reloadGeneration.current) return;
+    const nextQuestionIds = Array.from(
+      new Set([
+        ...nextRegions.map((item) => item.question_id),
+        ...incomplete.question_ids,
+      ]),
+    ).sort();
     setPages(nextPages);
     setRegions(nextRegions);
-    setCurrentPageId((old) => old || nextPages[0]?.id || "");
-    setQuestionId(
-      (old) =>
-        old || incomplete.question_ids[0] || nextRegions[0]?.question_id || "",
+    setQuestionIds(nextQuestionIds);
+    setCurrentPageId((old) =>
+      old && nextPages.some((item) => item.id === old)
+        ? old
+        : (nextPages[0]?.id ?? ""),
+    );
+    setQuestionId((old) =>
+      old && nextQuestionIds.includes(old) ? old : (nextQuestionIds[0] ?? ""),
     );
   }, [submissionId]);
 
   useEffect(() => {
     void reload();
+    return () => {
+      reloadGeneration.current += 1;
+    };
   }, [reload]);
 
   useEffect(() => {
     if (!job || terminal.has(job.status)) return;
+    let cancelled = false;
     const timer = window.setInterval(async () => {
       const next = await submissionProcessingApi.job(submissionId, job.id);
+      if (cancelled) return;
       setJob(next);
       if (terminal.has(next.status)) await reload();
     }, 1500);
-    return () => window.clearInterval(timer);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [job, reload, submissionId]);
 
   const page = pages.find((item) => item.id === currentPageId) ?? pages[0];
@@ -112,17 +134,11 @@ export function SubmissionSegmentationWorkspace({
     () => regions.filter((item) => item.submission_page_id === page?.id),
     [page?.id, regions],
   );
-  const questionIds = Array.from(
-    new Set(regions.map((item) => item.question_id)),
-  );
   const questionNumberById = new Map(
     regions
       .filter((item) => item.question_number)
       .map((item) => [item.question_id, item.question_number]),
   );
-  if (questionId && !questionIds.includes(questionId))
-    questionIds.push(questionId);
-
   function point(event: React.PointerEvent<HTMLDivElement>) {
     const rect = canvas.current!.getBoundingClientRect();
     return {
@@ -145,6 +161,7 @@ export function SubmissionSegmentationWorkspace({
         </div>
         <div className="flex gap-2">
           <Button
+            data-testid="submission-processing-start"
             variant="outline"
             disabled={!!job && !terminal.has(job.status)}
             onClick={async () =>
@@ -154,6 +171,7 @@ export function SubmissionSegmentationWorkspace({
             {job && !terminal.has(job.status) ? "自动切题中" : "处理并自动切题"}
           </Button>
           <Button
+            data-testid="submission-confirm-high-confidence"
             variant="outline"
             onClick={async () => {
               await submissionProcessingApi.confirmHighConfidence(submissionId);
@@ -165,7 +183,14 @@ export function SubmissionSegmentationWorkspace({
         </div>
       </div>
       {job && (
-        <div className="rounded-lg bg-slate-50 p-2 text-sm">
+        <div
+          className="rounded-lg bg-slate-50 p-2 text-sm"
+          data-testid="submission-processing-job"
+          data-job-id={job.id}
+          data-status={job.status}
+          data-stage={job.stage}
+          data-progress={job.progress}
+        >
           <Badge status={job.status} />{" "}
           {processingStageLabels[job.stage] ?? job.stage} · {job.progress}%
           {job.error_code && (
@@ -182,6 +207,10 @@ export function SubmissionSegmentationWorkspace({
                 className={`w-full rounded-lg border p-2 text-left text-xs ${
                   item.id === page?.id ? "border-blue-500" : ""
                 }`}
+                data-testid="submission-processing-page"
+                data-page-id={item.id}
+                data-page-number={item.page_number}
+                data-status={item.processing_status}
               >
                 <button
                   className="w-full text-left"
@@ -252,6 +281,8 @@ export function SubmissionSegmentationWorkspace({
               <div
                 ref={canvas}
                 aria-label="框选题目区域"
+                data-testid="submission-region-canvas"
+                data-page-id={page?.id}
                 className="relative touch-none select-none"
                 style={{ width: `${zoom * 100}%` }}
                 onPointerDown={(event) => {
@@ -438,6 +469,7 @@ export function SubmissionSegmentationWorkspace({
             <label className="grid gap-1">
               框选后分配给题目
               <select
+                data-testid="submission-question-select"
                 className="rounded-lg border p-2"
                 value={questionId}
                 onChange={(event) => setQuestionId(event.target.value)}
@@ -452,7 +484,15 @@ export function SubmissionSegmentationWorkspace({
               </select>
             </label>
             {pageRegions.map((region) => (
-              <div key={region.id} className="rounded-lg border p-2">
+              <div
+                key={region.id}
+                className="rounded-lg border p-2"
+                data-testid="submission-region-card"
+                data-region-id={region.id}
+                data-question-id={region.question_id}
+                data-page-id={region.submission_page_id}
+                data-status={region.status}
+              >
                 <strong>
                   {region.question_number
                     ? `第 ${region.question_number} 题`
@@ -473,6 +513,8 @@ export function SubmissionSegmentationWorkspace({
                 <div className="mt-1 flex gap-1">
                   {region.status !== "confirmed" && (
                     <Button
+                      data-testid="submission-region-confirm"
+                      data-region-id={region.id}
                       variant="outline"
                       onClick={async () => {
                         await submissionProcessingApi.updateRegion(
@@ -502,6 +544,8 @@ export function SubmissionSegmentationWorkspace({
                     </Button>
                   )}
                   <Button
+                    data-testid="submission-region-delete"
+                    data-region-id={region.id}
                     variant="danger"
                     onClick={async () => {
                       await submissionProcessingApi.removeRegion(

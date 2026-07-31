@@ -59,6 +59,7 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
   const [item, setItem] = useState<AssignmentRecord>();
   const [classes, setClasses] = useState<ClassRecord[]>([]);
   const [step, setStep] = useState(1);
+  const [reviewInputsRevision, setReviewInputsRevision] = useState(0);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [dueMode, setDueMode] = useState<"none" | "scheduled">("none");
@@ -120,6 +121,10 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
       setError(e instanceof ApiError ? e.message : "无法加载草稿");
     }
   }, [assignmentId]);
+  const refreshReviewInputs = useCallback(async () => {
+    setReviewInputsRevision((current) => current + 1);
+    await load();
+  }, [load]);
   useEffect(() => void load(), [load]);
   useEffect(() => {
     setDueMode(item?.due_at ? "scheduled" : "none");
@@ -319,6 +324,7 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
         assignmentId={item.id}
         assignment={item}
         onAssignmentChanged={load}
+        onReviewInputsChanged={refreshReviewInputs}
       />
       <ol
         className="grid grid-cols-2 gap-2 md:grid-cols-6"
@@ -1153,6 +1159,7 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
       {step === 6 && (
         <AssignmentCentralReview
           item={item}
+          reviewInputsRevision={reviewInputsRevision}
           onNavigate={setStep}
           onPublished={() => router.push(`/assignments/${item.id}`)}
         />

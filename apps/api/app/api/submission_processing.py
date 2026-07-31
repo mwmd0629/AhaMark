@@ -69,8 +69,13 @@ def _submission(db: Session, owner_id: uuid.UUID, submission_id: uuid.UUID) -> S
 
 def _editable(db: Session, owner_id: uuid.UUID, submission_id: uuid.UUID) -> Submission:
     item = _submission(db, owner_id, submission_id)
-    if item.status == "finalized" or item.finalized_at is not None:
-        raise ApiProblem(409, "FINALIZED_SUBMISSION_IMMUTABLE", "已完成答卷不可修改")
+    if item.status in {"finalized", "merged", "voided"} or item.finalized_at is not None:
+        raise ApiProblem(
+            409,
+            "FINALIZED_SUBMISSION_IMMUTABLE",
+            "当前答卷状态不可修改",
+            {"status": item.status},
+        )
     return item
 
 
@@ -362,6 +367,7 @@ def add_region(
         segmentation_version=SEGMENTATION_VERSION,
         confirmed_by=actor.id if data.status == "confirmed" else None,
         confirmed_at=now_utc() if data.status == "confirmed" else None,
+        confirmation_origin="teacher_explicit" if data.status == "confirmed" else None,
     )
     db.add(region)
     db.flush()
@@ -401,6 +407,7 @@ def update_region(
     region.region_version += 1
     region.confirmed_by = actor.id if data.status == "confirmed" else None
     region.confirmed_at = now_utc() if data.status == "confirmed" else None
+    region.confirmation_origin = "teacher_explicit" if data.status == "confirmed" else None
     _invalidate(db, answer)
     if old_answer and old_answer.id != answer.id:
         _invalidate(db, old_answer)
@@ -447,6 +454,7 @@ def confirm_high_confidence(submission_id: uuid.UUID, db: Db, actor: Actor) -> d
             actor.id,
             now_utc(),
         )
+        region.confirmation_origin = "teacher_explicit"
         _invalidate(db, answer)
     audit(
         db,

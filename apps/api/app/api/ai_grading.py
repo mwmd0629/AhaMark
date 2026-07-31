@@ -1,5 +1,3 @@
-import hashlib
-import json
 import uuid
 from decimal import Decimal
 from typing import Annotated, Any, Literal
@@ -8,17 +6,20 @@ from app.ai_grading.guards import (
     GuardViolation,
     public_status,
     require_answer_relation,
-    require_confirmed_answer,
     require_submission_mutable,
     validate_evidence_refs,
     validate_score,
     validate_validation_link,
 )
+from app.ai_grading.request_contract import (
+    require_current_recognition_evidence,
+    scoring_input_version,
+    strict_request_hash,
+)
 from app.api.actor import Actor
 from app.api.domain import ApiProblem, audit
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.math_validation.stale import stale_for_ai_versions
 from app.models import (
     AICriterionSuggestion,
     AIFeedbackDraft,
@@ -54,6 +55,11 @@ class CreateJob(BaseModel):
     criterion_stable_key: str | None = None
 
 
+class RetryJobInput(BaseModel):
+    idempotency_key: str = Field(min_length=1, max_length=128)
+    expected_generation: int = Field(ge=1)
+
+
 class ReviewInput(BaseModel):
     action: Literal["accepted", "modified", "rejected"]
     selected_points: float | None = None
@@ -87,8 +93,58 @@ def _assert_submission_mutable(db: Session, submission_id: uuid.UUID) -> None:
 def _enqueue(job: AIScoringJob, db: Session, criterion_key: str | None) -> None:
     from workers.tasks.ai_grading import run_ai_grading
 
-    task = run_ai_grading.delay(str(job.id), job.generation, criterion_key)
-    job.celery_task_id = task.id
+    submission = db.scalar(
+        select(Submission)
+        .where(Submission.id == job.submission_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    answer = db.scalar(
+        select(StudentAnswer)
+        .where(StudentAnswer.id == job.student_answer_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    current = db.scalar(
+        select(AIScoringJob)
+        .where(AIScoringJob.id == job.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if current is None:
+        raise ApiProblem(404, "AI_JOB_NOT_FOUND", "AI scoring job not found")
+    try:
+        require_submission_mutable(submission)
+        if answer is None or answer.submission_id != current.submission_id:
+            raise GuardViolation(
+                "ANSWER_SUBMISSION_MISMATCH",
+                "Answer does not belong to submission",
+            )
+    except GuardViolation as exc:
+        current.status = "stale"
+        current.error_code = exc.code
+        current.error_message = exc.message
+        current.stale_at = now_utc()
+        current.retryable = False
+        current.finished_at = now_utc()
+        db.commit()
+        return
+    try:
+        task = run_ai_grading.delay(str(current.id), current.generation, criterion_key)
+    except Exception as exc:
+        current.status = "failed"
+        current.error_code = "WORKER_UNAVAILABLE"
+        current.error_message = type(exc).__name__
+        current.retryable = True
+        current.finished_at = now_utc()
+        db.commit()
+        return
+    current.celery_task_id = task.id
+    current.status = "queued"
+    current.error_code = None
+    current.error_message = None
+    current.retryable = False
+    current.finished_at = None
     db.commit()
 
 
@@ -146,6 +202,7 @@ def job_json(db: Session, j: AIScoringJob) -> dict[str, Any]:
         "schema_version": j.schema_version,
         "stale": j.stale_at is not None,
         "error_code": j.error_code,
+        "retryable": j.retryable,
         "scoring_input_version": j.scoring_input_version,
         "rubric_version_id": str(j.rubric_version_id),
         "reference_answer_version_id": str(j.reference_answer_version_id),
@@ -287,67 +344,49 @@ def job_json(db: Session, j: AIScoringJob) -> dict[str, Any]:
 @router.post("/jobs", status_code=202)
 def create_job(data: CreateJob, db: Db, actor: Actor) -> dict[str, Any]:
     settings = get_settings()
-    stale_for_ai_versions(
-        db,
-        settings.ai_grading_provider,
-        settings.ai_grading_model,
-        settings.ai_grading_prompt_version,
-        settings.ai_grading_schema_version,
-        settings.ai_grading_config_version,
+    answer_hint = db.get(StudentAnswer, data.student_answer_id)
+    if answer_hint is None:
+        raise ApiProblem(404, "AI_GRADING_INPUT_NOT_FOUND", "Answer or rubric not found")
+    submission = db.scalar(
+        select(Submission)
+        .where(Submission.id == answer_hint.submission_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
-    existing = db.scalar(
-        select(AIScoringJob).where(
-            AIScoringJob.owner_id == actor.id, AIScoringJob.idempotency_key == data.idempotency_key
-        )
+    answer = db.scalar(
+        select(StudentAnswer)
+        .where(StudentAnswer.id == data.student_answer_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
-    if existing:
-        return job_json(db, existing)
-    answer = db.get(StudentAnswer, data.student_answer_id)
     rubric = db.get(StructuredRubricVersion, data.rubric_version_id)
     if not answer or not rubric or rubric.question_id != answer.question_id:
         raise ApiProblem(404, "AI_GRADING_INPUT_NOT_FOUND", "Answer or rubric not found")
-    submission = db.get(Submission, answer.submission_id)
     if not submission or submission.owner_id != actor.id:
         raise ApiProblem(404, "SUBMISSION_NOT_FOUND", "Submission not found")
     question = db.get(Question, answer.question_id)
     try:
         require_answer_relation(answer, submission, question, actor.id)
-        require_confirmed_answer(answer)
     except GuardViolation as exc:
         raise exc.problem(422) from exc
     try:
         require_submission_mutable(submission)
     except GuardViolation as exc:
         raise exc.problem(409) from exc
-    batch_cost = db.scalar(
-        select(func.coalesce(func.sum(AIScoringJob.estimated_cost), 0)).where(
-            AIScoringJob.assignment_id == submission.assignment_id,
-            AIScoringJob.owner_id == actor.id,
-        )
-    )
-    if batch_cost and float(batch_cost) >= settings.ai_grading_max_cost_per_batch:
-        raise ApiProblem(
-            429,
-            "AI_BATCH_COST_BUDGET_EXCEEDED",
-            "The assignment AI grading cost budget has been reached",
-        )
     if rubric.status != "confirmed":
         raise ApiProblem(422, "RUBRIC_NOT_CONFIRMED", "Confirmed rubric required")
-    evidence = db.scalar(
-        select(QuestionRecognitionEvidence)
-        .where(
-            QuestionRecognitionEvidence.student_answer_id == answer.id,
-            QuestionRecognitionEvidence.status == "confirmed",
-            QuestionRecognitionEvidence.stale_at.is_(None),
+    try:
+        evidence = require_current_recognition_evidence(
+            db,
+            answer=answer,
+            submission=submission,
+            owner_id=actor.id,
         )
-        .order_by(QuestionRecognitionEvidence.recognition_version.desc())
-    )
+    except GuardViolation as exc:
+        raise exc.problem(422) from exc
     reference = db.get(ReferenceAnswerVersion, rubric.reference_answer_version_id)
     if (
-        not evidence
-        or evidence.owner_id != actor.id
-        or evidence.submission_id != submission.id
-        or not reference
+        not reference
         or reference.status != "confirmed"
     ):
         raise ApiProblem(
@@ -364,7 +403,84 @@ def create_job(data: CreateJob, db: Db, actor: Actor) -> dict[str, Any]:
         )
         .order_by(MathValidationJob.generation.desc())
     )
-    db.scalar(select(StudentAnswer).where(StudentAnswer.id == answer.id).with_for_update())
+    s = settings
+    input_version = scoring_input_version(evidence)
+    request_hash = strict_request_hash(
+        answer=answer,
+        evidence=evidence,
+        rubric_id=rubric.id,
+        rubric_content_hash=rubric.content_hash,
+        reference_id=reference.id,
+        reference_content_hash=reference.content_hash,
+        validation_id=validation.id if validation else None,
+        criterion_stable_key=data.criterion_stable_key,
+        provider=s.ai_grading_provider,
+        model=s.ai_grading_model,
+        endpoint_mode="chat_completions",
+        prompt_version=s.ai_grading_prompt_version,
+        schema_version=s.ai_grading_schema_version,
+        provider_config_version=s.ai_grading_config_version,
+        grading_config_version=s.ai_grading_config_version,
+    )
+    existing = db.scalar(
+        select(AIScoringJob).where(
+            AIScoringJob.owner_id == actor.id,
+            AIScoringJob.idempotency_key == data.idempotency_key,
+        )
+    )
+    if existing:
+        expected = {
+            "student_answer_id": answer.id,
+            "submission_id": submission.id,
+            "question_id": answer.question_id,
+            "recognition_evidence_id": evidence.id,
+            "reference_answer_version_id": reference.id,
+            "rubric_version_id": rubric.id,
+            "math_validation_job_id": validation.id if validation else None,
+            "question_version": answer.question_version_reference,
+            "scoring_input_version": input_version,
+            "provider": s.ai_grading_provider,
+            "model": s.ai_grading_model,
+            "endpoint_mode": "chat_completions",
+            "prompt_version": s.ai_grading_prompt_version,
+            "schema_version": s.ai_grading_schema_version,
+            "provider_config_version": s.ai_grading_config_version,
+            "grading_config_version": s.ai_grading_config_version,
+            "request_hash": request_hash,
+        }
+        mismatches = sorted(
+            field for field, value in expected.items() if getattr(existing, field) != value
+        )
+        if mismatches:
+            raise ApiProblem(
+                409,
+                "IDEMPOTENCY_KEY_CONFLICT",
+                "Idempotency key belongs to a different AI grading request",
+                {
+                    "resource_type": "ai_scoring_job",
+                    "existing_job_id": str(existing.id),
+                    "mismatched_fields": mismatches,
+                },
+            )
+        if (
+            existing.status == "failed"
+            and existing.error_code == "WORKER_UNAVAILABLE"
+            and existing.retryable
+        ):
+            _enqueue(existing, db, data.criterion_stable_key)
+        return job_json(db, existing)
+    batch_cost = db.scalar(
+        select(func.coalesce(func.sum(AIScoringJob.estimated_cost), 0)).where(
+            AIScoringJob.assignment_id == submission.assignment_id,
+            AIScoringJob.owner_id == actor.id,
+        )
+    )
+    if batch_cost and float(batch_cost) >= settings.ai_grading_max_cost_per_batch:
+        raise ApiProblem(
+            429,
+            "AI_BATCH_COST_BUDGET_EXCEEDED",
+            "The assignment AI grading cost budget has been reached",
+        )
     generation = (
         db.scalar(
             select(func.max(AIScoringJob.generation)).where(
@@ -373,22 +489,6 @@ def create_job(data: CreateJob, db: Db, actor: Actor) -> dict[str, Any]:
         )
         or 0
     ) + 1
-    s = settings
-    request_hash = hashlib.sha256(
-        json.dumps(
-            {
-                "answer": str(answer.id),
-                "evidence": evidence.input_hash,
-                "rubric": rubric.content_hash,
-                "reference": reference.content_hash,
-                "validation": str(validation.id) if validation else None,
-                "prompt": s.ai_grading_prompt_version,
-                "schema": s.ai_grading_schema_version,
-                "config": s.ai_grading_config_version,
-            },
-            sort_keys=True,
-        ).encode()
-    ).hexdigest()
     job = AIScoringJob(
         owner_id=actor.id,
         assignment_id=submission.assignment_id,
@@ -400,10 +500,7 @@ def create_job(data: CreateJob, db: Db, actor: Actor) -> dict[str, Any]:
         rubric_version_id=rubric.id,
         math_validation_job_id=validation.id if validation else None,
         question_version=answer.question_version_reference,
-        scoring_input_version=(
-            f"{evidence.input_hash}:{evidence.recognition_version}:"
-            f"{evidence.confirmed_revision or 0}"
-        ),
+        scoring_input_version=input_version,
         status="queued",
         idempotency_key=data.idempotency_key,
         generation=generation,
@@ -420,12 +517,19 @@ def create_job(data: CreateJob, db: Db, actor: Actor) -> dict[str, Any]:
         image_bytes=0,
         retryable=False,
     )
-    db.add(job)
-    db.flush()
-    audit(db, actor.id, "ai_grading.create", "ai_scoring_job", job.id, {"generation": generation})
     try:
+        db.add(job)
+        db.flush()
+        audit(
+            db,
+            actor.id,
+            "ai_grading.create",
+            "ai_scoring_job",
+            job.id,
+            {"generation": generation},
+        )
         db.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         db.rollback()
         winner = db.scalar(
             select(AIScoringJob).where(
@@ -434,8 +538,52 @@ def create_job(data: CreateJob, db: Db, actor: Actor) -> dict[str, Any]:
             )
         )
         if winner:
-            return job_json(db, winner)
-        raise
+            expected = {
+                "student_answer_id": answer.id,
+                "submission_id": submission.id,
+                "recognition_evidence_id": evidence.id,
+                "reference_answer_version_id": reference.id,
+                "rubric_version_id": rubric.id,
+                "scoring_input_version": input_version,
+                "request_hash": request_hash,
+            }
+            mismatches = sorted(
+                field for field, value in expected.items() if getattr(winner, field) != value
+            )
+            if not mismatches:
+                if (
+                    winner.status == "failed"
+                    and winner.error_code == "WORKER_UNAVAILABLE"
+                    and winner.retryable
+                ):
+                    _enqueue(winner, db, data.criterion_stable_key)
+                return job_json(db, winner)
+            raise ApiProblem(
+                409,
+                "IDEMPOTENCY_KEY_CONFLICT",
+                "Idempotency key belongs to a different AI grading request",
+                {
+                    "resource_type": "ai_scoring_job",
+                    "existing_job_id": str(winner.id),
+                    "mismatched_fields": mismatches,
+                },
+            ) from exc
+        generation_winner = db.scalar(
+            select(AIScoringJob).where(
+                AIScoringJob.student_answer_id == answer.id,
+                AIScoringJob.generation == generation,
+            )
+        )
+        raise ApiProblem(
+            409,
+            "AI_GENERATION_CONFLICT",
+            "AI grading generation was allocated concurrently; retry with the same key",
+            {
+                "student_answer_id": str(answer.id),
+                "generation": generation,
+                "existing_job_id": str(generation_winner.id) if generation_winner else None,
+            },
+        ) from exc
     _enqueue(job, db, data.criterion_stable_key)
     return job_json(db, job)
 
@@ -479,13 +627,29 @@ def current_suggestions(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str,
 
 
 @router.post("/jobs/{job_id}/retry", status_code=202)
-def retry_job(job_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
+def retry_job(
+    job_id: uuid.UUID,
+    data: RetryJobInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
     source = _owned_job(db, actor.id, job_id)
+    if data.expected_generation != source.generation:
+        raise ApiProblem(
+            409,
+            "AI_RETRY_GENERATION_CONFLICT",
+            "Retry source generation does not match",
+            {
+                "job_id": str(source.id),
+                "expected_generation": data.expected_generation,
+                "actual_generation": source.generation,
+            },
+        )
     return create_job(
         CreateJob(
             student_answer_id=source.student_answer_id,
             rubric_version_id=source.rubric_version_id,
-            idempotency_key=f"retry:{source.id}:{uuid.uuid4().hex}",
+            idempotency_key=data.idempotency_key,
         ),
         db,
         actor,
@@ -493,8 +657,25 @@ def retry_job(job_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
 
 
 @router.post("/jobs/{job_id}/criteria/{criterion_key}/retry", status_code=202)
-def retry_criterion(job_id: uuid.UUID, criterion_key: str, db: Db, actor: Actor) -> dict[str, Any]:
+def retry_criterion(
+    job_id: uuid.UUID,
+    criterion_key: str,
+    data: RetryJobInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
     source = _owned_job(db, actor.id, job_id)
+    if data.expected_generation != source.generation:
+        raise ApiProblem(
+            409,
+            "AI_RETRY_GENERATION_CONFLICT",
+            "Retry source generation does not match",
+            {
+                "job_id": str(source.id),
+                "expected_generation": data.expected_generation,
+                "actual_generation": source.generation,
+            },
+        )
     exists = db.scalar(
         select(RubricCriterion.id).where(
             RubricCriterion.rubric_version_id == source.rubric_version_id,
@@ -507,7 +688,7 @@ def retry_criterion(job_id: uuid.UUID, criterion_key: str, db: Db, actor: Actor)
         CreateJob(
             student_answer_id=source.student_answer_id,
             rubric_version_id=source.rubric_version_id,
-            idempotency_key=(f"criterion-retry:{source.id}:{criterion_key}:{uuid.uuid4().hex}"),
+            idempotency_key=data.idempotency_key,
             criterion_stable_key=criterion_key,
         ),
         db,

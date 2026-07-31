@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { QuestionExtractionReview } from "./question-extraction-review";
 
@@ -105,6 +105,15 @@ describe("QuestionExtractionReview", () => {
     expect(document.querySelector("script")).toBeNull();
     expect(screen.getByText(/公式 LaTeX：未生成/)).toBeInTheDocument();
     expect(screen.getByText(/必须人工复核/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/第三步：整理页面/).closest("details"),
+    ).not.toHaveAttribute("open");
+    const questionDetails = screen
+      .getByDisplayValue("<script>自动发布</script> 请证明")
+      .closest("details");
+    expect(questionDetails).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText(/一、 · 分值待定/));
+    expect(questionDetails).toHaveAttribute("open");
     expect(
       screen.getByRole("button", { name: /确认全部服务器 eligible/ }),
     ).toBeDisabled();

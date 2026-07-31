@@ -8,6 +8,7 @@ import {
   type GradeReadiness,
   type GradeRelease,
   type GradingBatch,
+  type ProcessingRun,
   type ReportJob,
   type ReviewWorkspace,
   type SubmissionRecognitionJob,
@@ -17,6 +18,9 @@ import { Button, Card, PageHeader } from "@/components/ui";
 import { SubmissionSegmentationWorkspace } from "@/components/submission-segmentation-workspace";
 
 const terminal = new Set(["completed", "partially_completed", "failed"]);
+const terminalSubmissionStatuses = new Set(["finalized", "merged", "voided"]);
+const isActiveSubmission = (submission: SubmissionRecord) =>
+  !terminalSubmissionStatuses.has(submission.status);
 const submissionStatusLabels: Record<string, string> = {
   uploaded: "已上传",
   processing: "处理中",
@@ -49,6 +53,51 @@ const reportStatusLabels: Record<string, string> = {
   failed: "失败",
   expired: "已过期",
 };
+const processingStatusCopy: Record<
+  ProcessingRun["status"],
+  { label: string; description: string }
+> = {
+  queued: { label: "已排队", description: "服务端已保存处理计划。" },
+  running: { label: "处理中", description: "服务端正在推进可执行步骤。" },
+  waiting_input: {
+    label: "等待教师补充",
+    description: "部分答案仍需识别、分割确认或正式评分标准。",
+  },
+  waiting_codex: {
+    label: "等待 Codex-assisted",
+    description: "正在等待本地 Codex 受控生成评分建议。",
+  },
+  awaiting_teacher_review: {
+    label: "等待教师复核",
+    description: "评分建议已就绪，仍需教师明确复核；这不是正式成绩。",
+  },
+  partially_failed: {
+    label: "部分失败",
+    description: "部分步骤可安全重试，其余结果保持不变。",
+  },
+  failed: { label: "处理失败", description: "当前处理计划未能完成。" },
+  stale: {
+    label: "输入已变化",
+    description: "答案或评分标准已更新，请重新继续处理。",
+  },
+  cancelled: { label: "已取消", description: "当前处理计划已停止。" },
+};
+const unknownProcessingStatusCopy = {
+  label: "处理中",
+  description: "服务端正在推进处理计划，请稍候查看最新状态。",
+};
+const getProcessingStatusCopy = (status: string) =>
+  (
+    processingStatusCopy as Record<
+      string,
+      { label: string; description: string }
+    >
+  )[status] ?? unknownProcessingStatusCopy;
+const processingPollStatuses = new Set<ProcessingRun["status"]>([
+  "queued",
+  "running",
+  "waiting_codex",
+]);
 
 export default function GradingBatchPage({
   params,
@@ -76,6 +125,13 @@ export default function GradingBatchPage({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [selectedUploadFiles, setSelectedUploadFiles] = useState<File[]>([]);
+  const [uploadStatus, setUploadStatus] = useState<{
+    kind: "loading" | "success" | "error";
+    message: string;
+  }>();
+  const [processingRun, setProcessingRun] = useState<ProcessingRun>();
+  const [processingBusy, setProcessingBusy] = useState(false);
 
   const load = useCallback(async () => {
     const nextBatch = await gradingApi.getBatch(batchId);
@@ -116,23 +172,77 @@ export default function GradingBatchPage({
       .catch(() => setError("无法加载该发布版本的报告历史"));
   }, [release]);
 
+  useEffect(() => {
+    if (!processingRun || !processingPollStatuses.has(processingRun.status)) {
+      return;
+    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = () => {
+      timer = setTimeout(async () => {
+        try {
+          const next = await gradingApi.reconcileProcessing(
+            batchId,
+            processingRun.id,
+            {
+              idempotency_key: crypto.randomUUID(),
+              expected_generation: processingRun.generation,
+            },
+          );
+          if (cancelled) return;
+          setProcessingRun(next);
+          if (processingPollStatuses.has(next.status)) poll();
+        } catch (reason) {
+          if (!cancelled) {
+            setError(
+              reason instanceof Error ? reason.message : "无法刷新处理状态",
+            );
+          }
+        }
+      }, 1500);
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [batchId, processingRun]);
+
   async function upload(form: FormData) {
-    const files = form
+    const submittedFiles = form
       .getAll("files")
       .filter((item): item is File => item instanceof File && item.size > 0);
-    if (!files.length) return;
-    await act("学生作业已上传并完成确定性文件名匹配", async () => {
+    const files = submittedFiles.length ? submittedFiles : selectedUploadFiles;
+    if (!files.length) {
+      setUploadStatus({ kind: "error", message: "请先选择作业文件" });
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setMessage("");
+    setUploadStatus({ kind: "loading", message: "正在上传并匹配…" });
+    try {
       await gradingApi.upload(batchId, files);
       await load();
-    });
+      setMessage("学生作业已上传并完成确定性文件名匹配");
+      setUploadStatus({
+        kind: "success",
+        message: "上传完成，已刷新匹配结果",
+      });
+      setSelectedUploadFiles([]);
+    } catch (reason) {
+      const uploadError = reason instanceof Error ? reason.message : "上传失败";
+      setError(uploadError);
+      setUploadStatus({ kind: "error", message: uploadError });
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function startOcr() {
     await act("Submission OCR 已完成，可继续规则初批", async () => {
       const nextJobs: Record<string, SubmissionRecognitionJob> = {};
-      for (const submission of submissions.filter(
-        (item) => item.status !== "finalized",
-      )) {
+      for (const submission of submissions.filter(isActiveSubmission)) {
         let job = await gradingApi.startRecognition(submission.id);
         nextJobs[submission.id] = job;
         setJobs({ ...nextJobs });
@@ -201,7 +311,7 @@ export default function GradingBatchPage({
 
   async function gradeAll() {
     await act(
-      "客观题规则初批完成；主观题保持 Provider unavailable，等待教师人工评分",
+      "评分输入已准备完成；客观题已规则初批，主观题等待 Codex 生成建议",
       async () => {
         const current = await gradingApi.reviewWorkspace(batchId);
         for (const item of current.items) {
@@ -210,6 +320,48 @@ export default function GradingBatchPage({
         setWorkspace(await gradingApi.reviewWorkspace(batchId));
       },
     );
+  }
+
+  async function continueToTeacherReview() {
+    setProcessingBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const run = await gradingApi.continueProcessing(
+        batchId,
+        crypto.randomUUID(),
+      );
+      setProcessingRun(run);
+      setMessage("处理计划已保存；所有 Codex 结果仍只是待教师复核的建议。");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "无法继续处理");
+    } finally {
+      setProcessingBusy(false);
+    }
+  }
+
+  async function retryFailedProcessing() {
+    if (!processingRun) return;
+    const stepIds = processingRun.steps
+      .filter((step) => step.status === "retryable_failed" && step.retryable)
+      .map((step) => step.id)
+      .sort();
+    if (!stepIds.length) return;
+    setProcessingBusy(true);
+    setError("");
+    try {
+      setProcessingRun(
+        await gradingApi.retryProcessing(batchId, processingRun.id, {
+          idempotency_key: crypto.randomUUID(),
+          expected_generation: processingRun.generation,
+          step_ids: stepIds,
+        }),
+      );
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "无法重试处理");
+    } finally {
+      setProcessingBusy(false);
+    }
   }
 
   async function checkReadiness() {
@@ -301,6 +453,9 @@ export default function GradingBatchPage({
     ),
   };
   const submissionCount = batch.submission_count ?? submissions.length;
+  const currentProcessingStatusCopy = processingRun
+    ? getProcessingStatusCopy(processingRun.status)
+    : null;
   return (
     <div
       className="space-y-6"
@@ -388,7 +543,7 @@ export default function GradingBatchPage({
                     disabled={busy}
                     onClick={() => void gradeAll()}
                   >
-                    生成评分建议
+                    准备 Codex 批改
                   </Button>
                 ) : item.stage === "matching" ? (
                   <Button
@@ -416,24 +571,179 @@ export default function GradingBatchPage({
         )}
       </Card>
 
+      <Card className="space-y-4 p-5" data-testid="processing-orchestrator">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="font-bold">服务端连续处理</h2>
+            <p className="mt-1 text-sm text-slate-600">
+              识别与 Codex-assisted 结果只形成评分建议，必须经过教师复核。
+            </p>
+          </div>
+          <Button
+            data-testid="continue-processing-to-teacher-review"
+            disabled={processingBusy}
+            onClick={() => void continueToTeacherReview()}
+          >
+            继续处理至教师复核
+          </Button>
+        </div>
+        {processingRun ? (
+          <div className="space-y-3" data-testid="processing-run-status">
+            <div className="rounded-xl border bg-slate-50 p-3">
+              <p className="font-medium">
+                {currentProcessingStatusCopy?.label}
+              </p>
+              <p className="text-sm text-slate-600">
+                {currentProcessingStatusCopy?.description}
+              </p>
+              <p className="mt-1 text-xs text-slate-500">
+                {processingRun.provider_label} · suggestion-only · 已完成{" "}
+                {processingRun.completed_step_count}/{processingRun.step_count}
+              </p>
+            </div>
+            {processingRun.steps.some(
+              (step) =>
+                step.status === "blocked_review" ||
+                step.status === "retryable_failed" ||
+                step.status === "terminal_failed",
+            ) && (
+              <div className="space-y-2" data-testid="processing-step-blockers">
+                {processingRun.steps
+                  .filter(
+                    (step) =>
+                      step.status === "blocked_review" ||
+                      step.status === "retryable_failed" ||
+                      step.status === "terminal_failed",
+                  )
+                  .map((step) => (
+                    <p
+                      key={step.id}
+                      className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-sm"
+                    >
+                      {step.error_message || "此步骤需要教师处理"}
+                      {step.error_code ? `（${step.error_code}）` : ""}
+                    </p>
+                  ))}
+              </div>
+            )}
+            <div className="flex flex-wrap gap-2">
+              {processingRun.steps.some(
+                (step) => step.status === "retryable_failed" && step.retryable,
+              ) && (
+                <Button
+                  variant="outline"
+                  disabled={processingBusy}
+                  onClick={() => void retryFailedProcessing()}
+                >
+                  重试失败步骤
+                </Button>
+              )}
+              {processingRun.status === "awaiting_teacher_review" && (
+                <Link href={`/grading/${batch.id}/review`}>
+                  <Button>进入教师复核</Button>
+                </Link>
+              )}
+            </div>
+            <details className="rounded-lg border p-3 text-xs text-slate-600">
+              <summary className="cursor-pointer font-medium">技术详情</summary>
+              <dl className="mt-2 grid gap-1">
+                <div>Run ID：{processingRun.id}</div>
+                <div>Generation：{processingRun.generation}</div>
+                <div>Input version：{processingRun.input_version}</div>
+                <div>Request hash：{processingRun.request_hash}</div>
+                {processingRun.error_code && (
+                  <div>Error code：{processingRun.error_code}</div>
+                )}
+              </dl>
+            </details>
+          </div>
+        ) : (
+          <p className="text-sm text-slate-600">尚未启动新的服务端处理计划。</p>
+        )}
+      </Card>
+
       <Card className="space-y-4 p-5" id="upload-and-pages">
-        <h2 className="font-bold">1. 上传、匹配与页面整理</h2>
-        <form action={upload} className="flex flex-wrap items-end gap-3">
-          <label className="grid gap-1 text-sm font-medium">
-            合成学生作业（PNG/PDF）
+        <div>
+          <h2 className="font-bold">1. 上传、匹配与页面整理</h2>
+          <p className="mt-1 text-sm text-slate-600">
+            先上传学生作业，系统将自动匹配学生；随后可在下方核对并整理页面。
+          </p>
+        </div>
+        <form
+          action={upload}
+          className="flex flex-wrap items-end gap-4 rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4"
+          data-testid="submission-upload-panel"
+        >
+          <div className="min-w-0 flex-1">
+            <p className="font-semibold text-slate-900">上传学生作业</p>
+            <p className="mt-1 text-xs text-slate-500">
+              支持 PNG、JPG 或 PDF，可一次选择多个文件。
+            </p>
+            <label
+              htmlFor="submission-files"
+              className="mt-3 inline-flex cursor-pointer items-center rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-slate-400 hover:bg-slate-100"
+              data-testid="submission-file-picker"
+            >
+              选择文件
+            </label>
             <input
+              id="submission-files"
               name="files"
               aria-label="选择学生作业"
               type="file"
+              className="sr-only"
               multiple
               accept=".png,.jpg,.jpeg,.pdf"
+              onChange={(event) => {
+                setSelectedUploadFiles(
+                  Array.from(event.currentTarget.files ?? []),
+                );
+                setUploadStatus(undefined);
+              }}
             />
-          </label>
+            {selectedUploadFiles.length > 0 && (
+              <div
+                className="mt-3 text-sm text-slate-700"
+                data-testid="submission-file-selection"
+                role="status"
+              >
+                <p className="font-medium">
+                  已选择 {selectedUploadFiles.length} 个文件
+                </p>
+                <ul className="mt-1 space-y-0.5 text-xs text-slate-500">
+                  {selectedUploadFiles.slice(0, 3).map((file, index) => (
+                    <li className="break-all" key={`${file.name}-${index}`}>
+                      {file.name}
+                    </li>
+                  ))}
+                  {selectedUploadFiles.length > 3 && (
+                    <li>另有 {selectedUploadFiles.length - 3} 个文件</li>
+                  )}
+                </ul>
+              </div>
+            )}
+            {uploadStatus && (
+              <p
+                className={`mt-3 text-sm ${
+                  uploadStatus.kind === "error"
+                    ? "text-red-700"
+                    : uploadStatus.kind === "success"
+                      ? "text-emerald-700"
+                      : "text-slate-600"
+                }`}
+                data-testid="submission-upload-status"
+                role={uploadStatus.kind === "error" ? "alert" : "status"}
+              >
+                {uploadStatus.message}
+              </p>
+            )}
+          </div>
           <Button loading={busy}>上传并自动匹配</Button>
         </form>
-        <div className="grid gap-3 md:grid-cols-2">
+        <div className="grid gap-3" data-testid="submission-cards">
           {submissions.map((item) => {
             const job = jobs[item.id];
+            const isActive = isActiveSubmission(item);
             return (
               <article
                 key={item.id}
@@ -441,6 +751,7 @@ export default function GradingBatchPage({
                 data-testid="submission"
                 data-submission-id={item.id}
                 data-student-id={item.student_id}
+                data-status={item.status}
               >
                 <div className="flex justify-between">
                   <strong>学生作业</strong>
@@ -474,11 +785,13 @@ export default function GradingBatchPage({
                       .find((candidate) => candidate.submission_id === item.id)
                       ?.pages.map((page) => page.id) ?? [];
                   const primary = submissions.find(
-                    (candidate) => candidate.attempt_number === 1,
+                    (candidate) =>
+                      candidate.attempt_number === 1 &&
+                      isActiveSubmission(candidate),
                   );
                   return (
                     <div className="mt-2 flex flex-wrap gap-2">
-                      {pageIds.length > 1 && (
+                      {isActive && pageIds.length > 1 && (
                         <>
                           <Button
                             variant="outline"
@@ -499,18 +812,16 @@ export default function GradingBatchPage({
                           </Button>
                         </>
                       )}
-                      {item.attempt_number > 1 &&
-                        primary &&
-                        item.status !== "merged" && (
-                          <Button
-                            variant="outline"
-                            onClick={() =>
-                              void mergeSubmission(primary.id, item.id)
-                            }
-                          >
-                            合并回首次 Submission
-                          </Button>
-                        )}
+                      {item.attempt_number > 1 && primary && isActive && (
+                        <Button
+                          variant="outline"
+                          onClick={() =>
+                            void mergeSubmission(primary.id, item.id)
+                          }
+                        >
+                          合并回首次 Submission
+                        </Button>
+                      )}
                     </div>
                   );
                 })()}
@@ -520,6 +831,7 @@ export default function GradingBatchPage({
                     data-testid="submission-ocr"
                     data-job-id={job.id}
                     data-provider={job.provider}
+                    data-status={job.status}
                   >
                     OCR：{job.status} · provider={job.provider} · 页面{" "}
                     {job.pages
@@ -545,7 +857,7 @@ export default function GradingBatchPage({
                     )}
                   </div>
                 )}
-                {item.status !== "finalized" && (
+                {isActive && (
                   <div className="mt-3">
                     <SubmissionSegmentationWorkspace submissionId={item.id} />
                   </div>
@@ -633,7 +945,8 @@ export default function GradingBatchPage({
           </div>
         )}
         <Button
-          disabled={!submissions.length || busy}
+          data-testid="submission-ocr-start"
+          disabled={!submissions.some(isActiveSubmission) || busy}
           onClick={() => void startOcr()}
         >
           启动全部 Submission OCR
@@ -643,8 +956,8 @@ export default function GradingBatchPage({
       <Card className="space-y-4 p-5">
         <h2 className="font-bold">2. 初批与教师复核</h2>
         <p className="text-sm text-slate-600">
-          工作流测试 OCR 适配器只证明编排；客观题使用 objective-rule，主观题真实
-          Provider unavailable。
+          客观题先由规则引擎核对；主观题由 Codex
+          根据已确认的答题内容、参考答案和评分标准生成逐项建议。教师只需复核，不必从零人工评分。
         </p>
         <p data-testid="answer-count">
           已形成 StudentAnswer：
@@ -654,12 +967,13 @@ export default function GradingBatchPage({
           ) ?? 0}
         </p>
         <Button
+          data-testid="prepare-grading-inputs"
           disabled={
             !workspace?.items.some((item) => item.answers.length) || busy
           }
           onClick={() => void gradeAll()}
         >
-          运行确定性初批
+          准备并检查评分输入
         </Button>{" "}
         <Button
           variant="outline"
@@ -674,7 +988,9 @@ export default function GradingBatchPage({
           仅重新批改 stale 答案
         </Button>{" "}
         <Link href={`/grading/${batch.id}/review`}>
-          <Button variant="secondary">进入三栏教师复核</Button>
+          <Button data-testid="open-teacher-review" variant="secondary">
+            进入三栏教师复核
+          </Button>
         </Link>
       </Card>
 

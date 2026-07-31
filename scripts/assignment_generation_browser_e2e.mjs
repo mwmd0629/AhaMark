@@ -63,42 +63,38 @@ try {
   results.steps.central_review = await body.getByText("集中审查中心").isVisible();
   results.steps.zero_red_issues = false;
 
-  const confirmations = [
-    "确认班级",
-    "确认截止时间",
-    "确认总分",
-    "确认文件角色",
-    "确认答案来源",
-    "确认 PaperVersion",
-    "确认答案版本",
-    "确认 Structured Rubric",
+  const confirmationKinds = [
+    "classes",
+    "due_at",
+    "total_score",
+    "file_roles",
+    "answer_sources",
+    "paper_version",
+    "reference_answers",
+    "structured_rubrics",
   ];
-  for (const label of confirmations) {
-    const button = page.getByRole("button", { name: label });
-    await button.click();
+  for (const kind of confirmationKinds) {
+    const testId = `review-confirmation-${kind}`;
+    const button = page.getByTestId(testId);
     await button.waitFor({ state: "visible" });
-    await page.waitForFunction(
-      (name) => {
-        const candidate = [...document.querySelectorAll("button")].find(
-          (element) => element.textContent?.trim() === name,
-        );
-        return candidate && !candidate.disabled;
-      },
-      label,
-    );
+    if (await button.isEnabled()) {
+      await button.click();
+      await page.waitForFunction(
+        (id) =>
+          document
+            .querySelector(`[data-testid="${id}"]`)
+            ?.hasAttribute("disabled"),
+        testId,
+      );
+    }
   }
   results.steps.teacher_confirmations = true;
 
-  await page.getByRole("button", { name: "准备发布评分标准" }).click();
-  const confirmBinding = page.getByRole("button", { name: "确认绑定" });
+  const prepareBinding = page.getByTestId("prepare-rubric-publication-binding");
+  if (await prepareBinding.isEnabled()) await prepareBinding.click();
+  const confirmBinding = page.getByTestId("confirm-rubric-publication-binding");
   await confirmBinding.waitFor({ state: "visible" });
-  await page.waitForFunction(() => {
-    const candidate = [...document.querySelectorAll("button")].find(
-      (element) => element.textContent?.trim() === "确认绑定",
-    );
-    return candidate && !candidate.disabled;
-  });
-  await confirmBinding.click();
+  if (await confirmBinding.isEnabled()) await confirmBinding.click();
   await page.waitForFunction(() => {
     const candidate = [...document.querySelectorAll("button")].find(
       (element) => element.textContent?.trim() === "准备发布",

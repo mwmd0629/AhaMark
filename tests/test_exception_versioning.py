@@ -30,7 +30,7 @@ from app.models import (
 from app.results.services import FinalScoreService, release_scores
 from app.storage.dependencies import get_storage
 from sqlalchemy import func, select
-from test_submission_workflow import client, png, workflow
+from test_submission_workflow import client, confirm_answer_regions, png, workflow
 
 
 @pytest.mark.parametrize(
@@ -131,11 +131,20 @@ def test_ambiguous_match_requires_manual_confirmation_and_is_idempotent() -> Non
 def test_score_release_report_analytics_and_insight_versions_remain_fixed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    db, _storage, batch_id, submission_id, question_id = workflow()
+    db, _storage, _batch_id, submission_id, question_id = workflow()
     settings = get_settings()
     previous_provider = settings.recognition_provider
+    previous_answer_provider = settings.answer_recognition_provider
     settings.recognition_provider = "fake"
+    settings.answer_recognition_provider = "fake"
     try:
+        processing = client.post(
+            f"/api/submissions/{submission_id}/processing-jobs?run_now=true",
+            json={"idempotency_key": "exceptions-versioning-processing"},
+        )
+        assert processing.status_code == 201, processing.text
+        assert processing.json()["status"] == "completed"
+        confirm_answer_regions(db, submission_id)
         recognition = client.post(
             f"/api/submissions/{submission_id}/recognition-jobs?run_now=true",
             json={"idempotency_key": "exceptions-versioning-ocr"},
@@ -145,6 +154,11 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
             select(StudentAnswer).where(StudentAnswer.submission_id == submission_id)
         )
         assert answer is not None
+        corrected = client.patch(
+            f"/api/student-answers/{answer.id}",
+            json={"corrected_text": "1. 测试题"},
+        )
+        assert corrected.status_code == 200, corrected.text
         answer.status, answer.requires_review = "ready_for_grading", False
         db.commit()
 
@@ -359,16 +373,55 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
             )
         )
 
-        regrade = client.post(f"/api/student-answers/{answer.id}/grade")
-        assert regrade.status_code == 200
-        db.refresh(answer)
-        assert answer.status == "graded"
+        finalized_regrade = client.post(f"/api/student-answers/{answer.id}/grade")
+        assert finalized_regrade.status_code == 409
+        assert finalized_regrade.json()["code"] == "SUBMISSION_FINALIZED"
+
+        current_batch = client.post(
+            f"/api/assignments/{submission.assignment_id}/grading-batches",
+            json={"class_id": str(submission.class_id)},
+        )
+        assert current_batch.status_code == 201, current_batch.text
+        next_upload = client.post(
+            f"/api/grading-batches/{current_batch.json()['id']}/files",
+            files=[("files", ("0001-regrade.png", png("azure"), "image/png"))],
+        )
+        assert next_upload.status_code == 201, next_upload.text
+        current_submission_id = uuid.UUID(next_upload.json()["items"][0]["submission_id"])
+        assert current_submission_id != submission_id
+        current_processing = client.post(
+            f"/api/submissions/{current_submission_id}/processing-jobs?run_now=true",
+            json={"idempotency_key": "exceptions-versioning-processing-current"},
+        )
+        assert current_processing.status_code == 201, current_processing.text
+        assert current_processing.json()["status"] == "completed"
+        confirm_answer_regions(db, current_submission_id)
+        current_recognition = client.post(
+            f"/api/submissions/{current_submission_id}/recognition-jobs?run_now=true",
+            json={"idempotency_key": "exceptions-versioning-ocr-current"},
+        )
+        assert current_recognition.status_code == 201, current_recognition.text
+        current_answer = db.scalar(
+            select(StudentAnswer).where(StudentAnswer.submission_id == current_submission_id)
+        )
+        assert current_answer is not None
+        current_corrected = client.patch(
+            f"/api/student-answers/{current_answer.id}",
+            json={"corrected_text": "1. 测试题"},
+        )
+        assert current_corrected.status_code == 200, current_corrected.text
+        current_answer.status, current_answer.requires_review = "ready_for_grading", False
+        db.commit()
+        regrade = client.post(f"/api/student-answers/{current_answer.id}/grade")
+        assert regrade.status_code == 200, regrade.text
+        db.refresh(current_answer)
+        assert current_answer.status == "graded"
         rereview = client.put(
-            f"/api/student-answers/{answer.id}/review",
+            f"/api/student-answers/{current_answer.id}/review",
             json={"decision": "accepted"},
         )
         assert rereview.status_code == 200
-        snapshot_current = client.post(f"/api/submissions/{submission_id}/finalize")
+        snapshot_current = client.post(f"/api/submissions/{current_submission_id}/finalize")
         assert snapshot_current.status_code == 200
         assert snapshot_current.json()["status"] == "complete"
         extra_incomplete = Submission(
@@ -390,7 +443,7 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
         assert readiness.status_code == 200
         assert readiness.json()["releasable_count"] == 1
         assert readiness.json()["unreleasable_count"] == 0
-        assert readiness.json()["ready"][0]["submission_id"] == str(submission.id)
+        assert readiness.json()["ready"][0]["submission_id"] == str(current_submission_id)
         assert readiness.json()["ready"][0]["score_snapshot_id"] == snapshot_current.json()["id"]
         latest = FinalScoreService(db, submission.owner_id).latest(
             submission.assignment_id, submission.class_id
@@ -403,5 +456,6 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
         assert old_analytics.metrics == metrics_v1
     finally:
         settings.recognition_provider = previous_provider
+        settings.answer_recognition_provider = previous_answer_provider
         app.dependency_overrides.pop(get_storage, None)
         db.close()

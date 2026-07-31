@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Card } from "@/components/ui";
 import { QuestionExtractionReview } from "@/components/question-extraction-review";
 import {
@@ -23,6 +23,17 @@ const ACTIVE = new Set([
   "extracting_questions",
   "generating_rubrics",
   "validating",
+]);
+const TERMINAL = new Set([
+  "review_required",
+  "ready",
+  "partial",
+  "failed",
+  "cancelled",
+  "stale",
+  "unavailable",
+  "completed",
+  "discarded",
 ]);
 const STAGES: { key: AssignmentGenerationStage; label: string }[] = [
   { key: "analyzing", label: "分析输入" },
@@ -48,15 +59,34 @@ const STATUS_LABEL: Record<string, string> = {
   completed: "已完成",
   discarded: "结果已丢弃",
 };
+const FILE_ROLE_LABEL: Record<string, string> = {
+  question_paper: "试卷",
+  reference_answer: "参考答案",
+  rubric: "评分标准",
+  instructions: "作业说明",
+  attachment: "其他附件",
+  unknown: "尚未确定",
+};
+const ANSWER_SOURCE_LABEL: Record<string, string> = {
+  teacher_official: "教师官方答案",
+  publisher_official: "出版社官方答案",
+  teacher_provided: "教师提供",
+  third_party: "第三方答案",
+  ai_generated: "AI 生成",
+  unknown: "尚未确定",
+  not_applicable: "不适用",
+};
 
 export function AssignmentGenerationPanel({
   assignmentId,
   assignment,
   onAssignmentChanged,
+  onReviewInputsChanged,
 }: {
   assignmentId: string;
   assignment?: AssignmentRecord;
   onAssignmentChanged?: () => Promise<void> | void;
+  onReviewInputsChanged?: () => Promise<void> | void;
 }) {
   const [jobs, setJobs] = useState<AssignmentGenerationJob[]>([]);
   const [capabilities, setCapabilities] =
@@ -76,7 +106,21 @@ export function AssignmentGenerationPanel({
   const [fileChoices, setFileChoices] = useState<
     Record<string, { role: string; source: string }>
   >({});
+  const observedJobStatus = useRef<{ id: string; status: string } | null>(null);
   const current = jobs[0];
+  const activeFileAnalyses = fileAnalyses.filter(
+    (row) => row.analysis_status !== "superseded",
+  );
+  const fileAnalysisCounts = {
+    confirmed: activeFileAnalyses.filter(
+      (row) => row.analysis_status === "confirmed",
+    ).length,
+    pending: activeFileAnalyses.filter(
+      (row) => row.analysis_status === "suggested",
+    ).length,
+    stale: activeFileAnalyses.filter((row) => row.analysis_status === "stale")
+      .length,
+  };
 
   const load = useCallback(async () => {
     try {
@@ -137,9 +181,28 @@ export function AssignmentGenerationPanel({
     }
   }, [assignmentId]);
 
+  const notifyReviewInputsChanged = useCallback(async () => {
+    if (onReviewInputsChanged) await onReviewInputsChanged();
+    else await onAssignmentChanged?.();
+  }, [onAssignmentChanged, onReviewInputsChanged]);
+
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    const next = current ? { id: current.id, status: current.status } : null;
+    const previous = observedJobStatus.current;
+    observedJobStatus.current = next;
+    if (
+      next &&
+      previous?.id === next.id &&
+      ACTIVE.has(previous.status) &&
+      TERMINAL.has(next.status)
+    ) {
+      void notifyReviewInputsChanged();
+    }
+  }, [current, notifyReviewInputsChanged]);
 
   useEffect(() => {
     if (!current || !ACTIVE.has(current.status) || error) return;
@@ -164,11 +227,15 @@ export function AssignmentGenerationPanel({
     latestStages.get("extracting_questions")?.result_payload?.capability ===
     "codex_local";
 
-  const act = async (operation: () => Promise<AssignmentGenerationJob>) => {
+  const act = async (
+    operation: () => Promise<AssignmentGenerationJob>,
+    notifyReviewInputs = false,
+  ) => {
     setBusy(true);
     setError("");
     try {
       await operation();
+      if (notifyReviewInputs) await notifyReviewInputsChanged();
       await load();
     } catch (reason) {
       setError(reason instanceof ApiError ? reason.message : "任务操作失败");
@@ -182,7 +249,7 @@ export function AssignmentGenerationPanel({
     setError("");
     try {
       await operation();
-      await onAssignmentChanged?.();
+      await notifyReviewInputsChanged();
       await load();
     } catch (reason) {
       setError(
@@ -199,12 +266,14 @@ export function AssignmentGenerationPanel({
   };
 
   const start = () =>
-    act(() =>
-      assignmentGenerationApi.start(assignmentId, {
-        idempotency_key:
-          globalThis.crypto?.randomUUID?.() ??
-          `generation-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      }),
+    act(
+      () =>
+        assignmentGenerationApi.start(assignmentId, {
+          idempotency_key:
+            globalThis.crypto?.randomUUID?.() ??
+            `generation-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        }),
+      true,
     );
 
   const risk = current?.revision?.risk_summary ?? {
@@ -368,21 +437,30 @@ export function AssignmentGenerationPanel({
             )}
           </div>
           {current.issues.length > 0 && (
-            <ul className="grid gap-1 text-sm">
-              {current.issues.map((item) => (
-                <li key={item.id}>
-                  [{item.severity}] {item.code}：{item.message}
-                </li>
-              ))}
-            </ul>
+            <details className="rounded-lg border text-sm">
+              <summary className="cursor-pointer rounded-lg px-3 py-3 font-medium hover:bg-[var(--neutral-50)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--brand-600)]">
+                风险与技术详情（{current.issues.length}）
+              </summary>
+              <ul className="grid gap-1 px-3 pb-3">
+                {current.issues.map((item) => (
+                  <li key={item.id}>
+                    [{item.severity}] {item.code}：{item.message}
+                  </li>
+                ))}
+              </ul>
+            </details>
           )}
 
-          <section
+          <details
             className="space-y-3 border-t pt-4"
             aria-label="基本信息建议"
           >
-            <div>
-              <h3 className="font-semibold">第一步 · 基本信息建议</h3>
+            <summary className="cursor-pointer rounded-lg px-3 py-3 font-semibold hover:bg-[var(--neutral-50)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--brand-600)]">
+              第一步 · 基本信息建议（
+              {suggestions.filter((row) => row.status !== "superseded").length}
+              ）
+            </summary>
+            <div className="mt-3">
               <p className="text-sm text-[var(--neutral-600)]">
                 AI 建议不会自动覆盖教师内容；不会推荐班级，也不会设置截止时间。
               </p>
@@ -522,155 +600,228 @@ export function AssignmentGenerationPanel({
             ) : (
               <p className="text-sm">当前没有可用字段建议，请由教师填写。</p>
             )}
-          </section>
+          </details>
 
-          <section className="space-y-3 border-t pt-4" aria-label="文件分析">
-            <div>
-              <h3 className="font-semibold">第二步 · 文件与页面异常分析</h3>
+          <details
+            id="generation-file-analysis"
+            className="scroll-mt-6 space-y-3 border-t pt-4"
+            aria-label="文件分析"
+          >
+            <summary className="cursor-pointer rounded-lg px-3 py-3 font-semibold hover:bg-[var(--neutral-50)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--brand-600)]">
+              第二步 · 文件与页面异常分析（{activeFileAnalyses.length}{" "}
+              个文件：已确认 {fileAnalysisCounts.confirmed}，待确认{" "}
+              {fileAnalysisCounts.pending}
+              {fileAnalysisCounts.stale > 0
+                ? `，已过期 ${fileAnalysisCounts.stale}`
+                : ""}
+              ）
+            </summary>
+            <div className="mt-3">
               <p className="text-sm text-[var(--neutral-600)]">
                 文件角色需由教师确认。AI/第三方答案不会被标记为官方答案。分析不会删除或发布文件。
               </p>
-            </div>
-            {fileAnalyses
-              .filter((row) => row.analysis_status !== "superseded")
-              .map((file) => {
-                const choice = fileChoices[file.id] ?? {
-                  role: file.suggested_role,
-                  source: "not_applicable",
-                };
-                const pages = pageAnalyses[file.id] ?? [];
-                return (
-                  <article
-                    key={file.id}
-                    className="space-y-2 rounded-lg border p-3 text-sm"
+              {fileAnalysisCounts.stale > 0 && (
+                <div
+                  role="alert"
+                  className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 p-3"
+                >
+                  <div>
+                    <strong className="text-sm text-red-900">
+                      旧分析已过期，不能算作已确认
+                    </strong>
+                    <p className="text-xs text-red-700">
+                      作业总分、页面或其他生成输入已修改，请基于最新内容重新分析后再确认。
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    disabled={
+                      busy ||
+                      capabilities === null ||
+                      !capabilities.enabled ||
+                      !capabilities.teacher_start_allowed ||
+                      !capabilities.suggestion_only ||
+                      Boolean(current && ACTIVE.has(current.status))
+                    }
+                    onClick={start}
                   >
-                    <div className="flex flex-wrap justify-between gap-2">
-                      <strong>{file.file_name ?? file.stored_file_id}</strong>
-                      <span>
-                        {file.detected_mime_type} · {file.file_size ?? "—"}{" "}
-                        bytes · {file.page_count ?? "—"} 页
-                      </span>
-                    </div>
-                    <p>
-                      checksum：<code>{file.checksum.slice(0, 12)}</code> · 状态{" "}
-                      {file.analysis_status}
+                    重新分析最新内容
+                  </Button>
+                </div>
+              )}
+            </div>
+            {activeFileAnalyses.map((file) => {
+              const choice = fileChoices[file.id] ?? {
+                role: file.suggested_role,
+                source: "not_applicable",
+              };
+              const pages = pageAnalyses[file.id] ?? [];
+              return (
+                <article
+                  key={file.id}
+                  className="space-y-2 rounded-lg border p-3 text-sm"
+                >
+                  <div className="flex flex-wrap justify-between gap-2">
+                    <strong>{file.file_name ?? file.stored_file_id}</strong>
+                    <span>
+                      {file.detected_mime_type} · {file.file_size ?? "—"} bytes
+                      · {file.page_count ?? "—"} 页
+                    </span>
+                  </div>
+                  <p>
+                    checksum：<code>{file.checksum.slice(0, 12)}</code> · 状态{" "}
+                    {file.analysis_status === "suggested"
+                      ? "待确认"
+                      : file.analysis_status === "confirmed"
+                        ? "已确认"
+                        : file.analysis_status === "stale"
+                          ? "已过期"
+                          : file.analysis_status}
+                  </p>
+                  {file.analysis_status === "stale" && (
+                    <p className="rounded-lg bg-red-50 p-2 text-red-800">
+                      此文件的旧分析已过期。请点击上方“重新分析最新内容”，生成最新分析后再确认。
                     </p>
-                    <p>
-                      建议角色：{file.suggested_role}（
-                      {Math.round(file.role_confidence * 100)}%） ·
-                      建议答案来源：{file.suggested_answer_source}
+                  )}
+                  <p>
+                    建议用途：
+                    {FILE_ROLE_LABEL[file.suggested_role] ??
+                      file.suggested_role}
+                    （{Math.round(file.role_confidence * 100)}%） ·
+                    建议答案来源：
+                    {ANSWER_SOURCE_LABEL[file.suggested_answer_source] ??
+                      file.suggested_answer_source}
+                  </p>
+                  {file.analysis_status !== "suggested" &&
+                    file.teacher_confirmed_role && (
+                      <p className="rounded-lg bg-emerald-50 p-2 font-medium text-emerald-800">
+                        ✓ 已确认：此文件是
+                        {FILE_ROLE_LABEL[file.teacher_confirmed_role] ??
+                          file.teacher_confirmed_role}
+                        ；答案来源为
+                        {ANSWER_SOURCE_LABEL[
+                          file.teacher_confirmed_answer_source ??
+                            "not_applicable"
+                        ] ??
+                          file.teacher_confirmed_answer_source ??
+                          "不适用"}
+                      </p>
+                    )}
+                  {file.duplicate_of_file_id && (
+                    <p className="text-amber-700">
+                      重复关系：{file.duplicate_of_file_id}
                     </p>
-                    {file.duplicate_of_file_id && (
-                      <p className="text-amber-700">
-                        重复关系：{file.duplicate_of_file_id}
-                      </p>
-                    )}
-                    {!!file.warning_codes.length && (
-                      <p className="text-amber-700">
-                        风险：{file.warning_codes.join("、")}
-                      </p>
-                    )}
-                    {!!pages.length && (
-                      <p>
-                        页面：
-                        {pages
-                          .map(
-                            (page) =>
-                              `#${page.paper_page_id.slice(0, 6)} ${page.warning_codes.join("/") || page.status}`,
-                          )
-                          .join("；")}
-                      </p>
-                    )}
-                    {file.analysis_status === "suggested" && (
-                      <div className="grid gap-2 sm:grid-cols-3">
-                        <label>
-                          确认文件角色
-                          <select
-                            aria-label={`${file.file_name ?? file.id} 文件角色`}
-                            className="mt-1 w-full rounded border p-2"
-                            value={choice.role}
-                            onChange={(event) =>
-                              setFileChoices((old) => ({
-                                ...old,
-                                [file.id]: {
-                                  ...choice,
-                                  role: event.target.value,
-                                  source:
-                                    event.target.value === "reference_answer"
-                                      ? choice.source
-                                      : "not_applicable",
-                                },
-                              }))
-                            }
-                          >
-                            {[
-                              "question_paper",
-                              "reference_answer",
-                              "rubric",
-                              "instructions",
-                              "attachment",
-                              "unknown",
-                            ].map((role) => (
-                              <option key={role}>{role}</option>
-                            ))}
-                          </select>
-                        </label>
-                        <label>
-                          确认答案来源
-                          <select
-                            aria-label={`${file.file_name ?? file.id} 答案来源`}
-                            className="mt-1 w-full rounded border p-2"
-                            value={choice.source}
-                            disabled={choice.role !== "reference_answer"}
-                            onChange={(event) =>
-                              setFileChoices((old) => ({
-                                ...old,
-                                [file.id]: {
-                                  ...choice,
-                                  source: event.target.value,
-                                },
-                              }))
-                            }
-                          >
-                            {[
-                              "teacher_official",
-                              "publisher_official",
-                              "teacher_provided",
-                              "third_party",
-                              "ai_generated",
-                              "unknown",
-                              "not_applicable",
-                            ].map((source) => (
-                              <option key={source}>{source}</option>
-                            ))}
-                          </select>
-                        </label>
-                        <Button
-                          className="self-end"
-                          variant="outline"
-                          disabled={busy}
-                          onClick={() =>
-                            void review(() =>
-                              assignmentGenerationApi.confirmFileAnalysis(
-                                file.id,
-                                {
-                                  expected_teacher_edit_version:
-                                    file.teacher_edit_version,
-                                  confirmed_role: choice.role,
-                                  confirmed_answer_source: choice.source,
-                                },
-                              ),
-                            )
+                  )}
+                  {!!file.warning_codes.length && (
+                    <p className="text-amber-700">
+                      风险：{file.warning_codes.join("、")}
+                    </p>
+                  )}
+                  {!!pages.length && (
+                    <p>
+                      页面：
+                      {pages
+                        .map(
+                          (page) =>
+                            `#${page.paper_page_id.slice(0, 6)} ${page.warning_codes.join("/") || page.status}`,
+                        )
+                        .join("；")}
+                    </p>
+                  )}
+                  {file.analysis_status === "suggested" && (
+                    <div className="grid gap-2 sm:grid-cols-3">
+                      <label>
+                        确认文件角色
+                        <select
+                          aria-label={`${file.file_name ?? file.id} 文件角色`}
+                          className="mt-1 w-full rounded border p-2"
+                          value={choice.role}
+                          onChange={(event) =>
+                            setFileChoices((old) => ({
+                              ...old,
+                              [file.id]: {
+                                ...choice,
+                                role: event.target.value,
+                                source:
+                                  event.target.value === "reference_answer"
+                                    ? choice.source
+                                    : "not_applicable",
+                              },
+                            }))
                           }
                         >
-                          确认文件分析
-                        </Button>
-                      </div>
-                    )}
-                  </article>
-                );
-              })}
-          </section>
+                          {[
+                            "question_paper",
+                            "reference_answer",
+                            "rubric",
+                            "instructions",
+                            "attachment",
+                            "unknown",
+                          ].map((role) => (
+                            <option key={role} value={role}>
+                              {FILE_ROLE_LABEL[role]}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        确认答案来源
+                        <select
+                          aria-label={`${file.file_name ?? file.id} 答案来源`}
+                          className="mt-1 w-full rounded border p-2"
+                          value={choice.source}
+                          disabled={choice.role !== "reference_answer"}
+                          onChange={(event) =>
+                            setFileChoices((old) => ({
+                              ...old,
+                              [file.id]: {
+                                ...choice,
+                                source: event.target.value,
+                              },
+                            }))
+                          }
+                        >
+                          {[
+                            "teacher_official",
+                            "publisher_official",
+                            "teacher_provided",
+                            "third_party",
+                            "ai_generated",
+                            "unknown",
+                            "not_applicable",
+                          ].map((source) => (
+                            <option key={source} value={source}>
+                              {ANSWER_SOURCE_LABEL[source]}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <Button
+                        className="self-end"
+                        variant="outline"
+                        disabled={busy}
+                        onClick={() =>
+                          void review(() =>
+                            assignmentGenerationApi.confirmFileAnalysis(
+                              file.id,
+                              {
+                                expected_teacher_edit_version:
+                                  file.teacher_edit_version,
+                                confirmed_role: choice.role,
+                                confirmed_answer_source: choice.source,
+                              },
+                            ),
+                          )
+                        }
+                      >
+                        确认文件分析
+                      </Button>
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </details>
         </>
       ) : (
         <p className="text-sm text-[var(--neutral-600)]">尚未创建生成任务。</p>
@@ -679,12 +830,17 @@ export function AssignmentGenerationPanel({
       {current?.revision && (
         <QuestionExtractionReview
           revision={current.revision}
-          onChanged={() => void load()}
+          onChanged={() =>
+            void (async () => {
+              await notifyReviewInputsChanged();
+              await load();
+            })()
+          }
         />
       )}
 
       <details>
-        <summary className="cursor-pointer font-semibold">
+        <summary className="cursor-pointer rounded-lg px-3 py-3 font-semibold hover:bg-[var(--neutral-50)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--brand-600)]">
           草稿历史版本（{revisions.length}）
         </summary>
         <ol className="mt-2 grid gap-2 text-sm">

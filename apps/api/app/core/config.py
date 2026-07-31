@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     signed_url_expiry_seconds: int = 900
     demo_actor_enabled: bool = True
     demo_actor_email: str = "demo-teacher@ahamark.local"
+    synthetic_demo_reset_enabled: bool = False
+    synthetic_demo_reset_bucket: str = "ahamark-business-e2e-files"
     session_hmac_secret: str = "development-only-session-secret"
     auth_cookie_name: str = "ahamark_session"
     auth_session_hours: int = 12
@@ -112,6 +114,10 @@ class Settings(BaseSettings):
     ai_grading_store_responses: bool = False
     ai_grading_review_provider: str | None = None
     ai_grading_review_model: str | None = None
+    codex_local_enabled: bool = False
+    codex_local_internal_token: SecretStr | None = None
+    codex_local_lease_seconds: int = Field(default=300, ge=30, le=3600)
+    codex_local_max_claim: int = Field(default=20, ge=1, le=100)
     submission_max_files: int = 100
     submission_batch_max_bytes: int = 250 * 1024 * 1024
     submission_match_threshold: float = 0.95
@@ -129,6 +135,26 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def production_guard(self) -> "Settings":
+        weak_codex_tokens = {
+            "",
+            "change-me",
+            "change-me-in-production",
+            "password",
+            "secret",
+            "codex-local",
+            "development-only-codex-token",
+        }
+        if self.codex_local_enabled:
+            token = (
+                self.codex_local_internal_token.get_secret_value()
+                if self.codex_local_internal_token is not None
+                else ""
+            )
+            if token.lower() in weak_codex_tokens or len(token) < 32:
+                raise ValueError(
+                    "CODEX_LOCAL_INTERNAL_TOKEN must be a strong value of at least "
+                    "32 characters when CODEX_LOCAL_ENABLED is true"
+                )
         if self.app_env.lower() != "production":
             return self
         errors: list[str] = []
@@ -145,8 +171,14 @@ class Settings(BaseSettings):
             errors.append("DEBUG must be false")
         if self.demo_actor_enabled:
             errors.append("DEMO_ACTOR_ENABLED must be false")
+        if self.synthetic_demo_reset_enabled:
+            errors.append("SYNTHETIC_DEMO_RESET_ENABLED must be false")
+        if self.codex_local_enabled:
+            errors.append("CODEX_LOCAL_ENABLED must be false")
         if self.recognition_provider.lower() == "fake":
             errors.append("RECOGNITION_PROVIDER cannot be fake")
+        if self.answer_recognition_provider.lower() == "fake":
+            errors.append("ANSWER_RECOGNITION_PROVIDER cannot be fake")
         if self.grading_provider.lower() == "fake":
             errors.append("GRADING_PROVIDER cannot be fake")
         if self.ai_grading_provider.lower() == "fake":

@@ -1607,6 +1607,7 @@ class StudentAnswerRegion(TimestampMixin, Base):
         ForeignKey("users.id", ondelete="SET NULL")
     )
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    confirmation_origin: Mapped[str | None] = mapped_column(String(24))
     reason: Mapped[str | None] = mapped_column(String(255))
     segmentation_version: Mapped[str] = mapped_column(String(80), default="submission-seg-v1")
     region_version: Mapped[int] = mapped_column(Integer, default=1)
@@ -1851,6 +1852,7 @@ class QuestionRecognitionEvidence(TimestampMixin, Base):
         ForeignKey("users.id", ondelete="SET NULL")
     )
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    confirmation_origin: Mapped[str | None] = mapped_column(String(24))
 
 
 class GradingJob(TimestampMixin, Base):
@@ -2028,6 +2030,8 @@ class ReferenceAnswerVersion(Base):
     __tablename__ = "reference_answer_versions"
     __table_args__ = (
         UniqueConstraint("question_id", "version", name="uq_reference_answer_question_version"),
+        UniqueConstraint("origin_answer_candidate_id", name="uq_reference_answer_origin_candidate"),
+        UniqueConstraint("materialization_key", name="uq_reference_answer_materialization_key"),
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     question_id: Mapped[uuid.UUID] = mapped_column(
@@ -2047,12 +2051,25 @@ class ReferenceAnswerVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
     teacher_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    origin_answer_candidate_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "assignment_answer_draft_candidates.id",
+            name="fk_reference_answer_origin_candidate",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+    )
+    materialization_key: Mapped[str | None] = mapped_column(String(64))
 
 
 class StructuredRubricVersion(Base):
     __tablename__ = "structured_rubric_versions"
     __table_args__ = (
         UniqueConstraint("question_id", "rubric_version", name="uq_structured_rubric_version"),
+        UniqueConstraint(
+            "origin_rubric_candidate_id", name="uq_structured_rubric_origin_candidate"
+        ),
+        UniqueConstraint("materialization_key", name="uq_structured_rubric_materialization_key"),
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     question_id: Mapped[uuid.UUID] = mapped_column(
@@ -2073,6 +2090,15 @@ class StructuredRubricVersion(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    origin_rubric_candidate_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "assignment_rubric_draft_candidates.id",
+            name="fk_structured_rubric_origin_candidate",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+    )
+    materialization_key: Mapped[str | None] = mapped_column(String(64))
 
 
 class RubricCriterion(Base):
@@ -2209,6 +2235,12 @@ class AssignmentExplicitConfirmation(Base):
     confirmation_type: Mapped[str] = mapped_column(String(32), index=True)
     confirmed_value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     source_hash: Mapped[str] = mapped_column(String(64))
+    fingerprint_schema_version: Mapped[str | None] = mapped_column(String(40))
+    paper_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("paper_versions.id", ondelete="RESTRICT"), index=True
+    )
+    question_scope_hash: Mapped[str | None] = mapped_column(String(64))
+    confirmation_origin: Mapped[str | None] = mapped_column(String(24))
     confirmation_version: Mapped[int] = mapped_column(Integer)
     confirmed_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
@@ -2244,6 +2276,12 @@ class AssignmentRubricPublicationBinding(Base):
     binding_version: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(24), default="draft", index=True)
     source_binding_hash: Mapped[str] = mapped_column(String(64))
+    source_semantic_hash: Mapped[str | None] = mapped_column(String(64))
+    target_legacy_hash: Mapped[str | None] = mapped_column(String(64))
+    projection_profile: Mapped[str | None] = mapped_column(String(64))
+    projection_version: Mapped[str | None] = mapped_column(String(40))
+    loss_report: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
+    loss_report_hash: Mapped[str | None] = mapped_column(String(64))
     mapping: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
@@ -2655,3 +2693,458 @@ class AISuggestionReview(Base):
         ForeignKey("structured_rubric_versions.id", ondelete="RESTRICT")
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class ProcessingRun(TimestampMixin, Base):
+    __tablename__ = "processing_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "grading_batch_id",
+            "generation",
+            name="uq_processing_run_batch_generation",
+        ),
+        CheckConstraint("generation > 0", name="ck_processing_run_generation_positive"),
+        CheckConstraint(
+            "status IN ('queued', 'running', 'waiting_input', 'waiting_codex', "
+            "'awaiting_teacher_review', 'partially_failed', 'failed', 'stale', 'cancelled')",
+            name="ck_processing_run_status",
+        ),
+        CheckConstraint(
+            "mode IN ('codex_local')",
+            name="ck_processing_run_mode",
+        ),
+        CheckConstraint(
+            "submission_count >= 0 AND step_count >= 0 "
+            "AND completed_step_count >= 0 AND failed_step_count >= 0 "
+            "AND pending_codex_count >= 0",
+            name="ck_processing_run_counters_nonnegative",
+        ),
+        CheckConstraint(
+            "completed_step_count + failed_step_count <= step_count",
+            name="ck_processing_run_terminal_counters_bounded",
+        ),
+        Index(
+            "ix_processing_run_owner_batch_status",
+            "owner_id",
+            "grading_batch_id",
+            "status",
+        ),
+        Index(
+            "ix_processing_run_batch_request_hash",
+            "grading_batch_id",
+            "request_hash",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", name="fk_processing_run_owner", ondelete="RESTRICT")
+    )
+    grading_batch_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey(
+            "grading_batches.id",
+            name="fk_processing_run_grading_batch",
+            ondelete="RESTRICT",
+        )
+    )
+    status: Mapped[str] = mapped_column(String(30), default="queued")
+    mode: Mapped[str] = mapped_column(String(30), default="codex_local")
+    generation: Mapped[int] = mapped_column(Integer)
+    input_version: Mapped[str] = mapped_column(String(160))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    input_manifest: Mapped[dict[str, Any]] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"),
+        default=dict,
+        server_default=text("'{}'"),
+    )
+    submission_count: Mapped[int] = mapped_column(Integer, default=0)
+    step_count: Mapped[int] = mapped_column(Integer, default=0)
+    completed_step_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_step_count: Mapped[int] = mapped_column(Integer, default=0)
+    pending_codex_count: Mapped[int] = mapped_column(Integer, default=0)
+    retryable: Mapped[bool] = mapped_column(Boolean, default=True)
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    stale_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    steps: Mapped[list["ProcessingStep"]] = relationship(back_populates="run")
+
+
+class ProcessingRunCommand(TimestampMixin, Base):
+    __tablename__ = "processing_run_commands"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_id",
+            "idempotency_key",
+            name="uq_processing_run_command_owner_idempotency",
+        ),
+        CheckConstraint(
+            "operation IN ('continue', 'retry', 'reconcile')",
+            name="ck_processing_run_command_operation",
+        ),
+        CheckConstraint(
+            "idempotency_key = trim(idempotency_key) "
+            "AND length(idempotency_key) BETWEEN 1 AND 128",
+            name="ck_processing_run_command_idempotency_key",
+        ),
+        CheckConstraint(
+            "length(request_hash) = 64",
+            name="ck_processing_run_command_request_hash",
+        ),
+        CheckConstraint(
+            "expected_generation IS NULL OR expected_generation > 0",
+            name="ck_processing_run_command_expected_generation_positive",
+        ),
+        CheckConstraint(
+            "result_generation > 0",
+            name="ck_processing_run_command_result_generation_positive",
+        ),
+        CheckConstraint(
+            "(operation = 'continue' AND source_run_id IS NULL "
+            "AND expected_generation IS NULL) "
+            "OR (operation = 'retry' AND source_run_id IS NOT NULL "
+            "AND expected_generation IS NOT NULL) "
+            "OR (operation = 'reconcile' AND source_run_id IS NOT NULL "
+            "AND expected_generation IS NOT NULL AND source_run_id = result_run_id "
+            "AND expected_generation = result_generation)",
+            name="ck_processing_run_command_shape",
+        ),
+        Index(
+            "ix_processing_run_command_owner_batch_created",
+            "owner_id",
+            "grading_batch_id",
+            "created_at",
+        ),
+        Index(
+            "ix_processing_run_command_source_operation",
+            "source_run_id",
+            "operation",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey(
+            "users.id",
+            name="fk_processing_run_command_owner",
+            ondelete="RESTRICT",
+        )
+    )
+    grading_batch_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey(
+            "grading_batches.id",
+            name="fk_processing_run_command_grading_batch",
+            ondelete="RESTRICT",
+        )
+    )
+    operation: Mapped[str] = mapped_column(String(20))
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    request_payload: Mapped[dict[str, Any]] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"),
+        default=dict,
+        server_default=text("'{}'"),
+    )
+    source_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "processing_runs.id",
+            name="fk_processing_run_command_source_run",
+            ondelete="RESTRICT",
+        )
+    )
+    result_run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey(
+            "processing_runs.id",
+            name="fk_processing_run_command_result_run",
+            ondelete="RESTRICT",
+        )
+    )
+    expected_generation: Mapped[int | None] = mapped_column(Integer)
+    result_generation: Mapped[int] = mapped_column(Integer)
+
+
+class ProcessingStep(TimestampMixin, Base):
+    __tablename__ = "processing_steps"
+    __table_args__ = (
+        UniqueConstraint(
+            "processing_run_id",
+            "scope_key",
+            "kind",
+            "generation",
+            name="uq_processing_step_run_scope_kind_generation",
+        ),
+        CheckConstraint("generation > 0", name="ck_processing_step_generation_positive"),
+        CheckConstraint(
+            "attempt >= 0 AND max_attempts > 0 AND attempt <= max_attempts",
+            name="ck_processing_step_attempt_bounds",
+        ),
+        CheckConstraint(
+            "kind IN ('recognition', 'codex_suggestion', 'review_readiness')",
+            name="ck_processing_step_kind",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'dispatched', 'running', 'succeeded', 'blocked_review', "
+            "'retryable_failed', 'terminal_failed', 'stale', 'cancelled')",
+            name="ck_processing_step_status",
+        ),
+        CheckConstraint(
+            "(dispatch_token IS NULL AND dispatch_owner IS NULL "
+            "AND dispatch_lease_expires_at IS NULL) "
+            "OR (dispatch_token IS NOT NULL AND dispatch_owner IS NOT NULL "
+            "AND dispatch_lease_expires_at IS NOT NULL)",
+            name="ck_processing_step_dispatch_lease_complete",
+        ),
+        Index(
+            "ix_processing_step_run_status_available",
+            "processing_run_id",
+            "status",
+            "available_at",
+        ),
+        Index(
+            "ix_processing_step_submission_kind_status",
+            "submission_id",
+            "kind",
+            "status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    processing_run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey(
+            "processing_runs.id",
+            name="fk_processing_step_run",
+            ondelete="RESTRICT",
+        )
+    )
+    submission_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey(
+            "submissions.id",
+            name="fk_processing_step_submission",
+            ondelete="RESTRICT",
+        )
+    )
+    student_answer_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "student_answers.id",
+            name="fk_processing_step_student_answer",
+            ondelete="RESTRICT",
+        )
+    )
+    scope_key: Mapped[str] = mapped_column(String(160))
+    kind: Mapped[str] = mapped_column(String(40))
+    stage: Mapped[str] = mapped_column(
+        String(40),
+        default="answer_recognition",
+        server_default=text("'answer_recognition'"),
+    )
+    status: Mapped[str] = mapped_column(String(30), default="pending")
+    generation: Mapped[int] = mapped_column(Integer)
+    input_version: Mapped[str] = mapped_column(String(160))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dispatch_token: Mapped[str | None] = mapped_column(String(128))
+    dispatch_owner: Mapped[str | None] = mapped_column(String(160))
+    dispatch_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recognition_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "submission_recognition_jobs.id",
+            name="fk_processing_step_recognition_job",
+            ondelete="RESTRICT",
+        )
+    )
+    submission_processing_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "submission_processing_jobs.id",
+            name="fk_processing_step_submission_processing_job",
+            ondelete="RESTRICT",
+        ),
+        index=True,
+    )
+    retryable: Mapped[bool] = mapped_column(Boolean, default=True)
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    stale_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    run: Mapped[ProcessingRun] = relationship(back_populates="steps")
+    codex_work_item: Mapped["CodexWorkItem | None"] = relationship(back_populates="step")
+
+
+class CodexWorkItem(TimestampMixin, Base):
+    __tablename__ = "codex_work_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "processing_step_id",
+            name="uq_codex_work_item_processing_step",
+        ),
+        CheckConstraint("generation > 0", name="ck_codex_work_item_generation_positive"),
+        CheckConstraint(
+            "attempt >= 0 AND max_attempts > 0 AND attempt <= max_attempts",
+            name="ck_codex_work_item_attempt_bounds",
+        ),
+        CheckConstraint(
+            "provider = 'codex_local'",
+            name="ck_codex_work_item_provider",
+        ),
+        CheckConstraint(
+            "status IN ('queued', 'leased', 'submitted', 'applied', 'retryable_failed', "
+            "'terminal_failed', 'stale', 'cancelled')",
+            name="ck_codex_work_item_status",
+        ),
+        CheckConstraint(
+            "(status = 'leased' AND lease_token_hash IS NOT NULL "
+            "AND length(lease_token_hash) = 64 AND lease_owner IS NOT NULL "
+            "AND lease_expires_at IS NOT NULL) "
+            "OR (status <> 'leased' AND lease_token_hash IS NULL "
+            "AND lease_owner IS NULL AND lease_expires_at IS NULL)",
+            name="ck_codex_work_item_lease_state",
+        ),
+        CheckConstraint(
+            "length(request_hash) = 64",
+            name="ck_codex_work_item_request_hash",
+        ),
+        CheckConstraint(
+            "(response_payload IS NULL AND response_hash IS NULL "
+            "AND submitted_lease_token_hash IS NULL AND submitted_at IS NULL) "
+            "OR (response_payload IS NOT NULL AND response_hash IS NOT NULL "
+            "AND length(response_hash) = 64 AND submitted_lease_token_hash IS NOT NULL "
+            "AND length(submitted_lease_token_hash) = 64 AND submitted_at IS NOT NULL)",
+            name="ck_codex_work_item_submission_audit_complete",
+        ),
+        CheckConstraint(
+            "(status IN ('submitted', 'applied') AND response_payload IS NOT NULL "
+            "AND response_hash IS NOT NULL AND submitted_lease_token_hash IS NOT NULL "
+            "AND submitted_at IS NOT NULL) "
+            "OR (status IN ('queued', 'leased', 'retryable_failed') "
+            "AND response_payload IS NULL AND response_hash IS NULL "
+            "AND submitted_lease_token_hash IS NULL AND submitted_at IS NULL) "
+            "OR (status IN ('terminal_failed', 'stale', 'cancelled') "
+            "AND ((response_payload IS NULL AND response_hash IS NULL "
+            "AND submitted_lease_token_hash IS NULL AND submitted_at IS NULL) "
+            "OR (response_payload IS NOT NULL AND response_hash IS NOT NULL "
+            "AND submitted_lease_token_hash IS NOT NULL AND submitted_at IS NOT NULL)))",
+            name="ck_codex_work_item_submission_state",
+        ),
+        CheckConstraint(
+            "(grading_job_id IS NULL AND grading_result_id IS NULL) "
+            "OR (grading_job_id IS NOT NULL AND grading_result_id IS NOT NULL)",
+            name="ck_codex_work_item_applied_refs_complete",
+        ),
+        CheckConstraint(
+            "(status = 'applied' AND response_payload IS NOT NULL AND response_hash IS NOT NULL "
+            "AND grading_job_id IS NOT NULL AND grading_result_id IS NOT NULL "
+            "AND applied_at IS NOT NULL) "
+            "OR (status <> 'applied' AND grading_job_id IS NULL AND grading_result_id IS NULL "
+            "AND applied_at IS NULL)",
+            name="ck_codex_work_item_applied_state",
+        ),
+        Index(
+            "ix_codex_work_item_owner_batch_status_available",
+            "owner_id",
+            "grading_batch_id",
+            "status",
+            "available_at",
+        ),
+        Index(
+            "ix_codex_work_item_submission_answer_status",
+            "submission_id",
+            "student_answer_id",
+            "status",
+        ),
+        Index(
+            "ix_codex_work_item_claim",
+            "status",
+            "available_at",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    processing_step_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey(
+            "processing_steps.id",
+            name="fk_codex_work_item_processing_step",
+            ondelete="RESTRICT",
+        )
+    )
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", name="fk_codex_work_item_owner", ondelete="RESTRICT")
+    )
+    grading_batch_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey(
+            "grading_batches.id",
+            name="fk_codex_work_item_grading_batch",
+            ondelete="RESTRICT",
+        )
+    )
+    submission_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey(
+            "submissions.id",
+            name="fk_codex_work_item_submission",
+            ondelete="RESTRICT",
+        )
+    )
+    student_answer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey(
+            "student_answers.id",
+            name="fk_codex_work_item_student_answer",
+            ondelete="RESTRICT",
+        )
+    )
+    status: Mapped[str] = mapped_column(String(30), default="queued")
+    generation: Mapped[int] = mapped_column(Integer)
+    input_version: Mapped[str] = mapped_column(String(160))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    request_payload: Mapped[dict[str, Any]] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"), default=dict
+    )
+    response_payload: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql")
+    )
+    response_hash: Mapped[str | None] = mapped_column(String(64))
+    provider: Mapped[str] = mapped_column(String(80), default="codex_local")
+    prompt_version: Mapped[str] = mapped_column(String(80))
+    schema_version: Mapped[str] = mapped_column(String(80))
+    config_version: Mapped[str] = mapped_column(String(80))
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_token_hash: Mapped[str | None] = mapped_column(String(64))
+    lease_owner: Mapped[str | None] = mapped_column(String(160))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    submitted_lease_token_hash: Mapped[str | None] = mapped_column(String(64))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    grading_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "grading_jobs.id",
+            name="fk_codex_work_item_grading_job",
+            ondelete="RESTRICT",
+        )
+    )
+    grading_result_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "grading_results.id",
+            name="fk_codex_work_item_grading_result",
+            ondelete="RESTRICT",
+        )
+    )
+    retryable: Mapped[bool] = mapped_column(Boolean, default=True)
+    error_code: Mapped[str | None] = mapped_column(String(80))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    stale_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    step: Mapped[ProcessingStep] = relationship(back_populates="codex_work_item")

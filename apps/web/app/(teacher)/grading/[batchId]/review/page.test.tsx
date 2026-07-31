@@ -85,12 +85,13 @@ function workspace({
               max_score: "10",
             },
             result: {
-              score: "10",
+              score: "10" as string | null,
               confidence: "0.99",
               provider: "objective-rule",
               provider_version: "1",
               status: stale ? "stale" : "suggested",
               rubric_version_id: stale ? "rubric-2" : "rubric-1",
+              requires_review: false,
             },
             review: stale ? undefined : { final_score: "10", feedback: "" },
             criteria: [] as Array<{
@@ -137,22 +138,96 @@ it("blocks accepting a stale result and offers explicit regrading", async () => 
   await waitFor(() => expect(mocks.grade).toHaveBeenCalledWith("ans-1"));
 });
 
-it("allows an explicit teacher acceptance for a current low-confidence suggestion", async () => {
+it("blocks direct acceptance when the answer itself requires teacher review", async () => {
   mockEligibility(false);
   const data = workspace();
   data.items[0].answers[0].requires_review = true;
   data.items[0].answers[0].status = "review_required";
   mocks.reviewWorkspace.mockResolvedValue(data);
-  mocks.review.mockResolvedValue({});
   render(<ReviewPage />);
 
   const accept = await screen.findByRole("button", { name: "接受" });
-  expect(accept).toBeEnabled();
+  expect(accept).toBeDisabled();
+  expect(screen.getByTestId("acceptance-blocked-hint")).toHaveTextContent(
+    "当前建议已标记为需要教师复核",
+  );
   fireEvent.click(accept);
-  await waitFor(() =>
-    expect(mocks.review).toHaveBeenCalledWith("ans-1", {
-      decision: "accepted",
-    }),
+  expect(mocks.review).not.toHaveBeenCalled();
+});
+
+const reviewBlockCases: Array<
+  [
+    string,
+    {
+      resultRequiresReview?: boolean;
+      nullScore?: boolean;
+      incompleteCriterion?: boolean;
+    },
+    string,
+  ]
+> = [
+  [
+    "result requires review",
+    { resultRequiresReview: true },
+    "当前建议已标记为需要教师复核",
+  ],
+  ["score is null", { nullScore: true }, "建议中没有有效分数"],
+  [
+    "criterion is incomplete",
+    { incompleteCriterion: true },
+    "存在需要人工处理或尚未完成的评分项",
+  ],
+];
+
+it.each(reviewBlockCases)(
+  "includes %s in needs-review filtering and disables acceptance",
+  async (_label, condition, expectedReason) => {
+    mockEligibility(false);
+    const data = workspace({ reviewed: 0 });
+    const answer = data.items[0].answers[0];
+    answer.requires_review = false;
+    answer.review = undefined;
+    if (condition.resultRequiresReview) answer.result.requires_review = true;
+    if (condition.nullScore) answer.result.score = null;
+    if (condition.incompleteCriterion) {
+      answer.criteria = [
+        {
+          rubric_item_id: "criterion-incomplete",
+          status: "incomplete",
+          awarded_points: undefined,
+          max_points: "10",
+        },
+      ];
+    }
+    mocks.reviewWorkspace.mockResolvedValue(data);
+    render(<ReviewPage />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "必须逐题复核" }),
+    );
+    expect(screen.getByRole("button", { name: /第 1 题/ })).toBeInTheDocument();
+    expect(screen.getByTestId("review-answer")).toHaveTextContent(
+      "需要教师复核",
+    );
+    expect(screen.getByRole("button", { name: "接受" })).toBeDisabled();
+    expect(screen.getByTestId("acceptance-blocked-hint")).toHaveTextContent(
+      expectedReason,
+    );
+  },
+);
+
+it("shows the readable backend error when saving a review fails", async () => {
+  mockEligibility();
+  mocks.reviewWorkspace.mockResolvedValue(workspace());
+  mocks.review.mockRejectedValue(
+    new Error("建议分缺失，不能接受，请改为手动评分"),
+  );
+  render(<ReviewPage />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "接受" }));
+
+  expect(await screen.findByRole("status")).toHaveTextContent(
+    "保存失败：建议分缺失，不能接受，请改为手动评分",
   );
 });
 

@@ -73,14 +73,15 @@ export default function ClassDetailPage({
   const addStudent = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setSaving(true);
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     try {
       await studentsApi.add(classId, {
         name: String(form.get("name")),
         student_number: String(form.get("student_number")),
         email: String(form.get("email") || "") || undefined,
       });
-      event.currentTarget.reset();
+      formElement.reset();
       toast("学生已加入班级");
       await load();
       setStudentOpen(false);
@@ -93,13 +94,14 @@ export default function ClassDetailPage({
   const addGroup = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setSaving(true);
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     try {
       await groupsApi.create(classId, {
         name: String(form.get("name")),
         description: String(form.get("description") || ""),
       });
-      event.currentTarget.reset();
+      formElement.reset();
       toast("分组已创建");
       await load();
     } catch (e) {

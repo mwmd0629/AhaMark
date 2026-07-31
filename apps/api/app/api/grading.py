@@ -1,5 +1,6 @@
 import hashlib
 import io
+import json
 import re
 import uuid
 from decimal import Decimal
@@ -25,8 +26,10 @@ from app.models import (
     MembershipStatus,
     Question,
     QuestionKnowledgePoint,
+    QuestionRecognitionEvidence,
     QuestionRubric,
     QuestionStatus,
+    RecognitionRevision,
     RubricItem,
     RubricVersion,
     SchoolClass,
@@ -45,7 +48,9 @@ from app.models import (
     TeacherReview,
     now_utc,
 )
-from app.recognition.pipeline import provider_from_settings as recognition_provider_from_settings
+from app.recognition.answer_providers import (
+    provider_from_settings as recognition_provider_from_settings,
+)
 from app.recognition.submission import mark_submission_stale
 from app.security.files import UnsafeFile, inspect_upload, safe_filename
 from app.storage.base import ObjectStorage
@@ -53,11 +58,14 @@ from app.storage.dependencies import get_storage
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/api", tags=["grading"])
 Db = Annotated[Session, Depends(get_db)]
 Storage = Annotated[ObjectStorage, Depends(get_storage)]
+
+_CURRENT_RECOGNITION_STATUSES = {"recognized", "requires_review", "confirmed"}
 
 
 class BatchInput(BaseModel):
@@ -172,6 +180,166 @@ def owned_submission(db: Session, owner: uuid.UUID, submission_id: uuid.UUID) ->
     if item is None:
         raise ApiProblem(404, "SUBMISSION_NOT_FOUND", "提交不存在")
     return item
+
+
+def _effective_answer_content(answer: StudentAnswer) -> str:
+    corrected = (
+        answer.corrected_text if answer.corrected_text is not None else answer.corrected_latex
+    )
+    if corrected is not None:
+        return corrected.strip()
+    return (answer.recognized_text or answer.recognized_latex or "").strip()
+
+
+def _answer_evidence_context(
+    db: Session, answer: StudentAnswer
+) -> tuple[str | None, list[StudentAnswerRegion], QuestionRecognitionEvidence | None]:
+    confirmed_regions = list(
+        db.scalars(
+            select(StudentAnswerRegion).where(
+                StudentAnswerRegion.student_answer_id == answer.id,
+                StudentAnswerRegion.status == "confirmed",
+            )
+        ).all()
+    )
+    if not confirmed_regions:
+        return "CONFIRMED_REGION_MISSING", [], None
+    evidence = db.scalar(
+        select(QuestionRecognitionEvidence)
+        .where(QuestionRecognitionEvidence.student_answer_id == answer.id)
+        .order_by(
+            QuestionRecognitionEvidence.recognition_version.desc(),
+            QuestionRecognitionEvidence.created_at.desc(),
+        )
+    )
+    if evidence is None:
+        return "CURRENT_RECOGNITION_EVIDENCE_MISSING", confirmed_regions, None
+    if evidence.stale_at is not None or evidence.status == "stale":
+        return "RECOGNITION_EVIDENCE_STALE", confirmed_regions, evidence
+    if evidence.status not in _CURRENT_RECOGNITION_STATUSES or not evidence.block_sources:
+        return "CURRENT_RECOGNITION_EVIDENCE_MISSING", confirmed_regions, evidence
+    regions_by_id = {str(region.id): region for region in confirmed_regions}
+    current_regions: list[StudentAnswerRegion] = []
+    seen_region_ids: set[uuid.UUID] = set()
+    for source in evidence.block_sources:
+        if not isinstance(source, dict):
+            return "RECOGNITION_EVIDENCE_STALE", confirmed_regions, evidence
+        block_id, region_id = source.get("block_id"), source.get("region_id")
+        lineage_version_value = source.get("block_recognition_version")
+        region_version_value = source.get("region_version")
+        if (
+            not isinstance(lineage_version_value, int)
+            or isinstance(lineage_version_value, bool)
+            or not isinstance(region_version_value, int)
+            or isinstance(region_version_value, bool)
+        ):
+            return "RECOGNITION_EVIDENCE_STALE", confirmed_regions, evidence
+        try:
+            block_uuid = uuid.UUID(str(block_id))
+            page_uuid = uuid.UUID(str(source.get("page_id")))
+            lineage_job_uuid = uuid.UUID(str(source.get("block_recognition_job_id")))
+        except (TypeError, ValueError):
+            return "RECOGNITION_EVIDENCE_STALE", confirmed_regions, evidence
+        region = regions_by_id.get(str(region_id))
+        block = db.get(SubmissionRecognitionBlock, block_uuid)
+        region_bbox = (
+            [str(region.x), str(region.y), str(region.width), str(region.height)] if region else []
+        )
+        preserved_human_revision = source.get("preserved_human_revision") is True
+        has_current_human_revision = (
+            block is not None
+            and db.scalar(
+                select(RecognitionRevision.id).where(
+                    RecognitionRevision.recognition_block_id == block.id,
+                    RecognitionRevision.source == "human",
+                    RecognitionRevision.stale_at.is_(None),
+                )
+            )
+            is not None
+        )
+        valid_preserved_human_revision = preserved_human_revision and has_current_human_revision
+        if (
+            region is None
+            or block is None
+            or block.student_answer_region_id != region.id
+            or block.submission_page_id != region.submission_page_id
+            or page_uuid != region.submission_page_id
+            or lineage_job_uuid != block.submission_recognition_job_id
+            or lineage_version_value != block.recognition_version
+            or region_version_value != region.region_version
+            or source.get("region_bbox") != region_bbox
+            or block.stale_at is not None
+            or (
+                block.status not in _CURRENT_RECOGNITION_STATUSES
+                and not (valid_preserved_human_revision and block.status == "human_edited")
+            )
+        ):
+            return "RECOGNITION_EVIDENCE_STALE", confirmed_regions, evidence
+        lineage_matches_evidence = (
+            block.submission_recognition_job_id == evidence.recognition_job_id
+            and block.recognition_version == evidence.recognition_version
+        )
+        if not lineage_matches_evidence:
+            if not valid_preserved_human_revision:
+                return "RECOGNITION_EVIDENCE_STALE", confirmed_regions, evidence
+        if region.id not in seen_region_ids:
+            current_regions.append(region)
+            seen_region_ids.add(region.id)
+    if seen_region_ids != {region.id for region in confirmed_regions}:
+        return "RECOGNITION_EVIDENCE_STALE", confirmed_regions, evidence
+    if not answer.is_blank and not _effective_answer_content(answer):
+        return "EFFECTIVE_ANSWER_MISSING", current_regions, evidence
+    return None, current_regions, evidence
+
+
+def _require_answer_evidence(
+    db: Session, answer: StudentAnswer
+) -> tuple[list[StudentAnswerRegion], QuestionRecognitionEvidence]:
+    reason, regions, evidence = _answer_evidence_context(db, answer)
+    if reason is not None or evidence is None:
+        raise ApiProblem(
+            409,
+            "ANSWER_EVIDENCE_REQUIRED",
+            "当前答案证据链不完整，不能评分",
+            {"reason": reason or "CURRENT_RECOGNITION_EVIDENCE_MISSING"},
+        )
+    return regions, evidence
+
+
+def _has_current_grading_evidence(
+    db: Session,
+    result: GradingResult,
+    answer: StudentAnswer,
+    regions: list[StudentAnswerRegion],
+) -> bool:
+    current_coordinates = {
+        (
+            region.submission_page_id,
+            Decimal(region.x),
+            Decimal(region.y),
+            Decimal(region.width),
+            Decimal(region.height),
+        )
+        for region in regions
+    }
+    evidence_rows = db.scalars(
+        select(GradingEvidence).where(
+            GradingEvidence.grading_result_id == result.id,
+            GradingEvidence.student_answer_id == answer.id,
+            GradingEvidence.evidence_type == "answer_region",
+        )
+    ).all()
+    evidence_coordinates = {
+        (
+            row.submission_page_id,
+            Decimal(row.x) if row.x is not None else None,
+            Decimal(row.y) if row.y is not None else None,
+            Decimal(row.width) if row.width is not None else None,
+            Decimal(row.height) if row.height is not None else None,
+        )
+        for row in evidence_rows
+    }
+    return bool(current_coordinates) and current_coordinates.issubset(evidence_coordinates)
 
 
 def _batch_counts(db: Session, batch: GradingBatch) -> dict[str, int]:
@@ -298,6 +466,8 @@ def _submission_workflow(db: Session, submission: Submission) -> dict[str, Any]:
     answers = db.scalars(
         select(StudentAnswer).where(StudentAnswer.submission_id == submission.id)
     ).all()
+    assignment = db.get(Assignment, submission.assignment_id)
+    active_rubric_version_id = assignment.active_rubric_version_id if assignment else None
     if not answers:
         return {
             "stage": "segmentation",
@@ -307,34 +477,25 @@ def _submission_workflow(db: Session, submission: Submission) -> dict[str, Any]:
             "action": "确认题目区域后继续",
         }
     for answer in answers:
-        region_count = db.scalar(
-            select(func.count())
-            .select_from(StudentAnswerRegion)
-            .where(StudentAnswerRegion.student_answer_id == answer.id)
-        ) or 0
-        effective_text = (
-            answer.corrected_text
-            or answer.recognized_text
-            or answer.corrected_latex
-            or answer.recognized_latex
-        )
-        if not region_count or (not effective_text and not answer.is_blank):
+        evidence_reason, _, _ = _answer_evidence_context(db, answer)
+        if evidence_reason is not None:
             return {
                 "stage": "answer_review",
                 "stage_label": "等待答案校对",
                 "reason_code": "ANSWER_EVIDENCE_REQUIRED",
-                "reason": "至少有一道题缺少答题区域或有效识别文字。",
+                "reason": f"至少有一道题的当前证据链不完整（{evidence_reason}）。",
                 "action": "校对答案区域和识别结果",
             }
         result = db.scalar(
             select(GradingResult)
             .where(
                 GradingResult.student_answer_id == answer.id,
-                GradingResult.status != "superseded",
+                GradingResult.status.in_(["suggested", "accepted", "modified"]),
+                GradingResult.rubric_version_id == active_rubric_version_id,
             )
             .order_by(GradingResult.created_at.desc())
         )
-        if result is None or result.score is None:
+        if result is None:
             return {
                 "stage": "grading",
                 "stage_label": "等待评分建议",
@@ -987,6 +1148,8 @@ def _editable_submission(db: Session, owner: uuid.UUID, submission_id: uuid.UUID
     submission = owned_submission(db, owner, submission_id)
     if submission.status == "finalized":
         raise ApiProblem(409, "SUBMISSION_FINALIZED", "已完成提交不能修改页面结构")
+    if submission.status == "voided":
+        raise ApiProblem(409, "SUBMISSION_VOIDED", "已作废提交不能修改")
     return submission
 
 
@@ -1020,6 +1183,7 @@ def submission_job_json(db: Session, job: SubmissionRecognitionJob) -> dict[str,
         "config_version": job.config_version,
         "progress": job.progress,
         "attempt": job.attempt,
+        "generation": job.generation,
         "max_attempts": job.max_attempts,
         "input_hash": job.input_hash,
         "output_hash": job.output_hash,
@@ -1049,37 +1213,97 @@ def start_submission_recognition(
     storage: Storage,
     run_now: bool = False,
 ) -> dict[str, Any]:
-    submission = _editable_submission(db, actor.id, submission_id)
+    submission = db.scalar(
+        select(Submission)
+        .where(Submission.id == submission_id, Submission.owner_id == actor.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if submission is None:
+        raise ApiProblem(404, "SUBMISSION_NOT_FOUND", "答卷不存在")
+    if submission.status == "finalized" or submission.finalized_at is not None:
+        raise ApiProblem(409, "SUBMISSION_FINALIZED", "已完成提交不能启动识别")
+    if submission.status == "voided":
+        raise ApiProblem(409, "SUBMISSION_VOIDED", "已作废提交不能启动识别")
     processing_job = db.scalar(
         select(SubmissionProcessingJob)
-        .where(
-            SubmissionProcessingJob.submission_id == submission.id,
-            SubmissionProcessingJob.status.in_(["completed", "partially_completed"]),
-        )
+        .where(SubmissionProcessingJob.submission_id == submission.id)
         .order_by(SubmissionProcessingJob.created_at.desc())
     )
-    if processing_job is not None:
-        answers = db.scalars(
-            select(StudentAnswer).where(StudentAnswer.submission_id == submission.id)
+    if processing_job is None:
+        raise ApiProblem(
+            409,
+            "SUBMISSION_PROCESSING_REQUIRED",
+            "必须先完成页面处理和题目切分",
+        )
+    if processing_job.status != "completed":
+        raise ApiProblem(
+            409,
+            "SUBMISSION_PROCESSING_INCOMPLETE",
+            "最新页面处理任务尚未完整完成",
+            {
+                "processing_job_id": str(processing_job.id),
+                "status": processing_job.status,
+            },
+        )
+    answers = db.scalars(
+        select(StudentAnswer).where(StudentAnswer.submission_id == submission.id)
+    ).all()
+    if not answers:
+        raise ApiProblem(
+            409,
+            "SEGMENTATION_CONFIRMATION_REQUIRED",
+            "必须先形成并确认有效题目的答题区域",
+            {"reason": "ANSWERS_MISSING", "answer_ids": [], "question_ids": []},
+        )
+    incomplete = [
+        answer
+        for answer in answers
+        if db.scalar(
+            select(StudentAnswerRegion.id).where(
+                StudentAnswerRegion.student_answer_id == answer.id,
+                StudentAnswerRegion.status == "confirmed",
+            )
+        )
+        is None
+    ]
+    if incomplete:
+        raise ApiProblem(
+            409,
+            "SEGMENTATION_CONFIRMATION_REQUIRED",
+            "全部有效题目完成区域确认后才能运行 OCR",
+            {
+                "answer_ids": [str(answer.id) for answer in incomplete],
+                "question_ids": [str(answer.question_id) for answer in incomplete],
+            },
+        )
+    regions = list(
+        db.scalars(
+            select(StudentAnswerRegion)
+            .join(StudentAnswer, StudentAnswer.id == StudentAnswerRegion.student_answer_id)
+            .join(SubmissionPage, SubmissionPage.id == StudentAnswerRegion.submission_page_id)
+            .where(
+                StudentAnswer.submission_id == submission.id,
+                StudentAnswerRegion.status == "confirmed",
+            )
+            .order_by(
+                SubmissionPage.page_number,
+                StudentAnswerRegion.y,
+                StudentAnswerRegion.x,
+                StudentAnswerRegion.id,
+            )
         ).all()
-        incomplete = [
-            answer.question_id
-            for answer in answers
-            if db.scalar(
-                select(StudentAnswerRegion.id).where(
-                    StudentAnswerRegion.student_answer_id == answer.id,
-                    StudentAnswerRegion.status == "confirmed",
-                )
-            )
-            is None
-        ]
-        if incomplete:
-            raise ApiProblem(
-                409,
-                "SEGMENTATION_CONFIRMATION_REQUIRED",
-                "全部有效题目完成区域确认后才能运行 OCR",
-                {"question_ids": [str(question_id) for question_id in incomplete]},
-            )
+    )
+    settings = get_settings()
+    provider = recognition_provider_from_settings(settings)
+    input_hash = hashlib.sha256(
+        json.dumps(
+            [(region.id, region.region_version, region.segmentation_version) for region in regions],
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        ).encode()
+    ).hexdigest()
     existing = db.scalar(
         select(SubmissionRecognitionJob).where(
             SubmissionRecognitionJob.owner_id == actor.id,
@@ -1087,8 +1311,29 @@ def start_submission_recognition(
         )
     )
     if existing:
+        expected = {
+            "submission_id": submission.id,
+            "provider": provider.name,
+            "provider_version": provider.version,
+            "provider_kind": data.provider_kind,
+            "config_version": settings.answer_recognition_config_version,
+            "input_hash": input_hash,
+        }
+        mismatches = sorted(
+            field for field, value in expected.items() if getattr(existing, field) != value
+        )
+        if mismatches:
+            raise ApiProblem(
+                409,
+                "IDEMPOTENCY_KEY_CONFLICT",
+                "幂等键已用于不同的识别请求",
+                {
+                    "resource_type": "submission_recognition_job",
+                    "existing_job_id": str(existing.id),
+                    "mismatched_fields": mismatches,
+                },
+            )
         return submission_job_json(db, existing)
-    provider = recognition_provider_from_settings(get_settings())
     job = SubmissionRecognitionJob(
         owner_id=actor.id,
         submission_id=submission.id,
@@ -1097,31 +1342,73 @@ def start_submission_recognition(
         idempotency_key=data.idempotency_key,
         status="queued",
         provider_kind=data.provider_kind,
-        config_version=get_settings().answer_recognition_config_version,
-        max_attempts=get_settings().answer_recognition_max_attempts,
+        config_version=settings.answer_recognition_config_version,
+        input_hash=input_hash,
+        max_attempts=settings.answer_recognition_max_attempts,
+        generation=(
+            db.scalar(
+                select(func.max(SubmissionRecognitionJob.generation)).where(
+                    SubmissionRecognitionJob.submission_id == submission.id
+                )
+            )
+            or 0
+        )
+        + 1,
     )
     db.add(job)
-    db.flush()
-    audit(db, actor.id, "submission_recognition.create", "submission_recognition_job", job.id)
-    db.commit()
+    try:
+        db.flush()
+        audit(db, actor.id, "submission_recognition.create", "submission_recognition_job", job.id)
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        winner = db.scalar(
+            select(SubmissionRecognitionJob).where(
+                SubmissionRecognitionJob.owner_id == actor.id,
+                SubmissionRecognitionJob.idempotency_key == data.idempotency_key,
+            )
+        )
+        if winner is None:
+            raise ApiProblem(
+                409,
+                "IDEMPOTENCY_KEY_CONFLICT",
+                "识别请求并发冲突，请使用相同请求重试",
+                {"resource_type": "submission_recognition_job"},
+            ) from exc
+        expected = {
+            "submission_id": submission.id,
+            "provider": provider.name,
+            "provider_version": provider.version,
+            "provider_kind": data.provider_kind,
+            "config_version": settings.answer_recognition_config_version,
+            "input_hash": input_hash,
+        }
+        mismatches = sorted(
+            field for field, value in expected.items() if getattr(winner, field) != value
+        )
+        if mismatches:
+            raise ApiProblem(
+                409,
+                "IDEMPOTENCY_KEY_CONFLICT",
+                "幂等键已用于不同的识别请求",
+                {
+                    "resource_type": "submission_recognition_job",
+                    "existing_job_id": str(winner.id),
+                    "mismatched_fields": mismatches,
+                },
+            ) from exc
+        return submission_job_json(db, winner)
     if run_now:
         assert storage is not None
-        if processing_job is not None:
-            from app.recognition.answer_evidence import run_answer_evidence_phase
+        from app.recognition.answer_evidence import run_answer_evidence_phase
 
-            run_answer_evidence_phase(db, storage, get_settings(), job.id)
-        else:
-            from app.recognition.submission import run_submission_recognition_job
-
-            run_submission_recognition_job(db, storage, job.id)
+        run_answer_evidence_phase(db, storage, get_settings(), job.id)
     else:
         try:
             from workers.celery_app import celery_app
 
             celery_app.send_task(
-                "ahamark.answer_recognition.run"
-                if processing_job is not None
-                else "ahamark.submission_recognition.run",
+                "ahamark.answer_recognition.run",
                 args=[str(job.id)],
                 headers=celery_request_headers(),
             )
@@ -1177,22 +1464,12 @@ def retry_submission_page(
     )
     if job is None or page is None:
         raise ApiProblem(404, "SUBMISSION_PAGE_NOT_FOUND", "识别页面不存在")
-    page.status, job.status = "ready", "queued"
-    db.commit()
-    if run_now:
-        from app.recognition.submission import run_submission_recognition_job
-
-        assert storage is not None
-        run_submission_recognition_job(db, storage, job.id, page.id)
-    else:
-        from workers.celery_app import celery_app
-
-        celery_app.send_task(
-            "ahamark.submission_recognition.run",
-            args=[str(job.id), str(page.id)],
-            headers=celery_request_headers(),
-        )
-    return submission_job_json(db, job)
+    raise ApiProblem(
+        409,
+        "PAGE_RETRY_RESEGMENTATION_REQUIRED",
+        "页面级旧 OCR 重试已关闭；请重新完成题目切分与区域确认后启动答案识别",
+        {"job_id": str(job.id), "page_id": str(page.id)},
+    )
 
 
 @router.put("/submissions/{submission_id}/pages/order")
@@ -1201,10 +1478,18 @@ def reorder_submission_pages(
 ) -> dict[str, Any]:
     submission = _editable_submission(db, actor.id, submission_id)
     pages = db.scalars(
-        select(SubmissionPage).where(SubmissionPage.submission_id == submission.id)
+        select(SubmissionPage)
+        .where(SubmissionPage.submission_id == submission.id)
+        .order_by(SubmissionPage.page_number, SubmissionPage.id)
     ).all()
     if len(data.page_ids) != len(pages) or set(data.page_ids) != {page.id for page in pages}:
         raise ApiProblem(422, "PAGE_ORDER_INCOMPLETE", "排序必须包含且仅包含全部页面")
+    current_page_ids = [page.id for page in pages]
+    if data.page_ids == current_page_ids:
+        return {
+            "submission_id": str(submission.id),
+            "page_ids": [str(page_id) for page_id in current_page_ids],
+        }
     by_id = {page.id: page for page in pages}
     for index, page in enumerate(pages, 1):
         page.page_number = -index
@@ -1483,6 +1768,35 @@ def _owned_answer(db: Session, owner_id: uuid.UUID, answer_id: uuid.UUID) -> Stu
     return answer
 
 
+def _locked_mutable_answer(
+    db: Session, owner_id: uuid.UUID, answer_id: uuid.UUID
+) -> tuple[Submission, StudentAnswer]:
+    hint = db.get(StudentAnswer, answer_id)
+    if hint is None:
+        raise ApiProblem(404, "ANSWER_NOT_FOUND", "答案不存在")
+    submission = db.scalar(
+        select(Submission)
+        .where(Submission.id == hint.submission_id, Submission.owner_id == owner_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if submission is None:
+        raise ApiProblem(404, "ANSWER_NOT_FOUND", "答案不存在")
+    answer = db.scalar(
+        select(StudentAnswer)
+        .where(StudentAnswer.id == answer_id, StudentAnswer.submission_id == submission.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if answer is None:
+        raise ApiProblem(404, "ANSWER_NOT_FOUND", "答案不存在")
+    if submission.status == "finalized" or submission.finalized_at is not None:
+        raise ApiProblem(409, "SUBMISSION_FINALIZED", "已完成提交只读")
+    if submission.status == "voided":
+        raise ApiProblem(409, "SUBMISSION_VOIDED", "已作废提交只读")
+    return submission, answer
+
+
 def _stale_answer_derivatives(db: Session, answer: StudentAnswer) -> None:
     from app.recognition.answer_evidence import mark_answer_recognition_stale
 
@@ -1553,14 +1867,7 @@ def delete_answer_region(answer_id: uuid.UUID, region_id: uuid.UUID, db: Db, act
 
 @router.post("/student-answers/{answer_id}/grade")
 def grade_answer(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
-    answer = db.scalar(
-        select(StudentAnswer)
-        .join(Submission, Submission.id == StudentAnswer.submission_id)
-        .where(StudentAnswer.id == answer_id, Submission.owner_id == actor.id)
-    )
-    if answer is None:
-        raise ApiProblem(404, "ANSWER_NOT_FOUND", "答案不存在")
-    submission = owned_submission(db, actor.id, answer.submission_id)
+    submission, answer = _locked_mutable_answer(db, actor.id, answer_id)
     assignment = owned_assignment(db, actor.id, submission.assignment_id)
     question = db.get(Question, answer.question_id)
     rubric = db.scalar(
@@ -1571,6 +1878,62 @@ def grade_answer(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
     )
     if question is None or question.max_score is None or rubric is None:
         raise ApiProblem(409, "RUBRIC_INCOMPLETE", "题目或评分标准不完整")
+    regions, recognition_evidence = _require_answer_evidence(db, answer)
+    grading_config_version = get_settings().grading_config_version
+    grading_key = "grade:" + hashlib.sha256(
+        json.dumps(
+            {
+                "answer_id": str(answer.id),
+                "evidence_id": str(recognition_evidence.id),
+                "evidence_input_hash": recognition_evidence.input_hash,
+                "recognition_version": recognition_evidence.recognition_version,
+                "rubric_version_id": str(assignment.active_rubric_version_id),
+                "prompt_version": get_settings().grading_prompt_version,
+                "config_version": grading_config_version,
+            },
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    previous_job = db.scalar(
+        select(GradingJob).where(
+            GradingJob.owner_id == actor.id,
+            GradingJob.idempotency_key == grading_key,
+        )
+    )
+    if previous_job is not None:
+        previous_result = db.scalar(
+            select(GradingResult).where(GradingResult.grading_job_id == previous_job.id)
+        )
+        if previous_result is not None:
+            return {
+                "id": str(previous_result.id),
+                "method": previous_result.grading_method,
+                "provider": previous_result.provider,
+                "provider_version": previous_result.provider_version,
+                "prompt_version": previous_result.prompt_version,
+                "score": str(previous_result.score) if previous_result.score is not None else None,
+                "max_score": str(previous_result.max_score),
+                "confidence": (
+                    str(previous_result.confidence)
+                    if previous_result.confidence is not None
+                    else None
+                ),
+                "requires_review": previous_result.requires_review,
+                "status": previous_result.status,
+                "reasoning_summary": previous_result.reasoning_summary,
+                "criterion_count": db.scalar(
+                    select(func.count())
+                    .select_from(GradingCriterionResult)
+                    .where(GradingCriterionResult.grading_result_id == previous_result.id)
+                )
+                or 0,
+                "evidence_count": db.scalar(
+                    select(func.count())
+                    .select_from(GradingEvidence)
+                    .where(GradingEvidence.grading_result_id == previous_result.id)
+                )
+                or 0,
+            }
     job = GradingJob(
         owner_id=actor.id,
         grading_batch_id=submission.grading_batch_id,
@@ -1581,17 +1944,13 @@ def grade_answer(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
         provider="pending",
         provider_version="pending",
         prompt_version=get_settings().grading_prompt_version,
-        config_version=get_settings().grading_config_version,
-        idempotency_key=uuid.uuid4().hex,
+        config_version=grading_config_version,
+        idempotency_key=grading_key,
         started_at=now_utc(),
     )
     db.add(job)
     db.flush()
-    text = (
-        answer.corrected_text
-        if answer.corrected_text is not None
-        else (answer.recognized_text or "")
-    )
+    text = _effective_answer_content(answer)
     rubric_items = db.scalars(
         select(RubricItem)
         .where(RubricItem.question_rubric_id == rubric.id)
@@ -1600,9 +1959,6 @@ def grade_answer(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
     item_maximum = sum((Decimal(item.points) for item in rubric_items), Decimal("0"))
     if rubric_items and item_maximum != Decimal(question.max_score):
         raise ApiProblem(409, "RUBRIC_CRITERIA_TOTAL_MISMATCH", "评分分项总分与题目满分不一致")
-    regions = db.scalars(
-        select(StudentAnswerRegion).where(StudentAnswerRegion.student_answer_id == answer.id)
-    ).all()
     if question.question_type in {"single_choice", "multiple_choice", "true_false", "fill_blank"}:
         suggestion = grade_objective(
             text,
@@ -1770,149 +2126,12 @@ def grade_answer(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
 def save_codex_suggestion(
     answer_id: uuid.UUID, data: CodexSuggestionInput, db: Db, actor: Actor
 ) -> dict[str, Any]:
-    """Save a local Codex-assisted score as a reviewable suggestion only."""
-    answer = db.scalar(
-        select(StudentAnswer)
-        .join(Submission, Submission.id == StudentAnswer.submission_id)
-        .where(StudentAnswer.id == answer_id, Submission.owner_id == actor.id)
+    """Retired: codex_local suggestions may only enter through the internal worker API."""
+    raise ApiProblem(
+        410,
+        "CODEX_LOCAL_INTERNAL_ONLY",
+        "Codex-assisted suggestions must use the internal suggestion-only workflow",
     )
-    if answer is None:
-        raise ApiProblem(404, "ANSWER_NOT_FOUND", "答案不存在")
-    submission = owned_submission(db, actor.id, answer.submission_id)
-    assignment = owned_assignment(db, actor.id, submission.assignment_id)
-    question = db.get(Question, answer.question_id)
-    rubric = db.scalar(
-        select(QuestionRubric).where(
-            QuestionRubric.rubric_version_id == assignment.active_rubric_version_id,
-            QuestionRubric.question_id == answer.question_id,
-        )
-    )
-    if question is None or question.max_score is None or rubric is None:
-        raise ApiProblem(409, "RUBRIC_INCOMPLETE", "题目或评分标准不完整")
-    if data.score > Decimal(question.max_score):
-        raise ApiProblem(422, "SCORE_OUT_OF_RANGE", "建议分超出题目满分")
-    regions = db.scalars(
-        select(StudentAnswerRegion).where(
-            StudentAnswerRegion.student_answer_id == answer.id,
-            StudentAnswerRegion.status == "confirmed",
-        )
-    ).all()
-    text = answer.corrected_text or answer.recognized_text or ""
-    if not text.strip() or not regions:
-        raise ApiProblem(
-            422,
-            "CODEX_SUGGESTION_INPUT_INCOMPLETE",
-            "必须先确认答题区域并完成答案识别",
-        )
-    rubric_items = db.scalars(
-        select(RubricItem)
-        .where(RubricItem.question_rubric_id == rubric.id)
-        .order_by(RubricItem.display_order)
-    ).all()
-    if rubric_items:
-        expected_ids = {item.id for item in rubric_items}
-        if set(data.criterion_scores) != expected_ids:
-            raise ApiProblem(422, "CRITERION_SCORES_INCOMPLETE", "必须填写全部评分项")
-        for item in rubric_items:
-            awarded = data.criterion_scores[item.id]
-            if awarded < 0 or awarded > Decimal(item.points):
-                raise ApiProblem(422, "CRITERION_SCORE_OUT_OF_RANGE", "评分项建议分超出范围")
-        if sum(data.criterion_scores.values(), Decimal("0")) != data.score:
-            raise ApiProblem(422, "CRITERION_TOTAL_MISMATCH", "评分项合计必须等于建议总分")
-
-    for previous in db.scalars(
-        select(GradingResult).where(
-            GradingResult.student_answer_id == answer.id,
-            GradingResult.status.in_(["suggested", "accepted", "modified", "stale"]),
-        )
-    ).all():
-        previous.status = "superseded"
-    job = GradingJob(
-        owner_id=actor.id,
-        grading_batch_id=submission.grading_batch_id,
-        submission_id=submission.id,
-        question_id=question.id,
-        rubric_version_id=assignment.active_rubric_version_id,
-        status="completed",
-        provider="codex-assisted",
-        provider_version="local",
-        prompt_version="codex-assisted-v1",
-        config_version=get_settings().grading_config_version,
-        idempotency_key=f"codex-assisted:{uuid.uuid4().hex}",
-        started_at=now_utc(),
-        completed_at=now_utc(),
-    )
-    db.add(job)
-    db.flush()
-    result = GradingResult(
-        grading_job_id=job.id,
-        student_answer_id=answer.id,
-        question_id=question.id,
-        rubric_version_id=assignment.active_rubric_version_id,
-        grading_method="codex_assisted",
-        provider="codex-assisted",
-        provider_version="local",
-        prompt_version="codex-assisted-v1",
-        score=data.score,
-        max_score=question.max_score,
-        confidence=None,
-        recognized_answer_snapshot=text,
-        reasoning_summary=data.reasoning,
-        requires_review=True,
-        status="suggested",
-    )
-    db.add(result)
-    db.flush()
-    for item in rubric_items:
-        db.add(
-            GradingCriterionResult(
-                grading_result_id=result.id,
-                rubric_item_id=item.id,
-                status="evaluated",
-                awarded_points=data.criterion_scores[item.id],
-                max_points=item.points,
-                reason=data.reasoning,
-                confidence=None,
-            )
-        )
-    for region in regions:
-        db.add(
-            GradingEvidence(
-                grading_result_id=result.id,
-                student_answer_id=answer.id,
-                submission_page_id=region.submission_page_id,
-                evidence_type="answer_region",
-                quote=text[:500],
-                x=region.x,
-                y=region.y,
-                width=region.width,
-                height=region.height,
-                description="Codex 辅助建议引用的教师确认答题区域",
-            )
-        )
-    answer.status = "graded"
-    audit(
-        db,
-        actor.id,
-        "grading.codex_assisted_suggestion",
-        "student_answer",
-        answer.id,
-        {"score": str(data.score), "provider": "codex-assisted"},
-    )
-    db.commit()
-    db.refresh(result)
-    return {
-        "id": str(result.id),
-        "provider": result.provider,
-        "provider_version": result.provider_version,
-        "score": str(result.score),
-        "max_score": str(result.max_score),
-        "requires_review": result.requires_review,
-        "status": result.status,
-        "reasoning_summary": result.reasoning_summary,
-        "criterion_count": len(rubric_items),
-        "evidence_count": len(regions),
-    }
 
 
 @router.put("/student-answers/{answer_id}/review")
@@ -1932,12 +2151,14 @@ def review_answer(answer_id: uuid.UUID, data: ReviewInput, db: Db, actor: Actor)
         .where(GradingResult.student_answer_id == answer.id, GradingResult.status != "superseded")
         .order_by(GradingResult.created_at.desc())
     )
-    if data.decision == "accepted":
-        effective = (
-            answer.corrected_text
-            if answer.corrected_text is not None
-            else (answer.recognized_text or "")
+    if data.decision == "modified" and result is None:
+        raise ApiProblem(
+            409,
+            "GRADING_RESULT_REQUIRED",
+            "修改评分建议前必须存在评分结果；无建议时请使用 manual_scored",
         )
+    if data.decision == "accepted":
+        effective = _effective_answer_content(answer)
         if (
             result is None
             or result.status != "suggested"
@@ -1948,6 +2169,25 @@ def review_answer(answer_id: uuid.UUID, data: ReviewInput, db: Db, actor: Actor)
                 409,
                 "GRADING_RESULT_STALE",
                 "答案或 Rubric 已变化，旧建议不能接受；请重新批改或人工评分",
+            )
+    if data.decision in {"accepted", "modified"} and result is not None:
+        effective = _effective_answer_content(answer)
+        if (
+            result.rubric_version_id != assignment.active_rubric_version_id
+            or result.recognized_answer_snapshot != effective
+        ):
+            raise ApiProblem(
+                409,
+                "GRADING_RESULT_STALE",
+                "答案或 Rubric 已变化，旧建议不能复核；请重新批改或人工评分",
+            )
+        current_regions, _ = _require_answer_evidence(db, answer)
+        if not _has_current_grading_evidence(db, result, answer, current_regions):
+            raise ApiProblem(
+                409,
+                "GRADING_EVIDENCE_REQUIRED",
+                "当前评分建议缺少可追溯的答案区域证据",
+                {"grading_result_id": str(result.id)},
             )
     score = (
         data.final_score
@@ -2052,6 +2292,13 @@ def acceptance_eligibility(
     )
     if result is None:
         return ["RESULT_MISSING"], None
+    try:
+        current_regions, _ = _require_answer_evidence(db, answer)
+    except ApiProblem as exc:
+        reasons.append(str(exc.details.get("reason") or exc.code))
+        current_regions = []
+    if current_regions and not _has_current_grading_evidence(db, result, answer, current_regions):
+        reasons.append("GRADING_EVIDENCE_REQUIRED")
     if result.status != "suggested":
         reasons.append("RESULT_NOT_SUGGESTED")
     if result.score is None or result.score < 0 or result.score > result.max_score:
@@ -2104,27 +2351,6 @@ def acceptance_eligibility(
     )
     if actual != expected:
         reasons.append("CRITERION_INCOMPLETE")
-    question = db.get(Question, answer.question_id)
-    evidence_count = (
-        db.scalar(
-            select(func.count())
-            .select_from(GradingEvidence)
-            .where(GradingEvidence.grading_result_id == result.id)
-        )
-        or 0
-    )
-    if (
-        question
-        and question.question_type
-        not in {
-            "single_choice",
-            "multiple_choice",
-            "true_false",
-            "fill_blank",
-        }
-        and not evidence_count
-    ):
-        reasons.append("EVIDENCE_REQUIRED")
     return list(dict.fromkeys(reasons)), result
 
 
@@ -2336,7 +2562,9 @@ def review_workspace(
         "batch": batch_json(db, batch),
         "items": items,
         "progress": {"total": total_answers, "reviewed": reviewed_answers},
-        "provider_notice": "主观题评分 Provider unavailable 时必须教师人工评分",
+        "provider_notice": (
+            "主观题由 Codex 根据已确认的答题内容、参考答案和评分标准生成建议；教师负责复核与定稿"
+        ),
     }
 
 

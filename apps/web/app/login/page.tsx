@@ -31,6 +31,8 @@ export default function LoginPage() {
     <main className="grid min-h-screen place-items-center bg-slate-50 p-4">
       <form
         onSubmit={submit}
+        autoComplete="off"
+        data-form-type="other"
         className="w-full max-w-sm rounded-2xl border bg-white p-7 shadow-sm"
       >
         <div className="mb-6">
@@ -47,7 +49,9 @@ export default function LoginPage() {
           <input
             name="email"
             type="email"
-            autoComplete="username"
+            autoComplete="off"
+            data-1p-ignore
+            data-lpignore="true"
             required
             className="mt-1.5 w-full rounded-lg border px-3 py-2.5"
           />
@@ -57,7 +61,9 @@ export default function LoginPage() {
           <input
             name="password"
             type="password"
-            autoComplete="current-password"
+            autoComplete="new-password"
+            data-1p-ignore
+            data-lpignore="true"
             minLength={8}
             required
             className="mt-1.5 w-full rounded-lg border px-3 py-2.5"

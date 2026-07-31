@@ -127,9 +127,11 @@ export function QuestionExtractionReview({
           {error}
         </p>
       )}
-      <div>
-        <h3 className="font-semibold">第三步：整理页面</h3>
-        <p className="text-sm text-[var(--neutral-600)]">
+      <details className="border-t pt-4">
+        <summary className="cursor-pointer rounded-lg px-3 py-3 font-semibold hover:bg-[var(--neutral-50)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--brand-600)]">
+          第三步：整理页面（{pages.length} 页）
+        </summary>
+        <p className="mt-2 text-sm text-[var(--neutral-600)]">
           AI 不会自动排除或删除页面；排序、旋转与排除建议均须教师确认。
         </p>
         <div className="mt-2 grid gap-2">
@@ -189,7 +191,7 @@ export function QuestionExtractionReview({
             </article>
           ))}
         </div>
-      </div>
+      </details>
       <div>
         <div className="flex items-center justify-between">
           <h3 className="font-semibold">第四步：编辑题目</h3>
@@ -219,121 +221,129 @@ export function QuestionExtractionReview({
         </div>
         <div className="mt-2 grid gap-3">
           {questions.map((item, index) => (
-            <article
+            <details
               key={item.id}
-              tabIndex={0}
-              className="rounded-lg border p-3"
+              className="rounded-lg border open:bg-[var(--neutral-50)]"
             >
-              <p className="text-sm">
-                候选 {index + 1}/{questions.length} · 状态 {item.status} ·
-                总置信度 {(item.overall_confidence * 100).toFixed(0)}%{" "}
+              <summary className="cursor-pointer rounded-lg px-4 py-4 text-sm font-medium hover:bg-[var(--neutral-100)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--brand-600)]">
+                {item.question_number || `候选 ${index + 1}`} ·{" "}
+                {item.max_score == null ? "分值待定" : `${item.max_score} 分`} ·
+                状态 {item.status} · 总置信度{" "}
+                {(item.overall_confidence * 100).toFixed(0)}%{" "}
                 {item.server_eligible ? "· eligible" : "· 需复核"}
-              </p>
-              <label className="block text-sm">
-                题号
-                <input
-                  aria-label={`候选${index + 1}题号`}
-                  className="mt-1 w-full rounded border p-2"
-                  value={edits[item.id]?.number ?? ""}
-                  onChange={(e) =>
-                    setEdits({
-                      ...edits,
-                      [item.id]: { ...edits[item.id], number: e.target.value },
-                    })
-                  }
-                />
-              </label>
-              <p className="text-sm">
-                父候选：{item.parent_candidate_id ?? "无"} · 题型{" "}
-                {item.question_type} · 难度 {item.difficulty ?? "未建议"}
-              </p>
-              <label className="block text-sm">
-                题干
-                <textarea
-                  aria-label={`候选${index + 1}题干`}
-                  className="mt-1 w-full rounded border p-2"
-                  value={edits[item.id]?.text ?? ""}
-                  onChange={(e) =>
-                    setEdits({
-                      ...edits,
-                      [item.id]: { ...edits[item.id], text: e.target.value },
-                    })
-                  }
-                />
-              </label>
-              <label className="block text-sm">
-                分值（未知保持空）
-                <input
-                  aria-label={`候选${index + 1}分值`}
-                  type="number"
-                  min="0.01"
-                  step="0.01"
-                  className="mt-1 rounded border p-2"
-                  value={edits[item.id]?.score ?? ""}
-                  onChange={(e) =>
-                    setEdits({
-                      ...edits,
-                      [item.id]: { ...edits[item.id], score: e.target.value },
-                    })
-                  }
-                />
-              </label>
-              {item.content_latex === null && (
-                <p className="text-sm">公式 LaTeX：未生成</p>
-              )}
-              <p className="text-sm">
-                知识点建议：
-                {item.knowledge_point_suggestions.join("、") || "无"}
-              </p>
-              <p className="text-sm">
-                风险：{item.warning_codes.join("、") || "无"}
-                {item.manual_required ? " · 必须人工复核" : ""}
-              </p>
-              <details>
-                <summary>字段级 confidence / evidence / regions</summary>
-                <pre className="whitespace-pre-wrap text-xs">
-                  {JSON.stringify(
-                    {
-                      field_confidences: item.field_confidences,
-                      evidence: item.evidence,
-                      regions: item.regions,
-                    },
-                    null,
-                    2,
-                  )}
-                </pre>
-              </details>
-              {item.status === "suggested" && (
-                <div className="mt-2 flex flex-wrap gap-2">
-                  <Button
-                    disabled={busy}
-                    onClick={() => void questionAction(item, "accept")}
-                  >
-                    接受
-                  </Button>
-                  <Button
-                    disabled={busy}
-                    onClick={() => void questionAction(item, "modify")}
-                  >
-                    修改后接受
-                  </Button>
-                  <Button
-                    disabled={busy}
-                    onClick={() => void questionAction(item, "reject")}
-                  >
-                    拒绝
-                  </Button>
-                  <Button
-                    disabled={busy}
-                    onClick={() =>
-                      void questionAction(item, "mark_manual_required")
+              </summary>
+              <div className="grid gap-2 px-4 pb-4">
+                <label className="block text-sm">
+                  题号
+                  <input
+                    aria-label={`候选${index + 1}题号`}
+                    className="mt-1 w-full rounded border p-2"
+                    value={edits[item.id]?.number ?? ""}
+                    onChange={(e) =>
+                      setEdits({
+                        ...edits,
+                        [item.id]: {
+                          ...edits[item.id],
+                          number: e.target.value,
+                        },
+                      })
                     }
-                  >
-                    标为人工处理
-                  </Button>
-                </div>
-              )}
-            </article>
+                  />
+                </label>
+                <p className="text-sm">
+                  父候选：{item.parent_candidate_id ?? "无"} · 题型{" "}
+                  {item.question_type} · 难度 {item.difficulty ?? "未建议"}
+                </p>
+                <label className="block text-sm">
+                  题干
+                  <textarea
+                    aria-label={`候选${index + 1}题干`}
+                    className="mt-1 w-full rounded border p-2"
+                    value={edits[item.id]?.text ?? ""}
+                    onChange={(e) =>
+                      setEdits({
+                        ...edits,
+                        [item.id]: { ...edits[item.id], text: e.target.value },
+                      })
+                    }
+                  />
+                </label>
+                <label className="block text-sm">
+                  分值（未知保持空）
+                  <input
+                    aria-label={`候选${index + 1}分值`}
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    className="mt-1 rounded border p-2"
+                    value={edits[item.id]?.score ?? ""}
+                    onChange={(e) =>
+                      setEdits({
+                        ...edits,
+                        [item.id]: { ...edits[item.id], score: e.target.value },
+                      })
+                    }
+                  />
+                </label>
+                {item.content_latex === null && (
+                  <p className="text-sm">公式 LaTeX：未生成</p>
+                )}
+                <p className="text-sm">
+                  知识点建议：
+                  {item.knowledge_point_suggestions.join("、") || "无"}
+                </p>
+                <p className="text-sm">
+                  风险：{item.warning_codes.join("、") || "无"}
+                  {item.manual_required ? " · 必须人工复核" : ""}
+                </p>
+                <details>
+                  <summary className="cursor-pointer">
+                    字段级 confidence / evidence / regions
+                  </summary>
+                  <pre className="max-h-56 overflow-auto whitespace-pre-wrap text-xs">
+                    {JSON.stringify(
+                      {
+                        field_confidences: item.field_confidences,
+                        evidence: item.evidence,
+                        regions: item.regions,
+                      },
+                      null,
+                      2,
+                    )}
+                  </pre>
+                </details>
+                {item.status === "suggested" && (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <Button
+                      disabled={busy}
+                      onClick={() => void questionAction(item, "accept")}
+                    >
+                      接受
+                    </Button>
+                    <Button
+                      disabled={busy}
+                      onClick={() => void questionAction(item, "modify")}
+                    >
+                      修改后接受
+                    </Button>
+                    <Button
+                      disabled={busy}
+                      onClick={() => void questionAction(item, "reject")}
+                    >
+                      拒绝
+                    </Button>
+                    <Button
+                      disabled={busy}
+                      onClick={() =>
+                        void questionAction(item, "mark_manual_required")
+                      }
+                    >
+                      标为人工处理
+                    </Button>
+                  </div>
+                )}
+              </div>
+            </details>
           ))}
         </div>
       </div>

@@ -2,15 +2,15 @@ import base64
 import io
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol, cast
 
 from app.ai_grading.guards import (
     ErrorCodes,
     GuardViolation,
     require_answer_relation,
-    require_confirmed_answer,
     require_submission_mutable,
 )
 from app.ai_grading.providers import (
@@ -18,6 +18,11 @@ from app.ai_grading.providers import (
     canonical_hash,
     provider_from_settings,
     sanitize_text,
+)
+from app.ai_grading.request_contract import (
+    require_current_recognition_evidence,
+    scoring_input_version,
+    strict_request_hash,
 )
 from app.ai_grading.schema import ValidationContext, validate_output
 from app.core.config import get_settings
@@ -30,7 +35,6 @@ from app.models import (
     CriterionValidationResult,
     MathValidationJob,
     Question,
-    QuestionRecognitionEvidence,
     ReferenceAnswerVersion,
     RubricCriterion,
     StructuredRubricVersion,
@@ -42,9 +46,18 @@ from app.models import (
 )
 from app.storage.dependencies import get_storage
 from PIL import Image
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from workers.celery_app import celery_app
+
+
+class CeleryTask(Protocol):
+    def __call__(self, *args: Any, **kwargs: Any) -> Any: ...
+
+    def delay(self, *args: Any, **kwargs: Any) -> Any: ...
+
+    def run(self, *args: Any, **kwargs: Any) -> Any: ...
+
 
 TERMINAL_JOB_STATUSES = {
     "completed",
@@ -153,28 +166,79 @@ def _region_images(
     return images, refs, total_bytes, total_pixels
 
 
-@celery_app.task(name="ahamark.ai_grading.run", bind=True, soft_time_limit=90, time_limit=105)
+ai_grading_task = cast(
+    Callable[[Callable[..., Any]], CeleryTask],
+    celery_app.task(
+        name="ahamark.ai_grading.run",
+        bind=True,
+        soft_time_limit=90,
+        time_limit=105,
+    ),
+)
+
+
+@ai_grading_task
 def run_ai_grading(
     self: Any, job_id: str, generation: int, criterion_key: str | None = None
 ) -> dict[str, Any]:
     with SessionLocal() as db:
+        job_hint = db.get(AIScoringJob, uuid.UUID(job_id))
+        if job_hint is None:
+            return {"status": "discarded_late"}
+        submission = db.scalar(
+            select(Submission)
+            .where(Submission.id == job_hint.submission_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        answer = db.scalar(
+            select(StudentAnswer)
+            .where(
+                StudentAnswer.id == job_hint.student_answer_id,
+                StudentAnswer.submission_id == job_hint.submission_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         job = db.scalar(
-            select(AIScoringJob).where(AIScoringJob.id == uuid.UUID(job_id)).with_for_update()
+            select(AIScoringJob)
+            .where(AIScoringJob.id == uuid.UUID(job_id))
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         if not job or job.generation != generation or job.stale_at or job.cancelled_at:
             return {"status": "discarded_late"}
+        current_generation = (
+            db.scalar(
+                select(func.max(AIScoringJob.generation)).where(
+                    AIScoringJob.student_answer_id == job.student_answer_id
+                )
+            )
+            or 0
+        )
+        if job.generation < current_generation:
+            job.status = "stale"
+            job.error_code = "LATE_RESULT_DISCARDED"
+            job.stale_at = now_utc()
+            job.finished_at = now_utc()
+            db.commit()
+            return {"status": "discarded_late"}
         if job.status in TERMINAL_JOB_STATUSES:
             return {"status": "already_processed"}
-        evidence = db.get(QuestionRecognitionEvidence, job.recognition_evidence_id)
         rubric = db.get(StructuredRubricVersion, job.rubric_version_id)
         reference = db.get(ReferenceAnswerVersion, job.reference_answer_version_id)
-        answer = db.get(StudentAnswer, job.student_answer_id)
         question = db.get(Question, job.question_id)
-        submission = db.get(Submission, job.submission_id)
         try:
             require_answer_relation(answer, submission, question, job.owner_id)
-            require_confirmed_answer(answer)
             require_submission_mutable(submission)
+            assert answer is not None
+            assert submission is not None
+            evidence = require_current_recognition_evidence(
+                db,
+                answer=answer,
+                submission=submission,
+                owner_id=job.owner_id,
+            )
         except GuardViolation as exc:
             job.status = "stale"
             job.error_code = exc.code
@@ -182,8 +246,7 @@ def run_ai_grading(
             db.commit()
             return {"status": "stale", "error_code": exc.code}
         if (
-            evidence is None
-            or rubric is None
+            rubric is None
             or reference is None
             or answer is None
             or question is None
@@ -199,12 +262,36 @@ def run_ai_grading(
             or reference.question_id != job.question_id
             or submission.assignment_id != job.assignment_id
             or answer.question_version_reference != job.question_version
-            or evidence.input_hash not in job.scoring_input_version
+            or scoring_input_version(evidence) != job.scoring_input_version
         ):
             job.status = "stale"
             job.stale_at = now_utc()
             db.commit()
             return {"status": "stale"}
+        expected_request_hash = strict_request_hash(
+            answer=answer,
+            evidence=evidence,
+            rubric_id=rubric.id,
+            rubric_content_hash=rubric.content_hash,
+            reference_id=reference.id,
+            reference_content_hash=reference.content_hash,
+            validation_id=job.math_validation_job_id,
+            criterion_stable_key=criterion_key,
+            provider=job.provider,
+            model=job.model,
+            endpoint_mode=job.endpoint_mode,
+            prompt_version=job.prompt_version,
+            schema_version=job.schema_version,
+            provider_config_version=job.provider_config_version,
+            grading_config_version=job.grading_config_version,
+        )
+        if expected_request_hash != job.request_hash:
+            job.status = "stale"
+            job.error_code = "AI_REQUEST_CONTRACT_MISMATCH"
+            job.stale_at = now_utc()
+            job.finished_at = now_utc()
+            db.commit()
+            return {"status": "stale", "error_code": job.error_code}
         assert evidence is not None
         assert rubric is not None
         assert reference is not None
@@ -436,21 +523,51 @@ def run_ai_grading(
         # input before persisting its result so a late response cannot revive or
         # overwrite a stale/current generation.
         db.expire_all()
+        current_submission = db.scalar(
+            select(Submission)
+            .where(Submission.id == input_snapshot.submission_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        current_answer = db.scalar(
+            select(StudentAnswer)
+            .where(
+                StudentAnswer.id == input_snapshot.student_answer_id,
+                StudentAnswer.submission_id == input_snapshot.submission_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         current = db.scalar(
             select(AIScoringJob)
             .where(AIScoringJob.id == uuid.UUID(job_id))
             .with_for_update()
             .execution_options(populate_existing=True)
         )
-        current_evidence = db.get(
-            QuestionRecognitionEvidence, input_snapshot.recognition_evidence_id
+        current_generation = (
+            db.scalar(
+                select(func.max(AIScoringJob.generation)).where(
+                    AIScoringJob.student_answer_id == input_snapshot.student_answer_id
+                )
+            )
+            or 0
         )
-        current_answer = db.get(StudentAnswer, input_snapshot.student_answer_id)
+        try:
+            if current_answer is None or current_submission is None:
+                raise GuardViolation("AI_INPUT_NOT_CONFIRMED", "AI input is missing")
+            require_submission_mutable(current_submission)
+            current_evidence = require_current_recognition_evidence(
+                db,
+                answer=current_answer,
+                submission=current_submission,
+                owner_id=job.owner_id,
+            )
+        except GuardViolation:
+            current_evidence = None
         current_rubric = db.get(StructuredRubricVersion, input_snapshot.rubric_version_id)
         current_reference = db.get(
             ReferenceAnswerVersion, input_snapshot.reference_answer_version_id
         )
-        current_submission = db.get(Submission, input_snapshot.submission_id)
         current_validation = (
             db.get(MathValidationJob, input_snapshot.math_validation_job_id)
             if input_snapshot.math_validation_job_id
@@ -480,6 +597,7 @@ def run_ai_grading(
         late = (
             current is None
             or current.generation != generation
+            or generation < current_generation
             or current.recognition_evidence_id != input_snapshot.recognition_evidence_id
             or current.rubric_version_id != input_snapshot.rubric_version_id
             or current.reference_answer_version_id != input_snapshot.reference_answer_version_id
@@ -494,11 +612,10 @@ def run_ai_grading(
             or current_evidence.status != "confirmed"
             or current_evidence.stale_at is not None
             or current_evidence.input_hash != input_snapshot.evidence_input_hash
-            or current_evidence.input_hash not in input_snapshot.scoring_input_version
+            or scoring_input_version(current_evidence) != input_snapshot.scoring_input_version
             or frozenset(current_block_refs) != input_snapshot.block_evidence_refs
             or current_region_refs != input_snapshot.confirmed_region_refs
             or current_answer is None
-            or current_answer.status != "confirmed"
             or current_answer.question_version_reference != input_snapshot.question_version
             or current_rubric is None
             or current_rubric.status != "confirmed"
@@ -508,6 +625,7 @@ def run_ai_grading(
             or current_reference.content_hash != input_snapshot.reference_content_hash
             or current_submission is None
             or current_submission.finalized_at is not None
+            or current_submission.status in {"finalized", "voided"}
             or (
                 input_snapshot.math_validation_job_id is not None
                 and (
@@ -551,6 +669,15 @@ def run_ai_grading(
         )
         db.add(invocation)
         if late:
+            if (
+                current is not None
+                and current.status == "running"
+                and generation < current_generation
+            ):
+                current.status = "stale"
+                current.error_code = "LATE_RESULT_DISCARDED"
+                current.stale_at = now_utc()
+                current.finished_at = now_utc()
             db.commit()
             return {"status": "discarded_late"}
         assert current is not None

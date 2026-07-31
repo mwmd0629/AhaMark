@@ -219,10 +219,12 @@ it("展示并审查基本信息与文件分析，保持班级和截止时间为�
     classes: [],
     completeness: { ready: false, next_step: 1, issues: [] },
   } as AssignmentRecord;
+  const onReviewInputsChanged = vi.fn();
   render(
     <AssignmentGenerationPanel
       assignmentId="assignment-1"
       assignment={assignment}
+      onReviewInputsChanged={onReviewInputsChanged}
     />,
   );
 
@@ -235,6 +237,12 @@ it("展示并审查基本信息与文件分析，保持班级和截止时间为�
     screen.getByText(/AI\/第三方答案不会被标记为官方答案/),
   ).toBeInTheDocument();
   expect(screen.getAllByText(/LOW_QUALITY_PAGE/).length).toBeGreaterThan(0);
+  expect(screen.getByLabelText("基本信息建议")).not.toHaveAttribute("open");
+  expect(screen.getByLabelText("文件分析")).not.toHaveAttribute("open");
+  expect(screen.getByRole("option", { name: "参考答案" })).toBeInTheDocument();
+  expect(
+    screen.getByRole("option", { name: "第三方答案" }),
+  ).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: "接受" }));
   await waitFor(() =>
@@ -244,6 +252,7 @@ it("展示并审查基本信息与文件分析，保持班级和截止时间为�
       expected_assignment_updated_at: assignment.updated_at,
     }),
   );
+  expect(onReviewInputsChanged).toHaveBeenCalledOnce();
 });
 
 it("活动任务会轮询且可请求取消", async () => {
@@ -262,13 +271,53 @@ it("活动任务会轮询且可请求取消", async () => {
   expect(mocks.listJobs.mock.calls.length).toBeGreaterThan(1);
 });
 
+it("不会把已过期文件误报为待确认 0 即已完成", async () => {
+  mocks.listFileAnalyses.mockResolvedValue([
+    {
+      id: "analysis-stale",
+      stored_file_id: "file-stale",
+      source_snapshot_hash: "a".repeat(64),
+      file_name: "旧试卷.pdf",
+      file_size: 1024,
+      detected_mime_type: "application/pdf",
+      checksum: "b".repeat(64),
+      page_count: 3,
+      suggested_role: "question_paper",
+      role_confidence: 0.9,
+      suggested_answer_source: "not_applicable",
+      answer_source_confidence: 1,
+      analysis_status: "stale",
+      evidence: [],
+      warning_codes: [],
+      teacher_edit_version: 0,
+    },
+  ]);
+
+  render(<AssignmentGenerationPanel assignmentId="assignment-1" />);
+
+  expect(
+    await screen.findByText(/已确认 0，待确认 0，已过期 1/),
+  ).toBeInTheDocument();
+  expect(screen.getByText("旧分析已过期，不能算作已确认")).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "重新分析最新内容" }),
+  ).toBeInTheDocument();
+});
+
 it("无任务时可启动且网络错误会停止轮询并显示重试", async () => {
+  const onReviewInputsChanged = vi.fn();
   mocks.listJobs.mockResolvedValueOnce([]);
   mocks.listRevisions.mockResolvedValueOnce([]);
-  render(<AssignmentGenerationPanel assignmentId="assignment-1" />);
+  render(
+    <AssignmentGenerationPanel
+      assignmentId="assignment-1"
+      onReviewInputsChanged={onReviewInputsChanged}
+    />,
+  );
 
   fireEvent.click(await screen.findByRole("button", { name: "启动生成任务" }));
   await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(onReviewInputsChanged).toHaveBeenCalledOnce());
   expect(mocks.start.mock.calls[0][1]).not.toHaveProperty("provider_mode");
 
   mocks.start.mockRejectedValueOnce(new Error("network"));
@@ -276,6 +325,36 @@ it("无任务时可启动且网络错误会停止轮询并显示重试", async (
   await waitFor(() =>
     expect(screen.getByText(/任务操作失败/)).toBeInTheDocument(),
   );
+});
+
+it("仅在活动任务跨入 partial 终态时通知一次且停止轮询", async () => {
+  vi.useFakeTimers();
+  const onReviewInputsChanged = vi.fn();
+  mocks.listJobs
+    .mockResolvedValueOnce([job("queued")])
+    .mockResolvedValue([job("partial")]);
+  render(
+    <AssignmentGenerationPanel
+      assignmentId="assignment-1"
+      onReviewInputsChanged={onReviewInputsChanged}
+    />,
+  );
+  await vi.waitFor(() =>
+    expect(screen.getByLabelText("生成状态").textContent).toContain(
+      "等待 Worker",
+    ),
+  );
+
+  await vi.advanceTimersByTimeAsync(2000);
+  await vi.waitFor(() =>
+    expect(screen.getByLabelText("生成状态").textContent).toContain("部分完成"),
+  );
+  expect(onReviewInputsChanged).toHaveBeenCalledOnce();
+  const callsAtTerminal = mocks.listJobs.mock.calls.length;
+
+  await vi.advanceTimersByTimeAsync(6000);
+  expect(onReviewInputsChanged).toHaveBeenCalledOnce();
+  expect(mocks.listJobs).toHaveBeenCalledTimes(callsAtTerminal);
 });
 
 it("展示服务器能力开关并在教师启动被禁用时关闭启动按钮", async () => {
