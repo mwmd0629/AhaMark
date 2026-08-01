@@ -41,7 +41,18 @@ const steps = [
   "集中审查与发布",
 ];
 
-const GRADE_OPTIONS = ["大一", "大二", "大三", "大四"] as const;
+function toLocalDateTimeInput(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value.slice(0, 16);
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000)
+    .toISOString()
+    .slice(0, 16);
+}
+
+function toIsoDateTime(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toISOString();
+}
 
 function isPdfPreview(url: string) {
   return /\.pdf(?:$|[?#])/i.test(url);
@@ -64,6 +75,10 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
   const [busy, setBusy] = useState(false);
   const [dueMode, setDueMode] = useState<"none" | "scheduled">("none");
   const [dueValue, setDueValue] = useState("");
+  const [selectedClassIds, setSelectedClassIds] = useState<string[]>([]);
+  const [deliveryMode, setDeliveryMode] = useState<
+    "class_assignment" | "joint_exam"
+  >("class_assignment");
   const [uploadFile, setUploadFile] = useState<File>();
   const [uploadState, setUploadState] = useState<
     "idle" | "ready" | "uploading" | "processing" | "success" | "error"
@@ -74,6 +89,7 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
     pages: number;
   }>();
   const [dragging, setDragging] = useState(false);
+  const [deletingFileId, setDeletingFileId] = useState("");
   const [selectedPageId, setSelectedPageId] = useState("");
   const [pagePreviewUrls, setPagePreviewUrls] = useState<
     Record<string, string>
@@ -128,8 +144,14 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
   useEffect(() => void load(), [load]);
   useEffect(() => {
     setDueMode(item?.due_at ? "scheduled" : "none");
-    setDueValue(item?.due_at?.slice(0, 16) ?? "");
+    setDueValue(item?.due_at ? toLocalDateTimeInput(item.due_at) : "");
   }, [item?.id, item?.due_at]);
+  useEffect(() => {
+    setSelectedClassIds(item?.classes.map((entry) => entry.id) ?? []);
+  }, [item?.classes]);
+  useEffect(() => {
+    setDeliveryMode(item?.delivery_mode ?? "class_assignment");
+  }, [item?.id, item?.delivery_mode]);
   useEffect(() => {
     const pages = item?.paper_version?.pages ?? [];
     if (!pages.length) {
@@ -216,20 +238,38 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
       toast("请选择具体的截止日期和时间", "error");
       return;
     }
+    if (!selectedClassIds.length) {
+      toast("请至少选择一个班级", "error");
+      return;
+    }
+    if (deliveryMode === "joint_exam" && selectedClassIds.length < 2) {
+      toast("联考统批至少选择两个班级", "error");
+      return;
+    }
     setBusy(true);
     try {
-      const next = await assignmentsApi.update(
+      let next = await assignmentsApi.update(
         item.id,
         {
           title: String(form.get("title")),
+          delivery_mode: deliveryMode,
           subject: String(form.get("subject")),
           grade: String(form.get("grade")),
           description: String(form.get("description")),
           total_score: Number(form.get("total_score")),
-          due_at: dueMode === "none" ? null : dueValue,
+          due_at: dueMode === "none" ? null : toIsoDateTime(dueValue),
         },
         item.updated_at,
       );
+      const currentClassIds = item.classes.map((entry) => entry.id).sort();
+      const nextClassIds = [...selectedClassIds].sort();
+      if (currentClassIds.join("|") !== nextClassIds.join("|")) {
+        next = await assignmentsApi.setClasses(
+          item.id,
+          selectedClassIds,
+          next.updated_at,
+        );
+      }
       setItem(next);
       setStep(2);
       toast("基本信息已保存");
@@ -295,6 +335,37 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
     }
   };
 
+  const deleteUploadedFile = async (file: { id: string; name: string }) => {
+    if (
+      busy ||
+      !window.confirm(`确定删除“${file.name}”吗？其对应页面也会删除。`)
+    ) {
+      return;
+    }
+    setBusy(true);
+    setDeletingFileId(file.id);
+    try {
+      await assignmentsApi.removeFile(item.id, file.id);
+      setPagePreviewUrls((current) => {
+        const next = { ...current };
+        delete next[file.id];
+        return next;
+      });
+      setPreviewErrors((current) => {
+        const next = { ...current };
+        delete next[file.id];
+        return next;
+      });
+      await load();
+      toast("文件已删除");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "文件删除失败", "error");
+    } finally {
+      setDeletingFileId("");
+      setBusy(false);
+    }
+  };
+
   const onDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setDragging(false);
@@ -355,13 +426,12 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
               defaultValue={item.title}
             />
             <Input name="subject" label="学科" defaultValue={item.subject} />
-            <Select name="grade" label="年级" defaultValue={item.grade}>
-              {GRADE_OPTIONS.map((grade) => (
-                <option key={grade} value={grade}>
-                  {grade}
-                </option>
-              ))}
-            </Select>
+            <Input
+              name="grade"
+              label="年级或教学层级"
+              defaultValue={item.grade}
+              placeholder="如：大二、研究生、2026 级"
+            />
             <Input
               name="total_score"
               label="总分"
@@ -371,6 +441,23 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
               required
               defaultValue={item.total_score}
             />
+            <Select
+              label="布置方式"
+              value={deliveryMode}
+              onChange={(event) =>
+                setDeliveryMode(
+                  event.target.value as "class_assignment" | "joint_exam",
+                )
+              }
+            >
+              <option value="class_assignment">普通作业</option>
+              <option value="joint_exam">联考统批</option>
+            </Select>
+            <p className="self-end pb-2 text-xs text-slate-500">
+              {deliveryMode === "joint_exam"
+                ? "多班共用试卷与评分标准，统一批改进度，按班发布成绩。"
+                : "适合日常作业，可按班建立批改批次。"}
+            </p>
             <fieldset className="space-y-3 rounded-xl border p-4 md:col-span-2">
               <legend className="px-1 text-sm font-semibold">截止时间</legend>
               <label className="flex items-start gap-3">
@@ -418,28 +505,51 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
                 </span>
               </label>
             </fieldset>
-            <label className="grid gap-1.5 text-sm font-medium md:col-span-2">
-              关联班级（创建草稿时已校验）
-              <div className="flex flex-wrap gap-2">
-                {item.classes.map((x) => (
-                  <span
-                    className="rounded-full bg-slate-100 px-3 py-1"
-                    key={x.id}
-                  >
-                    {x.name}
-                  </span>
-                ))}
-                {!item.classes.length && (
-                  <Link className="text-[var(--brand-700)]" href="/classes">
-                    没有班级，前往创建
-                  </Link>
-                )}
-              </div>
-              <small className="text-slate-500">
-                当前共有 {classes.length} 个可用活动班级。AI
-                不会推荐或自动选择班级。
-              </small>
-            </label>
+            <fieldset className="space-y-3 rounded-xl border p-4 md:col-span-2">
+              <legend className="px-1 text-sm font-semibold">发布班级</legend>
+              {classes.length ? (
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {classes.map((entry) => (
+                    <label
+                      className="flex items-start gap-2 rounded-lg border p-3 text-sm"
+                      key={entry.id}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedClassIds.includes(entry.id)}
+                        onChange={(event) =>
+                          setSelectedClassIds((current) =>
+                            event.target.checked
+                              ? [...current, entry.id]
+                              : current.filter((id) => id !== entry.id),
+                          )
+                        }
+                      />
+                      <span>
+                        <strong className="block">{entry.name}</strong>
+                        <span className="text-xs text-slate-500">
+                          {[entry.subject, entry.academic_year, entry.semester]
+                            .filter(Boolean)
+                            .join(" · ") || "未填写课程信息"}
+                        </span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              ) : (
+                <Link
+                  className="text-sm text-[var(--brand-700)]"
+                  href="/classes"
+                >
+                  没有可用班级，前往班级管理
+                </Link>
+              )}
+              <p className="text-xs text-slate-500">
+                {deliveryMode === "joint_exam"
+                  ? "至少选择两个班级；发布时冻结本次联考名单。"
+                  : "发布前可以调整；发布后班级范围将锁定。"}
+              </p>
+            </fieldset>
             <label className="grid gap-1.5 text-sm font-medium md:col-span-2">
               作业说明
               <textarea
@@ -471,10 +581,24 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
                   继续添加不会删除已有文件
                 </span>
               </div>
-              <ul className="mt-2 space-y-1 text-sm text-emerald-950">
+              <ul className="mt-2 space-y-2 text-sm text-emerald-950">
                 {uploadedFiles.map((file, index) => (
-                  <li key={file.id}>
-                    {index + 1}. {file.name} · {file.pageCount} 页 · 已保留
+                  <li
+                    key={file.id}
+                    className="flex flex-wrap items-center justify-between gap-2"
+                  >
+                    <span>
+                      {index + 1}. {file.name} · {file.pageCount} 页 · 已保留
+                    </span>
+                    <Button
+                      variant="ghost"
+                      loading={deletingFileId === file.id}
+                      disabled={busy && deletingFileId !== file.id}
+                      onClick={() => void deleteUploadedFile(file)}
+                      aria-label={`删除 ${file.name}`}
+                    >
+                      删除
+                    </Button>
                   </li>
                 ))}
               </ul>
@@ -569,11 +693,11 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
                     重新上传
                   </Button>
                 )}
-                {!["uploading", "processing"].includes(uploadState) && (
+                {!["uploading", "processing", "success"].includes(
+                  uploadState,
+                ) && (
                   <Button variant="ghost" onClick={() => chooseUpload()}>
-                    {uploadState === "success"
-                      ? "继续添加文件"
-                      : "删除所选文件"}
+                    删除所选文件
                   </Button>
                 )}
               </div>
@@ -1025,6 +1149,7 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
           <AnswerRubricGenerationReview
             assignmentId={item.id}
             questions={item.paper_version?.questions ?? []}
+            savedRubrics={item.rubric_version?.question_rubrics ?? []}
           />
           <h3 className="border-t pt-4 font-bold">
             手动 legacy Rubric 快捷录入

@@ -15,20 +15,6 @@ import {
   type RubricDraftValidation,
 } from "@/lib/api";
 
-const sourceLabels: Record<string, string> = {
-  teacher_official: "教师官方",
-  publisher_official: "出版方官方",
-  teacher_provided: "教师提供",
-  third_party: "第三方",
-  ai_generated: "AI 生成",
-  teacher_authored: "教师编写",
-  official_solution: "官方答案",
-  imported_reference: "导入的参考答案",
-  ai_draft: "AI 草稿",
-  other: "其他",
-  unknown: "未知",
-};
-
 const validationLabels: Record<string, string> = {
   verified: "结构与确定性检查通过",
   partially_verified: "部分验证",
@@ -45,6 +31,21 @@ type QuestionOption = {
   max_score?: number | string | null;
 };
 
+type SavedRubricOption = {
+  id: string;
+  question_id: string;
+  standard_answer?: string;
+  scoring_notes?: string;
+  items: Array<{
+    id: string;
+    title: string;
+    description?: string | null;
+    points: string;
+    required: boolean;
+    deduction_rule?: string | null;
+  }>;
+};
+
 function safeJson(value: string, label: string): Record<string, unknown> {
   try {
     const parsed = JSON.parse(value) as unknown;
@@ -59,9 +60,11 @@ function safeJson(value: string, label: string): Record<string, unknown> {
 export function AnswerRubricGenerationReview({
   assignmentId,
   questions,
+  savedRubrics = [],
 }: {
   assignmentId: string;
   questions: QuestionOption[];
+  savedRubrics?: SavedRubricOption[];
 }) {
   const toast = useToast();
   const [revision, setRevision] = useState<AssignmentDraftRevision | null>(
@@ -142,6 +145,10 @@ export function AnswerRubricGenerationReview({
     () => rubrics.find((item) => item.question_id === selectedQuestion),
     [rubrics, selectedQuestion],
   );
+  const savedRubric = useMemo(
+    () => savedRubrics.find((item) => item.question_id === selectedQuestion),
+    [savedRubrics, selectedQuestion],
+  );
   const bundleQuestion = bundle?.questions.find(
     (question) => question.id === selectedQuestion,
   );
@@ -171,7 +178,11 @@ export function AnswerRubricGenerationReview({
     bundleQuestion.rubric.materialized.id !== formalRubric?.id
       ? bundleQuestion.rubric.materialized
       : null;
-  const displayQuestions = bundleError ? [] : (bundle?.questions ?? questions);
+  const displayQuestions = bundleError
+    ? []
+    : questions.length
+      ? questions
+      : (bundle?.questions ?? []);
 
   useEffect(() => {
     if (
@@ -292,7 +303,7 @@ export function AnswerRubricGenerationReview({
                     revision.teacher_edit_version,
                   expected_source_snapshot: revision.source_snapshot_hash,
                 }),
-              "服务器判定的低风险答案已接受；来源标签保持不变",
+              "服务器判定的低风险答案已接受",
             )
           }
         >
@@ -331,6 +342,13 @@ export function AnswerRubricGenerationReview({
             );
             const savedAnswer = savedQuestion?.answer.selected;
             const savedRubric = savedQuestion?.rubric.selected;
+            const currentRubric = savedRubrics.find(
+              (entry) => entry.question_id === question.id,
+            );
+            const riskCount =
+              bundle?.blockers.filter(
+                (blocker) => blocker.entity_id === question.id,
+              ).length ?? 0;
             return (
               <button
                 key={question.id}
@@ -345,9 +363,11 @@ export function AnswerRubricGenerationReview({
                     ? "已确认"
                     : savedAnswer?.status === "draft"
                       ? "等待确认"
-                      : savedQuestion?.answer.candidate
-                        ? "有生成建议"
-                        : "尚未生成"}
+                      : currentRubric?.standard_answer
+                        ? "已保存"
+                        : savedQuestion?.answer.candidate
+                          ? "有生成建议"
+                          : "尚未生成"}
                 </span>
                 <span className="block text-xs">
                   评分标准：
@@ -355,13 +375,17 @@ export function AnswerRubricGenerationReview({
                     ? "已确认"
                     : savedRubric?.status === "draft"
                       ? "等待确认"
-                      : savedQuestion?.rubric.candidate
-                        ? "有生成建议"
-                        : "尚未生成"}
+                      : currentRubric?.items.length
+                        ? "已保存"
+                        : savedQuestion?.rubric.candidate
+                          ? "有生成建议"
+                          : "尚未生成"}
                 </span>
-                <span className="block text-xs">
-                  来源：{savedQuestion?.source.label ?? "题目信息加载中"}
-                </span>
+                {riskCount > 0 && (
+                  <span className="mt-1 block text-xs text-amber-700">
+                    {riskCount} 项风险待处理
+                  </span>
+                )}
               </button>
             );
           })}
@@ -372,10 +396,6 @@ export function AnswerRubricGenerationReview({
           {formalAnswer ? (
             <div className="space-y-3" data-testid="saved-reference-answer">
               <div className="flex flex-wrap gap-2 text-sm">
-                <span className="rounded-full bg-slate-100 px-3 py-1">
-                  来源：
-                  {formalAnswer.source.label}
-                </span>
                 <span>版本 {formalAnswer.version}</span>
                 <span>
                   {formalAnswer.status === "confirmed" ? "已确认" : "待确认"}
@@ -491,27 +511,28 @@ export function AnswerRubricGenerationReview({
                 </details>
               )}
             </div>
+          ) : savedRubric?.standard_answer ? (
+            <div className="space-y-3" data-testid="saved-legacy-answer">
+              <p className="text-sm text-emerald-700">✓ 已保存到作业草稿</p>
+              <div className="whitespace-pre-wrap rounded-lg border bg-slate-50 p-3 text-sm">
+                {savedRubric.standard_answer}
+              </div>
+              {savedRubric.scoring_notes && (
+                <p className="text-sm text-slate-600">
+                  {savedRubric.scoring_notes}
+                </p>
+              )}
+            </div>
           ) : !answer ? (
             <p>Provider unavailable 或题目尚未确认；没有伪造答案。</p>
           ) : (
             <>
               <div className="flex flex-wrap gap-2 text-sm">
                 <span className="rounded-full bg-slate-100 px-3 py-1">
-                  来源：
-                  {bundleQuestion?.answer.candidate?.source.label ??
-                    sourceLabels[answer.source_type] ??
-                    "参考答案建议"}
+                  生成建议
                 </span>
-                <span>confidence {answer.confidence.toFixed(2)}</span>
-                <span>{answer.status}</span>
+                <span>置信度 {answer.confidence.toFixed(2)}</span>
               </div>
-              {!["teacher_official", "publisher_official"].includes(
-                answer.source_type,
-              ) && (
-                <p className="text-sm text-amber-700">
-                  此答案不显示为官方答案。
-                </p>
-              )}
               <label className="grid gap-1 text-sm font-medium">
                 标准答案（纯文本安全渲染）
                 <textarea
@@ -529,7 +550,7 @@ export function AnswerRubricGenerationReview({
                 />
               </label>
               <details>
-                <summary>provenance / evidence / warning codes</summary>
+                <summary>查看证据与技术详情</summary>
                 <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap rounded bg-slate-50 p-2 text-xs">
                   {JSON.stringify(
                     {
@@ -632,7 +653,7 @@ export function AnswerRubricGenerationReview({
         </Card>
 
         <Card className="space-y-3 p-4" data-testid="rubric-candidate-panel">
-          <h3 className="font-bold">Structured Rubric 草稿</h3>
+          <h3 className="font-bold">评分标准草稿</h3>
           {formalRubric ? (
             <div className="space-y-3" data-testid="saved-structured-rubric">
               <div>
@@ -751,6 +772,28 @@ export function AnswerRubricGenerationReview({
                   </Button>
                 </details>
               )}
+            </div>
+          ) : savedRubric ? (
+            <div className="space-y-3" data-testid="saved-legacy-rubric">
+              <p className="text-sm text-emerald-700">✓ 已保存到作业草稿</p>
+              <div className="space-y-2" aria-label="已保存评分项">
+                {savedRubric.items.map((item) => (
+                  <div key={item.id} className="rounded-lg border p-3 text-sm">
+                    <div className="flex items-center justify-between gap-3">
+                      <strong>{item.title}</strong>
+                      <span>{item.points} 分</span>
+                    </div>
+                    {item.description && (
+                      <p className="mt-1 text-slate-700">{item.description}</p>
+                    )}
+                    {item.deduction_rule && (
+                      <p className="mt-1 text-xs text-slate-500">
+                        {item.deduction_rule}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
             </div>
           ) : !rubric ? (
             <p>暂无评分标准建议，也没有已生成的 Structured Rubric。</p>

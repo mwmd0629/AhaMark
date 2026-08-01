@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
   gradingApi,
@@ -144,6 +144,11 @@ function matchesReviewFilter(answer: ReviewAnswer, filter: ReviewFilter) {
 
 export default function ReviewPage() {
   const { batchId } = useParams<{ batchId: string }>();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const jointQuestionId = searchParams.get("questionId") ?? undefined;
+  const jointMode =
+    searchParams.get("joint") === "1" && Boolean(jointQuestionId);
   const [data, setData] = useState<ReviewWorkspace>();
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -173,9 +178,13 @@ export default function ReviewPage() {
     | undefined
   >(undefined);
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all");
+  const fetchWorkspace = () =>
+    jointQuestionId
+      ? gradingApi.reviewWorkspace(batchId, jointQuestionId)
+      : gradingApi.reviewWorkspace(batchId);
 
   const load = async () => {
-    const next = await gradingApi.reviewWorkspace(batchId);
+    const next = await fetchWorkspace();
     const nextReadiness =
       next.collaboration?.can_confirm_results === false
         ? undefined
@@ -189,7 +198,7 @@ export default function ReviewPage() {
     setConfirmedResult(undefined);
     confirmCommand.current = undefined;
     gradingApi
-      .reviewWorkspace(batchId)
+      .reviewWorkspace(batchId, ...(jointQuestionId ? [jointQuestionId] : []))
       .then(async (workspace) => {
         const nextReadiness =
           workspace.collaboration?.can_confirm_results === false
@@ -209,7 +218,19 @@ export default function ReviewPage() {
         }
       })
       .catch(() => setError("无法加载复核工作台"));
-  }, [batchId]);
+  }, [batchId, jointQuestionId]);
+
+  useEffect(() => {
+    if (!data || !jointMode || reviewTargets(data, "all").length) return;
+    const batches = data.joint_navigation?.batches ?? [];
+    const currentIndex = batches.findIndex((item) => item.id === batchId);
+    const nextBatch = currentIndex >= 0 ? batches[currentIndex + 1] : undefined;
+    if (nextBatch && jointQuestionId) {
+      router.replace(
+        `/grading/${nextBatch.id}/review?questionId=${jointQuestionId}&joint=1`,
+      );
+    }
+  }, [batchId, data, jointMode, jointQuestionId, router]);
 
   const submission = data?.items[submissionIndex];
   const selectedAnswer = submission?.answers[answerIndex];
@@ -348,6 +369,19 @@ export default function ReviewPage() {
         setPageIndex(0);
         setActiveEvidence(undefined);
       }
+      const batches = next.joint_navigation?.batches ?? [];
+      const currentBatchIndex = batches.findIndex(
+        (item) => item.id === batchId,
+      );
+      const nextBatch =
+        currentBatchIndex >= 0 ? batches[currentBatchIndex + 1] : undefined;
+      if (!target && jointMode && jointQuestionId && nextBatch) {
+        router.push(
+          `/grading/${nextBatch.id}/review?questionId=${jointQuestionId}&joint=1`,
+        );
+        setMessage("本班该题已处理完，正在进入下一班");
+        return;
+      }
       setScoringDecision(null);
       setMessage(
         target
@@ -422,9 +456,25 @@ export default function ReviewPage() {
     if (!data?.collaboration?.is_owner || saving) return;
     setSaving(true);
     try {
-      await gradingApi.assignQuestion(batchId, questionId, assigneeId);
+      if (data.joint_navigation) {
+        await gradingApi.assignJointQuestion(
+          data.joint_navigation.assignment_id,
+          questionId,
+          assigneeId,
+        );
+      } else {
+        await gradingApi.assignQuestion(batchId, questionId, assigneeId);
+      }
       await load();
-      setMessage(assigneeId ? "题目已分配" : "题目已收回");
+      setMessage(
+        assigneeId
+          ? data.joint_navigation
+            ? "该题已分配到全部联考班级"
+            : "题目已分配"
+          : data.joint_navigation
+            ? "已从全部联考班级收回该题"
+            : "题目已收回",
+      );
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : "题目分配失败");
     } finally {

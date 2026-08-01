@@ -143,7 +143,7 @@ it("恢复 partial/unavailable、风险与草稿历史并允许单阶段重试",
   expect(screen.getByText("阻断 2")).toBeInTheDocument();
   expect(screen.getByText("草稿历史版本（1）")).toBeInTheDocument();
   expect(
-    screen.getByText(/由 Codex 生成可编辑草稿，不能直接发布作业/),
+    screen.getByText(/由 Codex 生成可编辑草稿，不会直接发布/),
   ).toBeInTheDocument();
   expect(screen.queryByText("发布作业")).not.toBeInTheDocument();
 
@@ -233,16 +233,22 @@ it("展示并审查基本信息与文件分析，保持班级和截止时间为�
   expect(
     screen.getByText(/不会推荐班级，也不会设置截止时间/),
   ).toBeInTheDocument();
-  expect(
-    screen.getByText(/AI\/第三方答案不会被标记为官方答案/),
-  ).toBeInTheDocument();
+  expect(screen.getByText(/只需确认文件用途/)).toBeInTheDocument();
   expect(screen.getAllByText(/LOW_QUALITY_PAGE/).length).toBeGreaterThan(0);
   expect(screen.getByLabelText("基本信息建议")).not.toHaveAttribute("open");
   expect(screen.getByLabelText("文件分析")).not.toHaveAttribute("open");
   expect(screen.getByRole("option", { name: "参考答案" })).toBeInTheDocument();
-  expect(
-    screen.getByRole("option", { name: "第三方答案" }),
-  ).toBeInTheDocument();
+  expect(screen.queryByText(/答案来源/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/ANSWER_SOURCE/)).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "确认文件用途" }));
+  await waitFor(() =>
+    expect(mocks.confirmFileAnalysis).toHaveBeenCalledWith("analysis-1", {
+      expected_teacher_edit_version: 0,
+      confirmed_role: "reference_answer",
+      confirmed_answer_source: "third_party",
+    }),
+  );
 
   fireEvent.click(screen.getByRole("button", { name: "接受" }));
   await waitFor(() =>
@@ -252,7 +258,7 @@ it("展示并审查基本信息与文件分析，保持班级和截止时间为�
       expected_assignment_updated_at: assignment.updated_at,
     }),
   );
-  expect(onReviewInputsChanged).toHaveBeenCalledOnce();
+  expect(onReviewInputsChanged).toHaveBeenCalledTimes(2);
 });
 
 it("活动任务会轮询且可请求取消", async () => {

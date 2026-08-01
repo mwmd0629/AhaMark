@@ -17,6 +17,7 @@ from app.grading.providers import grade_objective, provider_from_settings
 from app.models import (
     Assignment,
     AssignmentClass,
+    AssignmentParticipantSnapshot,
     AssignmentStatus,
     ClassStudent,
     FileStatus,
@@ -168,6 +169,11 @@ def _apply_consistency_quality_flags(items: list[dict[str, Any]]) -> None:
 
 class BatchInput(BaseModel):
     class_id: uuid.UUID
+    name: str | None = Field(None, max_length=160)
+    description: str | None = Field(None, max_length=2000)
+
+
+class JointPoolInput(BaseModel):
     name: str | None = Field(None, max_length=160)
     description: str | None = Field(None, max_length=2000)
 
@@ -726,20 +732,52 @@ def _submission_workflow(db: Session, submission: Submission) -> dict[str, Any]:
     }
 
 
+def _batch_students(db: Session, batch: GradingBatch) -> list[tuple[Student, str, str]]:
+    assignment = db.get(Assignment, batch.assignment_id)
+    if assignment is not None and assignment.delivery_mode == "joint_exam":
+        return [
+            (student, student_number, student_name)
+            for student, student_number, student_name in db.execute(
+                select(
+                    Student,
+                    AssignmentParticipantSnapshot.student_number,
+                    AssignmentParticipantSnapshot.student_name,
+                )
+                .join(
+                    AssignmentParticipantSnapshot,
+                    AssignmentParticipantSnapshot.student_id == Student.id,
+                )
+                .where(
+                    AssignmentParticipantSnapshot.assignment_id == batch.assignment_id,
+                    AssignmentParticipantSnapshot.class_id == batch.class_id,
+                    Student.owner_id == batch.owner_id,
+                )
+                .order_by(
+                    AssignmentParticipantSnapshot.student_number,
+                    AssignmentParticipantSnapshot.student_id,
+                )
+            )
+        ]
+    return [
+        (student, student.student_number, student.name)
+        for student in db.scalars(
+            select(Student)
+            .join(ClassStudent, ClassStudent.student_id == Student.id)
+            .where(
+                ClassStudent.class_id == batch.class_id,
+                ClassStudent.status == MembershipStatus.active,
+                Student.owner_id == batch.owner_id,
+            )
+            .order_by(Student.student_number, Student.id)
+        )
+    ]
+
+
 def batch_json(db: Session, x: GradingBatch) -> dict[str, Any]:
     matches = db.scalars(
         select(SubmissionFileMatch).where(SubmissionFileMatch.grading_batch_id == x.id)
     ).all()
-    members = db.scalars(
-        select(Student)
-        .join(ClassStudent, ClassStudent.student_id == Student.id)
-        .where(
-            ClassStudent.class_id == x.class_id,
-            ClassStudent.status == MembershipStatus.active,
-            Student.owner_id == x.owner_id,
-        )
-        .order_by(Student.student_number, Student.id)
-    ).all()
+    members = _batch_students(db, x)
     counts = _batch_counts(db, x)
     submissions = db.scalars(
         select(Submission).where(
@@ -810,10 +848,10 @@ def batch_json(db: Session, x: GradingBatch) -> dict[str, Any]:
             "student_options": [
                 {
                     "id": str(student.id),
-                    "student_number": student.student_number,
-                    "name": student.name,
+                    "student_number": student_number,
+                    "name": student_name,
                 }
-                for student in members
+                for student, student_number, student_name in members
             ],
         },
         "actions": ["upload", "review_matches", "grade", "archive"]
@@ -826,7 +864,13 @@ def batch_json(db: Session, x: GradingBatch) -> dict[str, Any]:
 def create_batch(
     assignment_id: uuid.UUID, data: BatchInput, db: Db, actor: Actor
 ) -> dict[str, Any]:
-    assignment = owned_assignment(db, actor.id, assignment_id)
+    assignment = db.scalar(
+        select(Assignment)
+        .where(Assignment.id == assignment_id, Assignment.owner_id == actor.id)
+        .with_for_update()
+    )
+    if assignment is None:
+        raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     school_class = db.scalar(
         select(SchoolClass).where(SchoolClass.id == data.class_id, SchoolClass.owner_id == actor.id)
     )
@@ -838,6 +882,34 @@ def create_batch(
     )
     if school_class is None or linked is None:
         raise ApiProblem(409, "ASSIGNMENT_CLASS_MISMATCH", "班级未关联到该作业")
+    _ensure_assignment_gradable(db, assignment)
+    if assignment.delivery_mode == "joint_exam":
+        existing = db.scalar(
+            select(GradingBatch.id).where(
+                GradingBatch.assignment_id == assignment.id,
+                GradingBatch.class_id == data.class_id,
+                GradingBatch.owner_id == actor.id,
+                GradingBatch.status != "archived",
+            )
+        )
+        if existing is not None:
+            raise ApiProblem(409, "JOINT_EXAM_BATCH_EXISTS", "该联考班级已有活动批改批次")
+    item = GradingBatch(
+        owner_id=actor.id,
+        assignment_id=assignment.id,
+        class_id=data.class_id,
+        name=data.name,
+        description=data.description,
+        status="collecting",
+    )
+    db.add(item)
+    db.flush()
+    audit(db, actor.id, "grading_batch.create", "grading_batch", item.id)
+    db.commit()
+    return batch_json(db, item)
+
+
+def _ensure_assignment_gradable(db: Session, assignment: Assignment) -> None:
     if assignment.status not in {
         AssignmentStatus.published,
         AssignmentStatus.grading,
@@ -863,19 +935,184 @@ def create_batch(
     )
     if any(q.id not in rubric_ids for q in questions):
         raise ApiProblem(409, "RUBRIC_INCOMPLETE", "评分标准不完整")
-    item = GradingBatch(
-        owner_id=actor.id,
-        assignment_id=assignment.id,
-        class_id=data.class_id,
-        name=data.name,
-        description=data.description,
-        status="collecting",
+
+
+def _joint_pool_json(
+    db: Session, assignment: Assignment, batches: list[GradingBatch]
+) -> dict[str, Any]:
+    class_names = {
+        class_id: class_name
+        for class_id, class_name in db.execute(
+            select(SchoolClass.id, SchoolClass.name)
+            .join(AssignmentClass, AssignmentClass.class_id == SchoolClass.id)
+            .where(AssignmentClass.assignment_id == assignment.id)
+        )
+    }
+    items = [batch_json(db, batch) for batch in batches]
+    count_keys = ("submission_count", "recognized_count", "graded_count", "reviewed_count")
+    batch_ids = [batch.id for batch in batches]
+    questions = (
+        list(
+            db.scalars(
+                select(Question)
+                .where(
+                    Question.paper_version_id == assignment.active_paper_version_id,
+                    Question.status == QuestionStatus.active,
+                )
+                .order_by(Question.display_order, Question.id)
+            )
+        )
+        if assignment.active_paper_version_id is not None
+        else []
     )
-    db.add(item)
-    db.flush()
-    audit(db, actor.id, "grading_batch.create", "grading_batch", item.id)
+    question_items: list[dict[str, Any]] = []
+    for question in questions:
+        assignment_rows = list(
+            db.scalars(
+                select(GradingQuestionAssignment).where(
+                    GradingQuestionAssignment.grading_batch_id.in_(batch_ids),
+                    GradingQuestionAssignment.question_id == question.id,
+                )
+            )
+        )
+        assignee_ids = {row.assignee_id for row in assignment_rows}
+        total = (
+            db.scalar(
+                select(func.count())
+                .select_from(StudentAnswer)
+                .join(Submission, Submission.id == StudentAnswer.submission_id)
+                .where(
+                    Submission.grading_batch_id.in_(batch_ids),
+                    Submission.status != "voided",
+                    StudentAnswer.question_id == question.id,
+                )
+            )
+            or 0
+        )
+        reviewed = (
+            db.scalar(
+                select(func.count())
+                .select_from(TeacherReview)
+                .join(StudentAnswer, StudentAnswer.id == TeacherReview.student_answer_id)
+                .join(Submission, Submission.id == StudentAnswer.submission_id)
+                .where(
+                    Submission.grading_batch_id.in_(batch_ids),
+                    StudentAnswer.question_id == question.id,
+                    TeacherReview.final_score.is_not(None),
+                    StudentAnswer.requires_review.is_(False),
+                )
+            )
+            or 0
+        )
+        assignment_complete = len(assignment_rows) == len(batch_ids) and len(assignee_ids) == 1
+        question_items.append(
+            {
+                "id": str(question.id),
+                "number": question.question_number,
+                "total": total,
+                "reviewed": reviewed,
+                "assignee_id": (
+                    str(next(iter(assignee_ids))) if assignment_complete and assignee_ids else None
+                ),
+                "assignment_mixed": bool(assignment_rows) and not assignment_complete,
+            }
+        )
+    return {
+        "assignment_id": str(assignment.id),
+        "delivery_mode": assignment.delivery_mode,
+        "class_count": len(class_names),
+        "batch_count": len(items),
+        **{key: sum(int(item[key]) for item in items) for key in count_keys},
+        "items": [
+            item | {"class_name": class_names.get(uuid.UUID(item["class_id"]), "未知班级")}
+            for item in items
+        ],
+        "questions": question_items,
+    }
+
+
+@router.get("/assignments/{assignment_id}/joint-grading-pool")
+def get_joint_grading_pool(assignment_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
+    assignment = owned_assignment(db, actor.id, assignment_id)
+    if assignment.delivery_mode != "joint_exam":
+        raise ApiProblem(409, "NOT_JOINT_EXAM", "该作业不是联考统批")
+    batches = list(
+        db.scalars(
+            select(GradingBatch)
+            .where(
+                GradingBatch.assignment_id == assignment.id,
+                GradingBatch.owner_id == actor.id,
+                GradingBatch.status != "archived",
+            )
+            .order_by(GradingBatch.created_at, GradingBatch.id)
+        )
+    )
+    return _joint_pool_json(db, assignment, batches)
+
+
+@router.post("/assignments/{assignment_id}/joint-grading-pool", status_code=201)
+def create_joint_grading_pool(
+    assignment_id: uuid.UUID, data: JointPoolInput, db: Db, actor: Actor
+) -> dict[str, Any]:
+    assignment = db.scalar(
+        select(Assignment)
+        .where(Assignment.id == assignment_id, Assignment.owner_id == actor.id)
+        .with_for_update()
+    )
+    if assignment is None:
+        raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    if assignment.delivery_mode != "joint_exam":
+        raise ApiProblem(409, "NOT_JOINT_EXAM", "该作业不是联考统批")
+    _ensure_assignment_gradable(db, assignment)
+    class_rows = list(
+        db.execute(
+            select(SchoolClass.id, SchoolClass.name)
+            .join(AssignmentClass, AssignmentClass.class_id == SchoolClass.id)
+            .where(AssignmentClass.assignment_id == assignment.id)
+            .order_by(SchoolClass.name, SchoolClass.id)
+        )
+    )
+    existing = {
+        batch.class_id: batch
+        for batch in db.scalars(
+            select(GradingBatch)
+            .where(
+                GradingBatch.assignment_id == assignment.id,
+                GradingBatch.owner_id == actor.id,
+                GradingBatch.status != "archived",
+            )
+            .order_by(GradingBatch.created_at.desc())
+        )
+    }
+    created_ids: list[str] = []
+    for class_id, class_name in class_rows:
+        if class_id in existing:
+            continue
+        batch = GradingBatch(
+            owner_id=actor.id,
+            assignment_id=assignment.id,
+            class_id=class_id,
+            name=f"{data.name or assignment.title} · {class_name}",
+            description=data.description,
+            status="collecting",
+        )
+        db.add(batch)
+        db.flush()
+        existing[class_id] = batch
+        created_ids.append(str(batch.id))
+        audit(
+            db, actor.id, "grading_batch.create", "grading_batch", batch.id, {"mode": "joint_exam"}
+        )
+    audit(
+        db,
+        actor.id,
+        "joint_grading_pool.ensure",
+        "assignment",
+        assignment.id,
+        {"created_batch_ids": created_ids, "class_count": len(class_rows)},
+    )
     db.commit()
-    return batch_json(db, item)
+    return _joint_pool_json(db, assignment, list(existing.values()))
 
 
 @router.get("/assignments/{assignment_id}/grading-batches")
@@ -931,34 +1168,26 @@ def archive_batch(batch_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
 def match_student(
     db: Session, batch: GradingBatch, filename: str
 ) -> tuple[Student | None, str, Decimal, str]:
-    members = db.scalars(
-        select(Student)
-        .join(ClassStudent, ClassStudent.student_id == Student.id)
-        .where(
-            ClassStudent.class_id == batch.class_id,
-            ClassStudent.status == MembershipStatus.active,
-            Student.owner_id == batch.owner_id,
-        )
-    ).all()
+    members = _batch_students(db, batch)
     # Treat punctuation, whitespace, underscores, hyphens and Chinese brackets as
     # separators. Only adjacent ASCII letters/digits can be part of another identifier.
     numbers = [
-        s
-        for s in members
+        member
+        for member in members
         if re.search(
-            rf"(?<![0-9A-Za-z]){re.escape(s.student_number)}(?![0-9A-Za-z])",
+            rf"(?<![0-9A-Za-z]){re.escape(member[1])}(?![0-9A-Za-z])",
             filename,
             re.I,
         )
     ]
-    names = [s for s in members if s.name in filename]
-    candidates = {s.id: s for s in numbers + names}
+    names = [member for member in members if member[2] in filename]
+    candidates = {member[0].id: member for member in numbers + names}
     if len(candidates) > 1:
         return None, "ambiguous", Decimal("0"), "文件名包含多个学生标识"
     if len(numbers) == 1:
-        return numbers[0], "student_number", Decimal("1"), "学号精确匹配"
-    if len(names) == 1 and sum(s.name == names[0].name for s in members) == 1:
-        return names[0], "exact_name", Decimal("0.98"), "班级内唯一姓名精确匹配"
+        return numbers[0][0], "student_number", Decimal("1"), "学号精确匹配"
+    if len(names) == 1 and sum(member[2] == names[0][2] for member in members) == 1:
+        return names[0][0], "exact_name", Decimal("0.98"), "班级内唯一姓名精确匹配"
     if names:
         return None, "ambiguous", Decimal("0"), "姓名在班级内不唯一"
     return None, "unmatched", Decimal("0"), "未找到可靠学生标识"
@@ -1140,15 +1369,13 @@ def confirm_match(
             SubmissionFileMatch.id == match_id, SubmissionFileMatch.grading_batch_id == batch.id
         )
     )
-    student = db.scalar(
-        select(Student)
-        .join(ClassStudent, ClassStudent.student_id == Student.id)
-        .where(
-            Student.id == data.student_id,
-            Student.owner_id == actor.id,
-            ClassStudent.class_id == batch.class_id,
-            ClassStudent.status == MembershipStatus.active,
-        )
+    student = next(
+        (
+            candidate
+            for candidate, _, _ in _batch_students(db, batch)
+            if candidate.id == data.student_id
+        ),
+        None,
     )
     if match is None or student is None:
         raise ApiProblem(404, "MATCH_OR_STUDENT_NOT_FOUND", "匹配记录或班级学生不存在")
@@ -2537,14 +2764,6 @@ def review_answer(answer_id: uuid.UUID, data: ReviewInput, db: Db, actor: Actor)
         .with_for_update()
         .execution_options(populate_existing=True)
     )
-    collaboration_enabled = (
-        db.scalar(
-            select(GradingQuestionAssignment.id)
-            .where(GradingQuestionAssignment.grading_batch_id == batch.id)
-            .limit(1)
-        )
-        is not None
-    )
     if review is None:
         review = TeacherReview(
             student_answer_id=answer.id,
@@ -2557,7 +2776,7 @@ def review_answer(answer_id: uuid.UUID, data: ReviewInput, db: Db, actor: Actor)
         db.add(review)
         db.flush()
     else:
-        if collaboration_enabled and data.expected_review_version != review.review_version:
+        if data.expected_review_version != review.review_version:
             raise ApiProblem(
                 409,
                 "REVIEW_CONFLICT",
@@ -2623,13 +2842,11 @@ def review_answer(answer_id: uuid.UUID, data: ReviewInput, db: Db, actor: Actor)
         db.commit()
     except IntegrityError as exc:
         db.rollback()
-        if collaboration_enabled:
-            raise ApiProblem(
-                409,
-                "REVIEW_CONFLICT",
-                "该题已被其他教师更新，请刷新后重试",
-            ) from exc
-        raise
+        raise ApiProblem(
+            409,
+            "REVIEW_CONFLICT",
+            "该题已被其他教师更新，请刷新后重试",
+        ) from exc
     return {
         "id": str(review.id),
         "decision": review.decision,
@@ -4046,6 +4263,90 @@ def assign_grading_question(
     return _collaboration_json(db, batch, actor.id)
 
 
+@router.put("/assignments/{assignment_id}/joint-question-assignments/{question_id}")
+def assign_joint_grading_question(
+    assignment_id: uuid.UUID,
+    question_id: uuid.UUID,
+    data: QuestionAssignmentInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    assignment = db.scalar(
+        select(Assignment)
+        .where(Assignment.id == assignment_id, Assignment.owner_id == actor.id)
+        .with_for_update()
+    )
+    if assignment is None:
+        raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    if assignment.delivery_mode != "joint_exam":
+        raise ApiProblem(409, "NOT_JOINT_EXAM", "该作业不是联考统批")
+    question = db.scalar(
+        select(Question).where(
+            Question.id == question_id,
+            Question.paper_version_id == assignment.active_paper_version_id,
+            Question.status == QuestionStatus.active,
+        )
+    )
+    if question is None:
+        raise ApiProblem(404, "QUESTION_NOT_FOUND", "题目不存在")
+    if (
+        data.assignee_id is not None
+        and _active_collaborator(db, assignment.id, data.assignee_id) is None
+    ):
+        raise ApiProblem(422, "COLLABORATOR_REQUIRED", "请先添加该教师为协作者")
+    batches = list(
+        db.scalars(
+            select(GradingBatch)
+            .where(
+                GradingBatch.assignment_id == assignment.id,
+                GradingBatch.owner_id == actor.id,
+                GradingBatch.status != "archived",
+            )
+            .order_by(GradingBatch.created_at, GradingBatch.id)
+        )
+    )
+    if not batches:
+        raise ApiProblem(409, "JOINT_GRADING_POOL_REQUIRED", "请先创建联考统批池")
+    previous_assignees: dict[str, str | None] = {}
+    for batch in batches:
+        row = db.scalar(
+            select(GradingQuestionAssignment).where(
+                GradingQuestionAssignment.grading_batch_id == batch.id,
+                GradingQuestionAssignment.question_id == question.id,
+            )
+        )
+        previous_assignees[str(batch.id)] = str(row.assignee_id) if row else None
+        if data.assignee_id is None:
+            if row is not None:
+                db.delete(row)
+        elif row is None:
+            db.add(
+                GradingQuestionAssignment(
+                    grading_batch_id=batch.id,
+                    question_id=question.id,
+                    assignee_id=data.assignee_id,
+                    assigned_by=actor.id,
+                )
+            )
+        else:
+            row.assignee_id, row.assigned_by = data.assignee_id, actor.id
+    audit(
+        db,
+        actor.id,
+        "grading.joint_question.assign",
+        "question",
+        question.id,
+        {
+            "assignment_id": str(assignment.id),
+            "batch_ids": [str(batch.id) for batch in batches],
+            "previous_assignees": previous_assignees,
+            "assignee_id": str(data.assignee_id) if data.assignee_id else None,
+        },
+    )
+    db.commit()
+    return _joint_pool_json(db, assignment, batches)
+
+
 @router.get("/grading-batches/{batch_id}/review-workspace")
 def review_workspace(
     batch_id: uuid.UUID,
@@ -4056,6 +4357,7 @@ def review_workspace(
     submission_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     batch, is_owner, assigned_question_ids = _reviewable_batch(db, actor.id, batch_id)
+    assignment = db.get(Assignment, batch.assignment_id)
     submission_filters: list[Any] = [
         Submission.grading_batch_id == batch.id,
         Submission.owner_id == batch.owner_id,
@@ -4292,6 +4594,29 @@ def review_workspace(
             "主观题由 Codex 根据已确认的答题内容、参考答案和评分标准生成建议；教师负责复核与定稿"
         ),
         "collaboration": _collaboration_json(db, batch, actor.id),
+        "joint_navigation": (
+            {
+                "assignment_id": str(batch.assignment_id),
+                "batches": [
+                    {
+                        "id": str(joint_batch.id),
+                        "class_id": str(joint_batch.class_id),
+                        "class_name": class_name,
+                    }
+                    for joint_batch, class_name in db.execute(
+                        select(GradingBatch, SchoolClass.name)
+                        .join(SchoolClass, SchoolClass.id == GradingBatch.class_id)
+                        .where(
+                            GradingBatch.assignment_id == batch.assignment_id,
+                            GradingBatch.status != "archived",
+                        )
+                        .order_by(SchoolClass.name, GradingBatch.id)
+                    )
+                ],
+            }
+            if assignment is not None and assignment.delivery_mode == "joint_exam"
+            else None
+        ),
     }
 
 

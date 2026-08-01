@@ -18,6 +18,12 @@ const mocks = vi.hoisted(() => ({
   addCollaborator: vi.fn(),
   removeCollaborator: vi.fn(),
   assignQuestion: vi.fn(),
+  assignJointQuestion: vi.fn(),
+}));
+const navigation = vi.hoisted(() => ({
+  search: "",
+  push: vi.fn(),
+  replace: vi.fn(),
 }));
 const recognitionMocks = vi.hoisted(() => ({
   blocks: vi.fn().mockResolvedValue([]),
@@ -31,6 +37,8 @@ const recognitionMocks = vi.hoisted(() => ({
 
 vi.mock("next/navigation", () => ({
   useParams: () => ({ batchId: "b1" }),
+  useRouter: () => ({ push: navigation.push, replace: navigation.replace }),
+  useSearchParams: () => new URLSearchParams(navigation.search),
 }));
 vi.mock("next/link", () => ({
   default: ({
@@ -48,6 +56,7 @@ vi.mock("@/lib/api", () => ({
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  navigation.search = "";
 });
 
 function workspace({
@@ -874,4 +883,31 @@ it("shows concise rubric evidence for each scoring item", async () => {
   expect(
     screen.getByText("依据：先列出方程，再代入求解。"),
   ).toBeInTheDocument();
+});
+
+it("按题统批遇到空班级时自动进入下一班", async () => {
+  navigation.search = "questionId=question-1&joint=1";
+  mockReadiness();
+  const data = workspace();
+  data.items = [];
+  data.progress = { reviewed: 0, total: 0 };
+  Object.assign(data, {
+    joint_navigation: {
+      assignment_id: "joint-1",
+      batches: [
+        { id: "b1", class_id: "class-1", class_name: "一班" },
+        { id: "b2", class_id: "class-2", class_name: "二班" },
+      ],
+    },
+  });
+  mocks.reviewWorkspace.mockResolvedValue(data);
+
+  render(<ReviewPage />);
+
+  await waitFor(() =>
+    expect(navigation.replace).toHaveBeenCalledWith(
+      "/grading/b2/review?questionId=question-1&joint=1",
+    ),
+  );
+  expect(mocks.reviewWorkspace).toHaveBeenCalledWith("b1", "question-1");
 });

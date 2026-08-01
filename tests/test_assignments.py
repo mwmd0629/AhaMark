@@ -1,4 +1,5 @@
 import io
+import uuid
 from decimal import Decimal
 
 from app.api.assignments import detail
@@ -8,6 +9,7 @@ from app.models import (
     ArchiveStatus,
     Assignment,
     AssignmentClass,
+    AssignmentGenerationJob,
     AuditLog,
     PaperVersion,
     Question,
@@ -185,12 +187,113 @@ def test_file_pages_question_region_rubric_and_publish():
         json={"standard_answer": "答案", "items": [{"title": "正确", "points": 10}]},
     )
     assert rubric.status_code == 200
-    # Publishing is intentionally unavailable without a teacher-created,
-    # server-side readiness snapshot from the central review workflow.
-    published = client.post(f"/api/assignments/{aid}/publish")
-    assert published.status_code == 422
-    assert client.get(f"/api/assignments/{aid}").json()["status"] == "draft"
+    readiness = client.get(f"/api/assignments/{aid}/manual-publish-readiness")
+    assert readiness.status_code == 200
+    ready = readiness.json()
+    assert ready["ready"] is True
+    assert ready["class_ids"] == [str(cls.id)]
+    assert len(ready["state_hash"]) == 64
+
+    missing_confirmation = client.post(
+        f"/api/assignments/{aid}/manual-publish",
+        json={
+            "state_hash": ready["state_hash"],
+            "expected_assignment_updated_at": ready["expected_assignment_updated_at"],
+        },
+    )
+    assert missing_confirmation.status_code == 422
+
+    current = client.get(f"/api/assignments/{aid}").json()
+    changed = client.patch(
+        f"/api/assignments/{aid}",
+        json={"title": "发布前改名", "updated_at": current["updated_at"]},
+    )
+    assert changed.status_code == 200
+    stale = client.post(
+        f"/api/assignments/{aid}/manual-publish",
+        json={
+            "state_hash": ready["state_hash"],
+            "expected_assignment_updated_at": ready["expected_assignment_updated_at"],
+            "explicit_confirmation": True,
+        },
+    )
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "PUBLISH_STATE_STALE"
+
+    ready = client.get(f"/api/assignments/{aid}/manual-publish-readiness").json()
+    published = client.post(
+        f"/api/assignments/{aid}/manual-publish",
+        json={
+            "state_hash": ready["state_hash"],
+            "expected_assignment_updated_at": ready["expected_assignment_updated_at"],
+            "explicit_confirmation": True,
+        },
+    )
+    assert published.status_code == 200
+    assert published.json()["status"] == "published"
+    # The structured/AI review endpoint remains protected by its own readiness contract.
+    assert client.post(f"/api/assignments/{aid}/publish").status_code == 422
     app.dependency_overrides.pop(get_storage, None)
+
+
+def test_delete_draft_file_removes_object_pages_and_renumbers_remaining_pages():
+    actor, db = actor_and_db()
+    from app.storage.dependencies import get_storage
+
+    fake = FakeStorage()
+    app.dependency_overrides[get_storage] = lambda: fake
+    try:
+        aid = create(client, active_class(db, actor.id, "删除文件测试班").id)["id"]
+        file_ids: list[str] = []
+        for name in ("first.png", "second.png"):
+            image = io.BytesIO()
+            Image.new("RGB", (100, 200), "white").save(image, "PNG")
+            response = client.post(
+                f"/api/assignments/{aid}/files",
+                files={"file": (name, image.getvalue(), "image/png")},
+            )
+            assert response.status_code == 201, response.text
+            file_ids.append(response.json()["id"])
+
+        assert len(fake.objects) == 2
+        deleted = client.delete(f"/api/assignments/{aid}/files/{file_ids[0]}")
+        assert deleted.status_code == 200, deleted.text
+        assert deleted.json() == {"id": file_ids[0], "pages_deleted": 1}
+        assert len(fake.objects) == 1
+        pages = client.get(f"/api/assignments/{aid}").json()["paper_version"]["pages"]
+        assert [(page["file_name"], page["page_number"]) for page in pages] == [("second.png", 1)]
+        repeated = client.delete(f"/api/assignments/{aid}/files/{file_ids[0]}")
+        assert repeated.status_code == 404
+        assert repeated.json()["code"] == "FILE_NOT_FOUND"
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_manual_publish_cannot_bypass_an_ai_generation_job():
+    actor, db = actor_and_db()
+    item = create(client, active_class(db, actor.id, "AI 作业班").id)
+    db.add(
+        AssignmentGenerationJob(
+            owner_id=actor.id,
+            assignment_id=uuid.UUID(item["id"]),
+            generation=1,
+            status="completed",
+            current_stage="completed",
+            progress=100,
+            idempotency_key=f"test-ai-review-{item['id']}",
+            request_fingerprint="a" * 64,
+            source_snapshot_hash="b" * 64,
+            provider_mode="unavailable",
+            provider_config_version="test-unavailable-v1",
+            prompt_version="test-v1",
+            schema_version="test-v1",
+        )
+    )
+    db.commit()
+
+    response = client.get(f"/api/assignments/{item['id']}/manual-publish-readiness")
+    assert response.status_code == 409
+    assert response.json()["code"] == "AI_REVIEW_REQUIRED"
 
 
 def test_upload_rejections():

@@ -166,12 +166,12 @@ def test_migration_head_matches_strict_audit_models() -> None:
     materialization_revision = script.get_revision("0026_idempotent_materialization")
     semantic_revision = script.get_revision("0027_semantic_projection")
     orchestrator_revision = script.get_revision("0028_processing_orchestrator")
-    auto_confirmation_revision = script.get_revision(
-        "0029_processing_auto_confirmation"
-    )
+    auto_confirmation_revision = script.get_revision("0029_processing_auto_confirmation")
     collaboration_revision = script.get_revision("0030_collaborative_grading")
     student_portal_revision = script.get_revision("0031_student_portal")
-    assert script.get_current_head() == student_portal_revision.revision
+    joint_exam_revision = script.get_revision("0032_joint_exam_roster")
+    assert script.get_current_head() == joint_exam_revision.revision
+    assert joint_exam_revision.down_revision == student_portal_revision.revision
     assert student_portal_revision.down_revision == collaboration_revision.revision
     assert collaboration_revision.down_revision == auto_confirmation_revision.revision
     assert orchestrator_revision.down_revision == semantic_revision.revision
@@ -493,12 +493,8 @@ def test_strict_create_and_retry_replay_only_the_same_contract(
             idempotency_key="strict-criterion-retry-stable",
             expected_generation=source.generation,
         )
-        criterion_first = retry_criterion(
-            source.id, "result", criterion_retry, db, actor
-        )
-        criterion_replay = retry_criterion(
-            source.id, "result", criterion_retry, db, actor
-        )
+        criterion_first = retry_criterion(source.id, "result", criterion_retry, db, actor)
+        criterion_replay = retry_criterion(source.id, "result", criterion_retry, db, actor)
         assert criterion_replay["id"] == criterion_first["id"]
     finally:
         settings.ai_grading_provider = old_provider
@@ -559,9 +555,7 @@ def test_new_job_generation_fences_inflight_and_preexisting_old_worker(
             )
         )
         invocation = db.scalar(
-            select(AIProviderInvocation).where(
-                AIProviderInvocation.ai_scoring_job_id == old_job.id
-            )
+            select(AIProviderInvocation).where(AIProviderInvocation.ai_scoring_job_id == old_job.id)
         )
         assert current_old is not None and current_old.status == "stale"
         assert current_old.error_code == "LATE_RESULT_DISCARDED"
@@ -594,9 +588,9 @@ def test_new_job_generation_fences_inflight_and_preexisting_old_worker(
             "provider_from_settings",
             lambda _settings: pytest.fail("superseded generation must not call provider"),
         )
-        assert worker.run_ai_grading.run(
-            str(preexisting_old.id), preexisting_old.generation
-        ) == {"status": "discarded_late"}
+        assert worker.run_ai_grading.run(str(preexisting_old.id), preexisting_old.generation) == {
+            "status": "discarded_late"
+        }
     finally:
         settings.ai_grading_provider = old_provider
         db.close()

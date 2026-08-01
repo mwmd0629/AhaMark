@@ -294,6 +294,15 @@ export const assignmentReviewApi = {
       `/api/assignment-review-sessions/${sessionId}/confirm/${kind}`,
       { method: "POST", body: JSON.stringify(reviewAction(reviewVersion)) },
     ),
+  autoConfirm: (sessionId: string, reviewVersion: number) =>
+    request<{
+      confirmed: string[];
+      skipped: Record<string, string>;
+      review_version: number;
+    }>(`/api/assignment-review-sessions/${sessionId}/auto-confirm`, {
+      method: "POST",
+      body: JSON.stringify(reviewAction(reviewVersion)),
+    }),
   disposition: (
     itemId: string,
     reviewVersion: number,
@@ -579,6 +588,7 @@ export type QuestionRecord = {
 export type AssignmentRecord = {
   id: string;
   title: string;
+  delivery_mode?: "class_assignment" | "joint_exam";
   subject?: string;
   grade?: string;
   description?: string;
@@ -589,6 +599,12 @@ export type AssignmentRecord = {
   published_at?: string;
   updated_at: string;
   classes: Pick<ClassRecord, "id" | "name" | "status">[];
+  participant_snapshot?: {
+    frozen: boolean;
+    frozen_at?: string | null;
+    total: number;
+    by_class: Record<string, number>;
+  };
   question_count?: number;
   paper_version?: {
     id: string;
@@ -616,7 +632,15 @@ export type AssignmentRecord = {
       question_id: string;
       standard_answer?: string;
       scoring_notes?: string;
-      items: { id: string; title: string; points: string }[];
+      items: {
+        id: string;
+        title: string;
+        description?: string | null;
+        points: string;
+        item_type: string;
+        required: boolean;
+        deduction_rule?: string | null;
+      }[];
     }[];
   };
   completeness: {
@@ -632,6 +656,7 @@ export type AssignmentRecord = {
 };
 export type AssignmentInput = {
   title: string;
+  delivery_mode?: "class_assignment" | "joint_exam";
   subject?: string;
   grade?: string;
   description?: string;
@@ -639,6 +664,16 @@ export type AssignmentInput = {
   total_score?: number;
   due_at?: string | null;
   class_ids: string[];
+};
+export type ManualPublishReadiness = {
+  mode: "manual";
+  ready: boolean;
+  issues: AssignmentRecord["completeness"]["issues"];
+  state_hash: string;
+  expected_assignment_updated_at: string;
+  class_ids: string[];
+  due_at: string | null;
+  total_score: string | null;
 };
 export const assignmentsApi = {
   list: (query = "") =>
@@ -656,6 +691,11 @@ export const assignmentsApi = {
       method: "PATCH",
       body: JSON.stringify({ ...data, updated_at }),
     }),
+  setClasses: (id: string, classIds: string[], updatedAt: string) =>
+    request<AssignmentRecord>(`/api/assignments/${id}/classes`, {
+      method: "PUT",
+      body: JSON.stringify({ class_ids: classIds, updated_at: updatedAt }),
+    }),
   upload: (id: string, file: File) => {
     const body = new FormData();
     body.append("file", file);
@@ -668,6 +708,11 @@ export const assignmentsApi = {
     request<{ url: string }>(`/api/assignments/${id}/files/${fileId}/preview`, {
       method: "POST",
     }),
+  removeFile: (id: string, fileId: string) =>
+    request<{ id: string; pages_deleted: number }>(
+      `/api/assignments/${id}/files/${fileId}`,
+      { method: "DELETE" },
+    ),
   page: (id: string, pageId: string, data: Record<string, unknown>) =>
     request(`/api/assignments/${id}/pages/${pageId}`, {
       method: "PATCH",
@@ -701,9 +746,19 @@ export const assignmentsApi = {
     request<AssignmentRecord["completeness"]>(
       `/api/assignments/${id}/publish-check`,
     ),
-  publish: (id: string) =>
-    request<AssignmentRecord>(`/api/assignments/${id}/publish`, {
+  manualPublishReadiness: (id: string) =>
+    request<ManualPublishReadiness>(
+      `/api/assignments/${id}/manual-publish-readiness`,
+    ),
+  publishManual: (id: string, readiness: ManualPublishReadiness) =>
+    request<AssignmentRecord>(`/api/assignments/${id}/manual-publish`, {
       method: "POST",
+      body: JSON.stringify({
+        state_hash: readiness.state_hash,
+        expected_assignment_updated_at:
+          readiness.expected_assignment_updated_at,
+        explicit_confirmation: true,
+      }),
     }),
   copy: (id: string) =>
     request<AssignmentRecord>(`/api/assignments/${id}/copy`, {
@@ -885,6 +940,26 @@ export type GradingBatch = {
   actions: string[];
 };
 
+export type JointGradingPool = {
+  assignment_id: string;
+  delivery_mode: "joint_exam";
+  class_count: number;
+  batch_count: number;
+  submission_count: number;
+  recognized_count: number;
+  graded_count: number;
+  reviewed_count: number;
+  items: Array<GradingBatch & { class_name: string }>;
+  questions: Array<{
+    id: string;
+    number: string;
+    total: number;
+    reviewed: number;
+    assignee_id?: string | null;
+    assignment_mixed: boolean;
+  }>;
+};
+
 export type ProcessingStep = {
   id: string;
   submission_id: string;
@@ -1000,6 +1075,18 @@ export const gradingApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  jointPool: (assignmentId: string) =>
+    request<JointGradingPool>(
+      `/api/assignments/${assignmentId}/joint-grading-pool`,
+    ),
+  ensureJointPool: (
+    assignmentId: string,
+    data: { name?: string; description?: string } = {},
+  ) =>
+    request<JointGradingPool>(
+      `/api/assignments/${assignmentId}/joint-grading-pool`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
   getBatch: (batchId: string) =>
     request<GradingBatch>(`/api/grading-batches/${batchId}`),
   upload: (batchId: string, files: File[]) => {
@@ -1119,6 +1206,18 @@ export const gradingApi = {
         body: JSON.stringify({ assignee_id: assigneeId ?? null }),
       },
     ),
+  assignJointQuestion: (
+    assignmentId: string,
+    questionId: string,
+    assigneeId?: string,
+  ) =>
+    request<JointGradingPool>(
+      `/api/assignments/${assignmentId}/joint-question-assignments/${questionId}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ assignee_id: assigneeId ?? null }),
+      },
+    ),
   continueProcessing: (batchId: string, idempotencyKey: string) =>
     request<ProcessingRun>(`/api/grading-batches/${batchId}/processing-runs`, {
       method: "POST",
@@ -1187,9 +1286,9 @@ export const gradingApi = {
     request(`/api/submissions/${submissionId}/finalize`, { method: "POST" }),
   snapshots: (assignmentId: string) =>
     request(`/api/assignments/${assignmentId}/score-snapshots?status=complete`),
-  reviewWorkspace: (batchId: string) =>
+  reviewWorkspace: (batchId: string, questionId?: string) =>
     request<ReviewWorkspace>(
-      `/api/grading-batches/${batchId}/review-workspace`,
+      `/api/grading-batches/${batchId}/review-workspace${questionId ? `?question_id=${questionId}` : ""}`,
     ),
 };
 
@@ -1243,6 +1342,10 @@ export type ReviewWorkspace = {
   progress: { total: number; reviewed: number };
   provider_notice: string;
   collaboration: GradingCollaboration;
+  joint_navigation?: {
+    assignment_id: string;
+    batches: Array<{ id: string; class_id: string; class_name: string }>;
+  } | null;
   items: Array<{
     submission_id: string;
     student_id?: string;

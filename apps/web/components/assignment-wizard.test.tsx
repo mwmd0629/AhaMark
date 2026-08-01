@@ -33,7 +33,7 @@ vi.mock("@/lib/api", async () => {
     status: "draft" as const,
     total_score: "20.00",
     updated_at: "2026-07-25T00:00:00Z",
-    classes: [],
+    classes: [{ id: "class-1", name: "线代 2 班", status: "active" as const }],
     due_at: null,
     completeness: { ready: true, next_step: 5, issues: [] },
     paper_version: {
@@ -75,7 +75,36 @@ vi.mock("@/lib/api", async () => {
     ...actual,
     classesApi: {
       ...actual.classesApi,
-      list: vi.fn().mockResolvedValue({ items: [] }),
+      list: vi.fn().mockResolvedValue({
+        items: [
+          {
+            id: "class-1",
+            name: "线代 2 班",
+            subject: "线性代数",
+            academic_year: "2026-2027",
+            semester: "秋季",
+            status: "active",
+            student_count: 30,
+            active_student_count: 30,
+            group_count: 0,
+            created_at: "2026-07-01T00:00:00Z",
+            updated_at: "2026-07-01T00:00:00Z",
+          },
+          {
+            id: "class-2",
+            name: "线代 3 班",
+            subject: "线性代数",
+            academic_year: "2026-2027",
+            semester: "秋季",
+            status: "active",
+            student_count: 28,
+            active_student_count: 28,
+            group_count: 0,
+            created_at: "2026-07-01T00:00:00Z",
+            updated_at: "2026-07-01T00:00:00Z",
+          },
+        ],
+      }),
     },
     assignmentGenerationApi: {
       ...actual.assignmentGenerationApi,
@@ -90,10 +119,15 @@ vi.mock("@/lib/api", async () => {
         ...data,
         updated_at: "2026-07-25T01:00:00Z",
       })),
+      setClasses: vi.fn().mockResolvedValue(assignment),
       upload: vi.fn().mockResolvedValue({
         id: "file-2",
         name: "新试卷.pdf",
         pages_created: 3,
+      }),
+      removeFile: vi.fn().mockResolvedValue({
+        id: "file-1",
+        pages_deleted: 3,
       }),
       preview: vi.fn().mockResolvedValue({
         url: "https://example.test/paper.pdf?signature=1",
@@ -113,7 +147,7 @@ it("回填标准答案并在切换题目时同步更新", async () => {
     await screen.findByDisplayValue("第一题已保存答案"),
   ).toBeInTheDocument();
   expect(
-    screen.getByText(/由 Codex 生成可编辑草稿，不能直接发布作业/),
+    screen.getByText(/由 Codex 生成可编辑草稿，不会直接发布/),
   ).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("当前题目"), {
     target: { value: "q2" },
@@ -142,10 +176,27 @@ it("支持拖拽上传并显示文件、处理状态和成功页数", async () =
     "原试卷.pdf · 3 页 · 已保留",
   );
   expect(screen.getByText("继续添加不会删除已有文件")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "继续添加文件" }));
-  expect(screen.getByRole("region", { name: "已上传文件" })).toHaveTextContent(
-    "原试卷.pdf · 3 页 · 已保留",
+  expect(
+    screen.queryByRole("button", { name: "继续添加文件" }),
+  ).not.toBeInTheDocument();
+});
+
+it("确认后删除已上传文件", async () => {
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<AssignmentWizard assignmentId="assignment-1" />);
+  await screen.findByDisplayValue("第一题已保存答案");
+  fireEvent.click(screen.getByRole("button", { name: /上传试卷/ }));
+  fireEvent.click(screen.getByRole("button", { name: "删除 原试卷.pdf" }));
+  await waitFor(() =>
+    expect(assignmentsApi.removeFile).toHaveBeenCalledWith(
+      "assignment-1",
+      "file-1",
+    ),
   );
+  expect(window.confirm).toHaveBeenCalledWith(
+    "确定删除“原试卷.pdf”吗？其对应页面也会删除。",
+  );
+  confirm.mockRestore();
 });
 
 it("拒绝非法格式并允许重新选择", async () => {
@@ -192,17 +243,42 @@ it("无截止时间保存为 null，回显时保持无截止时间", async () =>
   );
 });
 
-it("年级使用大一至大四下拉选项并回填编辑值", async () => {
+it("发布前可以调整班级，并将本地截止时间转换为带时区的 ISO 时间", async () => {
+  render(<AssignmentWizard assignmentId="assignment-1" />);
+  await screen.findByDisplayValue("第一题已保存答案");
+  fireEvent.click(screen.getByRole("button", { name: /基本信息/ }));
+  fireEvent.click(screen.getByRole("checkbox", { name: /线代 3 班/ }));
+  fireEvent.click(screen.getByRole("radio", { name: /设置截止时间/ }));
+  fireEvent.change(screen.getByLabelText("具体截止时间"), {
+    target: { value: "2026-08-01T08:30" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "保存并继续" }));
+
+  await waitFor(() =>
+    expect(assignmentsApi.update).toHaveBeenCalledWith(
+      "assignment-1",
+      expect.objectContaining({
+        due_at: new Date("2026-08-01T08:30").toISOString(),
+      }),
+      "2026-07-25T00:00:00Z",
+    ),
+  );
+  await waitFor(() =>
+    expect(assignmentsApi.setClasses).toHaveBeenCalledWith(
+      "assignment-1",
+      ["class-1", "class-2"],
+      "2026-07-25T01:00:00Z",
+    ),
+  );
+});
+
+it("年级允许大学课程自定义教学层级并回填编辑值", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" />);
   await screen.findByDisplayValue("第一题已保存答案");
   fireEvent.click(screen.getByRole("button", { name: /基本信息/ }));
 
-  const grade = screen.getByLabelText("年级");
+  const grade = screen.getByLabelText("年级或教学层级");
   expect(grade).toHaveValue("大二");
-  expect(
-    Array.from((grade as HTMLSelectElement).options).map(
-      (option) => option.value,
-    ),
-  ).toEqual(["大一", "大二", "大三", "大四"]);
-  expect(grade.tagName).toBe("SELECT");
+  expect(grade).toHaveAttribute("placeholder", "如：大二、研究生、2026 级");
+  expect(grade.tagName).toBe("INPUT");
 });

@@ -189,9 +189,7 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
         assert stored_snapshot_v1.version == 1
         assert stored_snapshot_v1.total_score == Decimal("10")
         snapshot_v1_details = copy.deepcopy(stored_snapshot_v1.details)
-        release_v1 = client.get(
-            f"/api/grade-releases/{confirm_v1.json()['grade_release_id']}"
-        )
+        release_v1 = client.get(f"/api/grade-releases/{confirm_v1.json()['grade_release_id']}")
         assert release_v1.status_code == 200
         analytics_v1 = client.post(f"/api/grade-releases/{release_v1.json()['id']}/analytics")
         assert analytics_v1.status_code == 201
@@ -242,6 +240,7 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
                 "final_score": 8,
                 "final_feedback": "合成改分",
                 "reason": "第三部分版本一致性测试",
+                "expected_review_version": review_v1.json()["review_version"],
             },
         )
         assert review_v2.status_code == 200
@@ -263,9 +262,7 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
         assert stored_snapshot_v2.status == "complete"
         assert stored_snapshot_v2.version == 2
         assert stored_snapshot_v2.total_score == Decimal("8")
-        release_v2 = client.get(
-            f"/api/grade-releases/{confirm_v2.json()['grade_release_id']}"
-        )
+        release_v2 = client.get(f"/api/grade-releases/{confirm_v2.json()['grade_release_id']}")
         assert release_v2.status_code == 200
         analytics_v2 = client.post(f"/api/grade-releases/{release_v2.json()['id']}/analytics")
         assert analytics_v2.status_code == 201

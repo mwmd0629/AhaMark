@@ -28,7 +28,9 @@ from app.models import (
     AssignmentRubricPublicationBinding,
     AssignmentSourceFileAnalysis,
     AssignmentStatus,
+    ClassStudent,
     GenerationIssue,
+    MembershipStatus,
     PaperPage,
     PaperPageOrganizationSuggestion,
     PaperVersion,
@@ -42,6 +44,7 @@ from app.models import (
     SchoolClass,
     StoredFile,
     StructuredRubricVersion,
+    Student,
     VersionStatus,
     now_utc,
 )
@@ -66,6 +69,7 @@ CONFIRMATION_TYPES = {
     "legacy_binding",
 }
 REQUIRED_CONFIRMATIONS = CONFIRMATION_TYPES
+AUTOMATIC_CONFIRMATION_TYPES = REQUIRED_CONFIRMATIONS - {"legacy_binding"}
 LEGACY_PROJECTION_SCHEMA_VERSION = "structured-rubric-projection-v3"
 LEGACY_PROJECTION_PROFILE = "structured-to-legacy"
 CONFIRMATION_FINGERPRINT_VERSION = "confirmation-fingerprint-v2"
@@ -206,9 +210,7 @@ def _select_formal_version(rows: list[Any], version_field: str) -> Any | None:
     return max(selected, key=lambda row: (getattr(row, version_field), str(row.id)), default=None)
 
 
-def selected_question_version(
-    db: Session, question: Question
-) -> dict[str, Any]:
+def selected_question_version(db: Session, question: Question) -> dict[str, Any]:
     """Read-only lifecycle selection shared by central review and review bundles."""
     rubrics = list(
         db.scalars(
@@ -240,8 +242,7 @@ def selected_question_version(
     )
     answer = (
         associated_answer
-        if associated_answer is not None
-        and associated_answer.status in FORMAL_CURRENT_STATUSES
+        if associated_answer is not None and associated_answer.status in FORMAL_CURRENT_STATUSES
         else _select_formal_version(answers, "version")
     )
     criteria = (
@@ -364,9 +365,7 @@ def _rubric_candidate_json(
         else None,
         "source": _source("rubric_candidate", "评分标准候选"),
         "title": candidate.title,
-        "total_points": str(candidate.total_points)
-        if candidate.total_points is not None
-        else None,
+        "total_points": str(candidate.total_points) if candidate.total_points is not None else None,
         "confidence": str(candidate.confidence),
         "visibility": "teacher",
     }
@@ -416,9 +415,7 @@ def _rubric_criteria(db: Session, rubric_id: uuid.UUID) -> list[RubricCriterion]
     )
 
 
-def _rubric_content_payload(
-    db: Session, rubric: StructuredRubricVersion
-) -> dict[str, Any]:
+def _rubric_content_payload(db: Session, rubric: StructuredRubricVersion) -> dict[str, Any]:
     return {
         "question_version": rubric.question_version,
         "title": rubric.title,
@@ -529,11 +526,7 @@ def _rubric_lifecycle(
         None,
     )
     materialized_candidate = next(
-        (
-            item
-            for item in candidates
-            if item.materialized_structured_rubric_id is not None
-        ),
+        (item for item in candidates if item.materialized_structured_rubric_id is not None),
         None,
     )
     materialized = (
@@ -658,9 +651,7 @@ def review_bundle(db: Session, actor_id: uuid.UUID, assignment_id: uuid.UUID) ->
                 "visibility": "teacher",
             }
         )
-    expected_binding_hash = (
-        binding_source_hash(db, session) if session is not None else None
-    )
+    expected_binding_hash = binding_source_hash(db, session) if session is not None else None
     projection_validation = (
         validate_current_projection_under_locks(
             db,
@@ -752,9 +743,7 @@ def review_bundle(db: Session, actor_id: uuid.UUID, assignment_id: uuid.UUID) ->
             if session is None
             else (
                 "ready_to_publish"
-                if binding_is_current
-                and not blockers
-                and REQUIRED_CONFIRMATIONS <= set(confirms)
+                if binding_is_current and not blockers and REQUIRED_CONFIRMATIONS <= set(confirms)
                 else "action_required"
             )
         ),
@@ -794,6 +783,36 @@ def state_payload(db: Session, assignment: Assignment, paper: PaperVersion) -> d
         for x in db.scalars(
             select(AssignmentClass.class_id).where(AssignmentClass.assignment_id == assignment.id)
         )
+    )
+    participants = (
+        [
+            {
+                "class_id": class_id,
+                "student_id": student_id,
+                "student_number": student_number,
+                "student_name": student_name,
+                "joined_at": joined_at,
+            }
+            for class_id, student_id, student_number, student_name, joined_at in db.execute(
+                select(
+                    ClassStudent.class_id,
+                    Student.id,
+                    Student.student_number,
+                    Student.name,
+                    ClassStudent.joined_at,
+                )
+                .join(Student, Student.id == ClassStudent.student_id)
+                .where(
+                    ClassStudent.class_id.in_([uuid.UUID(class_id) for class_id in class_ids]),
+                    ClassStudent.status == MembershipStatus.active,
+                    Student.owner_id == assignment.owner_id,
+                    Student.status == ArchiveStatus.active,
+                )
+                .order_by(ClassStudent.class_id, Student.student_number, Student.id)
+            )
+        ]
+        if assignment.delivery_mode == "joint_exam" and class_ids
+        else []
     )
     rows = selected_versions(db, paper.id)
     files = list(
@@ -836,6 +855,7 @@ def state_payload(db: Session, assignment: Assignment, paper: PaperVersion) -> d
         "assignment": {
             "id": assignment.id,
             "title": assignment.title,
+            "delivery_mode": assignment.delivery_mode,
             "subject": assignment.subject,
             "grade": assignment.grade,
             "description": assignment.description,
@@ -843,6 +863,7 @@ def state_payload(db: Session, assignment: Assignment, paper: PaperVersion) -> d
             "due_at": assignment.due_at,
             "total_score": assignment.total_score,
             "class_ids": class_ids,
+            "participants": participants,
         },
         "paper": {"id": paper.id, "version": paper.version},
         "files": [
@@ -1006,9 +1027,7 @@ def confirmation_value(db: Session, session: AssignmentReviewSession, kind: str)
                     "question_id": x["question"].id,
                     "id": x["rubric"].id if x["rubric"] else None,
                     "hash": x["rubric"].content_hash if x["rubric"] else None,
-                    "content": (
-                        _rubric_content_payload(db, x["rubric"]) if x["rubric"] else None
-                    ),
+                    "content": (_rubric_content_payload(db, x["rubric"]) if x["rubric"] else None),
                 }
                 for x in rows
             ]
@@ -1120,9 +1139,7 @@ def projection_loss_report(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "feedback_template",
                 "scoring_mode",
             }
-            if any(
-                _meaningful_projection_value(metadata[key]) for key in metadata_extra
-            ):
+            if any(_meaningful_projection_value(metadata[key]) for key in metadata_extra):
                 codes.append("CRITERION_METADATA_NOT_LOSSLESS")
             report.extend(
                 {
@@ -1256,17 +1273,13 @@ def validate_current_projection_under_locks(
         .execution_options(populate_existing=True)
     )
     if binding_id is not None:
-        binding_query = binding_query.where(
-            AssignmentRubricPublicationBinding.id == binding_id
-        )
+        binding_query = binding_query.where(AssignmentRubricPublicationBinding.id == binding_id)
     if lock:
         binding_query = binding_query.with_for_update()
     bindings = list(db.scalars(binding_query))
 
     question_ids = [
-        question.id
-        for question in locked_questions
-        if question.status == QuestionStatus.active
+        question.id for question in locked_questions if question.status == QuestionStatus.active
     ]
     answer_query = (
         select(ReferenceAnswerVersion)
@@ -1381,20 +1394,16 @@ def validate_current_projection_under_locks(
     confirmation = db.scalar(confirmation_query)
     if not require_confirmed:
         return ProjectionValidation(binding, confirmation, True, None)
-    _, confirmation_hash, scope_hash = confirmation_fingerprint(
-        db, session, "legacy_binding"
-    )
+    _, confirmation_hash, scope_hash = confirmation_fingerprint(db, session, "legacy_binding")
     confirmation_current = (
         confirmation is not None
-        and confirmation.fingerprint_schema_version
-        == CONFIRMATION_FINGERPRINT_VERSION
+        and confirmation.fingerprint_schema_version == CONFIRMATION_FINGERPRINT_VERSION
         and confirmation.confirmation_origin in {"origin", "system_auto"}
         and confirmation.paper_version_id == session.paper_version_id
         and confirmation.question_scope_hash == scope_hash
         and confirmation.source_hash == confirmation_hash
         and str(confirmation.confirmed_value.get("binding_id")) == str(binding.id)
-        and confirmation.confirmed_value.get("source_binding_hash")
-        == binding.source_binding_hash
+        and confirmation.confirmed_value.get("source_binding_hash") == binding.source_binding_hash
     )
     if not confirmation_current:
         return ProjectionValidation(binding, confirmation, False, "LEGACY_CONFIRMATION_STALE")
@@ -1414,9 +1423,7 @@ def valid_confirmations(
         .order_by(AssignmentExplicitConfirmation.confirmation_version.desc())
     ).all()
     for row in rows:
-        _, source_hash, scope_hash = confirmation_fingerprint(
-            db, session, row.confirmation_type
-        )
+        _, source_hash, scope_hash = confirmation_fingerprint(db, session, row.confirmation_type)
         is_v2 = (
             row.fingerprint_schema_version == CONFIRMATION_FINGERPRINT_VERSION
             and row.paper_version_id == session.paper_version_id
@@ -1869,10 +1876,7 @@ def create_review_session(assignment_id: uuid.UUID, db: Db, actor: Actor) -> dic
         ):
             continue
         value, source_hash, scope_hash = confirmation_fingerprint(db, row, kind)
-        if (
-            source_hash != previous.source_hash
-            or scope_hash != previous.question_scope_hash
-        ):
+        if source_hash != previous.source_hash or scope_hash != previous.question_scope_hash:
             continue
         db.add(
             AssignmentExplicitConfirmation(
@@ -2072,6 +2076,95 @@ def disposition(item_id: uuid.UUID, data: Disposition, db: Db, actor: Actor) -> 
     return {"id": str(item.id), "status": item.status, "review_version": session.review_version}
 
 
+def automatic_confirmation_blocker(
+    db: Session,
+    session: AssignmentReviewSession,
+    confirmation_type: str,
+    value: dict[str, Any],
+) -> str | None:
+    if confirmation_type == "classes" and not value["class_ids"]:
+        return "CLASSES_REQUIRED"
+    if confirmation_type == "total_score":
+        if value["total_score"] is None or any(
+            item["score"] is None for item in value["question_scores"]
+        ):
+            return "TOTAL_SCORE_INCOMPLETE"
+        if sum(
+            (Decimal(item["score"]) for item in value["question_scores"]),
+            Decimal(),
+        ) != Decimal(value["total_score"]):
+            return "TOTAL_SCORE_MISMATCH"
+    if confirmation_type == "file_roles" and any(
+        item["value"] in {None, "unknown"} for item in value["files"]
+    ):
+        return "FILE_ROLE_UNCONFIRMED"
+    if confirmation_type == "answer_sources" and any(
+        item["value"] in {None, "unknown"} for item in value["files"]
+    ):
+        return "ANSWER_SOURCE_UNCONFIRMED"
+    if confirmation_type in {"reference_answers", "structured_rubrics"} and any(
+        item["id"] is None for item in value["versions"]
+    ):
+        return "VERSION_CONFIRMATION_INCOMPLETE"
+    if confirmation_type == "paper_version":
+        risky_page = db.scalar(
+            select(AssignmentPageAnalysis.id).where(
+                AssignmentPageAnalysis.draft_revision_id == session.draft_revision_id,
+                (
+                    AssignmentPageAnalysis.corrupted.is_(True)
+                    | AssignmentPageAnalysis.missing_page_suspected.is_(True)
+                    | AssignmentPageAnalysis.low_quality.is_(True)
+                    | AssignmentPageAnalysis.mixed_document_suspected.is_(True)
+                    | AssignmentPageAnalysis.variant_label.is_not(None)
+                ),
+            )
+        )
+        pending_organization = db.scalar(
+            select(PaperPageOrganizationSuggestion.id).where(
+                PaperPageOrganizationSuggestion.draft_revision_id == session.draft_revision_id,
+                PaperPageOrganizationSuggestion.status.in_(["suggested", "stale"]),
+            )
+        )
+        if risky_page or pending_organization:
+            return "PAPER_REVIEW_REQUIRED"
+    return None
+
+
+def add_confirmation(
+    db: Session,
+    session: AssignmentReviewSession,
+    actor: Actor,
+    confirmation_type: str,
+    *,
+    origin: str,
+) -> AssignmentExplicitConfirmation:
+    version = (
+        db.scalar(
+            select(func.max(AssignmentExplicitConfirmation.confirmation_version)).where(
+                AssignmentExplicitConfirmation.review_session_id == session.id,
+                AssignmentExplicitConfirmation.confirmation_type == confirmation_type,
+            )
+        )
+        or 0
+    ) + 1
+    value, source_hash, scope_hash = confirmation_fingerprint(db, session, confirmation_type)
+    row = AssignmentExplicitConfirmation(
+        review_session_id=session.id,
+        assignment_id=session.assignment_id,
+        confirmation_type=confirmation_type,
+        confirmed_value=canonical(value),
+        source_hash=source_hash,
+        fingerprint_schema_version=CONFIRMATION_FINGERPRINT_VERSION,
+        paper_version_id=session.paper_version_id,
+        question_scope_hash=scope_hash,
+        confirmation_origin=origin,
+        confirmation_version=version,
+        confirmed_by=actor.id,
+    )
+    db.add(row)
+    return row
+
+
 @router.post("/assignment-review-sessions/{session_id}/confirm/{confirmation_type}")
 def confirm(
     session_id: uuid.UUID, confirmation_type: str, data: VersionedAction, db: Db, actor: Actor
@@ -2097,30 +2190,7 @@ def confirm(
         x["value"] in {None, "unknown"} for x in value["files"]
     ):
         raise ApiProblem(422, "ANSWER_SOURCE_UNKNOWN", "未知答案来源不能确认")
-    version = (
-        db.scalar(
-            select(func.max(AssignmentExplicitConfirmation.confirmation_version)).where(
-                AssignmentExplicitConfirmation.review_session_id == session.id,
-                AssignmentExplicitConfirmation.confirmation_type == confirmation_type,
-            )
-        )
-        or 0
-    ) + 1
-    value, source_hash, scope_hash = confirmation_fingerprint(db, session, confirmation_type)
-    row = AssignmentExplicitConfirmation(
-        review_session_id=session.id,
-        assignment_id=session.assignment_id,
-        confirmation_type=confirmation_type,
-        confirmed_value=canonical(value),
-        source_hash=source_hash,
-        fingerprint_schema_version=CONFIRMATION_FINGERPRINT_VERSION,
-        paper_version_id=session.paper_version_id,
-        question_scope_hash=scope_hash,
-        confirmation_origin="origin",
-        confirmation_version=version,
-        confirmed_by=actor.id,
-    )
-    db.add(row)
+    row = add_confirmation(db, session, actor, confirmation_type, origin="origin")
     if confirmation_type == "paper_version":
         for review_item in db.scalars(
             select(AssignmentReviewItem)
@@ -2151,7 +2221,61 @@ def confirm(
     return {
         "id": str(row.id),
         "confirmation_type": confirmation_type,
-        "confirmation_version": version,
+        "confirmation_version": row.confirmation_version,
+        "review_version": session.review_version,
+    }
+
+
+@router.post("/assignment-review-sessions/{session_id}/auto-confirm")
+def auto_confirm_review_inputs(
+    session_id: uuid.UUID, data: VersionedAction, db: Db, actor: Actor
+) -> dict[str, Any]:
+    session = owned_session(db, actor.id, session_id, lock=True)
+    if session.review_version != data.expected_review_version:
+        raise ApiProblem(409, "REVIEW_VERSION_CONFLICT", "审查版本已变化")
+    existing = valid_confirmations(db, session)
+    confirmed: list[str] = []
+    skipped: dict[str, str] = {}
+    rows: list[AssignmentExplicitConfirmation] = []
+    for confirmation_type in sorted(AUTOMATIC_CONFIRMATION_TYPES - set(existing)):
+        value = confirmation_value(db, session, confirmation_type)
+        blocker = automatic_confirmation_blocker(db, session, confirmation_type, value)
+        if blocker:
+            skipped[confirmation_type] = blocker
+            continue
+        row = add_confirmation(
+            db,
+            session,
+            actor,
+            confirmation_type,
+            origin="system_auto",
+        )
+        rows.append(row)
+        confirmed.append(confirmation_type)
+    if rows:
+        session.review_version += 1
+        db.flush()
+        for row in rows:
+            audit(
+                db,
+                actor.id,
+                f"assignment_review.auto_confirm.{row.confirmation_type}",
+                "assignment_explicit_confirmation",
+                row.id,
+            )
+    refresh(db, session)
+    audit(
+        db,
+        actor.id,
+        "assignment_review.auto_confirm",
+        "assignment_review_session",
+        session.id,
+        {"confirmed": confirmed, "skipped": skipped},
+    )
+    db.commit()
+    return {
+        "confirmed": confirmed,
+        "skipped": skipped,
         "review_version": session.review_version,
     }
 
@@ -2253,14 +2377,11 @@ def create_binding(
             conversion_warnings = [
                 item["code"]
                 for item in loss_report
-                if item["question_id"] == str(q.id)
-                and item["criterion_key"] == c.stable_key
+                if item["question_id"] == str(q.id) and item["criterion_key"] == c.stable_key
             ]
             question_warnings.extend(conversion_warnings)
             fallback_payload = {
-                "projection_mode": "manual_review"
-                if conversion_warnings
-                else "legacy_native",
+                "projection_mode": "manual_review" if conversion_warnings else "legacy_native",
                 "structured_criterion_id": str(c.id),
                 "dependencies": list(c.dependencies),
                 "validation_rule": c.validation_rule,
@@ -2349,9 +2470,7 @@ def create_binding(
         legacy.status = VersionStatus.confirmed
         legacy.confirmed_at = binding.confirmed_at
         db.flush()
-        value, legacy_hash, scope_hash = confirmation_fingerprint(
-            db, session, "legacy_binding"
-        )
+        value, legacy_hash, scope_hash = confirmation_fingerprint(db, session, "legacy_binding")
         confirmation_version = (
             db.scalar(
                 select(func.max(AssignmentExplicitConfirmation.confirmation_version)).where(
@@ -2392,9 +2511,7 @@ def create_binding(
 
 
 def binding_json(x: AssignmentRubricPublicationBinding) -> dict[str, Any]:
-    warnings = sorted(
-        {w for row in x.mapping for w in row.get("conversion_warnings", [])}
-    )
+    warnings = sorted({w for row in x.mapping for w in row.get("conversion_warnings", [])})
     return {
         "id": str(x.id),
         "assignment_id": str(x.assignment_id),
@@ -2435,8 +2552,7 @@ def confirm_binding(
     binding_id: uuid.UUID, data: VersionedAction, db: Db, actor: Actor
 ) -> dict[str, Any]:
     binding_hint = db.scalar(
-        select(AssignmentRubricPublicationBinding)
-        .where(
+        select(AssignmentRubricPublicationBinding).where(
             AssignmentRubricPublicationBinding.id == binding_id,
             AssignmentRubricPublicationBinding.owner_id == actor.id,
         )
@@ -2493,9 +2609,7 @@ def confirm_binding(
             source_hash=digest(value),
             fingerprint_schema_version=CONFIRMATION_FINGERPRINT_VERSION,
             paper_version_id=session.paper_version_id,
-            question_scope_hash=confirmation_fingerprint(
-                db, session, "legacy_binding"
-            )[2],
+            question_scope_hash=confirmation_fingerprint(db, session, "legacy_binding")[2],
             confirmation_origin="origin",
             confirmation_version=version,
             confirmed_by=actor.id,
@@ -2760,12 +2874,13 @@ def teacher_publish(
     ):
         snapshot.status, snapshot.invalidated_at = "invalidated", now
         raise ApiProblem(409, "READINESS_STALE", "作业或审查状态已变化")
-    from app.api.assignments import publish_issues
+    from app.api.assignments import freeze_participant_roster, publish_issues
 
     assignment.active_paper_version_id, assignment.active_rubric_version_id = paper.id, legacy.id
     issues = publish_issues(db, assignment)
     if issues:
         raise ApiProblem(422, "ASSIGNMENT_INCOMPLETE", "现有发布门禁未通过", {"issues": issues})
+    participant_count = freeze_participant_roster(db, assignment)
     paper.status, paper.confirmed_at = VersionStatus.confirmed, paper.confirmed_at or now
     legacy.status, legacy.confirmed_at = VersionStatus.confirmed, legacy.confirmed_at or now
     assignment.status, assignment.published_at = AssignmentStatus.published, now
@@ -2783,6 +2898,7 @@ def teacher_publish(
             "binding_id": str(binding.id),
             "paper_version_id": str(paper.id),
             "rubric_version_id": str(legacy.id),
+            "participant_count": participant_count,
         },
     )
     db.commit()

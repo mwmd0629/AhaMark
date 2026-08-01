@@ -10,9 +10,10 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AssignmentCentralReview } from "./assignment-central-review";
-import type {
-  AssignmentReviewBundle,
-  AssignmentReviewItemRecord,
+import {
+  ApiError,
+  type AssignmentReviewBundle,
+  type AssignmentReviewItemRecord,
 } from "@/lib/api";
 
 const reviewApi = vi.hoisted(() => ({
@@ -22,6 +23,7 @@ const reviewApi = vi.hoisted(() => ({
   items: vi.fn(),
   bundle: vi.fn(),
   confirm: vi.fn(),
+  autoConfirm: vi.fn(),
   refresh: vi.fn(),
   disposition: vi.fn(),
   createBinding: vi.fn(),
@@ -29,10 +31,18 @@ const reviewApi = vi.hoisted(() => ({
   prepare: vi.fn(),
   publish: vi.fn(),
 }));
-vi.mock("@/lib/api", async (load) => ({
-  ...(await load()),
-  assignmentReviewApi: reviewApi,
+const manualApi = vi.hoisted(() => ({
+  manualPublishReadiness: vi.fn(),
+  publishManual: vi.fn(),
 }));
+vi.mock("@/lib/api", async (load) => {
+  const actual = await load<typeof import("@/lib/api")>();
+  return {
+    ...actual,
+    assignmentReviewApi: reviewApi,
+    assignmentsApi: { ...actual.assignmentsApi, ...manualApi },
+  };
+});
 
 const confirmationKinds = [
   "classes",
@@ -253,9 +263,9 @@ const reviewItem = ({
   id = "risk-1",
   status = "open",
   severity = "blocking",
-  issue_code = "CONFIRM_CLASSES_REQUIRED",
-  section = "classes",
-  message = "必须由教师确认",
+  issue_code = "TOTAL_SCORE_MISMATCH",
+  section = "total_score",
+  message = "题目分值合计与作业总分不一致",
   ...overrides
 }: Partial<AssignmentReviewItemRecord> = {}): AssignmentReviewItemRecord => ({
   id,
@@ -310,6 +320,11 @@ beforeEach(() => {
   reviewApi.items.mockResolvedValue({ items: [] });
   reviewApi.bundle.mockResolvedValue(reviewBundle());
   reviewApi.confirm.mockResolvedValue({ review_version: 2 });
+  reviewApi.autoConfirm.mockResolvedValue({
+    confirmed: [],
+    skipped: {},
+    review_version: 2,
+  });
   reviewApi.refresh.mockResolvedValue(session());
   reviewApi.disposition.mockResolvedValue({ review_version: 2 });
   reviewApi.createBinding.mockResolvedValue({
@@ -331,8 +346,55 @@ beforeEach(() => {
     paper_version_id: "paper-1",
     legacy_rubric_version_id: "legacy-1",
   });
+  manualApi.manualPublishReadiness.mockResolvedValue({
+    mode: "manual",
+    ready: true,
+    issues: [],
+    state_hash: "m".repeat(64),
+    expected_assignment_updated_at: "2026-07-26T00:00:00Z",
+    class_ids: ["class-1"],
+    due_at: null,
+    total_score: "10.00",
+  });
+  manualApi.publishManual.mockResolvedValue({ status: "published" });
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+it("allows a teacher-authored assignment to publish without an AI generation job", async () => {
+  reviewApi.list.mockResolvedValue({ items: [] });
+  reviewApi.bundle.mockRejectedValue(
+    new ApiError(409, {
+      code: "GENERATION_REQUIRED",
+      message: "尚无可审查的生成任务",
+      details: {},
+      request_id: "request-1",
+    }),
+  );
+  const onPublished = vi.fn();
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(
+    <AssignmentCentralReview
+      item={assignment()}
+      onNavigate={vi.fn()}
+      onPublished={onPublished}
+    />,
+  );
+
+  expect(
+    await screen.findByText(/教师手工整理的作业，不需要运行 AI 生成/),
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "确认发布" }));
+  await waitFor(() =>
+    expect(manualApi.publishManual).toHaveBeenCalledWith(
+      "assignment-1",
+      expect.objectContaining({ state_hash: "m".repeat(64) }),
+    ),
+  );
+  expect(onPublished).toHaveBeenCalled();
+});
 
 describe("AssignmentCentralReview preserved behavior", () => {
   it("shows each question answer, full rubric, and teacher-readable blocker together", async () => {
@@ -380,7 +442,7 @@ describe("AssignmentCentralReview preserved behavior", () => {
             },
           },
         ],
-        blockers: [blocker("CONFIRM_REFERENCE_ANSWERS_REQUIRED")],
+        blockers: [blocker("TOTAL_SCORE_MISMATCH")],
       }),
     );
 
@@ -396,13 +458,13 @@ describe("AssignmentCentralReview preserved behavior", () => {
     expect(screen.getByText("核对学生的最终计算结果。")).toBeInTheDocument();
     expect(screen.getByText("暂无具体评分项")).toBeInTheDocument();
     expect(
-      screen.getByText("参考答案已经生成，但还需要确认本次发布使用这些版本。"),
+      screen.getByText("请修改作业总分或题目分值，使二者完全一致。"),
     ).toBeInTheDocument();
     const details = screen
       .getByText("当前阻塞项")
       .parentElement?.querySelector("details");
     expect(details).not.toHaveAttribute("open");
-    expect(details).toHaveTextContent("CONFIRM_REFERENCE_ANSWERS_REQUIRED");
+    expect(details).toHaveTextContent("TOTAL_SCORE_MISMATCH");
   });
 
   it("requires an explicit start and never creates or publishes on load", async () => {
@@ -429,11 +491,9 @@ describe("AssignmentCentralReview preserved behavior", () => {
     });
     renderReview();
     fireEvent.click(await screen.findByText(/查看全部待处理明细/));
-    expect(
-      screen.queryByText("CONFIRM_CLASSES_REQUIRED"),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText("TOTAL_SCORE_MISMATCH")).not.toBeInTheDocument();
     fireEvent.click(screen.getAllByText("查看技术详情")[0]);
-    expect(screen.getByText(/CONFIRM_CLASSES_REQUIRED/)).toBeInTheDocument();
+    expect(screen.getByText(/TOTAL_SCORE_MISMATCH/)).toBeInTheDocument();
   });
 
   it("keeps resolved items folded until the teacher expands them", async () => {
@@ -528,7 +588,7 @@ describe("AssignmentCentralReview preserved behavior", () => {
     );
   });
 
-  it("keeps the total-score confirmation flow", async () => {
+  it("automatically processes a complete total score", async () => {
     reviewApi.bundle.mockResolvedValue(
       reviewBundle({
         status: "action_required",
@@ -545,18 +605,10 @@ describe("AssignmentCentralReview preserved behavior", () => {
         },
       }),
     );
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: "确认本次总分为 10 分",
-      }),
-    );
-    await waitFor(() =>
-      expect(reviewApi.confirm).toHaveBeenCalledWith(
-        "review-1",
-        "total_score",
-        1,
-      ),
-    );
+    await waitFor(() => expect(reviewApi.autoConfirm).toHaveBeenCalledOnce());
+    expect(
+      screen.queryByRole("button", { name: /确认本次总分/ }),
+    ).not.toBeInTheDocument();
   });
 
   it("does not let informational rows block publication preparation", async () => {
@@ -564,9 +616,9 @@ describe("AssignmentCentralReview preserved behavior", () => {
       items: [reviewItem({ severity: "info", status: "open" })],
     });
     renderReview();
-    expect(
-      await screen.findByRole("button", { name: "准备发布" }),
-    ).toBeEnabled();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "确认发布" })).toBeEnabled(),
+    );
   });
 
   it("blocks when a required Bundle confirmation is absent", async () => {
@@ -580,7 +632,7 @@ describe("AssignmentCentralReview preserved behavior", () => {
     );
     renderReview();
     expect(
-      await screen.findByRole("button", { name: "准备发布" }),
+      await screen.findByRole("button", { name: "确认发布" }),
     ).toBeDisabled();
   });
 
@@ -696,20 +748,14 @@ describe("AssignmentCentralReview Bundle authority and races", () => {
     reviewApi.bundle.mockResolvedValue(
       reviewBundle({
         status: "action_required",
-        blockers: [
-          blocker("CONFIRM_REFERENCE_ANSWERS_REQUIRED", "请确认参考答案"),
-        ],
+        blockers: [blocker("TOTAL_SCORE_MISMATCH", "分值不一致")],
       }),
     );
     renderReview();
     expect(
-      await screen.findByText(
-        "参考答案已经生成，但还需要确认本次发布使用这些版本。",
-      ),
+      await screen.findByText("请修改作业总分或题目分值，使二者完全一致。"),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "教师确认并发布" }),
-    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "确认发布" })).toBeDisabled();
   });
 
   it("fails closed when Bundle loading fails", async () => {
@@ -718,9 +764,7 @@ describe("AssignmentCentralReview Bundle authority and races", () => {
     expect(
       await screen.findByText("暂时无法确认当前发布条件"),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "教师确认并发布" }),
-    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "确认发布" })).toBeDisabled();
   });
 
   it("clears an old readiness snapshot when the Bundle hash changes", async () => {
@@ -729,31 +773,24 @@ describe("AssignmentCentralReview Bundle authority and races", () => {
       .mockResolvedValueOnce(reviewBundle({ hash: "hash-1" }))
       .mockResolvedValue(reviewBundle({ hash: "hash-2" }));
     renderReview();
-    fireEvent.click(await screen.findByRole("button", { name: "准备发布" }));
+    await screen.findByRole("button", { name: "确认发布" });
     await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "教师确认并发布" }),
-      ).toBeEnabled(),
+      expect(screen.getByRole("button", { name: "确认发布" })).toBeEnabled(),
     );
     fireEvent.click(screen.getByRole("button", { name: "重新扫描最新状态" }));
     await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "教师确认并发布" }),
-      ).toBeDisabled(),
+      expect(screen.getByRole("button", { name: "确认发布" })).toBeDisabled(),
     );
   });
 
   it("clears an enabled readiness snapshot when the next Bundle reload fails", async () => {
     reviewApi.bundle
       .mockResolvedValueOnce(reviewBundle({ hash: "hash-ready" }))
-      .mockResolvedValueOnce(reviewBundle({ hash: "hash-ready" }))
       .mockRejectedValueOnce(new Error("network"));
     renderReview();
-    fireEvent.click(await screen.findByRole("button", { name: "准备发布" }));
+    await screen.findByRole("button", { name: "确认发布" });
     await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "教师确认并发布" }),
-      ).toBeEnabled(),
+      expect(screen.getByRole("button", { name: "确认发布" })).toBeEnabled(),
     );
 
     fireEvent.click(screen.getByRole("button", { name: "重新扫描最新状态" }));
@@ -761,9 +798,7 @@ describe("AssignmentCentralReview Bundle authority and races", () => {
     expect(
       await screen.findByText("暂时无法确认当前发布条件"),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "教师确认并发布" }),
-    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "确认发布" })).toBeDisabled();
   });
 
   it("ignores late responses from an older load", async () => {
@@ -806,7 +841,7 @@ describe("AssignmentCentralReview Bundle authority and races", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders the new blocking Bundle after a confirmation mutation", async () => {
+  it("renders the new blocking Bundle after automatic confirmation", async () => {
     reviewApi.bundle
       .mockResolvedValueOnce(
         reviewBundle({
@@ -822,30 +857,22 @@ describe("AssignmentCentralReview Bundle authority and races", () => {
           hash: "after-confirmation",
           status: "action_required",
           blockers: [
-            blocker(
-              "CONFIRM_REFERENCE_ANSWERS_REQUIRED",
-              "确认后发现新的参考答案阻断",
-            ),
+            blocker("TOTAL_SCORE_MISMATCH", "自动核对后发现分值不一致"),
           ],
         }),
       );
     renderReview();
     await screen.findByText("当前答案与评分标准");
-    fireEvent.click(screen.getByRole("button", { name: "确认截止时间" }));
-    await waitFor(() => expect(reviewApi.confirm).toHaveBeenCalledOnce());
+    await waitFor(() => expect(reviewApi.autoConfirm).toHaveBeenCalledOnce());
     expect(
-      await screen.findByText(
-        "参考答案已经生成，但还需要确认本次发布使用这些版本。",
-      ),
+      await screen.findByText("请修改作业总分或题目分值，使二者完全一致。"),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "教师确认并发布" }),
-    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "确认发布" })).toBeDisabled();
   });
 });
 
 describe("AssignmentCentralReview semantic confirmations and compatibility", () => {
-  it("shows inherited confirmations as read-only and leaves changed content actionable", async () => {
+  it("automatically processes routine confirmations without individual actions", async () => {
     reviewApi.bundle.mockResolvedValue(
       reviewBundle({
         status: "action_required",
@@ -858,13 +885,13 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
 
     renderReview();
 
-    expect(
-      await screen.findByText("班级：内容未变，已沿用确认"),
-    ).toBeInTheDocument();
+    await waitFor(() => expect(reviewApi.autoConfirm).toHaveBeenCalledOnce());
     expect(
       screen.queryByTestId("review-confirmation-classes"),
     ).not.toBeInTheDocument();
-    expect(screen.getByTestId("review-confirmation-due_at")).toBeEnabled();
+    expect(
+      screen.queryByTestId("review-confirmation-due_at"),
+    ).not.toBeInTheDocument();
   });
 
   it("shows a fresh lossless binding as automatically compatible without a confirmation action", async () => {
@@ -877,7 +904,9 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
     expect(
       screen.queryByText("内容未变，已沿用确认", { exact: false }),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "准备发布" })).toBeEnabled();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "确认发布" })).toBeEnabled(),
+    );
   });
 
   it.each([
@@ -1012,7 +1041,9 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
     expect(
       screen.queryByTestId("rubric-binding-loss-confirm"),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "准备发布" })).toBeEnabled();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "确认发布" })).toBeEnabled(),
+    );
   });
 
   it("fails closed for an unknown loss and exposes it only in closed technical details", async () => {
@@ -1039,9 +1070,7 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
     expect(
       screen.queryByTestId("rubric-binding-loss-confirm"),
     ).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "教师确认并发布" }),
-    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "确认发布" })).toBeDisabled();
     const details = screen.getByTestId("rubric-binding-technical-details");
     expect(details).not.toHaveAttribute("open");
     expect(details).toHaveTextContent("UNKNOWN_LOSS");
@@ -1061,9 +1090,7 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
 
     renderReview();
 
-    expect(
-      await screen.findByText("班级：内容未变，已沿用确认"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("常规内容已自动核对")).toBeInTheDocument();
     expect(screen.getByText("✓ 可自动兼容")).toBeInTheDocument();
     expect(screen.getByTestId("rubric-binding-automatic")).toHaveTextContent(
       "本次重新生成",
@@ -1140,11 +1167,9 @@ describe("AssignmentCentralReview fail-closed publication contract", () => {
       renderReview();
 
       expect(
-        await screen.findByRole("button", { name: "准备发布" }),
+        await screen.findByRole("button", { name: "确认发布" }),
       ).toBeDisabled();
-      expect(
-        screen.getByRole("button", { name: "教师确认并发布" }),
-      ).toBeDisabled();
+      expect(screen.getByRole("button", { name: "确认发布" })).toBeDisabled();
     },
   );
 
@@ -1221,7 +1246,7 @@ describe("AssignmentCentralReview fail-closed publication contract", () => {
       screen.queryByTestId("review-confirmation-due_at"),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "准备发布" }),
+      screen.queryByRole("button", { name: "确认发布" }),
     ).not.toBeInTheDocument();
     expect(reviewApi.confirm).not.toHaveBeenCalled();
   });
@@ -1309,8 +1334,12 @@ describe("AssignmentCentralReview assignment epoch", () => {
   });
 
   it("does not reload assignment A after its pending mutation finishes on assignment B", async () => {
-    const confirmationMutation = deferred<{ review_version: number }>();
-    reviewApi.confirm.mockReturnValueOnce(confirmationMutation.promise);
+    const confirmationMutation = deferred<{
+      confirmed: string[];
+      skipped: Record<string, string>;
+      review_version: number;
+    }>();
+    reviewApi.autoConfirm.mockReturnValueOnce(confirmationMutation.promise);
     reviewApi.list.mockImplementation(async (assignmentId: string) => ({
       items: [
         session(`review-${assignmentId}`, {
@@ -1331,12 +1360,7 @@ describe("AssignmentCentralReview assignment epoch", () => {
         status: "action_required",
         blockers:
           assignmentId === "assignment-2"
-            ? [
-                blocker(
-                  "CONFIRM_REFERENCE_ANSWERS_REQUIRED",
-                  "assignment B blocker",
-                ),
-              ]
+            ? [blocker("TOTAL_SCORE_MISMATCH", "assignment B blocker")]
             : [],
         confirmations: confirmationKinds
           .filter((kind) => kind !== "due_at")
@@ -1345,10 +1369,7 @@ describe("AssignmentCentralReview assignment epoch", () => {
     );
 
     const view = renderReview(assignment());
-    fireEvent.click(
-      await screen.findByRole("button", { name: "确认截止时间" }),
-    );
-    await waitFor(() => expect(reviewApi.confirm).toHaveBeenCalledOnce());
+    await waitFor(() => expect(reviewApi.autoConfirm).toHaveBeenCalledOnce());
 
     view.rerender(
       <AssignmentCentralReview
@@ -1358,15 +1379,17 @@ describe("AssignmentCentralReview assignment epoch", () => {
       />,
     );
     expect(
-      await screen.findByText(
-        "参考答案已经生成，但还需要确认本次发布使用这些版本。",
-      ),
+      await screen.findByText("请修改作业总分或题目分值，使二者完全一致。"),
     ).toBeInTheDocument();
     const assignmentACallsBeforeCompletion = reviewApi.bundle.mock.calls.filter(
       ([assignmentId]) => assignmentId === "assignment-1",
     ).length;
 
-    confirmationMutation.resolve({ review_version: 2 });
+    confirmationMutation.resolve({
+      confirmed: ["due_at"],
+      skipped: {},
+      review_version: 2,
+    });
     await Promise.resolve();
     await Promise.resolve();
 
@@ -1376,7 +1399,7 @@ describe("AssignmentCentralReview assignment epoch", () => {
       ),
     ).toHaveLength(assignmentACallsBeforeCompletion);
     expect(
-      screen.getByText("参考答案已经生成，但还需要确认本次发布使用这些版本。"),
+      screen.getByText("请修改作业总分或题目分值，使二者完全一致。"),
     ).toBeInTheDocument();
   });
 });

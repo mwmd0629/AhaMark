@@ -122,9 +122,7 @@ def test_semantic_hash_v1_normalizes_text_and_drops_nested_identity_metadata() -
 
 def test_reference_answer_source_type_is_teacher_visible_semantics() -> None:
     payload = {"source_type": "teacher_official", "normalized_content": "42"}
-    assert semantic_hash(payload) != semantic_hash(
-        payload | {"source_type": "ai_generated"}
-    )
+    assert semantic_hash(payload) != semantic_hash(payload | {"source_type": "ai_generated"})
     common = {
         "source_type": "teacher_official",
         "source_region": {},
@@ -176,18 +174,20 @@ def test_projection_write_lock_order_is_postgresql_safe() -> None:
         "owned_session(db, actor.id, session_id, lock=True)"
     )
     disposition_source = pyinspect.getsource(disposition)
-    assert disposition_source.index("item_hint =") < disposition_source.index(
-        "owned_session(db, actor.id, item_hint.review_session_id, lock=True)"
-    ) < disposition_source.index("item = db.scalar(")
+    assert (
+        disposition_source.index("item_hint =")
+        < disposition_source.index(
+            "owned_session(db, actor.id, item_hint.review_session_id, lock=True)"
+        )
+        < disposition_source.index("item = db.scalar(")
+    )
     assert "execution_options(populate_existing=True)" in disposition_source
 
 
 def test_lock_helpers_refresh_stale_identity_map_before_disposition_gate() -> None:
     client.get("/api/classes")
     with SessionLocal() as first_db:
-        actor = first_db.scalar(
-            select(User).where(User.email == "demo-teacher@ahamark.local")
-        )
+        actor = first_db.scalar(select(User).where(User.email == "demo-teacher@ahamark.local"))
         assert actor is not None
         assignment = Assignment(
             owner_id=actor.id,
@@ -279,9 +279,10 @@ def test_lock_helpers_refresh_stale_identity_map_before_disposition_gate() -> No
             concurrent_review.status = "in_review"
             concurrent_db.commit()
 
-        assert owned_assignment(
-            first_db, actor_id, assignment_id, lock=True
-        ).title == "fresh lock helper"
+        assert (
+            owned_assignment(first_db, actor_id, assignment_id, lock=True).title
+            == "fresh lock helper"
+        )
         refreshed_review = owned_session(first_db, actor_id, review_id, lock=True)
         assert refreshed_review.review_version == 2
         assert refreshed_review.status == "in_review"
@@ -302,9 +303,7 @@ def test_lock_helpers_refresh_stale_identity_map_before_disposition_gate() -> No
 
 def test_0027_upgrade_downgrade_upgrade_and_backfill(tmp_path: Path) -> None:
     engine = create_engine(f"sqlite:///{tmp_path / 'semantic-projection.db'}")
-    migration = import_module(
-        "apps.api.alembic.versions.0027_semantic_confirmation_projection"
-    )
+    migration = import_module("apps.api.alembic.versions.0027_semantic_confirmation_projection")
     with engine.begin() as connection:
         connection.exec_driver_sql("CREATE TABLE paper_versions (id CHAR(32) PRIMARY KEY)")
         connection.exec_driver_sql(
@@ -352,16 +351,12 @@ def test_0027_upgrade_downgrade_upgrade_and_backfill(tmp_path: Path) -> None:
         migration.downgrade()
         assert "fingerprint_schema_version" not in {
             item["name"]
-            for item in inspect(connection).get_columns(
-                "assignment_explicit_confirmations"
-            )
+            for item in inspect(connection).get_columns("assignment_explicit_confirmations")
         }
         migration.upgrade()
         assert "source_semantic_hash" in {
             item["name"]
-            for item in inspect(connection).get_columns(
-                "assignment_rubric_publication_bindings"
-            )
+            for item in inspect(connection).get_columns("assignment_rubric_publication_bindings")
         }
 
 
@@ -487,9 +482,9 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
     created = client.post(f"/api/assignments/{assignment.id}/review-sessions")
     assert created.status_code == 201, created.text
     session = created.json()
-    review_items = client.get(
-        f"/api/assignment-review-sessions/{session['id']}/items"
-    ).json()["items"]
+    review_items = client.get(f"/api/assignment-review-sessions/{session['id']}/items").json()[
+        "items"
+    ]
     provider_review = next(
         item for item in review_items if item["issue_code"] == "PROVIDER_UNAVAILABLE"
     )
@@ -504,7 +499,15 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
     assert unchanged.status_code == 201, unchanged.text
     assert unchanged.json()["id"] == original_session_id
     session = unchanged.json()
-    for kind in (
+    automatic = client.post(
+        f"/api/assignment-review-sessions/{session['id']}/auto-confirm",
+        json={
+            "expected_review_version": session["review_version"],
+            "explicit_confirmation": True,
+        },
+    )
+    assert automatic.status_code == 200, automatic.text
+    assert set(automatic.json()["confirmed"]) == {
         "classes",
         "due_at",
         "total_score",
@@ -513,39 +516,30 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
         "paper_version",
         "reference_answers",
         "structured_rubrics",
-    ):
-        response = client.post(
-            f"/api/assignment-review-sessions/{session['id']}/confirm/{kind}",
-            json={
-                "expected_review_version": session["review_version"],
-                "explicit_confirmation": True,
-            },
-        )
-        assert response.status_code == 200, response.text
-        session["review_version"] = response.json()["review_version"]
+    }
+    assert automatic.json()["skipped"] == {}
+    session["review_version"] = automatic.json()["review_version"]
+    automatic_bundle = client.get(f"/api/assignments/{assignment.id}/review-bundle").json()
+    assert all(
+        item["origin"] == "system_auto"
+        for item in automatic_bundle["confirmations"]
+        if item["type"] != "legacy_binding"
+    )
     answer.content_hash = "5" * 64
     db.commit()
-    changed_content = client.get(
-        f"/api/assignment-review-sessions/{session['id']}"
-    ).json()
+    changed_content = client.get(f"/api/assignment-review-sessions/{session['id']}").json()
     assert "reference_answers" in changed_content["confirmations"]
     assert "answer_sources" in changed_content["confirmations"]
     answer.content_hash = "3" * 64
     answer.normalized_content = "3"
     db.commit()
-    semantic_change = client.get(
-        f"/api/assignment-review-sessions/{session['id']}"
-    ).json()
+    semantic_change = client.get(f"/api/assignment-review-sessions/{session['id']}").json()
     assert "reference_answers" not in semantic_change["confirmations"]
     answer.normalized_content = "2"
     db.commit()
-    restored_content = client.get(
-        f"/api/assignment-review-sessions/{session['id']}"
-    ).json()
+    restored_content = client.get(f"/api/assignment-review-sessions/{session['id']}").json()
     assert "reference_answers" in restored_content["confirmations"]
-    original_rubric_semantics = semantic_normalize(
-        _rubric_content_payload(db, structured)
-    )
+    original_rubric_semantics = semantic_normalize(_rubric_content_payload(db, structured))
     replacement_answer = ReferenceAnswerVersion(
         question_id=question.id,
         source_type=answer.source_type,
@@ -592,12 +586,11 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
     answer.status = "retired"
     structured.status = "retired"
     db.commit()
-    assert semantic_normalize(
-        _rubric_content_payload(db, replacement_rubric)
-    ) == original_rubric_semantics
-    equivalent_replacement = client.get(
-        f"/api/assignment-review-sessions/{session['id']}"
-    ).json()
+    assert (
+        semantic_normalize(_rubric_content_payload(db, replacement_rubric))
+        == original_rubric_semantics
+    )
+    equivalent_replacement = client.get(f"/api/assignment-review-sessions/{session['id']}").json()
     assert {"reference_answers", "structured_rubrics"} <= set(
         equivalent_replacement["confirmations"]
     )
@@ -617,9 +610,7 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
         "reference_answers",
         "structured_rubrics",
     }
-    inherited_bundle = client.get(
-        f"/api/assignments/{assignment.id}/review-bundle"
-    ).json()
+    inherited_bundle = client.get(f"/api/assignments/{assignment.id}/review-bundle").json()
     assert all(
         item["origin"] == "inherited" and item["inherited"] is True
         for item in inherited_bundle["confirmations"]
@@ -645,9 +636,7 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
     assert repeated_binding.status_code == 200, repeated_binding.text
     assert repeated_binding.json()["id"] == binding.json()["id"]
 
-    binding_row = db.get(
-        AssignmentRubricPublicationBinding, uuid.UUID(binding.json()["id"])
-    )
+    binding_row = db.get(AssignmentRubricPublicationBinding, uuid.UUID(binding.json()["id"]))
     assert binding_row is not None
     replacement_rubric.title = "语义内容漂移"
     db.commit()
@@ -684,9 +673,7 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
     binding_row.loss_report = original_loss_report
     db.commit()
 
-    rubric_item_id = uuid.UUID(
-        binding.json()["mapping"][0]["criteria"][0]["rubric_item_id"]
-    )
+    rubric_item_id = uuid.UUID(binding.json()["mapping"][0]["criteria"][0]["rubric_item_id"])
     legacy_item = db.get(RubricItem, rubric_item_id)
     assert legacy_item is not None
     original_item_title = legacy_item.title
@@ -716,9 +703,7 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
     assert human_bundle["binding"]["projection_current"] is True
     assert human_bundle["binding"]["projection_reason"] is None
     human_legacy_confirmation = next(
-        item
-        for item in human_bundle["confirmations"]
-        if item["type"] == "legacy_binding"
+        item for item in human_bundle["confirmations"] if item["type"] == "legacy_binding"
     )
     assert human_legacy_confirmation["origin"] == "origin"
     assert human_legacy_confirmation["binding_id"] == human_bundle["binding"]["id"]
@@ -754,9 +739,7 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
     open_bundle = client.get(f"/api/assignments/{assignment.id}/review-bundle").json()
     assert open_bundle["status"] == "action_required"
     open_blockers = [
-        item
-        for item in open_bundle["blockers"]
-        if item["code"] == "TEST_MANUAL_BLOCKER"
+        item for item in open_bundle["blockers"] if item["code"] == "TEST_MANUAL_BLOCKER"
     ]
     assert len(open_blockers) == 1
     assert open_blockers[0]["status"] == "open"
@@ -778,21 +761,15 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
     )
     assert resolved.status_code == 200, resolved.text
     session["review_version"] = resolved.json()["review_version"]
-    resolved_bundle = client.get(
-        f"/api/assignments/{assignment.id}/review-bundle"
-    ).json()
-    assert "TEST_MANUAL_BLOCKER" not in {
-        item["code"] for item in resolved_bundle["blockers"]
-    }
+    resolved_bundle = client.get(f"/api/assignments/{assignment.id}/review-bundle").json()
+    assert "TEST_MANUAL_BLOCKER" not in {item["code"] for item in resolved_bundle["blockers"]}
 
     manual_blocker.message = "second blocking fact"
     db.commit()
     review_row = db.get(AssignmentReviewSession, uuid.UUID(session["id"]))
     assert review_row is not None
     second_issue = next(
-        item
-        for item in generated_issues(db, review_row)
-        if item["code"] == "TEST_MANUAL_BLOCKER"
+        item for item in generated_issues(db, review_row) if item["code"] == "TEST_MANUAL_BLOCKER"
     )
     assert second_issue["source_hash"] != first_item.source_hash
     second_item = AssignmentReviewItem(
@@ -812,13 +789,9 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
     db.commit()
     db.refresh(first_item)
     assert first_item.status == "resolved"
-    changed_bundle = client.get(
-        f"/api/assignments/{assignment.id}/review-bundle"
-    ).json()
+    changed_bundle = client.get(f"/api/assignments/{assignment.id}/review-bundle").json()
     changed_blockers = [
-        item
-        for item in changed_bundle["blockers"]
-        if item["code"] == "TEST_MANUAL_BLOCKER"
+        item for item in changed_bundle["blockers"] if item["code"] == "TEST_MANUAL_BLOCKER"
     ]
     assert len(changed_blockers) == 1
     assert changed_blockers[0]["source_hash"] == second_issue["source_hash"]
@@ -842,12 +815,8 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
             AuditLog,
         )
     )
-    ready_after_resolution = client.get(
-        f"/api/assignments/{assignment.id}/review-bundle"
-    )
-    repeated_ready_after_resolution = client.get(
-        f"/api/assignments/{assignment.id}/review-bundle"
-    )
+    ready_after_resolution = client.get(f"/api/assignments/{assignment.id}/review-bundle")
+    repeated_ready_after_resolution = client.get(f"/api/assignments/{assignment.id}/review-bundle")
     assert ready_after_resolution.status_code == 200
     assert ready_after_resolution.json() == repeated_ready_after_resolution.json()
     assert ready_after_resolution.json()["status"] == "ready_to_publish"
@@ -1079,9 +1048,7 @@ def test_review_bundle_is_read_only_and_selects_current_formal_lifecycle() -> No
 
     counts_before = domain_counts()
     missing_review = client.get(f"/api/assignments/{assignment.id}/review-bundle")
-    repeated_missing_review = client.get(
-        f"/api/assignments/{assignment.id}/review-bundle"
-    )
+    repeated_missing_review = client.get(f"/api/assignments/{assignment.id}/review-bundle")
     assert missing_review.status_code == 200, missing_review.text
     assert repeated_missing_review.status_code == 200, repeated_missing_review.text
     missing_payload = missing_review.json()
@@ -1130,15 +1097,12 @@ def test_review_bundle_is_read_only_and_selects_current_formal_lifecycle() -> No
     assert binding.json()["manual_review_required"] is False
     assert binding.json()["loss_report"] == []
     session = client.get(f"/api/assignment-review-sessions/{session['id']}").json()
-    old_binding = db.get(
-        AssignmentRubricPublicationBinding, uuid.UUID(binding.json()["id"])
-    )
+    old_binding = db.get(AssignmentRubricPublicationBinding, uuid.UUID(binding.json()["id"]))
     assert old_binding is not None
     old_binding.projection_profile = "legacy-unverified"
     old_confirmation = db.scalar(
         select(AssignmentExplicitConfirmation).where(
-            AssignmentExplicitConfirmation.review_session_id
-            == uuid.UUID(session["id"]),
+            AssignmentExplicitConfirmation.review_session_id == uuid.UUID(session["id"]),
             AssignmentExplicitConfirmation.confirmation_type == "legacy_binding",
         )
     )
@@ -1146,18 +1110,11 @@ def test_review_bundle_is_read_only_and_selects_current_formal_lifecycle() -> No
     old_confirmation.fingerprint_schema_version = None
     old_confirmation.confirmation_origin = "legacy_origin"
     db.commit()
-    invalid_bundle = client.get(
-        f"/api/assignments/{assignment.id}/review-bundle"
-    ).json()
+    invalid_bundle = client.get(f"/api/assignments/{assignment.id}/review-bundle").json()
     assert invalid_bundle["status"] == "action_required"
     assert invalid_bundle["binding"]["projection_current"] is False
-    assert (
-        invalid_bundle["binding"]["projection_reason"]
-        == "BINDING_PROJECTION_STALE"
-    )
-    assert "legacy_binding" not in {
-        item["type"] for item in invalid_bundle["confirmations"]
-    }
+    assert invalid_bundle["binding"]["projection_reason"] == "BINDING_PROJECTION_STALE"
+    assert "legacy_binding" not in {item["type"] for item in invalid_bundle["confirmations"]}
     bypass = client.post(
         f"/api/assignment-review-sessions/{session['id']}/prepare-publication",
         json={
@@ -1190,9 +1147,7 @@ def test_review_bundle_is_read_only_and_selects_current_formal_lifecycle() -> No
     assert ready_bundle["binding"]["projection_current"] is True
     assert ready_bundle["binding"]["projection_reason"] is None
     automatic_legacy_confirmation = next(
-        item
-        for item in ready_bundle["confirmations"]
-        if item["type"] == "legacy_binding"
+        item for item in ready_bundle["confirmations"] if item["type"] == "legacy_binding"
     )
     assert automatic_legacy_confirmation["origin"] == "system_auto"
     assert automatic_legacy_confirmation["binding_id"] == ready_bundle["binding"]["id"]
@@ -1234,9 +1189,7 @@ def test_review_bundle_is_read_only_and_selects_current_formal_lifecycle() -> No
     assert stale_bundle["binding"]["status"] == "stale"
     assert stale_bundle["binding"]["projection_current"] is False
     assert stale_bundle["binding"]["projection_reason"] == "BINDING_NOT_CURRENT"
-    assert "structured_rubrics" not in {
-        item["type"] for item in stale_bundle["confirmations"]
-    }
+    assert "structured_rubrics" not in {item["type"] for item in stale_bundle["confirmations"]}
     assert {item["code"] for item in stale_bundle["blockers"]} >= {
         "CONFIRM_STRUCTURED_RUBRICS_REQUIRED",
         "LEGACY_BINDING_STALE",

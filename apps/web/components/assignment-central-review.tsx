@@ -5,11 +5,13 @@ import { Button, Card, Select, useToast } from "@/components/ui";
 import {
   ApiError,
   assignmentReviewApi,
+  assignmentsApi,
   type AssignmentReadinessRecord,
   type AssignmentReviewBundle,
   type AssignmentRecord,
   type AssignmentReviewItemRecord,
   type AssignmentReviewSessionRecord,
+  type ManualPublishReadiness,
 } from "@/lib/api";
 import { getReviewCopy } from "@/lib/review-copy";
 
@@ -18,11 +20,14 @@ const confirmations = [
   ["due_at", "确认截止时间"],
   ["total_score", "确认总分"],
   ["file_roles", "确认文件角色"],
-  ["answer_sources", "确认答案来源"],
+  ["answer_sources", "确认答案文件"],
   ["paper_version", "确认试卷版本"],
   ["reference_answers", "确认答案版本"],
   ["structured_rubrics", "确认评分标准"],
 ] as const;
+const routineConfirmationIssueCodes = new Set(
+  confirmations.map(([kind]) => `CONFIRM_${kind.toUpperCase()}_REQUIRED`),
+);
 
 const bindingLossMessages: Record<string, string> = {
   DEPENDENCY_NOT_LOSSLESS:
@@ -121,12 +126,19 @@ export function AssignmentCentralReview({
   const [readiness, setReadiness] = useState<AssignmentReadinessRecord>();
   const [bundle, setBundle] = useState<AssignmentReviewBundle>();
   const [bundleError, setBundleError] = useState("");
+  const [manualReadiness, setManualReadiness] =
+    useState<ManualPublishReadiness>();
+  const [manualMode, setManualMode] = useState(false);
+  const [preparingReadiness, setPreparingReadiness] = useState(false);
   const [severity, setSeverity] = useState("all");
   const [section, setSection] = useState("all");
   const [busy, setBusy] = useState(false);
+  const [automating, setAutomating] = useState(false);
   const [resolvedOpen, setResolvedOpen] = useState(false);
   const requestGeneration = useRef(0);
   const mutationGeneration = useRef(0);
+  const autoConfirmationAttempt = useRef("");
+  const autoBindingAttempt = useRef("");
   const assignmentEpoch = useRef({
     id: item.id,
     reviewInputsRevision,
@@ -189,6 +201,30 @@ export function AssignmentCentralReview({
       return next;
     } catch (error) {
       if (!isCurrentRequest(assignmentId, epoch, generation)) return;
+      if (
+        error instanceof ApiError &&
+        ["GENERATION_REQUIRED", "DRAFT_INPUT_REQUIRED"].includes(
+          error.body.code,
+        )
+      ) {
+        try {
+          const readiness =
+            await assignmentsApi.manualPublishReadiness(assignmentId);
+          if (!isCurrentRequest(assignmentId, epoch, generation)) return;
+          setManualReadiness(readiness);
+          setManualMode(true);
+          setBundleError("");
+          return;
+        } catch (manualError) {
+          if (!isCurrentRequest(assignmentId, epoch, generation)) return;
+          setBundleError(
+            manualError instanceof ApiError
+              ? manualError.message
+              : "无法检查当前作业，请稍后重试。",
+          );
+          return;
+        }
+      }
       setBundle(undefined);
       setReadiness(undefined);
       setBundleError("无法取得当前审查内容，请重试后再继续发布。");
@@ -244,6 +280,9 @@ export function AssignmentCentralReview({
     setReadiness(undefined);
     setBundle(undefined);
     setBundleError("");
+    setManualMode(false);
+    setManualReadiness(undefined);
+    setPreparingReadiness(false);
     setBusy(false);
     assignmentReviewApi
       .list(assignmentId)
@@ -302,6 +341,7 @@ export function AssignmentCentralReview({
         (row) =>
           !["stale", "superseded"].includes(row.status) &&
           row.issue_code !== "LEGACY_CONVERSION_REVIEW" &&
+          !routineConfirmationIssueCodes.has(row.issue_code) &&
           (severity === "all" || row.severity === severity) &&
           (section === "all" || row.section === section),
       ),
@@ -326,20 +366,27 @@ export function AssignmentCentralReview({
     pages: "试卷页面",
     questions: "题目",
     answers: "参考答案",
-    answer_sources: "答案来源",
+    answer_sources: "答案文件",
     rubrics: "评分标准",
     file_roles: "文件用途",
     publication: "发布绑定",
     total_score: "分值",
   };
   const openCodes = new Set(bundle?.blockers.map((row) => row.code) ?? []);
-  const bundleConfirmationsByType = new Map(
-    bundle?.confirmations.map((confirmation) => [
-      confirmation.type,
-      confirmation,
-    ]) ?? [],
+  const bundleConfirmationsByType = useMemo(
+    () =>
+      new Map(
+        bundle?.confirmations.map((confirmation) => [
+          confirmation.type,
+          confirmation,
+        ]) ?? [],
+      ),
+    [bundle?.confirmations],
   );
-  const bundleConfirmations = new Set(bundleConfirmationsByType.keys());
+  const bundleConfirmations = useMemo(
+    () => new Set(bundleConfirmationsByType.keys()),
+    [bundleConfirmationsByType],
+  );
   const requiredConfirmationsComplete = confirmations.every(([kind]) =>
     bundleConfirmations.has(kind),
   );
@@ -400,7 +447,9 @@ export function AssignmentCentralReview({
     !!bundle && isCurrentBundleContract(bundle, item.id);
   const teacherVisibleBlockers =
     bundle?.blockers.filter(
-      (blocker) => !bindingIssueCodes.has(blocker.code),
+      (blocker) =>
+        !bindingIssueCodes.has(blocker.code) &&
+        !routineConfirmationIssueCodes.has(blocker.code),
     ) ?? [];
   const publicationBlocked =
     !bundle ||
@@ -410,12 +459,168 @@ export function AssignmentCentralReview({
     bundle.blockers.length > 0 ||
     !requiredConfirmationsComplete ||
     !bindingPublicationReady;
-  const bundleBlockingCount =
-    bundle?.blockers.filter((blocker) => blocker.severity === "blocking")
-      .length ?? 0;
-  const bundleWarningCount =
-    bundle?.blockers.filter((blocker) => blocker.severity === "warning")
-      .length ?? 0;
+  useEffect(() => {
+    if (
+      !session ||
+      !bundle ||
+      bundleError ||
+      busy ||
+      automating ||
+      requiredConfirmationsComplete
+    )
+      return;
+    const assignmentId = item.id;
+    const epoch = assignmentEpoch.current.value;
+    const key = `${session.id}:${session.review_version}:${[
+      ...bundleConfirmations,
+    ]
+      .sort()
+      .join(",")}`;
+    if (autoConfirmationAttempt.current === key) return;
+    autoConfirmationAttempt.current = key;
+    let cancelled = false;
+    setAutomating(true);
+    assignmentReviewApi
+      .autoConfirm(session.id, session.review_version)
+      .then(() => {
+        if (!cancelled && isCurrentRequest(assignmentId, epoch))
+          return load(session);
+      })
+      .catch((error) => {
+        if (!cancelled && isCurrentRequest(assignmentId, epoch)) {
+          toast(
+            error instanceof ApiError
+              ? error.message
+              : "自动核对暂时失败，请重新扫描。",
+            "error",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled && isCurrentRequest(assignmentId, epoch))
+          setAutomating(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    automating,
+    bundle,
+    bundleConfirmations,
+    bundleError,
+    busy,
+    isCurrentRequest,
+    item.id,
+    load,
+    requiredConfirmationsComplete,
+    session,
+    toast,
+  ]);
+  useEffect(() => {
+    if (
+      !session ||
+      !bundle ||
+      bundle.binding ||
+      bundleError ||
+      busy ||
+      automating ||
+      !requiredConfirmationsComplete
+    )
+      return;
+    const assignmentId = item.id;
+    const epoch = assignmentEpoch.current.value;
+    const key = `${session.id}:${session.review_version}`;
+    if (autoBindingAttempt.current === key) return;
+    autoBindingAttempt.current = key;
+    let cancelled = false;
+    setAutomating(true);
+    assignmentReviewApi
+      .createBinding(session.id, session.review_version)
+      .then(() => {
+        if (!cancelled && isCurrentRequest(assignmentId, epoch))
+          return load(session);
+      })
+      .catch((error) => {
+        if (!cancelled && isCurrentRequest(assignmentId, epoch)) {
+          toast(
+            error instanceof ApiError
+              ? error.message
+              : "评分标准兼容检查暂时失败，请重新扫描。",
+            "error",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled && isCurrentRequest(assignmentId, epoch))
+          setAutomating(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    automating,
+    bundle,
+    bundleError,
+    busy,
+    isCurrentRequest,
+    item.id,
+    load,
+    requiredConfirmationsComplete,
+    session,
+    toast,
+  ]);
+  useEffect(() => {
+    if (
+      publicationBlocked ||
+      !session ||
+      readiness ||
+      manualMode ||
+      preparingReadiness
+    )
+      return;
+    const assignmentId = item.id;
+    const epoch = assignmentEpoch.current.value;
+    let cancelled = false;
+    setPreparingReadiness(true);
+    assignmentReviewApi
+      .prepare(session.id, session.review_version)
+      .then((next) => {
+        if (!cancelled && isCurrentRequest(assignmentId, epoch)) {
+          setReadiness(next);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled && isCurrentRequest(assignmentId, epoch)) {
+          setBundleError(
+            error instanceof ApiError
+              ? error.message
+              : "无法核对发布状态，请重试。",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled && isCurrentRequest(assignmentId, epoch)) {
+          setPreparingReadiness(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    isCurrentRequest,
+    item.id,
+    manualMode,
+    preparingReadiness,
+    publicationBlocked,
+    readiness,
+    session,
+  ]);
+  const bundleBlockingCount = teacherVisibleBlockers.filter(
+    (blocker) => blocker.severity === "blocking",
+  ).length;
+  const bundleWarningCount = teacherVisibleBlockers.filter(
+    (blocker) => blocker.severity === "warning",
+  ).length;
   const questionTotal =
     item.paper_version?.questions.reduce(
       (sum, question) => sum + Number(question.max_score ?? 0),
@@ -460,46 +665,14 @@ export function AssignmentCentralReview({
     openCodes.has("ANSWER_SOURCE_CONFIRMATION_REQUIRED")
       ? [
           {
-            title: "确认上传文件的用途与答案来源",
-            detail:
-              "逐个选择文件用途；参考答案文件还必须选择真实来源。每个文件都点击“确认文件分析”，直到待确认变为 0。",
+            title: "确认上传文件的用途",
+            detail: "逐个选择文件用途并确认，直到待确认变为 0。",
             targetId: "generation-file-analysis",
             actionLabel: "打开文件确认区",
           },
         ]
       : []),
-    ...(!openCodes.has("FILE_ROLE_UNCONFIRMED") &&
-    !openCodes.has("ANSWER_SOURCE_UNCONFIRMED") &&
-    (openCodes.has("CONFIRM_FILE_ROLES_REQUIRED") ||
-      openCodes.has("CONFIRM_ANSWER_SOURCES_REQUIRED"))
-      ? [
-          {
-            title: "确认本次发布采用这些文件信息",
-            detail:
-              "文件逐项分析已经完成。现在只需在“教师显式确认”中点击“确认文件角色”和“确认答案来源”。",
-            targetId: "teacher-explicit-confirmations",
-            actionLabel: "去完成发布确认",
-          },
-        ]
-      : []),
-    ...(openCodes.has("CONFIRM_TOTAL_SCORE_REQUIRED") &&
-    !openCodes.has("TOTAL_SCORE_MISMATCH")
-      ? [
-          {
-            title: `总分已核对为 ${item.total_score ?? questionTotal} 分，只待教师确认`,
-            detail: `${scoreCalculation}；数值一致，不需要修改分值。`,
-            targetId: "teacher-explicit-confirmations",
-            actionLabel: "查看 100 分明细",
-            confirmationKind: "total_score",
-            secondaryActionLabel: `确认本次总分为 ${Number(
-              item.total_score ?? questionTotal,
-            )} 分`,
-            confirmationSuccess: "总分已确认，不再作为分值问题显示",
-          },
-        ]
-      : []),
-    ...(openCodes.has("PAPER_VARIANT_REVIEW") ||
-    openCodes.has("CONFIRM_PAPER_VERSION_REQUIRED")
+    ...(openCodes.has("PAPER_VARIANT_REVIEW")
       ? [
           {
             title: "核对试卷页面",
@@ -512,19 +685,7 @@ export function AssignmentCentralReview({
           },
         ]
       : []),
-    ...(openCodes.has("CONFIRM_REFERENCE_ANSWERS_REQUIRED") ||
-    openCodes.has("CONFIRM_STRUCTURED_RUBRICS_REQUIRED")
-      ? [
-          {
-            title: "确认参考答案与评分标准版本",
-            detail: "内容已生成；检查无误后使用下方对应的确认按钮。",
-            step: 5,
-          },
-        ]
-      : []),
-    ...(openCodes.has("LEGACY_BINDING_REQUIRED") ||
-    openCodes.has("CONFIRM_LEGACY_BINDING_REQUIRED") ||
-    openCodes.has("LEGACY_BINDING_STALE")
+    ...(bindingIsStale || bindingHasKnownLosses || bindingHasUnknownLoss
       ? [
           {
             title: bindingIsStale
@@ -611,7 +772,6 @@ export function AssignmentCentralReview({
           <div className="mt-2 rounded bg-slate-950 p-3 text-xs text-slate-100">
             <p>错误码：{review.issue_code}</p>
             <p>问题 ID：{review.id}</p>
-            <p>来源哈希：{review.source_hash}</p>
             <p>后端说明：{review.message}</p>
             <pre className="mt-2 overflow-auto whitespace-pre-wrap">
               {JSON.stringify(review.evidence, null, 2)}
@@ -681,6 +841,91 @@ export function AssignmentCentralReview({
     );
   };
 
+  if (manualMode) {
+    const issues = manualReadiness?.issues ?? [];
+    return (
+      <Card className="space-y-5 p-6">
+        <div>
+          <h2 className="font-bold">发布作业</h2>
+          <p className="text-sm text-slate-600">
+            这是教师手工整理的作业，不需要运行 AI
+            生成。系统会在发布时再次核对当前内容。
+          </p>
+        </div>
+        {issues.length > 0 ? (
+          <section className="space-y-3" aria-label="发布前需要处理的问题">
+            <h3 className="font-semibold">还需完成 {issues.length} 项</h3>
+            <ul className="space-y-2">
+              {issues.map((issue, index) => (
+                <li
+                  className="flex items-center justify-between gap-3 rounded-xl border p-3"
+                  key={`${issue.code}-${issue.question_id ?? index}`}
+                >
+                  <span className="text-sm">{issue.message}</span>
+                  <Button
+                    variant="outline"
+                    onClick={() => onNavigate(issue.step)}
+                  >
+                    去处理
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : manualReadiness ? (
+          <section className="space-y-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+            <div>
+              <h3 className="font-semibold text-emerald-900">发布条件已满足</h3>
+              <p className="mt-1 text-sm text-emerald-800">
+                {manualReadiness.class_ids.length} 个班级 · 总分{" "}
+                {manualReadiness.total_score} · 截止时间{" "}
+                {manualReadiness.due_at
+                  ? new Date(manualReadiness.due_at).toLocaleString("zh-CN")
+                  : "无"}
+              </p>
+            </div>
+            <Button
+              loading={busy}
+              onClick={() => {
+                if (
+                  !window.confirm(
+                    "确认发布这份作业？发布后不能直接修改题目和评分标准。",
+                  )
+                )
+                  return;
+                setBusy(true);
+                void assignmentsApi
+                  .publishManual(item.id, manualReadiness)
+                  .then(() => {
+                    toast("作业已由教师确认发布");
+                    onPublished();
+                  })
+                  .catch(async (error) => {
+                    toast(
+                      error instanceof ApiError ? error.message : "发布失败",
+                      "error",
+                    );
+                    try {
+                      setManualReadiness(
+                        await assignmentsApi.manualPublishReadiness(item.id),
+                      );
+                    } catch {
+                      // Keep the original error visible through the toast.
+                    }
+                  })
+                  .finally(() => setBusy(false));
+              }}
+            >
+              确认发布
+            </Button>
+          </section>
+        ) : (
+          <p>正在检查发布条件…</p>
+        )}
+      </Card>
+    );
+  }
+
   if (!session) {
     if (bundleError) {
       return (
@@ -720,7 +965,7 @@ export function AssignmentCentralReview({
       <div>
         <h2 className="font-bold">集中审查中心</h2>
         <p className="text-sm text-slate-600">
-          请先处理影响发布的问题，再确认其余内容。版本等排查信息可在技术详情中查看。
+          系统会自动核对常规内容；这里只需处理真正影响发布的问题。
         </p>
       </div>
       {bundleError ? (
@@ -770,14 +1015,10 @@ export function AssignmentCentralReview({
                 >
                   <strong>第 {question.number} 题</strong>
                   <p className="mt-1">{question.content ?? "题目内容待补充"}</p>
-                  <p className="text-xs text-slate-600">
-                    来源：{question.source.label}
-                  </p>
                   <p className="mt-2">
                     参考答案：{question.answer.selected?.content ?? "尚未确定"}
                   </p>
                   <p className="text-xs text-slate-600">
-                    来源：{question.answer.selected?.source.label ?? "未提供"} ·{" "}
                     {question.answer.selected?.status === "draft"
                       ? "等待确认"
                       : question.answer.selected
@@ -788,7 +1029,6 @@ export function AssignmentCentralReview({
                     评分标准：{question.rubric.selected?.title ?? "尚未确定"}
                   </p>
                   <p className="text-xs text-slate-600">
-                    来源：{question.rubric.selected?.source.label ?? "未提供"} ·{" "}
                     {question.rubric.selected?.status === "draft"
                       ? "等待确认"
                       : question.rubric.selected
@@ -862,7 +1102,7 @@ export function AssignmentCentralReview({
           )}
         </section>
       ) : null}
-      {publicationBlocked ? (
+      {teacherVisibleBlockers.length > 0 ? (
         <section
           className="rounded-xl border border-red-200 bg-red-50 p-4"
           aria-label="发布阻断说明"
@@ -969,6 +1209,16 @@ export function AssignmentCentralReview({
             </ol>
           )}
         </section>
+      ) : publicationBlocked ? (
+        <section
+          className="rounded-xl border border-sky-200 bg-sky-50 p-4"
+          aria-label="自动发布检查"
+        >
+          <h3 className="font-semibold text-sky-900">正在自动完成发布检查</h3>
+          <p className="mt-1 text-sm text-sky-800">
+            无需逐项确认；检查完成后将直接开放“确认发布”。
+          </p>
+        </section>
       ) : (
         <section
           className="rounded-xl border border-emerald-200 bg-emerald-50 p-4"
@@ -980,14 +1230,14 @@ export function AssignmentCentralReview({
           </p>
           <p className="mt-2 text-sm text-emerald-900">
             {readiness?.status === "ready"
-              ? "发布快照已经生成。请核对班级、截止时间和总分，然后点击“教师确认并发布”。"
-              : "下一步点击下方“准备发布”生成发布快照；核对班级、截止时间和总分后，再由教师最终确认发布。"}
+              ? "系统已完成发布状态核对。请核对班级、截止时间和总分，然后点击“确认发布”。"
+              : "系统正在自动核对发布状态；完成后只需由教师确认发布。"}
           </p>
         </section>
       )}
       <div className="grid grid-cols-3 gap-3" aria-label="风险汇总">
         <div className="rounded bg-emerald-50 p-3">
-          提示 {items.filter((entry) => entry.severity === "info").length}
+          提示 {visible.filter((entry) => entry.severity === "info").length}
         </div>
         <div className="rounded bg-amber-50 p-3">警告 {bundleWarningCount}</div>
         <div className="rounded bg-red-50 p-3">
@@ -1060,53 +1310,17 @@ export function AssignmentCentralReview({
           )}
         </section>
       )}
-      <div
-        id="teacher-explicit-confirmations"
-        className="scroll-mt-6 space-y-2"
-      >
-        <h3 className="font-semibold">教师显式确认</h3>
-        <p className="text-sm text-slate-600">
-          先完成上方内容修改，再按从左到右依次确认。确认按钮只记录“已核对”，不会自动修改内容。
+      <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+        <strong>
+          {automating
+            ? "正在自动核对…"
+            : requiredConfirmationsComplete
+              ? "常规内容已自动核对"
+              : "仍有内容需要处理"}
+        </strong>
+        <p className="mt-1">
+          班级、时间、分值、文件和版本由系统核对；只有内容不完整或存在冲突时才需要处理。
         </p>
-        <div className="flex flex-wrap gap-2">
-          {confirmations.map(([kind, label]) => {
-            const saved = bundleConfirmationsByType.get(kind);
-            if (saved) {
-              return (
-                <div
-                  key={kind}
-                  data-testid={`review-confirmation-state-${kind}`}
-                  className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900"
-                >
-                  {saved.inherited
-                    ? `${label.replace(/^确认/, "")}：内容未变，已沿用确认`
-                    : `✓ 已${label}`}
-                </div>
-              );
-            }
-            return (
-              <Button
-                key={kind}
-                data-testid={`review-confirmation-${kind}`}
-                variant="outline"
-                disabled={busy}
-                onClick={() =>
-                  act(
-                    () =>
-                      assignmentReviewApi.confirm(
-                        session.id,
-                        kind,
-                        session.review_version,
-                      ),
-                    `${label}完成`,
-                  )
-                }
-              >
-                {label}
-              </Button>
-            );
-          })}
-        </div>
       </div>
       <div className="space-y-2">
         <h3 className="font-semibold">评分标准兼容说明</h3>
@@ -1256,10 +1470,6 @@ export function AssignmentCentralReview({
                 {
                   binding_id: bundle.binding.id,
                   binding_version: bundle.binding.binding_version,
-                  source_binding_hash: bundle.binding.source_binding_hash,
-                  source_semantic_hash: bundle.binding.source_semantic_hash,
-                  expected_source_binding_hash:
-                    bundle.binding.expected_source_binding_hash,
                   target_legacy_hash: bundle.binding.target_legacy_hash,
                   projection_profile: bundle.binding.projection_profile,
                   projection_version: bundle.binding.projection_version,
@@ -1272,10 +1482,7 @@ export function AssignmentCentralReview({
                     ? {
                         id: legacyBindingConfirmation.id,
                         origin: legacyBindingConfirmation.origin,
-                        source_hash: legacyBindingConfirmation.source_hash,
                         binding_id: legacyBindingConfirmation.binding_id,
-                        source_binding_hash:
-                          legacyBindingConfirmation.source_binding_hash,
                         fingerprint_schema_version:
                           legacyBindingConfirmation.fingerprint_schema_version,
                       }
@@ -1295,23 +1502,6 @@ export function AssignmentCentralReview({
           总分 {item.total_score ?? "未设置"}
         </p>
         <div className="mt-3 flex gap-2">
-          <Button
-            disabled={busy || publicationBlocked}
-            onClick={() =>
-              act(
-                async () =>
-                  setReadiness(
-                    await assignmentReviewApi.prepare(
-                      session.id,
-                      session.review_version,
-                    ),
-                  ),
-                "发布准备快照已生成；作业尚未发布",
-              )
-            }
-          >
-            准备发布
-          </Button>
           <Button
             disabled={
               publicationBlocked ||
@@ -1337,7 +1527,7 @@ export function AssignmentCentralReview({
               }, "作业已由教师发布");
             }}
           >
-            教师确认并发布
+            {preparingReadiness ? "正在核对发布状态…" : "确认发布"}
           </Button>
         </div>
       </div>

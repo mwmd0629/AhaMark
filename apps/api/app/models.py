@@ -347,6 +347,9 @@ class Assignment(TimestampMixin, Base):
         ForeignKey("users.id", ondelete="RESTRICT"), index=True
     )
     title: Mapped[str] = mapped_column(String(200), index=True)
+    delivery_mode: Mapped[str] = mapped_column(
+        String(30), default="class_assignment", server_default="class_assignment", index=True
+    )
     subject: Mapped[str | None] = mapped_column(String(40), index=True)
     grade: Mapped[str | None] = mapped_column(String(40), index=True)
     description: Mapped[str | None] = mapped_column(Text)
@@ -376,6 +379,28 @@ class AssignmentClass(Base):
         ForeignKey("classes.id", ondelete="RESTRICT"), index=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class AssignmentParticipantSnapshot(Base):
+    __tablename__ = "assignment_participant_snapshots"
+    __table_args__ = (
+        UniqueConstraint("assignment_id", "student_id", name="uq_assignment_participant_student"),
+        Index("ix_assignment_participant_class", "assignment_id", "class_id"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignments.id", ondelete="RESTRICT"), index=True
+    )
+    class_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("classes.id", ondelete="RESTRICT"), index=True
+    )
+    student_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("students.id", ondelete="RESTRICT"), index=True
+    )
+    student_number: Mapped[str] = mapped_column(String(64))
+    student_name: Mapped[str] = mapped_column(String(120))
+    membership_joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    frozen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
 class PaperVersion(Base):

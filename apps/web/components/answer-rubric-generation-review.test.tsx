@@ -188,6 +188,39 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("AnswerRubricGenerationReview Bundle lifecycle", () => {
+  it("shows saved assignment answers and rubrics without prominent source labels", async () => {
+    render(
+      <AnswerRubricGenerationReview
+        {...props}
+        savedRubrics={[
+          {
+            id: "legacy-rubric-1",
+            question_id: "question-1",
+            standard_answer: "教师已保存答案",
+            scoring_notes: "按步骤给分",
+            items: [
+              {
+                id: "legacy-item-1",
+                title: "计算结果",
+                description: "结果正确",
+                points: "20.00",
+                required: true,
+                deduction_rule: "过程错误酌情扣分",
+              },
+            ],
+          },
+        ]}
+      />,
+    );
+
+    expect(await screen.findByText("教师已保存答案")).toBeInTheDocument();
+    expect(screen.getByText("计算结果")).toBeInTheDocument();
+    expect(screen.getAllByText("✓ 已保存到作业草稿")).toHaveLength(2);
+    expect(screen.getByText("参考答案：已保存")).toBeInTheDocument();
+    expect(screen.getByText("评分标准：已保存")).toBeInTheDocument();
+    expect(screen.queryByText(/来源：/)).not.toBeInTheDocument();
+  });
+
   it("shows a formal draft even when no review session exists", async () => {
     generationApi.listRevisions.mockResolvedValue([]);
     const draftAnswer = answerVersion("answer-draft", "draft", 1, "答案 2");

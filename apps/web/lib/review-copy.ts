@@ -77,23 +77,23 @@ const copies: Record<string, ReviewCopy> = {
     action: "确认文件用途",
   },
   CONFIRM_ANSWER_SOURCES_REQUIRED: {
-    title: "参考答案来源尚未确认",
-    message: "请核对参考答案来自教师、出版社、第三方还是 AI，并完成确认。",
-    action: "检查答案来源",
+    title: "参考答案文件信息待核对",
+    message: "系统会自动核对；如仍未完成，请重新确认文件用途。",
+    action: "检查答案文件",
   },
   ANSWER_SOURCE_UNCONFIRMED: {
-    title: "有参考答案的来源未确认",
-    message: "至少一个参考答案文件仍处于来源未知状态。",
-    action: "确认答案来源",
+    title: "参考答案文件信息不完整",
+    message: "请重新确认该文件的用途，或替换为内容明确的参考答案文件。",
+    action: "检查答案文件",
   },
   ANSWER_SOURCE_CONFIRMATION_REQUIRED: {
-    title: "答案文件需要确认来源",
-    message: "请返回文件分析，确认答案文件的用途及来源。",
+    title: "参考答案文件需要核对",
+    message: "请返回文件分析并确认文件用途。",
     action: "检查答案文件",
   },
   ANSWER_SOURCE_REVIEW: {
-    title: "AI 生成的参考答案需要复核",
-    message: "该题答案由 AI 生成，不会被标记为教师或出版社官方答案。",
+    title: "参考答案内容需要复核",
+    message: "请检查答案内容是否正确，确认后再继续发布。",
     action: "检查参考答案",
   },
   CONFIRM_PAPER_VERSION_REQUIRED: {

@@ -67,16 +67,6 @@ const FILE_ROLE_LABEL: Record<string, string> = {
   attachment: "其他附件",
   unknown: "尚未确定",
 };
-const ANSWER_SOURCE_LABEL: Record<string, string> = {
-  teacher_official: "教师官方答案",
-  publisher_official: "出版社官方答案",
-  teacher_provided: "教师提供",
-  third_party: "第三方答案",
-  ai_generated: "AI 生成",
-  unknown: "尚未确定",
-  not_applicable: "不适用",
-};
-
 export function AssignmentGenerationPanel({
   assignmentId,
   assignment,
@@ -289,7 +279,7 @@ export function AssignmentGenerationPanel({
           <h2 className="font-bold">Codex 草稿生成</h2>
           <p className="mt-1 text-sm text-[var(--neutral-600)]">
             由 Codex
-            生成可编辑草稿，不能直接发布作业。班级、截止时间、总分、答案与各版本仍须教师确认。
+            生成可编辑草稿，不会直接发布。完整内容由系统核对，仅在异常时提示教师处理。
           </p>
         </div>
         <Button
@@ -618,7 +608,7 @@ export function AssignmentGenerationPanel({
             </summary>
             <div className="mt-3">
               <p className="text-sm text-[var(--neutral-600)]">
-                文件角色需由教师确认。AI/第三方答案不会被标记为官方答案。分析不会删除或发布文件。
+                只需确认文件用途。分析不会删除或发布文件。
               </p>
               {fileAnalysisCounts.stale > 0 && (
                 <div
@@ -656,6 +646,9 @@ export function AssignmentGenerationPanel({
                 source: "not_applicable",
               };
               const pages = pageAnalyses[file.id] ?? [];
+              const visibleWarningCodes = file.warning_codes.filter(
+                (code) => !code.includes("ANSWER_SOURCE"),
+              );
               return (
                 <article
                   key={file.id}
@@ -687,10 +680,7 @@ export function AssignmentGenerationPanel({
                     建议用途：
                     {FILE_ROLE_LABEL[file.suggested_role] ??
                       file.suggested_role}
-                    （{Math.round(file.role_confidence * 100)}%） ·
-                    建议答案来源：
-                    {ANSWER_SOURCE_LABEL[file.suggested_answer_source] ??
-                      file.suggested_answer_source}
+                    （{Math.round(file.role_confidence * 100)}%）
                   </p>
                   {file.analysis_status !== "suggested" &&
                     file.teacher_confirmed_role && (
@@ -698,13 +688,6 @@ export function AssignmentGenerationPanel({
                         ✓ 已确认：此文件是
                         {FILE_ROLE_LABEL[file.teacher_confirmed_role] ??
                           file.teacher_confirmed_role}
-                        ；答案来源为
-                        {ANSWER_SOURCE_LABEL[
-                          file.teacher_confirmed_answer_source ??
-                            "not_applicable"
-                        ] ??
-                          file.teacher_confirmed_answer_source ??
-                          "不适用"}
                       </p>
                     )}
                   {file.duplicate_of_file_id && (
@@ -712,9 +695,9 @@ export function AssignmentGenerationPanel({
                       重复关系：{file.duplicate_of_file_id}
                     </p>
                   )}
-                  {!!file.warning_codes.length && (
+                  {!!visibleWarningCodes.length && (
                     <p className="text-amber-700">
-                      风险：{file.warning_codes.join("、")}
+                      风险：{visibleWarningCodes.join("、")}
                     </p>
                   )}
                   {!!pages.length && (
@@ -729,7 +712,7 @@ export function AssignmentGenerationPanel({
                     </p>
                   )}
                   {file.analysis_status === "suggested" && (
-                    <div className="grid gap-2 sm:grid-cols-3">
+                    <div className="grid gap-2 sm:grid-cols-2">
                       <label>
                         确认文件角色
                         <select
@@ -744,7 +727,12 @@ export function AssignmentGenerationPanel({
                                 role: event.target.value,
                                 source:
                                   event.target.value === "reference_answer"
-                                    ? choice.source
+                                    ? choice.source === "not_applicable"
+                                      ? file.suggested_answer_source ===
+                                        "not_applicable"
+                                        ? "unknown"
+                                        : file.suggested_answer_source
+                                      : choice.source
                                     : "not_applicable",
                               },
                             }))
@@ -760,38 +748,6 @@ export function AssignmentGenerationPanel({
                           ].map((role) => (
                             <option key={role} value={role}>
                               {FILE_ROLE_LABEL[role]}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <label>
-                        确认答案来源
-                        <select
-                          aria-label={`${file.file_name ?? file.id} 答案来源`}
-                          className="mt-1 w-full rounded border p-2"
-                          value={choice.source}
-                          disabled={choice.role !== "reference_answer"}
-                          onChange={(event) =>
-                            setFileChoices((old) => ({
-                              ...old,
-                              [file.id]: {
-                                ...choice,
-                                source: event.target.value,
-                              },
-                            }))
-                          }
-                        >
-                          {[
-                            "teacher_official",
-                            "publisher_official",
-                            "teacher_provided",
-                            "third_party",
-                            "ai_generated",
-                            "unknown",
-                            "not_applicable",
-                          ].map((source) => (
-                            <option key={source} value={source}>
-                              {ANSWER_SOURCE_LABEL[source]}
                             </option>
                           ))}
                         </select>
@@ -814,7 +770,7 @@ export function AssignmentGenerationPanel({
                           )
                         }
                       >
-                        确认文件分析
+                        确认文件用途
                       </Button>
                     </div>
                   )}
