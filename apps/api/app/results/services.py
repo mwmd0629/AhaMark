@@ -358,7 +358,11 @@ class FinalScoreService:
         return ValidatedScore(snapshot, submission, payload)
 
 
-def compute_metrics(scores: list[ValidatedScore]) -> dict[str, Any]:
+def compute_metrics(
+    scores: list[ValidatedScore],
+    knowledge_point_names: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    knowledge_point_names = knowledge_point_names or {}
     totals = [float(x.payload.total_score) for x in scores]
     ratios = [float(x.payload.total_score / x.payload.max_score) for x in scores]
     questions: dict[str, dict[str, Any]] = {}
@@ -399,6 +403,8 @@ def compute_metrics(scores: list[ValidatedScore]) -> dict[str, Any]:
     for item in questions.values():
         count = item["participants"]
         item.update(
+            average_score=item["score"] / count,
+            average_max_score=item["max"] / count,
             score_rate=item["score"] / item["max"] if item["max"] else None,
             full_rate=item["full"] / count,
             zero_rate=item["zero"] / count,
@@ -440,6 +446,7 @@ def compute_metrics(scores: list[ValidatedScore]) -> dict[str, Any]:
         "knowledge_points": [
             {
                 "knowledge_point_id": key,
+                "knowledge_point_name": knowledge_point_names.get(key, key),
                 "mastery_rate": value["score"] / value["max"] if value["max"] else None,
                 "question_ids": sorted(value["questions"]),
                 "sample_count": len(value["participants"]),
@@ -729,13 +736,29 @@ def student_report_pdf(
 
 def create_analytics(db: Session, release: GradeRelease) -> AnalyticsSnapshot:
     scores = release_scores(db, release.id)
+    knowledge_point_ids = {
+        knowledge_point_id
+        for row in scores
+        for detail in row.payload.details
+        for knowledge_point_id in detail.knowledge_point_ids
+    }
+    knowledge_point_names = {
+        str(point.id): point.name
+        for point in db.scalars(
+            select(KnowledgePoint).where(
+                KnowledgePoint.id.in_(knowledge_point_ids),
+                KnowledgePoint.owner_id == release.owner_id,
+            )
+        )
+    }
     snapshot = AnalyticsSnapshot(
         owner_id=release.owner_id,
         assignment_id=release.assignment_id,
         class_id=release.class_id,
         grade_release_id=release.id,
         source_snapshot_count=len(scores),
-        metrics=compute_metrics(scores),
+        schema_version="1.1",
+        metrics=compute_metrics(scores, knowledge_point_names),
     )
     db.add(snapshot)
     db.flush()

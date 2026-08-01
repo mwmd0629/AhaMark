@@ -375,6 +375,17 @@ export default function GradingBatchPage({
     });
   }
 
+  async function publishToStudents() {
+    if (!release || release.student_visible) return;
+    await act("该版本已向学生开放", async () => {
+      const next = await analyticsApi.publishToStudents(release.id);
+      setRelease(next);
+      setReleases((items) =>
+        items.map((item) => (item.id === next.id ? next : item)),
+      );
+    });
+  }
+
   async function requestDownload(job: ReportJob) {
     await act("已通过 UI 获取新的 15 分钟短期签名下载地址", async () => {
       const value = await analyticsApi.reportDownload(job.id);
@@ -1085,7 +1096,16 @@ export default function GradingBatchPage({
               >
                 生成首名学生中文 PDF
               </Button>
+              <Button
+                onClick={() => void publishToStudents()}
+                disabled={busy || release.student_visible}
+              >
+                {release.student_visible ? "已向学生开放" : "向学生开放此版本"}
+              </Button>
             </div>
+            <p className="text-xs text-slate-500">
+              开放后，已关联账号的学生可查看本人成绩；此操作不会公开班级排名或其他学生信息。
+            </p>
             <details className="rounded-lg border p-3 text-xs text-slate-500">
               <summary className="cursor-pointer font-medium">技术详情</summary>
               <p className="mt-2 break-all">

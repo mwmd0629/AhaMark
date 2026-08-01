@@ -97,8 +97,20 @@ def test_metrics_formulas_distribution_errors_and_knowledge_points() -> None:
         "90-100": 1,
     }
     assert metrics["questions"][0]["score_rate"] == 0.9
+    assert metrics["questions"][0]["average_score"] == 9
+    assert metrics["questions"][0]["average_max_score"] == 10
     assert metrics["knowledge_points"][0]["mastery_rate"] == 0.9
+    assert metrics["knowledge_points"][0]["knowledge_point_name"] == str(uuid.UUID(int=1))
     assert metrics["error_types"] == [{"code": "concept", "count": 1}]
+
+
+def test_metrics_include_snapshot_knowledge_point_names() -> None:
+    point_id = str(uuid.UUID(int=1))
+    metrics = compute_metrics(
+        [validated(payload())],
+        {point_id: "矩阵的秩"},
+    )
+    assert metrics["knowledge_points"][0]["knowledge_point_name"] == "矩阵的秩"
 
 
 def test_subjective_question_does_not_claim_correct_rate() -> None:
@@ -187,9 +199,10 @@ def test_grade_release_creation_is_retired_and_audits_the_call_source() -> None:
 
         assert response.status_code == 410
         assert response.json()["code"] == "GRADE_RELEASE_CREATION_RETIRED"
-        assert client.get("/openapi.json").json()["paths"]["/api/grade-releases"]["post"][
-            "deprecated"
-        ] is True
+        assert (
+            client.get("/openapi.json").json()["paths"]["/api/grade-releases"]["post"]["deprecated"]
+            is True
+        )
         assert response.headers["Deprecation"] == "true"
         assert (
             response.headers["X-AhaMark-Replacement"]

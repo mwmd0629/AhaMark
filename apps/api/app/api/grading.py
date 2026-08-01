@@ -23,9 +23,11 @@ from app.models import (
     GradeRelease,
     GradeReleaseItem,
     GradingBatch,
+    GradingCollaborator,
     GradingCriterionResult,
     GradingEvidence,
     GradingJob,
+    GradingQuestionAssignment,
     GradingResult,
     MembershipStatus,
     Question,
@@ -50,6 +52,7 @@ from app.models import (
     SubmissionRecognitionJob,
     SubmissionScoreSnapshot,
     TeacherReview,
+    User,
     now_utc,
 )
 from app.recognition.answer_providers import (
@@ -60,7 +63,7 @@ from app.security.files import UnsafeFile, inspect_upload, safe_filename
 from app.storage.base import ObjectStorage
 from app.storage.dependencies import get_storage
 from fastapi import APIRouter, Depends, File, Query, UploadFile
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -92,9 +95,7 @@ def _criterion_signature(db: Session, result_id: uuid.UUID) -> tuple[tuple[str, 
     )
 
 
-def _consistency_differs(
-    db: Session, answer: StudentAnswer, result: GradingResult
-) -> bool:
+def _consistency_differs(db: Session, answer: StudentAnswer, result: GradingResult) -> bool:
     submission = db.get(Submission, answer.submission_id)
     if submission is None:
         return False
@@ -119,9 +120,7 @@ def _consistency_differs(
     if len(comparable) < 2:
         return False
     scores = {str(peer_result.score) for _, peer_result in comparable}
-    criteria = {
-        _criterion_signature(db, peer_result.id) for _, peer_result in comparable
-    }
+    criteria = {_criterion_signature(db, peer_result.id) for _, peer_result in comparable}
     return len(scores) > 1 or len(criteria) > 1
 
 
@@ -134,8 +133,7 @@ def _needs_boundary_recheck(
         return False
     threshold = Decimal(str(get_settings().grading_auto_accept_confidence))
     return score in {Decimal("0"), maximum} or (
-        confidence is not None
-        and threshold - Decimal("0.08") <= confidence <= threshold
+        confidence is not None and threshold - Decimal("0.08") <= confidence <= threshold
     )
 
 
@@ -165,9 +163,7 @@ def _apply_consistency_quality_flags(items: list[dict[str, Any]]) -> None:
         }
         if len(scores) > 1 or len(criterion_signatures) > 1:
             for answer_item in group:
-                answer_item["result"]["quality_flags"].append(
-                    "CONSISTENCY_REVIEW_REQUIRED"
-                )
+                answer_item["result"]["quality_flags"].append("CONSISTENCY_REVIEW_REQUIRED")
 
 
 class BatchInput(BaseModel):
@@ -214,6 +210,15 @@ class ReviewInput(BaseModel):
     review_notes: str | None = None
     reason: str | None = None
     criterion_scores: dict[uuid.UUID, Decimal] = Field(default_factory=dict)
+    expected_review_version: int | None = Field(default=None, ge=1)
+
+
+class CollaboratorInput(BaseModel):
+    email: EmailStr
+
+
+class QuestionAssignmentInput(BaseModel):
+    assignee_id: uuid.UUID | None = None
 
 
 class CodexSuggestionInput(BaseModel):
@@ -299,6 +304,63 @@ def owned_submission(db: Session, owner: uuid.UUID, submission_id: uuid.UUID) ->
     if item is None:
         raise ApiProblem(404, "SUBMISSION_NOT_FOUND", "提交不存在")
     return item
+
+
+def _active_collaborator(
+    db: Session, assignment_id: uuid.UUID, user_id: uuid.UUID
+) -> GradingCollaborator | None:
+    return db.scalar(
+        select(GradingCollaborator).where(
+            GradingCollaborator.assignment_id == assignment_id,
+            GradingCollaborator.user_id == user_id,
+            GradingCollaborator.status == "active",
+        )
+    )
+
+
+def _reviewable_batch(
+    db: Session, actor_id: uuid.UUID, batch_id: uuid.UUID
+) -> tuple[GradingBatch, bool, set[uuid.UUID]]:
+    batch = db.get(GradingBatch, batch_id)
+    if batch is None:
+        raise ApiProblem(404, "GRADING_BATCH_NOT_FOUND", "批改批次不存在")
+    if batch.owner_id == actor_id:
+        return batch, True, set()
+    if _active_collaborator(db, batch.assignment_id, actor_id) is None:
+        raise ApiProblem(404, "GRADING_BATCH_NOT_FOUND", "批改批次不存在")
+    assigned = set(
+        db.scalars(
+            select(GradingQuestionAssignment.question_id).where(
+                GradingQuestionAssignment.grading_batch_id == batch.id,
+                GradingQuestionAssignment.assignee_id == actor_id,
+            )
+        ).all()
+    )
+    if not assigned:
+        raise ApiProblem(403, "GRADING_SCOPE_EMPTY", "尚未分配可批改的题目")
+    return batch, False, assigned
+
+
+def _require_question_scope(
+    db: Session,
+    actor_id: uuid.UUID,
+    batch: GradingBatch,
+    question_id: uuid.UUID,
+) -> bool:
+    if batch.owner_id == actor_id:
+        return True
+    if _active_collaborator(db, batch.assignment_id, actor_id) is None:
+        raise ApiProblem(404, "ANSWER_NOT_FOUND", "答案不存在")
+    assigned = db.scalar(
+        select(GradingQuestionAssignment.id).where(
+            GradingQuestionAssignment.grading_batch_id == batch.id,
+            GradingQuestionAssignment.question_id == question_id,
+            GradingQuestionAssignment.assignee_id == actor_id,
+        )
+    )
+    if assigned is None:
+        raise ApiProblem(403, "GRADING_SCOPE_FORBIDDEN", "该题未分配给当前教师")
+    return False
 
 
 def _effective_answer_content(answer: StudentAnswer) -> str:
@@ -1283,7 +1345,7 @@ def list_submissions(batch_id: uuid.UUID, db: Db, actor: Actor) -> list[dict[str
     )
     result: list[dict[str, Any]] = []
     for row in rows:
-        student = students.get(row.student_id)
+        student = students.get(row.student_id) if row.student_id is not None else None
         result.append(
             {
                 "id": str(row.id),
@@ -1900,7 +1962,7 @@ def answer_json(x: StudentAnswer) -> dict[str, Any]:
 
 @router.patch("/student-answers/{answer_id}")
 def patch_answer(answer_id: uuid.UUID, data: AnswerPatch, db: Db, actor: Actor) -> dict[str, Any]:
-    _, answer = _locked_mutable_answer(db, actor.id, answer_id)
+    _, answer, _, _ = _locked_reviewable_answer(db, actor.id, answer_id)
     answer.corrected_text, answer.corrected_latex, answer.status, answer.requires_review = (
         data.corrected_text,
         data.corrected_latex,
@@ -1958,6 +2020,39 @@ def _locked_mutable_answer(
     return submission, answer
 
 
+def _locked_reviewable_answer(
+    db: Session, actor_id: uuid.UUID, answer_id: uuid.UUID
+) -> tuple[Submission, StudentAnswer, GradingBatch, bool]:
+    hint = db.get(StudentAnswer, answer_id)
+    if hint is None:
+        raise ApiProblem(404, "ANSWER_NOT_FOUND", "答案不存在")
+    submission = db.scalar(
+        select(Submission)
+        .where(Submission.id == hint.submission_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if submission is None:
+        raise ApiProblem(404, "ANSWER_NOT_FOUND", "答案不存在")
+    answer = db.scalar(
+        select(StudentAnswer)
+        .where(StudentAnswer.id == answer_id, StudentAnswer.submission_id == submission.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if answer is None:
+        raise ApiProblem(404, "ANSWER_NOT_FOUND", "答案不存在")
+    batch = db.get(GradingBatch, submission.grading_batch_id)
+    if batch is None:
+        raise ApiProblem(404, "GRADING_BATCH_NOT_FOUND", "批改批次不存在")
+    is_owner = _require_question_scope(db, actor_id, batch, answer.question_id)
+    if submission.status == "finalized" or submission.finalized_at is not None:
+        raise ApiProblem(409, "SUBMISSION_FINALIZED", "已完成提交只读")
+    if submission.status == "voided":
+        raise ApiProblem(409, "SUBMISSION_VOIDED", "已作废提交只读")
+    return submission, answer, batch, is_owner
+
+
 def _stale_answer_derivatives(db: Session, answer: StudentAnswer) -> None:
     from app.recognition.answer_evidence import mark_answer_recognition_stale
 
@@ -1976,7 +2071,7 @@ def _stale_answer_derivatives(db: Session, answer: StudentAnswer) -> None:
 def create_answer_region(
     answer_id: uuid.UUID, data: AnswerRegionInput, db: Db, actor: Actor
 ) -> dict[str, Any]:
-    _, answer = _locked_mutable_answer(db, actor.id, answer_id)
+    _, answer, _, _ = _locked_reviewable_answer(db, actor.id, answer_id)
     page = db.scalar(
         select(SubmissionPage).where(
             SubmissionPage.id == data.submission_page_id,
@@ -2011,7 +2106,7 @@ def create_answer_region(
 
 @router.delete("/student-answers/{answer_id}/regions/{region_id}", status_code=204)
 def delete_answer_region(answer_id: uuid.UUID, region_id: uuid.UUID, db: Db, actor: Actor) -> None:
-    _, answer = _locked_mutable_answer(db, actor.id, answer_id)
+    _, answer, _, _ = _locked_reviewable_answer(db, actor.id, answer_id)
     region = db.scalar(
         select(StudentAnswerRegion).where(
             StudentAnswerRegion.id == region_id,
@@ -2028,8 +2123,10 @@ def delete_answer_region(answer_id: uuid.UUID, region_id: uuid.UUID, db: Db, act
 
 @router.post("/student-answers/{answer_id}/grade")
 def grade_answer(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
-    submission, answer = _locked_mutable_answer(db, actor.id, answer_id)
-    assignment = owned_assignment(db, actor.id, submission.assignment_id)
+    submission, answer, _, _ = _locked_reviewable_answer(db, actor.id, answer_id)
+    assignment = db.get(Assignment, submission.assignment_id)
+    if assignment is None:
+        raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     question = db.get(Question, answer.question_id)
     rubric = db.scalar(
         select(QuestionRubric).where(
@@ -2041,20 +2138,23 @@ def grade_answer(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
         raise ApiProblem(409, "RUBRIC_INCOMPLETE", "题目或评分标准不完整")
     regions, recognition_evidence = _require_answer_evidence(db, answer)
     grading_config_version = get_settings().grading_config_version
-    grading_key = "grade:" + hashlib.sha256(
-        json.dumps(
-            {
-                "answer_id": str(answer.id),
-                "evidence_id": str(recognition_evidence.id),
-                "evidence_input_hash": recognition_evidence.input_hash,
-                "recognition_version": recognition_evidence.recognition_version,
-                "rubric_version_id": str(assignment.active_rubric_version_id),
-                "prompt_version": get_settings().grading_prompt_version,
-                "config_version": grading_config_version,
-            },
-            sort_keys=True,
-        ).encode()
-    ).hexdigest()
+    grading_key = (
+        "grade:"
+        + hashlib.sha256(
+            json.dumps(
+                {
+                    "answer_id": str(answer.id),
+                    "evidence_id": str(recognition_evidence.id),
+                    "evidence_input_hash": recognition_evidence.input_hash,
+                    "recognition_version": recognition_evidence.recognition_version,
+                    "rubric_version_id": str(assignment.active_rubric_version_id),
+                    "prompt_version": get_settings().grading_prompt_version,
+                    "config_version": grading_config_version,
+                },
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+    )
     previous_job = db.scalar(
         select(GradingJob).where(
             GradingJob.owner_id == actor.id,
@@ -2080,9 +2180,7 @@ def grade_answer(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
                     else None
                 ),
                 "requires_review": previous_result.requires_review,
-                "quality_flags": (
-                    [previous_job.error_code] if previous_job.error_code else []
-                ),
+                "quality_flags": ([previous_job.error_code] if previous_job.error_code else []),
                 "status": previous_result.status,
                 "reasoning_summary": previous_result.reasoning_summary,
                 "criterion_count": db.scalar(
@@ -2190,8 +2288,7 @@ def grade_answer(answer_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
                     "previous_suggestion": {
                         "score": str(suggestion.score),
                         "criterion_scores": {
-                            key: str(value)
-                            for key, value in suggestion.criterion_scores.items()
+                            key: str(value) for key, value in suggestion.criterion_scores.items()
                         },
                     },
                 },
@@ -2354,8 +2451,10 @@ def save_codex_suggestion(
 
 @router.put("/student-answers/{answer_id}/review")
 def review_answer(answer_id: uuid.UUID, data: ReviewInput, db: Db, actor: Actor) -> dict[str, Any]:
-    submission, answer = _locked_mutable_answer(db, actor.id, answer_id)
-    assignment = owned_assignment(db, actor.id, submission.assignment_id)
+    submission, answer, batch, _ = _locked_reviewable_answer(db, actor.id, answer_id)
+    assignment = db.get(Assignment, submission.assignment_id)
+    if assignment is None:
+        raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     question = db.get(Question, answer.question_id)
     result = db.scalar(
         select(GradingResult)
@@ -2432,7 +2531,20 @@ def review_answer(answer_id: uuid.UUID, data: ReviewInput, db: Db, actor: Actor)
         for item_id, awarded in data.criterion_scores.items():
             row = by_item[item_id]
             row.awarded_points, row.status = awarded, "teacher_confirmed"
-    review = db.scalar(select(TeacherReview).where(TeacherReview.student_answer_id == answer.id))
+    review = db.scalar(
+        select(TeacherReview)
+        .where(TeacherReview.student_answer_id == answer.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    collaboration_enabled = (
+        db.scalar(
+            select(GradingQuestionAssignment.id)
+            .where(GradingQuestionAssignment.grading_batch_id == batch.id)
+            .limit(1)
+        )
+        is not None
+    )
     if review is None:
         review = TeacherReview(
             student_answer_id=answer.id,
@@ -2440,10 +2552,21 @@ def review_answer(answer_id: uuid.UUID, data: ReviewInput, db: Db, actor: Actor)
             reviewer_id=actor.id,
             decision=data.decision,
             final_score=score,
+            review_version=1,
         )
         db.add(review)
         db.flush()
     else:
+        if collaboration_enabled and data.expected_review_version != review.review_version:
+            raise ApiProblem(
+                409,
+                "REVIEW_CONFLICT",
+                "该题已被其他教师更新，请刷新后重试",
+                {
+                    "current_review_version": review.review_version,
+                    "reviewer_id": str(review.reviewer_id),
+                },
+            )
         if review.final_score != score or review.final_feedback != data.final_feedback:
             db.add(
                 ScoreRevision(
@@ -2458,6 +2581,8 @@ def review_answer(answer_id: uuid.UUID, data: ReviewInput, db: Db, actor: Actor)
                 )
             )
         review.decision, review.final_score = data.decision, score
+        review.reviewer_id = actor.id
+        review.review_version += 1
     review.grading_result_id = (
         result.id
         if result
@@ -2480,12 +2605,36 @@ def review_answer(answer_id: uuid.UUID, data: ReviewInput, db: Db, actor: Actor)
             else "rejected"
         )
     answer.requires_review = data.decision == "needs_more_information"
-    audit(db, actor.id, "grading.review", "student_answer", answer.id, {"decision": data.decision})
-    db.commit()
+    audit(
+        db,
+        actor.id,
+        "grading.review",
+        "student_answer",
+        answer.id,
+        {
+            "decision": data.decision,
+            "final_score": str(score) if score is not None else None,
+            "review_version": review.review_version,
+            "grading_batch_id": str(batch.id),
+            "question_id": str(answer.question_id),
+        },
+    )
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        if collaboration_enabled:
+            raise ApiProblem(
+                409,
+                "REVIEW_CONFLICT",
+                "该题已被其他教师更新，请刷新后重试",
+            ) from exc
+        raise
     return {
         "id": str(review.id),
         "decision": review.decision,
         "final_score": str(review.final_score) if review.final_score is not None else None,
+        "review_version": review.review_version,
     }
 
 
@@ -2615,9 +2764,7 @@ def _snapshot_matches_confirm_plan(
             "feedback": review.final_feedback,
             "final_error_type": review.final_error_type,
             "final_feedback": review.final_feedback,
-            "knowledge_point_ids": sorted(
-                plan["knowledge_point_ids"].get(question.id, [])
-            ),
+            "knowledge_point_ids": sorted(plan["knowledge_point_ids"].get(question.id, [])),
             "grading_method": result.grading_method if result is not None else "manual",
         }
         try:
@@ -2700,8 +2847,7 @@ def _changed_questions_for_confirm_plan(plan: dict[str, Any]) -> list[dict[str, 
         answer_changed_after_snapshot = (
             previous is not None
             and answer.updated_at is not None
-            and answer.updated_at.replace(tzinfo=None)
-            > previous.generated_at.replace(tzinfo=None)
+            and answer.updated_at.replace(tzinfo=None) > previous.generated_at.replace(tzinfo=None)
         )
         review_changed_after_snapshot = (
             previous is not None
@@ -2773,25 +2919,19 @@ def _confirm_results_state(
     if previous is not None:
         previous_release, previous_notes = previous
         for item in db.scalars(
-            select(GradeReleaseItem).where(
-                GradeReleaseItem.grade_release_id == previous_release.id
-            )
+            select(GradeReleaseItem).where(GradeReleaseItem.grade_release_id == previous_release.id)
         ):
             snapshot = db.get(SubmissionScoreSnapshot, item.score_snapshot_id)
             if snapshot is not None:
                 reusable_snapshots[item.submission_id] = snapshot
     active_rubric_query = (
-        select(RubricVersion).where(
-            RubricVersion.id == assignment.active_rubric_version_id
-        )
+        select(RubricVersion).where(RubricVersion.id == assignment.active_rubric_version_id)
         if assignment.active_rubric_version_id
         else None
     )
     if active_rubric_query is not None and lock:
         active_rubric_query = active_rubric_query.with_for_update()
-    active_rubric = (
-        db.scalar(active_rubric_query) if active_rubric_query is not None else None
-    )
+    active_rubric = db.scalar(active_rubric_query) if active_rubric_query is not None else None
     blockers: list[dict[str, str]] = []
     plans: list[dict[str, Any]] = []
     state: dict[str, Any] = {
@@ -2800,9 +2940,7 @@ def _confirm_results_state(
         "paper_version_id": str(assignment.active_paper_version_id),
         "rubric_version_id": str(assignment.active_rubric_version_id),
         "rubric_status": str(active_rubric.status) if active_rubric else None,
-        "rubric_created_at": active_rubric.created_at.isoformat()
-        if active_rubric
-        else None,
+        "rubric_created_at": active_rubric.created_at.isoformat() if active_rubric else None,
         "previous_confirmation": {
             "grade_release_id": str(previous_release.id),
             "version": previous_release.version,
@@ -2886,8 +3024,7 @@ def _confirm_results_state(
             if lock:
                 knowledge_point_query = knowledge_point_query.with_for_update()
             knowledge_point_ids = [
-                str(item.knowledge_point_id)
-                for item in db.scalars(knowledge_point_query)
+                str(item.knowledge_point_id) for item in db.scalars(knowledge_point_query)
             ]
             plan["knowledge_point_ids"][question.id] = knowledge_point_ids
             question_rubric_query = select(QuestionRubric).where(
@@ -2916,15 +3053,11 @@ def _confirm_results_state(
                 "knowledge_point_ids": knowledge_point_ids,
                 "rubric": {
                     "id": str(question_rubric.id) if question_rubric else None,
-                    "standard_answer": question_rubric.standard_answer
-                    if question_rubric
-                    else None,
+                    "standard_answer": question_rubric.standard_answer if question_rubric else None,
                     "alternative_answers": question_rubric.alternative_answers
                     if question_rubric
                     else [],
-                    "scoring_notes": question_rubric.scoring_notes
-                    if question_rubric
-                    else None,
+                    "scoring_notes": question_rubric.scoring_notes if question_rubric else None,
                     "items": [
                         {
                             "id": str(item.id),
@@ -2966,9 +3099,7 @@ def _confirm_results_state(
                     }
                 )
                 continue
-            review_query = select(TeacherReview).where(
-                TeacherReview.student_answer_id == answer.id
-            )
+            review_query = select(TeacherReview).where(TeacherReview.student_answer_id == answer.id)
             if lock:
                 review_query = review_query.with_for_update()
             review = db.scalar(review_query)
@@ -3191,8 +3322,10 @@ def _confirm_results_state(
                 }
         else:
             plan["reuse_snapshot"] = None
-    if previous_release is not None and plans and all(
-        plan.get("reuse_snapshot") is not None for plan in plans
+    if (
+        previous_release is not None
+        and plans
+        and all(plan.get("reuse_snapshot") is not None for plan in plans)
     ):
         blockers.append(
             {
@@ -3270,9 +3403,7 @@ def _validated_confirm_results_release(
             .order_by(GradeReleaseItem.submission_id)
         )
     )
-    snapshots = [
-        db.get(SubmissionScoreSnapshot, item.score_snapshot_id) for item in items
-    ]
+    snapshots = [db.get(SubmissionScoreSnapshot, item.score_snapshot_id) for item in items]
     submissions = [db.get(Submission, item.submission_id) for item in items]
     snapshot_ids = [str(item.score_snapshot_id) for item in items]
     detail_rows = [
@@ -3322,20 +3453,16 @@ def _validated_confirm_results_release(
         )
         or sorted(snapshot_ids) != sorted(notes.get("snapshot_ids", []))
         or set(noted_new_snapshot_ids) & set(noted_reused_snapshot_ids)
-        or sorted([*noted_new_snapshot_ids, *noted_reused_snapshot_ids])
-        != sorted(snapshot_ids)
+        or sorted([*noted_new_snapshot_ids, *noted_reused_snapshot_ids]) != sorted(snapshot_ids)
         or len(noted_new_snapshot_ids)
         != notes.get("new_snapshot_count", notes.get("submission_count"))
         or len(noted_reused_snapshot_ids) != notes.get("reused_snapshot_count", 0)
         or teacher_review_ids != sorted(notes.get("teacher_review_ids", []))
         or any(
-            reviews.get(str(detail.get("teacher_review_id"))) is None
-            or str(
-                reviews[str(detail["teacher_review_id"])].student_answer_id
-            )
-            != str(detail.get("student_answer_id"))
+            review is None or str(review.student_answer_id) != str(detail.get("student_answer_id"))
             for detail in detail_rows
             if detail.get("teacher_review_id")
+            for review in [reviews.get(str(detail.get("teacher_review_id")))]
         )
     ):
         raise ApiProblem(409, "CONFIRM_RESULTS_REPLAY_INVALID", "确认结果记录不完整")
@@ -3384,9 +3511,7 @@ def _confirm_results_replay(
     data: ConfirmResultsInput,
 ) -> dict[str, Any] | None:
     storage_key = _confirm_results_storage_key(actor_id, data.idempotency_key)
-    release = db.scalar(
-        select(GradeRelease).where(GradeRelease.idempotency_key == storage_key)
-    )
+    release = db.scalar(select(GradeRelease).where(GradeRelease.idempotency_key == storage_key))
     if release is None:
         return None
     notes = _confirm_results_notes(release)
@@ -3403,9 +3528,7 @@ def _confirm_results_replay(
         or notes.get("request_hash") != request_hash
     ):
         raise ApiProblem(409, "IDEMPOTENCY_KEY_CONFLICT", "幂等键已用于不同的确认结果请求")
-    return _validated_confirm_results_release(
-        db, actor_id, batch_id, release, notes
-    )
+    return _validated_confirm_results_release(db, actor_id, batch_id, release, notes)
 
 
 @router.get("/grading-batches/{batch_id}/confirm-results/readiness")
@@ -3413,9 +3536,7 @@ def confirm_results_readiness(batch_id: uuid.UUID, db: Db, actor: Actor) -> dict
     batch = owned_batch(db, actor.id, batch_id)
     assignment = owned_assignment(db, actor.id, batch.assignment_id)
     review_hash, blockers, plans = _confirm_results_state(db, batch, assignment)
-    reused_snapshot_count = sum(
-        plan.get("reuse_snapshot") is not None for plan in plans
-    )
+    reused_snapshot_count = sum(plan.get("reuse_snapshot") is not None for plan in plans)
     previous = _existing_confirm_results_release(db, actor.id, batch)
     previous_grade_release_id = str(previous[0].id) if previous is not None else None
     already_current = any(
@@ -3460,9 +3581,7 @@ def confirm_results(
     )
     if assignment is None:
         raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
-    review_hash, blockers, plans = _confirm_results_state(
-        db, batch, assignment, lock=True
-    )
+    review_hash, blockers, plans = _confirm_results_state(db, batch, assignment, lock=True)
     if review_hash != data.expected_review_hash:
         raise ApiProblem(
             409,
@@ -3693,6 +3812,240 @@ def bulk_accept_eligibility(batch_id: uuid.UUID, db: Db, actor: Actor) -> dict[s
     }
 
 
+def _collaboration_json(db: Session, batch: GradingBatch, actor_id: uuid.UUID) -> dict[str, Any]:
+    assignment = db.get(Assignment, batch.assignment_id)
+    owner = db.get(User, batch.owner_id)
+    collaborators = db.execute(
+        select(GradingCollaborator, User)
+        .join(User, User.id == GradingCollaborator.user_id)
+        .where(
+            GradingCollaborator.assignment_id == batch.assignment_id,
+            GradingCollaborator.status == "active",
+        )
+        .order_by(User.display_name, User.email)
+    ).all()
+    assignments = {
+        row.question_id: row
+        for row in db.scalars(
+            select(GradingQuestionAssignment).where(
+                GradingQuestionAssignment.grading_batch_id == batch.id
+            )
+        ).all()
+    }
+    question_rows = (
+        db.scalars(
+            select(Question)
+            .where(
+                Question.paper_version_id == assignment.active_paper_version_id,
+                Question.status == QuestionStatus.active,
+            )
+            .order_by(Question.question_number, Question.id)
+        ).all()
+        if assignment is not None and assignment.active_paper_version_id is not None
+        else []
+    )
+    questions: list[dict[str, Any]] = []
+    for question in question_rows:
+        assigned = assignments.get(question.id)
+        total = (
+            db.scalar(
+                select(func.count())
+                .select_from(StudentAnswer)
+                .join(Submission, Submission.id == StudentAnswer.submission_id)
+                .where(
+                    Submission.grading_batch_id == batch.id,
+                    Submission.status != "voided",
+                    StudentAnswer.question_id == question.id,
+                )
+            )
+            or 0
+        )
+        reviewed = (
+            db.scalar(
+                select(func.count())
+                .select_from(TeacherReview)
+                .join(StudentAnswer, StudentAnswer.id == TeacherReview.student_answer_id)
+                .join(Submission, Submission.id == StudentAnswer.submission_id)
+                .where(
+                    Submission.grading_batch_id == batch.id,
+                    StudentAnswer.question_id == question.id,
+                    TeacherReview.final_score.is_not(None),
+                    StudentAnswer.requires_review.is_(False),
+                )
+            )
+            or 0
+        )
+        questions.append(
+            {
+                "id": str(question.id),
+                "number": question.question_number,
+                "assignee_id": str(assigned.assignee_id) if assigned else None,
+                "total": total,
+                "reviewed": reviewed,
+            }
+        )
+    return {
+        "is_owner": batch.owner_id == actor_id,
+        "can_confirm_results": batch.owner_id == actor_id,
+        "owner": {
+            "id": str(batch.owner_id),
+            "display_name": owner.display_name if owner else "主责老师",
+            "email": owner.email if owner else None,
+        },
+        "collaborators": [
+            {
+                "id": str(row.user_id),
+                "display_name": user.display_name,
+                "email": user.email,
+                "role": row.role,
+            }
+            for row, user in collaborators
+        ],
+        "questions": questions,
+    }
+
+
+@router.get("/grading-batches/{batch_id}/collaboration")
+def get_grading_collaboration(batch_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
+    batch, _, _ = _reviewable_batch(db, actor.id, batch_id)
+    return _collaboration_json(db, batch, actor.id)
+
+
+@router.post("/grading-batches/{batch_id}/collaborators", status_code=201)
+def add_grading_collaborator(
+    batch_id: uuid.UUID, data: CollaboratorInput, db: Db, actor: Actor
+) -> dict[str, Any]:
+    batch = owned_batch(db, actor.id, batch_id)
+    user = db.scalar(select(User).where(func.lower(User.email) == data.email.lower()))
+    if user is None or user.status != "active":
+        raise ApiProblem(404, "COLLABORATOR_NOT_FOUND", "未找到可用的教师账号")
+    role_names = {role.name for role in user.roles}
+    if "student" in role_names and "teacher" not in role_names:
+        raise ApiProblem(422, "COLLABORATOR_TEACHER_REQUIRED", "学生账号不能参与批改")
+    if user.id == actor.id:
+        raise ApiProblem(422, "OWNER_ALREADY_LEADS", "主责老师无需添加为协作者")
+    row = db.scalar(
+        select(GradingCollaborator).where(
+            GradingCollaborator.assignment_id == batch.assignment_id,
+            GradingCollaborator.user_id == user.id,
+        )
+    )
+    if row is None:
+        row = GradingCollaborator(
+            assignment_id=batch.assignment_id,
+            user_id=user.id,
+            added_by=actor.id,
+            role="grader",
+            status="active",
+        )
+        db.add(row)
+    else:
+        row.status, row.added_by = "active", actor.id
+    audit(
+        db,
+        actor.id,
+        "grading.collaborator.add",
+        "grading_batch",
+        batch.id,
+        {"collaborator_id": str(user.id)},
+    )
+    db.commit()
+    return _collaboration_json(db, batch, actor.id)
+
+
+@router.delete("/grading-batches/{batch_id}/collaborators/{user_id}", status_code=204)
+def remove_grading_collaborator(
+    batch_id: uuid.UUID, user_id: uuid.UUID, db: Db, actor: Actor
+) -> None:
+    batch = owned_batch(db, actor.id, batch_id)
+    row = db.scalar(
+        select(GradingCollaborator).where(
+            GradingCollaborator.assignment_id == batch.assignment_id,
+            GradingCollaborator.user_id == user_id,
+            GradingCollaborator.status == "active",
+        )
+    )
+    if row is None:
+        raise ApiProblem(404, "COLLABORATOR_NOT_FOUND", "协作老师不存在")
+    batch_ids = select(GradingBatch.id).where(GradingBatch.assignment_id == batch.assignment_id)
+    db.execute(
+        delete(GradingQuestionAssignment).where(
+            GradingQuestionAssignment.grading_batch_id.in_(batch_ids),
+            GradingQuestionAssignment.assignee_id == user_id,
+        )
+    )
+    row.status = "inactive"
+    audit(
+        db,
+        actor.id,
+        "grading.collaborator.remove",
+        "grading_batch",
+        batch.id,
+        {"collaborator_id": str(user_id)},
+    )
+    db.commit()
+
+
+@router.put("/grading-batches/{batch_id}/question-assignments/{question_id}")
+def assign_grading_question(
+    batch_id: uuid.UUID,
+    question_id: uuid.UUID,
+    data: QuestionAssignmentInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    batch = owned_batch(db, actor.id, batch_id)
+    assignment = owned_assignment(db, actor.id, batch.assignment_id)
+    question = db.scalar(
+        select(Question).where(
+            Question.id == question_id,
+            Question.paper_version_id == assignment.active_paper_version_id,
+            Question.status == QuestionStatus.active,
+        )
+    )
+    if question is None:
+        raise ApiProblem(404, "QUESTION_NOT_FOUND", "题目不存在")
+    row = db.scalar(
+        select(GradingQuestionAssignment).where(
+            GradingQuestionAssignment.grading_batch_id == batch.id,
+            GradingQuestionAssignment.question_id == question.id,
+        )
+    )
+    previous_assignee = row.assignee_id if row else None
+    if data.assignee_id is None:
+        if row is not None:
+            db.delete(row)
+    else:
+        collaborator = _active_collaborator(db, batch.assignment_id, data.assignee_id)
+        if collaborator is None:
+            raise ApiProblem(422, "COLLABORATOR_REQUIRED", "请先添加该教师为协作者")
+        if row is None:
+            db.add(
+                GradingQuestionAssignment(
+                    grading_batch_id=batch.id,
+                    question_id=question.id,
+                    assignee_id=data.assignee_id,
+                    assigned_by=actor.id,
+                )
+            )
+        else:
+            row.assignee_id, row.assigned_by = data.assignee_id, actor.id
+    audit(
+        db,
+        actor.id,
+        "grading.question.assign",
+        "question",
+        question.id,
+        {
+            "grading_batch_id": str(batch.id),
+            "previous_assignee_id": str(previous_assignee) if previous_assignee else None,
+            "assignee_id": str(data.assignee_id) if data.assignee_id else None,
+        },
+    )
+    db.commit()
+    return _collaboration_json(db, batch, actor.id)
+
+
 @router.get("/grading-batches/{batch_id}/review-workspace")
 def review_workspace(
     batch_id: uuid.UUID,
@@ -3702,10 +4055,10 @@ def review_workspace(
     question_id: uuid.UUID | None = None,
     submission_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
-    batch = owned_batch(db, actor.id, batch_id)
+    batch, is_owner, assigned_question_ids = _reviewable_batch(db, actor.id, batch_id)
     submission_filters: list[Any] = [
         Submission.grading_batch_id == batch.id,
-        Submission.owner_id == actor.id,
+        Submission.owner_id == batch.owner_id,
     ]
     if submission_id:
         submission_filters.append(Submission.id == submission_id)
@@ -3718,6 +4071,8 @@ def review_workspace(
             .order_by(SubmissionPage.page_number)
         ).all()
         answer_filters: list[Any] = [StudentAnswer.submission_id == submission.id]
+        if not is_owner:
+            answer_filters.append(StudentAnswer.question_id.in_(assigned_question_ids))
         if question_id:
             answer_filters.append(StudentAnswer.question_id == question_id)
         answers = db.scalars(select(StudentAnswer).where(*answer_filters)).all()
@@ -3753,8 +4108,7 @@ def review_workspace(
             )
             grading_job = db.get(GradingJob, result.grading_job_id) if result else None
             criterion_rubric_items = {
-                item.rubric_item_id: db.get(RubricItem, item.rubric_item_id)
-                for item in criteria
+                item.rubric_item_id: db.get(RubricItem, item.rubric_item_id) for item in criteria
             }
             regions = db.scalars(
                 select(StudentAnswerRegion).where(
@@ -3800,6 +4154,8 @@ def review_workspace(
                         else None,
                         "feedback": review.final_feedback,
                         "error_type": review.final_error_type,
+                        "reviewer_id": str(review.reviewer_id),
+                        "review_version": review.review_version,
                     }
                     if review
                     else None,
@@ -3807,13 +4163,19 @@ def review_workspace(
                         {
                             "rubric_item_id": str(item.rubric_item_id),
                             "title": (
-                                criterion_rubric_items[item.rubric_item_id].title
-                                if criterion_rubric_items[item.rubric_item_id]
+                                rubric_item.title
+                                if (rubric_item := criterion_rubric_items.get(item.rubric_item_id))
+                                is not None
                                 else None
                             ),
                             "description": (
-                                criterion_rubric_items[item.rubric_item_id].description
-                                if criterion_rubric_items[item.rubric_item_id]
+                                rubric_item_for_description.description
+                                if (
+                                    rubric_item_for_description := criterion_rubric_items.get(
+                                        item.rubric_item_id
+                                    )
+                                )
+                                is not None
                                 else None
                             ),
                             "status": item.status,
@@ -3832,9 +4194,9 @@ def review_workspace(
                                             "rubric_items:"
                                         )
                                         or str(item.rubric_item_id)
-                                        in (evidence_item.description or "").removeprefix(
-                                            "rubric_items:"
-                                        ).split(",")
+                                        in (evidence_item.description or "")
+                                        .removeprefix("rubric_items:")
+                                        .split(",")
                                     )
                                 )
                             ),
@@ -3910,13 +4272,26 @@ def review_workspace(
         )
         for item in items
     )
+    batch_payload = batch_json(db, batch)
+    if not is_owner:
+        matching = batch_payload["matching"]
+        batch_payload["matching"] = {
+            "total": matching["total"],
+            "confirmed": matching["confirmed"],
+            "ambiguous": matching["ambiguous"],
+            "unmatched": matching["unmatched"],
+            "items": [],
+            "student_options": [],
+        }
+        batch_payload["actions"] = ["grade"]
     return {
-        "batch": batch_json(db, batch),
+        "batch": batch_payload,
         "items": items,
         "progress": {"total": total_answers, "reviewed": reviewed_answers},
         "provider_notice": (
             "主观题由 Codex 根据已确认的答题内容、参考答案和评分标准生成建议；教师负责复核与定稿"
         ),
+        "collaboration": _collaboration_json(db, batch, actor.id),
     }
 
 
@@ -4021,11 +4396,7 @@ def question_consistency(
                 "error_type_difference": len(errors) > 1 and len(rubric_versions) == 1,
                 "criterion_difference": len(criterion_signatures) > 1 and len(rubric_versions) == 1,
                 "requires_review": len(rubric_versions) == 1
-                and (
-                    len(scores) > 1
-                    or len(errors) > 1
-                    or len(criterion_signatures) > 1
-                ),
+                and (len(scores) > 1 or len(errors) > 1 or len(criterion_signatures) > 1),
             }
         )
     start = (page - 1) * page_size

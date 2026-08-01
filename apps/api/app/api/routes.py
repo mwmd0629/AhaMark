@@ -19,6 +19,7 @@ from app.api.processing import router as processing_router
 from app.api.recognition import router as recognition_router
 from app.api.results import router as results_router
 from app.api.structured_rubrics import router as structured_rubrics_router
+from app.api.student_portal import router as student_portal_router
 from app.api.submission_processing import router as submission_processing_router
 from app.core.config import get_settings
 from app.core.readiness import dependency_readiness
@@ -50,6 +51,7 @@ router.include_router(processing_router)
 router.include_router(submission_processing_router)
 router.include_router(structured_rubrics_router)
 router.include_router(results_router)
+router.include_router(student_portal_router)
 
 
 @router.get("/health")

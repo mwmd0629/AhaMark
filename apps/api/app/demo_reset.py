@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import Table, delete, func, select, tuple_
 from sqlalchemy.orm import Session
@@ -149,11 +149,7 @@ def _pending_cleanup_audits(db: Session) -> list[AuditLog]:
             .order_by(AuditLog.created_at, AuditLog.id)
         )
     )
-    return [
-        audit
-        for audit in audits
-        if audit.metadata_.get("status") in {"pending", "failed"}
-    ]
+    return [audit for audit in audits if audit.metadata_.get("status") in {"pending", "failed"}]
 
 
 def reset_synthetic_demo(
@@ -184,7 +180,7 @@ def reset_synthetic_demo(
             raise DemoResetRefused("DEMO_RESET_CLEANUP_AUDIT_INVALID")
         object_keys.update(keys)
     _validate_object_keys(object_keys)
-    selected.pop(User.__table__, None)
+    selected.pop(cast(Table, User.__table__), None)
 
     if not any(selected.values()) and not object_keys:
         return DemoResetResult({}, ())
@@ -211,7 +207,7 @@ def reset_synthetic_demo(
             if not keys:
                 continue
             result = db.execute(delete(table).where(_where_pk(table, keys)))
-            deleted_rows[table.name] = int(result.rowcount or 0)
+            deleted_rows[table.name] = int(getattr(result, "rowcount", 0) or 0)
         for table in User.metadata.tables.values():
             if "owner_id" not in table.c:
                 continue

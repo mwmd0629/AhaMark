@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   listStudents: vi.fn(),
   addStudent: vi.fn(),
   removeStudent: vi.fn(),
+  linkAccount: vi.fn(),
   listGroups: vi.fn(),
   createGroup: vi.fn(),
   removeGroup: vi.fn(),
@@ -30,6 +31,8 @@ vi.mock("@/lib/api", () => ({
     list: mocks.listStudents,
     add: mocks.addStudent,
     remove: mocks.removeStudent,
+    linkAccount: mocks.linkAccount,
+    unlinkAccount: vi.fn(),
   },
   groupsApi: {
     list: mocks.listGroups,

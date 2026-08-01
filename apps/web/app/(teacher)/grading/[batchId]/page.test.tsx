@@ -31,6 +31,7 @@ const mocks = vi.hoisted(() => ({
   continueProcessing: vi.fn(),
   retryProcessing: vi.fn(),
   reconcileProcessing: vi.fn(),
+  publishToStudents: vi.fn(),
 }));
 
 vi.mock("next/link", () => ({
@@ -95,6 +96,7 @@ vi.mock("@/lib/api", () => ({
     report: vi.fn(),
     reportDownload: vi.fn(),
     retryReport: mocks.retryReport,
+    publishToStudents: mocks.publishToStudents,
   },
 }));
 

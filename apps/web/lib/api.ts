@@ -382,7 +382,12 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
-export type AuthUser = { id: string; email: string; display_name: string };
+export type AuthUser = {
+  id: string;
+  email: string;
+  display_name: string;
+  roles: string[];
+};
 export const authApi = {
   login: (email: string, password: string) =>
     request<AuthUser>("/auth/login", {
@@ -458,6 +463,7 @@ export type Student = {
   email?: string;
   phone?: string;
   status: "active" | "archived";
+  account_linked: boolean;
   membership_status: "active" | "removed";
   joined_at: string;
   groups: Group[];
@@ -480,6 +486,14 @@ export const studentsApi = {
     request<Student>(`/api/students/${studentId}`, {
       method: "PATCH",
       body: JSON.stringify(data),
+    }),
+  linkAccount: (studentId: string) =>
+    request<Student>(`/api/students/${studentId}/account-link`, {
+      method: "POST",
+    }),
+  unlinkAccount: (studentId: string) =>
+    request<void>(`/api/students/${studentId}/account-link`, {
+      method: "DELETE",
     }),
   remove: (classId: string, studentId: string) =>
     request<{ status: string }>(
@@ -1084,6 +1098,27 @@ export const gradingApi = {
       method: "PUT",
       body: JSON.stringify(data),
     }),
+  collaboration: (batchId: string) =>
+    request<GradingCollaboration>(
+      `/api/grading-batches/${batchId}/collaboration`,
+    ),
+  addCollaborator: (batchId: string, email: string) =>
+    request<GradingCollaboration>(
+      `/api/grading-batches/${batchId}/collaborators`,
+      { method: "POST", body: JSON.stringify({ email }) },
+    ),
+  removeCollaborator: (batchId: string, userId: string) =>
+    request<void>(`/api/grading-batches/${batchId}/collaborators/${userId}`, {
+      method: "DELETE",
+    }),
+  assignQuestion: (batchId: string, questionId: string, assigneeId?: string) =>
+    request<GradingCollaboration>(
+      `/api/grading-batches/${batchId}/question-assignments/${questionId}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ assignee_id: assigneeId ?? null }),
+      },
+    ),
   continueProcessing: (batchId: string, idempotencyKey: string) =>
     request<ProcessingRun>(`/api/grading-batches/${batchId}/processing-runs`, {
       method: "POST",
@@ -1207,6 +1242,7 @@ export type ReviewWorkspace = {
   batch: GradingBatch;
   progress: { total: number; reviewed: number };
   provider_notice: string;
+  collaboration: GradingCollaboration;
   items: Array<{
     submission_id: string;
     student_id?: string;
@@ -1251,6 +1287,8 @@ export type ReviewWorkspace = {
         final_score?: string;
         feedback?: string;
         error_type?: string;
+        reviewer_id: string;
+        review_version: number;
       };
       criteria: Array<{
         rubric_item_id: string;
@@ -1286,6 +1324,25 @@ export type ReviewWorkspace = {
   }>;
 };
 
+export type GradingCollaboration = {
+  is_owner: boolean;
+  can_confirm_results: boolean;
+  owner: { id: string; display_name: string; email?: string };
+  collaborators: Array<{
+    id: string;
+    display_name: string;
+    email: string;
+    role: "grader";
+  }>;
+  questions: Array<{
+    id: string;
+    number: string;
+    assignee_id?: string;
+    total: number;
+    reviewed: number;
+  }>;
+};
+
 export type GradeRelease = {
   id: string;
   assignment_id: string;
@@ -1293,6 +1350,8 @@ export type GradeRelease = {
   version: number;
   status: "draft" | "scheduled" | "released" | "cancelled" | "superseded";
   release_mode: string;
+  student_visible: boolean;
+  student_visible_at?: string | null;
   meaning: string;
   items: Array<{
     student_id: string;
@@ -1327,6 +1386,11 @@ export const analyticsApi = {
   releases: (assignmentId: string) =>
     request<GradeRelease[]>(
       `/api/grade-releases?assignment_id=${assignmentId}`,
+    ),
+  publishToStudents: (releaseId: string) =>
+    request<GradeRelease>(
+      `/api/grade-releases/${releaseId}/publish-to-students`,
+      { method: "POST" },
     ),
   readiness: (assignmentId: string, classId: string) =>
     request<GradeReadiness>(
@@ -1416,6 +1480,64 @@ export const analyticsApi = {
     }),
   reportDownload: (jobId: string) =>
     request<{ url: string }>(`/api/report-jobs/${jobId}/download`),
+};
+
+export type StudentPortalAssignment = {
+  release_id: string;
+  release_version: number;
+  student_visible_at: string;
+  assignment_id: string;
+  assignment_title: string;
+  class_id: string;
+  class_name: string;
+  subject?: string | null;
+  student_id: string;
+  student_name: string;
+  student_number: string;
+  score_snapshot_id: string;
+};
+
+export type StudentPortalAssignmentDetail = StudentPortalAssignment & {
+  total_score: number;
+  max_score: number;
+  score_rate: number;
+  questions: Array<{
+    question_id: string;
+    question_number: string;
+    question_type: string;
+    score: number;
+    max_score: number;
+    feedback?: string | null;
+    error_type?: string | null;
+    knowledge_points: Array<{ id: string; name: string }>;
+  }>;
+  versions: Array<{
+    release_id: string;
+    version: number;
+    student_visible_at: string;
+    current: boolean;
+  }>;
+};
+
+export const studentPortalApi = {
+  me: () =>
+    request<{
+      account_id: string;
+      email: string;
+      profiles: Array<{
+        student_id: string;
+        name: string;
+        student_number: string;
+      }>;
+    }>("/api/student/me"),
+  assignments: () =>
+    request<StudentPortalAssignment[]>("/api/student/assignments"),
+  assignment: (releaseId: string) =>
+    request<StudentPortalAssignmentDetail>(
+      `/api/student/assignments/${releaseId}`,
+    ),
+  reportUrl: (releaseId: string) =>
+    `${API_URL}/api/student/assignments/${releaseId}/report.pdf`,
 };
 
 export type SubmissionProcessingJob = {

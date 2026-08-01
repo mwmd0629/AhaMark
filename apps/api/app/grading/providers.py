@@ -278,14 +278,14 @@ def objective_answers_match(answer: str, expected: str, question_type: str | Non
         right = _choice_value(expected, multiple=multiple)
         return left is not None and right is not None and left == right
     if question_type == "true_false":
-        left = _truth_value(answer)
-        right = _truth_value(expected)
-        return left is not None and right is not None and left == right
+        left_truth = _truth_value(answer)
+        right_truth = _truth_value(expected)
+        return left_truth is not None and right_truth is not None and left_truth == right_truth
     if question_type == "fill_blank":
-        left = _numeric_value(answer)
-        right = _numeric_value(expected)
-        if left is not None and right is not None:
-            return left == right
+        left_number = _numeric_value(answer)
+        right_number = _numeric_value(expected)
+        if left_number is not None and right_number is not None:
+            return left_number == right_number
     return False
 
 

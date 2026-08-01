@@ -261,6 +261,8 @@ def release_view(db: Session, release: GradeRelease) -> dict[str, Any]:
         "status": release.status,
         "release_mode": release.release_mode,
         "released_at": release.released_at,
+        "student_visible_at": release.student_visible_at,
+        "student_visible": release.student_visible_at is not None,
         "scheduled_at": release.scheduled_at,
         "meaning": "已确认发布数据，尚未发送到学生端。",
         "items": [
@@ -288,6 +290,25 @@ def list_releases(
 @router.get("/grade-releases/{release_id}")
 def get_release(release_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
     return release_view(db, owned_release(db, actor.id, release_id))
+
+
+@router.post("/grade-releases/{release_id}/publish-to-students")
+def publish_release_to_students(release_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
+    release = released_release(db, actor.id, release_id)
+    if release.student_visible_at is None:
+        release.student_visible_at = now_utc()
+        release.student_visible_by = actor.id
+        audit(
+            db,
+            actor.id,
+            "grade_release.publish_to_students",
+            "grade_release",
+            release.id,
+            {"version": release.version, "student_count": len(release_view(db, release)["items"])},
+        )
+        db.commit()
+        db.refresh(release)
+    return release_view(db, release)
 
 
 @router.post("/grade-releases/{release_id}/cancel")
@@ -494,7 +515,7 @@ def generate_analytics(release_id: uuid.UUID, db: Db, actor: Actor) -> dict[str,
         .where(
             AnalyticsSnapshot.owner_id == actor.id,
             AnalyticsSnapshot.grade_release_id == release.id,
-            AnalyticsSnapshot.schema_version == "1.0",
+            AnalyticsSnapshot.schema_version == "1.1",
             AnalyticsSnapshot.status == "complete",
         )
         .order_by(AnalyticsSnapshot.created_at.asc(), AnalyticsSnapshot.id.asc())
@@ -536,27 +557,56 @@ def generate_insight(analytics_id: uuid.UUID, db: Db, actor: Actor) -> dict[str,
         snapshot.metrics.get("questions", []),
         key=lambda x: x.get("score_rate") if x.get("score_rate") is not None else 2,
     )[:3]
-    evidence = [
-        {
-            "metric": "question_score_rate",
-            "question_id": x["question_id"],
-            "value": x["score_rate"],
-            "participants": x["participants"],
-        }
+    knowledge_points = sorted(
+        snapshot.metrics.get("knowledge_points", []),
+        key=lambda x: x.get("mastery_rate") if x.get("mastery_rate") is not None else 2,
+    )[:2]
+    errors = snapshot.metrics.get("error_types", [])[:2]
+    evidence = (
+        [
+            {
+                "metric": "question_score_rate",
+                "question_id": x["question_id"],
+                "value": x["score_rate"],
+                "participants": x["participants"],
+            }
+            for x in questions
+        ]
+        + [
+            {
+                "metric": "knowledge_point_mastery_rate",
+                "knowledge_point_id": x["knowledge_point_id"],
+                "value": x["mastery_rate"],
+                "participants": x["sample_count"],
+            }
+            for x in knowledge_points
+        ]
+        + [
+            {"metric": "confirmed_error_type_count", "error_type": x["code"], "value": x["count"]}
+            for x in errors
+        ]
+    )
+    recommendations = [
+        "优先讲评第"
+        f"{x['question_number']}题（平均得分率 {x['score_rate']:.1%}，"
+        f"样本 {x['participants']} 人）"
         for x in questions
     ]
+    recommendations.extend(
+        f"复习知识点“{x.get('knowledge_point_name') or x['knowledge_point_id']}”"
+        f"（掌握率 {x['mastery_rate']:.1%}，样本 {x['sample_count']} 人）"
+        for x in knowledge_points
+    )
+    recommendations.extend(
+        f"讲评时针对教师确认的“{x['code']}”错误补充示例（{x['count']} 次）" for x in errors
+    )
     content = {
         "title": "课堂讲评建议",
         "generation_method": "rule_based",
         "disclaimer": "这是基于固定 AnalyticsSnapshot 的规则型教学建议，不是 AI 自动评分或诊断。",
         "rules_version": "rules-v1",
         "sample_warning": snapshot.source_snapshot_count < 5,
-        "recommendations": [
-            "优先讲评第"
-            f"{x['question_number']}题（平均得分率 {x['score_rate']:.1%}，"
-            f"样本 {x['participants']} 人）"
-            for x in questions
-        ],
+        "recommendations": recommendations,
     }
     insight = TeachingInsight(
         owner_id=actor.id, analytics_snapshot_id=snapshot.id, content=content, evidence=evidence

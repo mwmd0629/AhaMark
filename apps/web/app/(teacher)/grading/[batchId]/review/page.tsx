@@ -175,30 +175,33 @@ export default function ReviewPage() {
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all");
 
   const load = async () => {
-    const [next, nextReadiness] = await Promise.all([
-      gradingApi.reviewWorkspace(batchId),
-      gradingApi.confirmResultsReadiness(batchId),
-    ]);
+    const next = await gradingApi.reviewWorkspace(batchId);
+    const nextReadiness =
+      next.collaboration?.can_confirm_results === false
+        ? undefined
+        : await gradingApi.confirmResultsReadiness(batchId);
     setData(next);
     setReadiness(nextReadiness);
-    setConfirmedResult((current) => nextReadiness.confirmed_result ?? current);
+    setConfirmedResult((current) => nextReadiness?.confirmed_result ?? current);
     return next;
   };
   useEffect(() => {
     setConfirmedResult(undefined);
     confirmCommand.current = undefined;
-    Promise.all([
-      gradingApi.reviewWorkspace(batchId),
-      gradingApi.confirmResultsReadiness(batchId),
-    ])
-      .then(([workspace, nextReadiness]) => {
+    gradingApi
+      .reviewWorkspace(batchId)
+      .then(async (workspace) => {
+        const nextReadiness =
+          workspace.collaboration?.can_confirm_results === false
+            ? undefined
+            : await gradingApi.confirmResultsReadiness(batchId);
         const preferredFilter = reviewTargets(workspace, "needs_review").length
           ? "needs_review"
           : "all";
         const firstTarget = reviewTargets(workspace, preferredFilter)[0];
         setData(workspace);
         setReadiness(nextReadiness);
-        setConfirmedResult(nextReadiness.confirmed_result ?? undefined);
+        setConfirmedResult(nextReadiness?.confirmed_result ?? undefined);
         setReviewFilter(preferredFilter);
         if (firstTarget) {
           setSubmissionIndex(firstTarget.submissionIndex);
@@ -294,6 +297,9 @@ export default function ReviewPage() {
   async function submitReview(decision: Decision) {
     if (!answer || saving) return;
     const payload: Record<string, unknown> = { decision };
+    if (answer.review) {
+      payload.expected_review_version = answer.review.review_version;
+    }
     if (decision === "modified" || decision === "manual_scored") {
       const score = Number(scoreDraft);
       if (
@@ -351,11 +357,76 @@ export default function ReviewPage() {
             : "复核结果已保存",
       );
     } catch (reason) {
+      const body =
+        typeof reason === "object" && reason !== null && "body" in reason
+          ? (reason.body as { code?: string })
+          : undefined;
+      if (body?.code === "REVIEW_CONFLICT") {
+        try {
+          await load();
+        } catch {
+          // Keep the conflict message visible if refreshing also fails.
+        }
+        setMessage("这道题已由其他老师更新，已刷新为最新结果，请重新检查");
+        return;
+      }
       setMessage(
         reason instanceof Error && reason.message.trim()
           ? `保存失败：${reason.message}`
           : "保存失败，请检查分数范围后重试",
       );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function addCollaborator() {
+    if (!data?.collaboration?.is_owner || saving) return;
+    const email = window.prompt("输入协作老师的登录邮箱");
+    if (!email?.trim()) return;
+    setSaving(true);
+    setMessage("");
+    try {
+      await gradingApi.addCollaborator(batchId, email.trim());
+      await load();
+      setMessage("协作老师已添加");
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : "添加协作老师失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeCollaborator(userId: string) {
+    if (!data?.collaboration?.is_owner || saving) return;
+    if (
+      !window.confirm(
+        "移除这位协作老师并清除其题目分配？已保存的批改记录会保留。",
+      )
+    ) {
+      return;
+    }
+    setSaving(true);
+    try {
+      await gradingApi.removeCollaborator(batchId, userId);
+      await load();
+      setMessage("协作老师已移除");
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : "移除协作老师失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function assignQuestion(questionId: string, assigneeId?: string) {
+    if (!data?.collaboration?.is_owner || saving) return;
+    setSaving(true);
+    try {
+      await gradingApi.assignQuestion(batchId, questionId, assigneeId);
+      await load();
+      setMessage(assigneeId ? "题目已分配" : "题目已收回");
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : "题目分配失败");
     } finally {
       setSaving(false);
     }
@@ -519,13 +590,15 @@ export default function ReviewPage() {
           <span>
             已检查 {data.progress.reviewed}/{data.progress.total}
           </span>
-          <button
-            className="rounded bg-indigo-700 px-3 py-2 text-white disabled:opacity-50"
-            disabled={saving || !readiness?.ready || Boolean(confirmedResult)}
-            onClick={() => void confirmResults()}
-          >
-            {confirmedResult ? "结果已确认" : "确认结果"}
-          </button>
+          {data.collaboration?.can_confirm_results !== false && (
+            <button
+              className="rounded bg-indigo-700 px-3 py-2 text-white disabled:opacity-50"
+              disabled={saving || !readiness?.ready || Boolean(confirmedResult)}
+              onClick={() => void confirmResults()}
+            >
+              {confirmedResult ? "结果已确认" : "确认结果"}
+            </button>
+          )}
           <Link
             className="rounded border px-3 py-2"
             href={`/grading/${batchId}`}
@@ -534,6 +607,87 @@ export default function ReviewPage() {
           </Link>
         </div>
       </header>
+      {data.collaboration && (
+        <section
+          className="rounded-xl border bg-white p-4"
+          aria-label="协作批改"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="font-semibold">协作批改</h2>
+              <p className="text-sm text-slate-600">
+                {data.collaboration.is_owner
+                  ? "按题分配给协作老师，最终结果仍由你统一确认。"
+                  : `主责老师：${data.collaboration.owner.display_name}。这里只显示分配给你的题目。`}
+              </p>
+            </div>
+            {data.collaboration.is_owner && (
+              <button
+                className="rounded border px-3 py-2 text-sm"
+                disabled={saving}
+                onClick={() => void addCollaborator()}
+              >
+                添加协作老师
+              </button>
+            )}
+          </div>
+          {data.collaboration.collaborators.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-2 text-sm">
+              {data.collaboration.collaborators.map((teacher) => (
+                <span
+                  key={teacher.id}
+                  className="rounded-full bg-slate-100 px-3 py-1"
+                >
+                  {teacher.display_name}
+                  {data.collaboration.is_owner && (
+                    <button
+                      className="ml-2 text-slate-500 hover:text-red-700"
+                      aria-label={`移除${teacher.display_name}`}
+                      onClick={() => void removeCollaborator(teacher.id)}
+                    >
+                      ×
+                    </button>
+                  )}
+                </span>
+              ))}
+            </div>
+          )}
+          {data.collaboration.is_owner &&
+            data.collaboration.questions.length > 0 && (
+              <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {data.collaboration.questions.map((question) => (
+                  <label
+                    key={question.id}
+                    className="flex items-center gap-2 rounded border p-2 text-sm"
+                  >
+                    <span className="min-w-14">第 {question.number} 题</span>
+                    <select
+                      className="min-w-0 flex-1 rounded border px-2 py-1"
+                      value={question.assignee_id ?? ""}
+                      disabled={saving}
+                      onChange={(event) =>
+                        void assignQuestion(
+                          question.id,
+                          event.target.value || undefined,
+                        )
+                      }
+                    >
+                      <option value="">主责老师</option>
+                      {data.collaboration.collaborators.map((teacher) => (
+                        <option key={teacher.id} value={teacher.id}>
+                          {teacher.display_name}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-slate-500">
+                      {question.reviewed}/{question.total}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            )}
+        </section>
+      )}
       <section
         aria-label="集中审查概览"
         className="rounded-xl border bg-white p-4"

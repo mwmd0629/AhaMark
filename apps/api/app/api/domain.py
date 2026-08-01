@@ -18,10 +18,14 @@ from app.models import (
     ImportRowStatus,
     ImportStatus,
     MembershipStatus,
+    Role,
     SchoolClass,
+    Status,
     Student,
     StudentGroup,
     StudentGroupMember,
+    User,
+    UserRole,
     now_utc,
 )
 from app.security.files import UnsafeFile, inspect_xlsx_archive, safe_filename
@@ -276,6 +280,7 @@ def student_json(
         "student_number": student.student_number,
         "gender": student.gender,
         "email": student.email,
+        "account_linked": student.user_id is not None,
         "phone": student.phone,
         "status": student.status,
         "membership_status": membership.status if membership else None,
@@ -438,6 +443,63 @@ def edit_student(student_id: uuid.UUID, data: StudentPatch, db: Db, actor: Actor
     db.commit()
     db.refresh(item)
     return student_json(db, item)
+
+
+@router.post("/students/{student_id}/account-link")
+def link_student_account(student_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
+    student = owned_student(db, actor.id, student_id)
+    if not student.email:
+        raise ApiProblem(422, "STUDENT_EMAIL_REQUIRED", "请先为学生填写登录邮箱")
+    user = db.scalar(
+        select(User).where(
+            func.lower(User.email) == student.email.strip().lower(),
+            User.status == Status.active,
+        )
+    )
+    if user is None:
+        raise ApiProblem(404, "STUDENT_ACCOUNT_NOT_FOUND", "未找到使用该邮箱的有效账号")
+    conflict = db.scalar(
+        select(Student.id).where(
+            Student.owner_id == actor.id,
+            Student.user_id == user.id,
+            Student.id != student.id,
+        )
+    )
+    if conflict is not None:
+        raise ApiProblem(409, "STUDENT_ACCOUNT_ALREADY_LINKED", "该账号已关联另一份学生档案")
+    role = db.scalar(select(Role).where(Role.name == "student"))
+    if role is None or db.get(UserRole, (user.id, role.id)) is None:
+        raise ApiProblem(409, "ACCOUNT_NOT_STUDENT", "该账号尚未配置为学生账号")
+    student.user_id = user.id
+    audit(
+        db,
+        actor.id,
+        "student.account_link",
+        "student",
+        student.id,
+        {"user_id": str(user.id)},
+    )
+    db.commit()
+    db.refresh(student)
+    return student_json(db, student)
+
+
+@router.delete("/students/{student_id}/account-link", status_code=204)
+def unlink_student_account(student_id: uuid.UUID, db: Db, actor: Actor) -> None:
+    student = owned_student(db, actor.id, student_id)
+    if student.user_id is None:
+        return
+    previous_user_id = student.user_id
+    student.user_id = None
+    audit(
+        db,
+        actor.id,
+        "student.account_unlink",
+        "student",
+        student.id,
+        {"user_id": str(previous_user_id)},
+    )
+    db.commit()
 
 
 @router.delete("/classes/{class_id}/students/{student_id}")

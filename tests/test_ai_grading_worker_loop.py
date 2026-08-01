@@ -169,7 +169,11 @@ def test_migration_head_matches_strict_audit_models() -> None:
     auto_confirmation_revision = script.get_revision(
         "0029_processing_auto_confirmation"
     )
-    assert script.get_current_head() == auto_confirmation_revision.revision
+    collaboration_revision = script.get_revision("0030_collaborative_grading")
+    student_portal_revision = script.get_revision("0031_student_portal")
+    assert script.get_current_head() == student_portal_revision.revision
+    assert student_portal_revision.down_revision == collaboration_revision.revision
+    assert collaboration_revision.down_revision == auto_confirmation_revision.revision
     assert orchestrator_revision.down_revision == semantic_revision.revision
     assert semantic_revision.down_revision == materialization_revision.revision
     assert materialization_revision.down_revision == audit_revision.revision

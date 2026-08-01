@@ -14,11 +14,16 @@ export default function LoginPage() {
     setError("");
     const data = new FormData(event.currentTarget);
     try {
-      await authApi.login(
+      const user = await authApi.login(
         String(data.get("email")),
         String(data.get("password")),
       );
-      router.replace("/dashboard");
+      const roles = user.roles ?? [];
+      router.replace(
+        roles.includes("student") && !roles.includes("teacher")
+          ? "/student"
+          : "/dashboard",
+      );
     } catch (reason) {
       setError(
         reason instanceof ApiError ? reason.message : "登录失败，请稍后重试",
@@ -39,9 +44,9 @@ export default function LoginPage() {
           <div className="mb-3 grid h-11 w-11 place-items-center rounded-xl bg-[var(--brand-600)] text-xl font-black text-white">
             A
           </div>
-          <h1 className="text-2xl font-bold">教师登录</h1>
+          <h1 className="text-2xl font-bold">登录 AhaMark</h1>
           <p className="mt-1 text-sm text-slate-500">
-            登录 AhaMark 批改与学情分析平台
+            教师进入批改工作台，学生查看已正式开放的作业成绩
           </p>
         </div>
         <label className="mb-4 block text-sm font-medium">

@@ -5,7 +5,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from datetime import timedelta
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 
 import structlog
 from app.api.actor import authenticated_session, digest
@@ -112,19 +112,18 @@ def check_rate_limit(key: str) -> None:
         attempts.append(time.monotonic())
 
 
-def user_view(user: User, csrf_token: str | None = None) -> dict[str, str | None]:
+def user_view(user: User, csrf_token: str | None = None) -> dict[str, Any]:
     return {
         "id": str(user.id),
         "email": user.email,
         "display_name": user.display_name,
+        "roles": sorted(role.name for role in user.roles),
         "csrf_token": csrf_token,
     }
 
 
 @router.post("/login")
-def login(
-    payload: LoginInput, request: Request, response: Response, db: Db
-) -> dict[str, str | None]:
+def login(payload: LoginInput, request: Request, response: Response, db: Db) -> dict[str, Any]:
     email = payload.email.lower().strip()
     check_rate_limit(f"{request.client.host if request.client else 'unknown'}:{email}")
     user = db.scalar(select(User).where(User.email == email))
@@ -166,7 +165,7 @@ def login(
 
 
 @router.get("/me")
-def me(request: Request, db: Db) -> dict[str, str | None]:
+def me(request: Request, db: Db) -> dict[str, Any]:
     authenticated = authenticated_session(request, db)
     if not authenticated:
         raise HTTPException(401, "请先登录")

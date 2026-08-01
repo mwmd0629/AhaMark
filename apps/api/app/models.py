@@ -225,10 +225,14 @@ class Student(TimestampMixin, Base):
     __tablename__ = "students"
     __table_args__ = (
         UniqueConstraint("owner_id", "student_number", name="uq_student_owner_number"),
+        UniqueConstraint("owner_id", "user_id", name="uq_student_owner_user"),
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     owner_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
     )
     student_number: Mapped[str] = mapped_column(String(64), index=True)
     name: Mapped[str] = mapped_column(String(120), index=True)
@@ -1459,6 +1463,39 @@ class GradingBatch(TimestampMixin, Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class GradingCollaborator(TimestampMixin, Base):
+    __tablename__ = "grading_collaborators"
+    __table_args__ = (UniqueConstraint("assignment_id", "user_id", name="uq_grading_collaborator"),)
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignments.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    added_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    role: Mapped[str] = mapped_column(String(30), default="grader")
+    status: Mapped[str] = mapped_column(String(30), default="active", index=True)
+
+
+class GradingQuestionAssignment(TimestampMixin, Base):
+    __tablename__ = "grading_question_assignments"
+    __table_args__ = (
+        UniqueConstraint("grading_batch_id", "question_id", name="uq_grading_question_assignment"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    grading_batch_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("grading_batches.id", ondelete="CASCADE"), index=True
+    )
+    question_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("questions.id", ondelete="CASCADE"), index=True
+    )
+    assignee_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    assigned_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+
+
 class Submission(TimestampMixin, Base):
     __tablename__ = "submissions"
     __table_args__ = (
@@ -1961,7 +1998,10 @@ class GradingEvidence(Base):
 
 class TeacherReview(TimestampMixin, Base):
     __tablename__ = "teacher_reviews"
-    __table_args__ = (UniqueConstraint("student_answer_id", name="uq_answer_review"),)
+    __table_args__ = (
+        UniqueConstraint("student_answer_id", name="uq_answer_review"),
+        CheckConstraint("review_version > 0", name="ck_teacher_review_version_positive"),
+    )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     grading_result_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("grading_results.id", ondelete="RESTRICT")
@@ -1976,6 +2016,7 @@ class TeacherReview(TimestampMixin, Base):
     final_error_type: Mapped[str | None] = mapped_column(String(80))
     review_notes: Mapped[str | None] = mapped_column(Text)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_version: Mapped[int] = mapped_column(Integer, default=1)
 
 
 class ScoreRevision(Base):
@@ -2427,6 +2468,10 @@ class GradeRelease(TimestampMixin, Base):
     release_mode: Mapped[str] = mapped_column(String(30), default="score_and_feedback")
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    student_visible_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    student_visible_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT")
+    )
     created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     notes: Mapped[str | None] = mapped_column(Text)
     idempotency_key: Mapped[str | None] = mapped_column(String(100), unique=True)
@@ -2787,8 +2832,7 @@ class ProcessingRunCommand(TimestampMixin, Base):
             name="ck_processing_run_command_operation",
         ),
         CheckConstraint(
-            "idempotency_key = trim(idempotency_key) "
-            "AND length(idempotency_key) BETWEEN 1 AND 128",
+            "idempotency_key = trim(idempotency_key) AND length(idempotency_key) BETWEEN 1 AND 128",
             name="ck_processing_run_command_idempotency_key",
         ),
         CheckConstraint(

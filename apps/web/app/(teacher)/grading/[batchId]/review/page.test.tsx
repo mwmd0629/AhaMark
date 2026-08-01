@@ -15,6 +15,9 @@ const mocks = vi.hoisted(() => ({
   review: vi.fn(),
   confirmResultsReadiness: vi.fn(),
   confirmResults: vi.fn(),
+  addCollaborator: vi.fn(),
+  removeCollaborator: vi.fn(),
+  assignQuestion: vi.fn(),
 }));
 const recognitionMocks = vi.hoisted(() => ({
   blocks: vi.fn().mockResolvedValue([]),
@@ -56,6 +59,26 @@ function workspace({
 } = {}) {
   return {
     provider_notice: "合成测试 Provider",
+    collaboration: undefined as
+      | {
+          is_owner: boolean;
+          can_confirm_results: boolean;
+          owner: { id: string; display_name: string; email: string };
+          collaborators: Array<{
+            id: string;
+            display_name: string;
+            email: string;
+            role: "grader";
+          }>;
+          questions: Array<{
+            id: string;
+            number: string;
+            assignee_id?: string;
+            total: number;
+            reviewed: number;
+          }>;
+        }
+      | undefined,
     progress: { reviewed, total: 1 },
     items: [
       {
@@ -103,6 +126,87 @@ function workspace({
     ],
   };
 }
+
+it("lets the owner assign questions while keeping final confirmation owner-only", async () => {
+  mockReadiness();
+  const data = workspace();
+  data.collaboration = {
+    is_owner: true,
+    can_confirm_results: true,
+    owner: {
+      id: "owner-1",
+      display_name: "主责老师",
+      email: "owner@example.com",
+    },
+    collaborators: [
+      {
+        id: "teacher-2",
+        display_name: "协作老师",
+        email: "collaborator@example.com",
+        role: "grader",
+      },
+    ],
+    questions: [
+      {
+        id: "question-1",
+        number: "1",
+        total: 30,
+        reviewed: 12,
+      },
+    ],
+  };
+  mocks.reviewWorkspace.mockResolvedValue(data);
+  mocks.assignQuestion.mockResolvedValue(data.collaboration);
+  render(<ReviewPage />);
+
+  expect(
+    await screen.findByRole("button", { name: "确认结果" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("12/30")).toBeInTheDocument();
+  fireEvent.change(screen.getByRole("combobox"), {
+    target: { value: "teacher-2" },
+  });
+  await waitFor(() =>
+    expect(mocks.assignQuestion).toHaveBeenCalledWith(
+      "b1",
+      "question-1",
+      "teacher-2",
+    ),
+  );
+});
+
+it("shows only the assigned-work message and no release action for collaborators", async () => {
+  const data = workspace();
+  data.collaboration = {
+    is_owner: false,
+    can_confirm_results: false,
+    owner: {
+      id: "owner-1",
+      display_name: "主责老师",
+      email: "owner@example.com",
+    },
+    collaborators: [],
+    questions: [
+      {
+        id: "question-1",
+        number: "1",
+        assignee_id: "teacher-2",
+        total: 30,
+        reviewed: 12,
+      },
+    ],
+  };
+  mocks.reviewWorkspace.mockResolvedValue(data);
+  render(<ReviewPage />);
+
+  expect(
+    await screen.findByText(/这里只显示分配给你的题目/),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "确认结果" }),
+  ).not.toBeInTheDocument();
+  expect(mocks.confirmResultsReadiness).not.toHaveBeenCalled();
+});
 
 function readinessPayload(
   ready = true,

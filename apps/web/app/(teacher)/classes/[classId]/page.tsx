@@ -162,6 +162,18 @@ export default function ClassDetailPage({
       setSaving(false);
     }
   };
+  const linkAccount = async (student: Student) => {
+    setSaving(true);
+    try {
+      await studentsApi.linkAccount(student.id);
+      toast("学生登录账号已关联");
+      await load();
+    } catch (e) {
+      toast(e instanceof ApiError ? e.body.message : "账号关联失败", "error");
+    } finally {
+      setSaving(false);
+    }
+  };
   if (loading && !klass)
     return (
       <div className="space-y-4">
@@ -407,6 +419,7 @@ export default function ClassDetailPage({
                 <th>学号</th>
                 <th>分组</th>
                 <th>状态</th>
+                <th>学生端</th>
                 <th>加入时间</th>
                 <th>操作</th>
               </tr>
@@ -424,6 +437,20 @@ export default function ClassDetailPage({
                   </td>
                   <td>
                     {student.membership_status === "active" ? "在班" : "已移出"}
+                  </td>
+                  <td>
+                    {student.account_linked ? (
+                      <span className="text-sm text-emerald-700">已关联</span>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        disabled={saving || !student.email}
+                        title={student.email ? undefined : "请先填写学生邮箱"}
+                        onClick={() => void linkAccount(student)}
+                      >
+                        {student.email ? "关联账号" : "未填邮箱"}
+                      </Button>
+                    )}
                   </td>
                   <td>
                     {new Date(student.joined_at).toLocaleDateString("zh-CN")}

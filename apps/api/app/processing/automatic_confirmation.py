@@ -340,7 +340,8 @@ def auto_confirm_deterministic_recognition(
         answer.id: {} for answer, _ in evidence_rows
     }
     for block in current_blocks:
-        answer_id = region_answer.get(block.student_answer_region_id)
+        region_id = block.student_answer_region_id
+        answer_id = region_answer.get(region_id) if region_id is not None else None
         if answer_id is None:
             return _blocked(
                 "RECOGNITION_BLOCK_SCOPE_AMBIGUOUS",
@@ -454,9 +455,7 @@ def auto_confirm_deterministic_recognition(
                     "version": AUTOMATIC_CONFIRMATION_VERSION,
                     "submission_id": str(submission_id),
                     "recognition_job_id": str(recognition_job_id),
-                    "evidence_ids": [
-                        str(evidence.id) for _, evidence in changed_evidence
-                    ],
+                    "evidence_ids": [str(evidence.id) for _, evidence in changed_evidence],
                     "confirmation_origin": "system_auto",
                 },
             )
