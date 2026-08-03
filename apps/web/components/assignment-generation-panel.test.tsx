@@ -143,7 +143,7 @@ it("恢复 partial/unavailable、风险与草稿历史并允许单阶段重试",
   expect(screen.getByText("阻断 2")).toBeInTheDocument();
   expect(screen.getByText("草稿历史版本（1）")).toBeInTheDocument();
   expect(
-    screen.getByText(/由 Codex 生成可编辑草稿，不会直接发布/),
+    screen.getByText(/一次生成题目、参考答案和评分标准草稿，不会直接发布/),
   ).toBeInTheDocument();
   expect(screen.queryByText("发布作业")).not.toBeInTheDocument();
 
@@ -156,7 +156,7 @@ it("恢复 partial/unavailable、风险与草稿历史并允许单阶段重试",
   );
 });
 
-it("展示并审查基本信息与文件分析，保持班级和截止时间为教师控制", async () => {
+it("自动识别明确的文件用途，并保留轻量修改入口", async () => {
   mocks.listFieldSuggestions.mockResolvedValue([
     {
       id: "suggestion-1",
@@ -233,7 +233,10 @@ it("展示并审查基本信息与文件分析，保持班级和截止时间为�
   expect(
     screen.getByText(/不会推荐班级，也不会设置截止时间/),
   ).toBeInTheDocument();
-  expect(screen.getByText(/只需确认文件用途/)).toBeInTheDocument();
+  expect(
+    screen.getByText(/系统会自动识别文件用途并直接生成/),
+  ).toBeInTheDocument();
+  expect(screen.getByText(/自动识别 1，需要选择 0/)).toBeInTheDocument();
   expect(screen.getAllByText(/LOW_QUALITY_PAGE/).length).toBeGreaterThan(0);
   expect(screen.getByLabelText("基本信息建议")).not.toHaveAttribute("open");
   expect(screen.getByLabelText("文件分析")).not.toHaveAttribute("open");
@@ -241,7 +244,8 @@ it("展示并审查基本信息与文件分析，保持班级和截止时间为�
   expect(screen.queryByText(/答案来源/)).not.toBeInTheDocument();
   expect(screen.queryByText(/ANSWER_SOURCE/)).not.toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("button", { name: "确认文件用途" }));
+  fireEvent.click(screen.getByText("修改用途"));
+  fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
   await waitFor(() =>
     expect(mocks.confirmFileAnalysis).toHaveBeenCalledWith("analysis-1", {
       expected_teacher_edit_version: 0,
@@ -259,6 +263,37 @@ it("展示并审查基本信息与文件分析，保持班级和截止时间为�
     }),
   );
   expect(onReviewInputsChanged).toHaveBeenCalledTimes(2);
+});
+
+it("仅在文件用途无法可靠判断时要求教师选择", async () => {
+  mocks.listFileAnalyses.mockResolvedValue([
+    {
+      id: "analysis-unknown",
+      stored_file_id: "file-unknown",
+      source_snapshot_hash: "a".repeat(64),
+      file_name: "材料.pdf",
+      file_size: 512,
+      detected_mime_type: "application/pdf",
+      checksum: "c".repeat(64),
+      page_count: 1,
+      suggested_role: "unknown",
+      role_confidence: 0.25,
+      suggested_answer_source: "unknown",
+      answer_source_confidence: 0.2,
+      analysis_status: "suggested",
+      evidence: [],
+      warning_codes: ["FILE_ROLE_REVIEW_REQUIRED"],
+      teacher_edit_version: 0,
+    },
+  ]);
+
+  render(<AssignmentGenerationPanel assignmentId="assignment-1" />);
+
+  expect(await screen.findByText(/自动识别 0，需要选择 1/)).toBeInTheDocument();
+  expect(screen.getByText(/状态\s*需要选择用途/)).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "保存文件用途" }),
+  ).toBeInTheDocument();
 });
 
 it("活动任务会轮询且可请求取消", async () => {
@@ -302,7 +337,7 @@ it("不会把已过期文件误报为待确认 0 即已完成", async () => {
   render(<AssignmentGenerationPanel assignmentId="assignment-1" />);
 
   expect(
-    await screen.findByText(/已确认 0，待确认 0，已过期 1/),
+    await screen.findByText(/自动识别 0，需要选择 0，已过期 1/),
   ).toBeInTheDocument();
   expect(screen.getByText("旧分析已过期，不能算作已确认")).toBeInTheDocument();
   expect(
@@ -321,13 +356,13 @@ it("无任务时可启动且网络错误会停止轮询并显示重试", async (
     />,
   );
 
-  fireEvent.click(await screen.findByRole("button", { name: "启动生成任务" }));
+  fireEvent.click(await screen.findByRole("button", { name: "生成完整草稿" }));
   await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(onReviewInputsChanged).toHaveBeenCalledOnce());
   expect(mocks.start.mock.calls[0][1]).not.toHaveProperty("provider_mode");
 
   mocks.start.mockRejectedValueOnce(new Error("network"));
-  fireEvent.click(screen.getByRole("button", { name: "重新生成新版本" }));
+  fireEvent.click(screen.getByRole("button", { name: "重新生成完整草稿" }));
   await waitFor(() =>
     expect(screen.getByText(/任务操作失败/)).toBeInTheDocument(),
   );
@@ -380,8 +415,8 @@ it("展示服务器能力开关并在教师启动被禁用时关闭启动按钮"
   expect(
     await screen.findByText(/当前草稿生成方式：Codex/),
   ).toBeInTheDocument();
-  expect(screen.getByText(/不会伪造 Provider 已完成/)).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "启动生成任务" })).toBeDisabled();
+  expect(screen.getByText(/不会把未完成阶段显示为成功/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "生成完整草稿" })).toBeDisabled();
 });
 
 it("明确显示 stale 状态且不会轮询终态", async () => {

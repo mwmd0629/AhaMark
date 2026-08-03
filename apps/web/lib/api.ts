@@ -665,6 +665,28 @@ export type AssignmentInput = {
   due_at?: string | null;
   class_ids: string[];
 };
+export type JointExamTeam = {
+  assignment_id: string;
+  title: string;
+  status: AssignmentStatus;
+  is_owner: boolean;
+  owner: { id: string; display_name: string; email?: string | null };
+  collaborators: Array<{
+    id: string;
+    display_name: string;
+    email: string;
+    role: string;
+  }>;
+  classes: Array<{
+    id: string;
+    name: string;
+    owner_id: string;
+    owner_name: string;
+    authorized_by?: string | null;
+    authorized: boolean;
+    mine: boolean;
+  }>;
+};
 export type ManualPublishReadiness = {
   mode: "manual";
   ready: boolean;
@@ -695,6 +717,24 @@ export const assignmentsApi = {
     request<AssignmentRecord>(`/api/assignments/${id}/classes`, {
       method: "PUT",
       body: JSON.stringify({ class_ids: classIds, updated_at: updatedAt }),
+    }),
+  jointInvitations: () =>
+    request<JointExamTeam[]>("/api/assignments/joint-exams/invitations"),
+  jointTeam: (id: string) =>
+    request<JointExamTeam>(`/api/assignments/${id}/joint-team`),
+  inviteJointCollaborator: (id: string, email: string) =>
+    request<JointExamTeam>(`/api/assignments/${id}/joint-team/collaborators`, {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+  authorizeJointClasses: (id: string, classIds: string[]) =>
+    request<JointExamTeam>(`/api/assignments/${id}/joint-classes`, {
+      method: "POST",
+      body: JSON.stringify({ class_ids: classIds }),
+    }),
+  removeJointClass: (id: string, classId: string) =>
+    request<JointExamTeam>(`/api/assignments/${id}/joint-classes/${classId}`, {
+      method: "DELETE",
     }),
   upload: (id: string, file: File) => {
     const body = new FormData();
@@ -959,6 +999,16 @@ export type JointGradingPool = {
     assignment_mixed: boolean;
   }>;
 };
+export type JointGradingWork = {
+  assignment_id: string;
+  assignment_title: string;
+  question_id: string;
+  question_number: string;
+  first_batch_id: string;
+  class_count: number;
+  total: number;
+  reviewed: number;
+};
 
 export type ProcessingStep = {
   id: string;
@@ -1063,6 +1113,7 @@ export type ConfirmResultsResult = {
 };
 
 export const gradingApi = {
+  jointWork: () => request<JointGradingWork[]>("/api/joint-grading-work"),
   batches: (assignmentId: string, query = "") =>
     request<Page<GradingBatch>>(
       `/api/assignments/${assignmentId}/grading-batches${query ? `?${query}` : ""}`,

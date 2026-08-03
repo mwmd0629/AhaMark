@@ -316,7 +316,10 @@ def _ensure_current(
         raise ApiProblem(409, "CANDIDATE_CONTEXT_CHANGED", "候选关联内容已变化，请刷新后重试")
     if revision.teacher_edit_version != expected_draft_version:
         raise ApiProblem(409, "CANDIDATE_EDIT_CONFLICT", "草稿已被其他教师修改")
-    if revision.status != "draft" or locked.status in {"stale", "superseded"}:
+    if revision.status not in {"draft", "partial", "review_required"} or locked.status in {
+        "stale",
+        "superseded",
+    }:
         raise ApiProblem(409, "CANDIDATE_STALE", "候选或草稿版本已失效")
     if (
         locked.question_version != expected_question_version

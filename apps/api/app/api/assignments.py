@@ -21,6 +21,7 @@ from app.models import (
     AssignmentStatus,
     ClassStudent,
     FileStatus,
+    GradingCollaborator,
     GradingResult,
     KnowledgePoint,
     MembershipStatus,
@@ -38,6 +39,7 @@ from app.models import (
     Student,
     StudentAnswer,
     Submission,
+    User,
     VersionStatus,
     now_utc,
 )
@@ -83,13 +85,6 @@ class AssignmentInput(BaseModel):
     class_ids: list[uuid.UUID] = Field(default_factory=list)
     delivery_mode: Literal["class_assignment", "joint_exam"] = "class_assignment"
 
-    @model_validator(mode="after")
-    def joint_exam_needs_multiple_classes(self) -> "AssignmentInput":
-        if self.delivery_mode == "joint_exam" and len(set(self.class_ids)) < 2:
-            raise ValueError("联考统批至少需要两个班级")
-        return self
-
-
 class AssignmentPatch(BaseModel):
     title: str | None = Field(None, min_length=1, max_length=200)
     subject: str | None = Field(None, max_length=40)
@@ -105,6 +100,14 @@ class AssignmentPatch(BaseModel):
 class ClassesInput(BaseModel):
     class_ids: list[uuid.UUID]
     updated_at: datetime
+
+
+class JointExamCollaboratorInput(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
+class JointExamClassesInput(BaseModel):
+    class_ids: list[uuid.UUID] = Field(min_length=1)
 
 
 class ManualPublishInput(BaseModel):
@@ -194,6 +197,77 @@ def validate_classes(db: Session, actor_id: uuid.UUID, ids: list[uuid.UUID]) -> 
     if any(x.status != ArchiveStatus.active for x in rows):
         raise ApiProblem(409, "CLASS_NOT_ACTIVE", "只能向活动班级布置作业")
     return rows
+
+
+def joint_exam_access(db: Session, actor_id: uuid.UUID, assignment_id: uuid.UUID) -> Assignment:
+    item = db.get(Assignment, assignment_id)
+    if item is None or item.delivery_mode != "joint_exam":
+        raise ApiProblem(404, "JOINT_EXAM_NOT_FOUND", "联考不存在")
+    if item.owner_id == actor_id:
+        return item
+    collaborator = db.scalar(
+        select(GradingCollaborator.id).where(
+            GradingCollaborator.assignment_id == item.id,
+            GradingCollaborator.user_id == actor_id,
+            GradingCollaborator.status == "active",
+        )
+    )
+    if collaborator is None:
+        raise ApiProblem(404, "JOINT_EXAM_NOT_FOUND", "联考不存在")
+    return item
+
+
+def joint_exam_team_json(db: Session, item: Assignment, actor_id: uuid.UUID) -> dict[str, Any]:
+    owner = db.get(User, item.owner_id)
+    collaborators = db.execute(
+        select(GradingCollaborator, User)
+        .join(User, User.id == GradingCollaborator.user_id)
+        .where(
+            GradingCollaborator.assignment_id == item.id,
+            GradingCollaborator.status == "active",
+        )
+        .order_by(User.display_name, User.email)
+    ).all()
+    class_rows = db.execute(
+        select(AssignmentClass, SchoolClass, User)
+        .join(SchoolClass, SchoolClass.id == AssignmentClass.class_id)
+        .join(User, User.id == SchoolClass.owner_id)
+        .where(AssignmentClass.assignment_id == item.id)
+        .order_by(SchoolClass.name, SchoolClass.id)
+    ).all()
+    return {
+        "assignment_id": str(item.id),
+        "title": item.title,
+        "status": item.status,
+        "is_owner": item.owner_id == actor_id,
+        "owner": {
+            "id": str(item.owner_id),
+            "display_name": owner.display_name if owner else "主责老师",
+            "email": owner.email if owner else None,
+        },
+        "collaborators": [
+            {
+                "id": str(row.user_id),
+                "display_name": user.display_name,
+                "email": user.email,
+                "role": row.role,
+            }
+            for row, user in collaborators
+        ],
+        "classes": [
+            {
+                "id": str(cls.id),
+                "name": cls.name,
+                "owner_id": str(cls.owner_id),
+                "owner_name": class_owner.display_name,
+                "authorized_by": str(link.authorized_by) if link.authorized_by else None,
+                "authorized": cls.owner_id == item.owner_id
+                or link.authorized_by == cls.owner_id,
+                "mine": cls.owner_id == actor_id,
+            }
+            for link, cls, class_owner in class_rows
+        ],
+    }
 
 
 def paper(db: Session, item: Assignment) -> PaperVersion | None:
@@ -547,13 +621,34 @@ def publish_issues(
         )
     if item.delivery_mode == "joint_exam" and links:
         class_ids = [link.class_id for link in links]
+        classes_by_id = {
+            cls.id: cls
+            for cls in db.scalars(select(SchoolClass).where(SchoolClass.id.in_(class_ids))).all()
+        }
+        unauthorized_class_ids = [
+            str(link.class_id)
+            for link in links
+            if (cls := classes_by_id.get(link.class_id)) is not None
+            and cls.owner_id != item.owner_id
+            and link.authorized_by != cls.owner_id
+        ]
+        if unauthorized_class_ids:
+            out.append(
+                {
+                    "code": "JOINT_EXAM_CLASS_AUTHORIZATION_REQUIRED",
+                    "message": "跨教师班级需要由班级负责人授权",
+                    "step": 1,
+                    "class_ids": unauthorized_class_ids,
+                }
+            )
         participant_rows = db.execute(
             select(ClassStudent.class_id, Student.id)
             .join(Student, Student.id == ClassStudent.student_id)
+            .join(SchoolClass, SchoolClass.id == ClassStudent.class_id)
             .where(
                 ClassStudent.class_id.in_(class_ids),
                 ClassStudent.status == MembershipStatus.active,
-                Student.owner_id == item.owner_id,
+                Student.owner_id == SchoolClass.owner_id,
                 Student.status == ArchiveStatus.active,
             )
         ).all()
@@ -726,10 +821,11 @@ def freeze_participant_roster(db: Session, item: Assignment) -> int:
     rows = db.execute(
         select(ClassStudent, Student)
         .join(Student, Student.id == ClassStudent.student_id)
+        .join(SchoolClass, SchoolClass.id == ClassStudent.class_id)
         .where(
             ClassStudent.class_id.in_(class_ids),
             ClassStudent.status == MembershipStatus.active,
-            Student.owner_id == item.owner_id,
+            Student.owner_id == SchoolClass.owner_id,
             Student.status == ArchiveStatus.active,
         )
         .order_by(ClassStudent.class_id, Student.student_number, Student.id)
@@ -836,11 +932,161 @@ def create_assignment(data: AssignmentInput, db: Db, actor: Actor) -> dict[str, 
     db.add(item)
     db.flush()
     for cid in data.class_ids:
-        db.add(AssignmentClass(assignment_id=item.id, class_id=cid))
+        db.add(AssignmentClass(assignment_id=item.id, class_id=cid, authorized_by=actor.id))
     audit(db, actor.id, "assignment.create", "assignment", item.id)
     db.commit()
     db.refresh(item)
     return detail(db, item)
+
+
+@router.get("/joint-exams/invitations")
+def list_joint_exam_invitations(db: Db, actor: Actor) -> list[dict[str, Any]]:
+    items = db.scalars(
+        select(Assignment)
+        .join(GradingCollaborator, GradingCollaborator.assignment_id == Assignment.id)
+        .where(
+            GradingCollaborator.user_id == actor.id,
+            GradingCollaborator.status == "active",
+            Assignment.delivery_mode == "joint_exam",
+            Assignment.status != AssignmentStatus.archived,
+        )
+        .order_by(Assignment.updated_at.desc(), Assignment.id)
+    ).all()
+    return [joint_exam_team_json(db, item, actor.id) for item in items]
+
+
+@router.get("/{assignment_id}/joint-team")
+def get_joint_exam_team(assignment_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
+    return joint_exam_team_json(db, joint_exam_access(db, actor.id, assignment_id), actor.id)
+
+
+@router.post("/{assignment_id}/joint-team/collaborators", status_code=201)
+def invite_joint_exam_collaborator(
+    assignment_id: uuid.UUID,
+    data: JointExamCollaboratorInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    item = owned(db, actor.id, assignment_id, lock=True)
+    if item.delivery_mode != "joint_exam":
+        raise ApiProblem(409, "NOT_JOINT_EXAM", "该作业不是联考")
+    if item.status == AssignmentStatus.archived:
+        raise ApiProblem(409, "ASSIGNMENT_ARCHIVED", "已归档联考不能邀请教师")
+    user = db.scalar(select(User).where(func.lower(User.email) == data.email.strip().lower()))
+    if user is None or user.status != "active":
+        raise ApiProblem(404, "COLLABORATOR_NOT_FOUND", "未找到可用的教师账号")
+    role_names = {role.name for role in user.roles}
+    if "student" in role_names and "teacher" not in role_names:
+        raise ApiProblem(422, "COLLABORATOR_TEACHER_REQUIRED", "学生账号不能参与联考")
+    if user.id == actor.id:
+        raise ApiProblem(422, "OWNER_ALREADY_LEADS", "主责老师无需邀请自己")
+    row = db.scalar(
+        select(GradingCollaborator).where(
+            GradingCollaborator.assignment_id == item.id,
+            GradingCollaborator.user_id == user.id,
+        )
+    )
+    if row is None:
+        row = GradingCollaborator(
+            assignment_id=item.id,
+            user_id=user.id,
+            added_by=actor.id,
+            role="grader",
+            status="active",
+        )
+        db.add(row)
+    else:
+        row.status, row.added_by = "active", actor.id
+    audit(
+        db,
+        actor.id,
+        "joint_exam.collaborator.invite",
+        "assignment",
+        item.id,
+        {"collaborator_id": str(user.id)},
+    )
+    db.commit()
+    return joint_exam_team_json(db, item, actor.id)
+
+
+@router.post("/{assignment_id}/joint-classes", status_code=201)
+def authorize_joint_exam_classes(
+    assignment_id: uuid.UUID,
+    data: JointExamClassesInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    item = joint_exam_access(db, actor.id, assignment_id)
+    if item.status != AssignmentStatus.draft:
+        raise ApiProblem(409, "ASSIGNMENT_LOCKED", "发布后不能更改联考班级")
+    classes = validate_classes(db, actor.id, data.class_ids)
+    existing = {
+        row.class_id: row
+        for row in db.scalars(
+            select(AssignmentClass).where(
+                AssignmentClass.assignment_id == item.id,
+                AssignmentClass.class_id.in_(data.class_ids),
+            )
+        ).all()
+    }
+    for cls in classes:
+        row = existing.get(cls.id)
+        if row is None:
+            db.add(
+                AssignmentClass(
+                    assignment_id=item.id,
+                    class_id=cls.id,
+                    authorized_by=actor.id,
+                )
+            )
+        else:
+            row.authorized_by = actor.id
+    item.updated_at = now_utc()
+    audit(
+        db,
+        actor.id,
+        "joint_exam.classes.authorize",
+        "assignment",
+        item.id,
+        {"class_ids": [str(cls.id) for cls in classes]},
+    )
+    db.commit()
+    return joint_exam_team_json(db, item, actor.id)
+
+
+@router.delete("/{assignment_id}/joint-classes/{class_id}")
+def remove_joint_exam_class(
+    assignment_id: uuid.UUID,
+    class_id: uuid.UUID,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    item = joint_exam_access(db, actor.id, assignment_id)
+    if item.status != AssignmentStatus.draft:
+        raise ApiProblem(409, "ASSIGNMENT_LOCKED", "发布后不能更改联考班级")
+    cls = db.get(SchoolClass, class_id)
+    if cls is None or (actor.id not in {item.owner_id, cls.owner_id}):
+        raise ApiProblem(404, "JOINT_EXAM_CLASS_NOT_FOUND", "联考班级不存在")
+    link = db.scalar(
+        select(AssignmentClass).where(
+            AssignmentClass.assignment_id == item.id,
+            AssignmentClass.class_id == class_id,
+        )
+    )
+    if link is None:
+        raise ApiProblem(404, "JOINT_EXAM_CLASS_NOT_FOUND", "联考班级不存在")
+    db.delete(link)
+    item.updated_at = now_utc()
+    audit(
+        db,
+        actor.id,
+        "joint_exam.classes.remove",
+        "assignment",
+        item.id,
+        {"class_id": str(class_id), "class_owner_id": str(cls.owner_id)},
+    )
+    db.commit()
+    return joint_exam_team_json(db, item, actor.id)
 
 
 @router.get("/{assignment_id}")
@@ -891,9 +1137,18 @@ def set_classes(
     if frozen_count:
         raise ApiProblem(409, "JOINT_EXAM_ROSTER_FROZEN", "联考名单冻结后不能更改班级范围")
     validate_classes(db, actor.id, data.class_ids)
-    db.execute(delete(AssignmentClass).where(AssignmentClass.assignment_id == item.id))
+    if item.delivery_mode == "joint_exam":
+        owned_class_ids = select(SchoolClass.id).where(SchoolClass.owner_id == actor.id)
+        db.execute(
+            delete(AssignmentClass).where(
+                AssignmentClass.assignment_id == item.id,
+                AssignmentClass.class_id.in_(owned_class_ids),
+            )
+        )
+    else:
+        db.execute(delete(AssignmentClass).where(AssignmentClass.assignment_id == item.id))
     for cid in data.class_ids:
-        db.add(AssignmentClass(assignment_id=item.id, class_id=cid))
+        db.add(AssignmentClass(assignment_id=item.id, class_id=cid, authorized_by=actor.id))
     item.updated_at = now_utc()
     audit(db, actor.id, "assignment.classes.update", "assignment", item.id)
     db.commit()

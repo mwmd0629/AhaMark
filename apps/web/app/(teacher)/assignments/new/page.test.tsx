@@ -105,7 +105,7 @@ it("从所选班级继承一致的大学课程信息", async () => {
   );
 });
 
-it("联考统批至少选择两个班级并提交联考模式", async () => {
+it("联考可以先建草稿再邀请其他老师授权班级", async () => {
   api.listClasses.mockResolvedValue({
     items: [
       {
@@ -132,8 +132,9 @@ it("联考统批至少选择两个班级并提交联考模式", async () => {
   });
   fireEvent.click(screen.getByRole("radio", { name: /联考统批/ }));
   const save = screen.getByRole("button", { name: "保存草稿并继续" });
+  expect(save).toBeEnabled();
   fireEvent.click(screen.getByRole("checkbox", { name: /大学物理 1 班/ }));
-  expect(save).toBeDisabled();
+  expect(save).toBeEnabled();
   fireEvent.click(screen.getByRole("checkbox", { name: /大学物理 2 班/ }));
   expect(save).toBeEnabled();
   fireEvent.click(save);

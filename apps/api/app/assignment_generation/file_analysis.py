@@ -80,6 +80,7 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
                 results[page.id] = row
     checksum_first: dict[str, uuid.UUID] = {}
     name_page_signatures: dict[tuple[str, int], uuid.UUID] = {}
+    roles_by_file: dict[uuid.UUID, str] = {}
     file_rows: list[FileAnalysisCandidate] = []
     page_rows: list[PageAnalysisCandidate] = []
     injection_evidence: list[EvidenceRef] = []
@@ -90,7 +91,9 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
             (block.text or "") for page in file_pages for block in blocks_by_page.get(page.id, [])
         )[:8000]
         role, role_conf, answer_source, source_conf = _role(stored.original_name, text)
-        warnings = ["FILE_ROLE_REVIEW_REQUIRED"]
+        warnings: list[str] = []
+        if role == "unknown" or role_conf < 0.7:
+            warnings.append("FILE_ROLE_REVIEW_REQUIRED")
         duplicate = checksum_first.get(stored.checksum)
         if duplicate:
             warnings.append("DUPLICATE_FILE")
@@ -105,13 +108,22 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
             warnings.append("PROBABLE_DUPLICATE_FILE")
         else:
             name_page_signatures[signature] = stored.id
-        if role == "reference_answer":
-            warnings.append("ANSWER_SOURCE_CONFIRMATION_REQUIRED")
+        if duplicate and roles_by_file.get(duplicate) not in {None, role}:
+            warnings.append("FILE_ROLE_CONFLICT_REVIEW_REQUIRED")
+        roles_by_file[stored.id] = role
         evidence = [
             EvidenceRef(
                 kind="file_name",
                 reference_id=str(stored.id),
-                summary="文件角色仅由受控文件名/OCR线索建议，仍需教师确认",
+                summary=(
+                    "文件用途无法可靠判断，需要教师选择"
+                    if any(
+                        code
+                        in {"FILE_ROLE_REVIEW_REQUIRED", "FILE_ROLE_CONFLICT_REVIEW_REQUIRED"}
+                        for code in warnings
+                    )
+                    else "文件用途由受控文件名与 OCR 线索自动识别，可由教师修改"
+                ),
             )
         ]
         if _INJECTION.search(f"{stored.original_name} {text}"):

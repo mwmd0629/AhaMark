@@ -750,7 +750,6 @@ def _batch_students(db: Session, batch: GradingBatch) -> list[tuple[Student, str
                 .where(
                     AssignmentParticipantSnapshot.assignment_id == batch.assignment_id,
                     AssignmentParticipantSnapshot.class_id == batch.class_id,
-                    Student.owner_id == batch.owner_id,
                 )
                 .order_by(
                     AssignmentParticipantSnapshot.student_number,
@@ -1029,6 +1028,82 @@ def _joint_pool_json(
         ],
         "questions": question_items,
     }
+
+
+@router.get("/joint-grading-work")
+def list_joint_grading_work(db: Db, actor: Actor) -> list[dict[str, Any]]:
+    rows = db.execute(
+        select(Assignment, Question, GradingBatch)
+        .join(GradingBatch, GradingBatch.assignment_id == Assignment.id)
+        .join(
+            GradingQuestionAssignment,
+            GradingQuestionAssignment.grading_batch_id == GradingBatch.id,
+        )
+        .join(Question, Question.id == GradingQuestionAssignment.question_id)
+        .join(
+            GradingCollaborator,
+            GradingCollaborator.assignment_id == Assignment.id,
+        )
+        .where(
+            Assignment.delivery_mode == "joint_exam",
+            Assignment.status != AssignmentStatus.archived,
+            GradingBatch.status != "archived",
+            GradingQuestionAssignment.assignee_id == actor.id,
+            GradingCollaborator.user_id == actor.id,
+            GradingCollaborator.status == "active",
+        )
+        .order_by(Assignment.updated_at.desc(), Question.question_number, GradingBatch.created_at)
+    ).all()
+    grouped: dict[tuple[uuid.UUID, uuid.UUID], tuple[Assignment, Question, list[GradingBatch]]] = {}
+    for assignment, question, batch in rows:
+        key = (assignment.id, question.id)
+        if key not in grouped:
+            grouped[key] = (assignment, question, [])
+        grouped[key][2].append(batch)
+    result: list[dict[str, Any]] = []
+    for assignment, question, batches in grouped.values():
+        batch_ids = [batch.id for batch in batches]
+        total = (
+            db.scalar(
+                select(func.count())
+                .select_from(StudentAnswer)
+                .join(Submission, Submission.id == StudentAnswer.submission_id)
+                .where(
+                    Submission.grading_batch_id.in_(batch_ids),
+                    Submission.status != "voided",
+                    StudentAnswer.question_id == question.id,
+                )
+            )
+            or 0
+        )
+        reviewed = (
+            db.scalar(
+                select(func.count())
+                .select_from(TeacherReview)
+                .join(StudentAnswer, StudentAnswer.id == TeacherReview.student_answer_id)
+                .join(Submission, Submission.id == StudentAnswer.submission_id)
+                .where(
+                    Submission.grading_batch_id.in_(batch_ids),
+                    StudentAnswer.question_id == question.id,
+                    TeacherReview.final_score.is_not(None),
+                    StudentAnswer.requires_review.is_(False),
+                )
+            )
+            or 0
+        )
+        result.append(
+            {
+                "assignment_id": str(assignment.id),
+                "assignment_title": assignment.title,
+                "question_id": str(question.id),
+                "question_number": question.question_number,
+                "first_batch_id": str(batches[0].id),
+                "class_count": len(batches),
+                "total": total,
+                "reviewed": reviewed,
+            }
+        )
+    return result
 
 
 @router.get("/assignments/{assignment_id}/joint-grading-pool")
@@ -1551,21 +1626,20 @@ def undo_uploaded_file(
 @router.get("/grading-batches/{batch_id}/submissions")
 def list_submissions(batch_id: uuid.UUID, db: Db, actor: Actor) -> list[dict[str, Any]]:
     batch = owned_batch(db, actor.id, batch_id)
+    assignment = db.get(Assignment, batch.assignment_id)
     rows = db.scalars(
         select(Submission)
         .where(Submission.grading_batch_id == batch.id)
         .order_by(Submission.created_at)
     ).all()
     student_ids = {row.student_id for row in rows if row.student_id is not None}
+    student_query = select(Student).where(Student.id.in_(student_ids))
+    if assignment is None or assignment.delivery_mode != "joint_exam":
+        student_query = student_query.where(Student.owner_id == actor.id)
     students = (
         {
             student.id: student
-            for student in db.scalars(
-                select(Student).where(
-                    Student.id.in_(student_ids),
-                    Student.owner_id == actor.id,
-                )
-            )
+            for student in db.scalars(student_query)
         }
         if student_ids
         else {}

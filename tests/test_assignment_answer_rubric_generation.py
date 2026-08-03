@@ -337,9 +337,7 @@ def test_teacher_disposition_materializes_drafts_and_keeps_confirmed_immutable(
         assert db.get(Question, question_id).max_score == Decimal("5")
         formal_criteria = list(
             db.scalars(
-                select(RubricCriterion).where(
-                    RubricCriterion.rubric_version_id == structured.id
-                )
+                select(RubricCriterion).where(RubricCriterion.rubric_version_id == structured.id)
             )
         )
         projection_rows = [
@@ -350,9 +348,9 @@ def test_teacher_disposition_materializes_drafts_and_keeps_confirmed_immutable(
         ]
         assert projection_loss_report(projection_rows) == []
         formal_criteria[0].validation_rule = {"answer_type": "exact_scalar"}
-        assert {
-            item["code"] for item in projection_loss_report(projection_rows)
-        } == {"VALIDATION_RULE_NOT_LOSSLESS"}
+        assert {item["code"] for item in projection_loss_report(projection_rows)} == {
+            "VALIDATION_RULE_NOT_LOSSLESS"
+        }
     confirmed = client.post(f"/api/reference-answers/{reference_id}/confirm")
     assert confirmed.status_code == 200
     confirmed_rubric = client.post(f"/api/structured-rubrics/{structured_id}/confirm")
@@ -390,8 +388,7 @@ def test_teacher_disposition_materializes_drafts_and_keeps_confirmed_immutable(
         "structured_rubrics",
     ):
         confirmation = client.post(
-            f"/api/assignment-review-sessions/{review_payload['id']}"
-            f"/confirm/{confirmation_type}",
+            f"/api/assignment-review-sessions/{review_payload['id']}/confirm/{confirmation_type}",
             json={
                 "expected_review_version": review_payload["review_version"],
                 "explicit_confirmation": True,
@@ -412,8 +409,7 @@ def test_teacher_disposition_materializes_drafts_and_keeps_confirmed_immutable(
     with SessionLocal() as db:
         automatic = db.scalar(
             select(AssignmentExplicitConfirmation).where(
-                AssignmentExplicitConfirmation.review_session_id
-                == uuid.UUID(review_payload["id"]),
+                AssignmentExplicitConfirmation.review_session_id == uuid.UUID(review_payload["id"]),
                 AssignmentExplicitConfirmation.confirmation_type == "legacy_binding",
             )
         )
@@ -568,6 +564,36 @@ def test_candidate_lock_refreshes_probe_from_identity_map(
                 expected_snapshot,
             )
         assert error.value.code == "CANDIDATE_STALE"
+
+
+@pytest.mark.parametrize("revision_status", ["partial", "review_required"])
+def test_generated_candidate_remains_editable_in_review_states(
+    monkeypatch: pytest.MonkeyPatch, revision_status: str
+) -> None:
+    job_id, revision_id, _question_id = generation_context(monkeypatch)
+    with SessionLocal() as db:
+        from app.api.assignment_answer_rubric import _ensure_current
+        from app.assignment_generation.answer_rubric import generate_candidates
+
+        job = db.get(AssignmentGenerationJob, job_id)
+        revision = db.get(AssignmentDraftRevision, revision_id)
+        assert job is not None and revision is not None
+        generate_candidates(db, job, revision, provider_available=True)
+        revision.status = revision_status
+        db.commit()
+
+        candidate = db.scalar(select(AssignmentAnswerDraftCandidate))
+        assert candidate is not None
+        current_revision, _question, current_candidate = _ensure_current(
+            db,
+            candidate,
+            candidate.owner_id,
+            revision.teacher_edit_version,
+            candidate.question_version,
+            candidate.source_snapshot_hash,
+        )
+        assert current_revision.status == revision_status
+        assert current_candidate.id == candidate.id
 
 
 def test_reference_materialization_unique_race_uses_savepoint_and_preserves_outer_transaction(

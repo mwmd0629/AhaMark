@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.assignment_generation.question_extraction import prompt_injection
+from app.assignment_generation.question_extraction import materialize, prompt_injection
 from app.models import (
     AssignmentDraftRevision,
     AssignmentGenerationJob,
@@ -24,6 +24,7 @@ from app.models import (
     QuestionCandidateRegion,
     RecognitionBlock,
     RecognitionJob,
+    RecognitionStatus,
 )
 
 
@@ -34,8 +35,15 @@ def build_page_suggestions(
         db.scalars(
             select(AssignmentSourceFileAnalysis).where(
                 AssignmentSourceFileAnalysis.draft_revision_id == revision.id,
-                AssignmentSourceFileAnalysis.analysis_status == "confirmed",
-                AssignmentSourceFileAnalysis.teacher_confirmed_role == "question_paper",
+                (
+                    (AssignmentSourceFileAnalysis.analysis_status == "confirmed")
+                    & (AssignmentSourceFileAnalysis.teacher_confirmed_role == "question_paper")
+                )
+                | (
+                    (AssignmentSourceFileAnalysis.analysis_status == "suggested")
+                    & (AssignmentSourceFileAnalysis.suggested_role == "question_paper")
+                    & (AssignmentSourceFileAnalysis.role_confidence >= 0.7)
+                ),
             )
         ).all()
     )
@@ -133,13 +141,17 @@ def build_fake_candidates(
             )
         ).all()
     )
-    unconfirmed = [x for x in sources if x.analysis_status != "confirmed"]
     questions = {
         x.stored_file_id
         for x in sources
-        if x.analysis_status == "confirmed" and x.teacher_confirmed_role == "question_paper"
+        if (x.analysis_status == "confirmed" and x.teacher_confirmed_role == "question_paper")
+        or (
+            x.analysis_status == "suggested"
+            and x.suggested_role == "question_paper"
+            and float(x.role_confidence or 0) >= 0.7
+        )
     }
-    if unconfirmed or not questions:
+    if not questions:
         return {"created": 0, "blocked": "QUESTION_PAPER_ROLE_UNCONFIRMED"}
     pages = list(
         db.scalars(
@@ -158,14 +170,16 @@ def build_fake_candidates(
             )
         ).all()
     )
-    if processed_page_ids != {page.id for page in pages}:
+    if {page.id for page in pages if page.status != "ready" and page.id not in processed_page_ids}:
         return {"created": 0, "blocked": "PAGE_PROCESSING_INCOMPLETE"}
     version_ids = {x.paper_version_id for x in pages}
     recognition = db.scalar(
         select(RecognitionJob)
         .where(
             RecognitionJob.paper_version_id.in_(version_ids),
-            RecognitionJob.status.in_(["completed", "partial"]),
+            RecognitionJob.status.in_(
+                [RecognitionStatus.completed, RecognitionStatus.partially_completed]
+            ),
         )
         .order_by(RecognitionJob.created_at.desc())
     )
@@ -363,3 +377,52 @@ def build_fake_candidates(
         "prompt_injection_detected": injection,
         "question_number_conflict": any(value > 1 for key, value in number_counts.items() if key),
     }
+
+
+def materialize_draft_questions(
+    db: Session, job: AssignmentGenerationJob, revision: AssignmentDraftRevision
+) -> int:
+    """Create editable AI-draft questions without recording teacher approval."""
+    rows = list(
+        db.scalars(
+            select(AssignmentQuestionExtractionCandidate)
+            .where(
+                AssignmentQuestionExtractionCandidate.generation_job_id == job.id,
+                AssignmentQuestionExtractionCandidate.draft_revision_id == revision.id,
+                AssignmentQuestionExtractionCandidate.status == "suggested",
+            )
+            .order_by(
+                AssignmentQuestionExtractionCandidate.parent_candidate_id,
+                AssignmentQuestionExtractionCandidate.question_number,
+                AssignmentQuestionExtractionCandidate.id,
+            )
+        ).all()
+    )
+    created = 0
+    pending = list(rows)
+    while pending:
+        progressed = False
+        for row in list(pending):
+            parent = (
+                db.get(AssignmentQuestionExtractionCandidate, row.parent_candidate_id)
+                if row.parent_candidate_id
+                else None
+            )
+            if parent is not None and parent.materialized_question_id is None:
+                continue
+            regions = list(
+                db.scalars(
+                    select(AssignmentQuestionExtractionRegion)
+                    .where(AssignmentQuestionExtractionRegion.candidate_id == row.id)
+                    .order_by(AssignmentQuestionExtractionRegion.display_order)
+                ).all()
+            )
+            question = materialize(db, row, regions)
+            if parent is not None:
+                question.parent_question_id = parent.materialized_question_id
+            created += 1
+            pending.remove(row)
+            progressed = True
+        if not progressed:
+            break
+    return created

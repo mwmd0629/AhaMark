@@ -170,7 +170,11 @@ def test_migration_head_matches_strict_audit_models() -> None:
     collaboration_revision = script.get_revision("0030_collaborative_grading")
     student_portal_revision = script.get_revision("0031_student_portal")
     joint_exam_revision = script.get_revision("0032_joint_exam_roster")
-    assert script.get_current_head() == joint_exam_revision.revision
+    joint_exam_authorization_revision = script.get_revision(
+        "0033_joint_exam_class_authorization"
+    )
+    assert script.get_current_head() == joint_exam_authorization_revision.revision
+    assert joint_exam_authorization_revision.down_revision == joint_exam_revision.revision
     assert joint_exam_revision.down_revision == student_portal_revision.revision
     assert student_portal_revision.down_revision == collaboration_revision.revision
     assert collaboration_revision.down_revision == auto_confirmation_revision.revision

@@ -173,8 +173,12 @@ def test_file_role_duplicate_and_untrusted_answer_confirmation(monkeypatch):
     analyses = response.json()
     assert len(analyses) == 2
     assert any("DUPLICATE_FILE" in row["warning_codes"] for row in analyses)
+    question = next(row for row in analyses if row["suggested_role"] == "question_paper")
+    assert "FILE_ROLE_REVIEW_REQUIRED" not in question["warning_codes"]
     answer = next(row for row in analyses if row["suggested_role"] == "reference_answer")
     assert answer["suggested_answer_source"] == "third_party"
+    assert "FILE_ROLE_CONFLICT_REVIEW_REQUIRED" in answer["warning_codes"]
+    assert "ANSWER_SOURCE_CONFIRMATION_REQUIRED" not in answer["warning_codes"]
     forbidden = client.patch(
         f"/api/assignment-source-file-analyses/{answer['id']}/confirmation",
         json={

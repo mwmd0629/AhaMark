@@ -147,7 +147,9 @@ it("回填标准答案并在切换题目时同步更新", async () => {
     await screen.findByDisplayValue("第一题已保存答案"),
   ).toBeInTheDocument();
   expect(
-    screen.getByText(/由 Codex 生成可编辑草稿，不会直接发布/),
+    screen.getByText(
+      /由 Codex 一次生成题目、参考答案和评分标准草稿，不会直接发布/,
+    ),
   ).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("当前题目"), {
     target: { value: "q2" },

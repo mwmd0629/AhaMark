@@ -10,8 +10,11 @@ import {
   type AssignmentRecord,
   type GradingBatch,
   type JointGradingPool,
+  type JointGradingWork,
+  type JointExamTeam,
 } from "@/lib/api";
 import { Button, Card, Input, PageHeader, Select } from "@/components/ui";
+import { JointExamTeamPanel } from "@/components/joint-exam-team-panel";
 
 export default function GradingPage() {
   const searchParams = useSearchParams();
@@ -22,6 +25,8 @@ export default function GradingPage() {
     Array<GradingBatch & { class_name?: string }>
   >([]);
   const [jointPool, setJointPool] = useState<JointGradingPool>();
+  const [invitations, setInvitations] = useState<JointExamTeam[]>([]);
+  const [jointWork, setJointWork] = useState<JointGradingWork[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const assignment = useMemo(
@@ -37,6 +42,19 @@ export default function GradingPage() {
       )
       .catch(() => setError("无法加载已发布作业"))
       .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    Promise.all([assignmentsApi.jointInvitations(), gradingApi.jointWork()])
+      .then(([teams, work]) => {
+        setInvitations(teams);
+        setJointWork(work);
+      })
+      .catch((reason) =>
+        setError(
+          reason instanceof ApiError ? reason.message : "无法加载联考协作任务",
+        ),
+      );
   }, []);
 
   useEffect(() => {
@@ -116,6 +134,46 @@ export default function GradingPage() {
         title="作业批改"
         description="选择作业，创建批次并检查结果。"
       />
+      {invitations.map((team) => (
+        <JointExamTeamPanel
+          key={team.assignment_id}
+          assignmentId={team.assignment_id}
+          onChanged={async () => {
+            setInvitations(await assignmentsApi.jointInvitations());
+          }}
+        />
+      ))}
+      {jointWork.length > 0 && (
+        <Card className="space-y-3 p-5">
+          <div>
+            <strong>我的联考批改</strong>
+            <p className="mt-1 text-xs text-slate-500">
+              只显示分配给你的题目，不开放其他班级管理权限。
+            </p>
+          </div>
+          <div className="grid gap-2 md:grid-cols-2">
+            {jointWork.map((work) => (
+              <div
+                key={`${work.assignment_id}:${work.question_id}`}
+                className="flex items-center justify-between gap-3 rounded-xl border p-3"
+              >
+                <div>
+                  <strong className="text-sm">{work.assignment_title}</strong>
+                  <p className="text-xs text-slate-500">
+                    第 {work.question_number} 题 · {work.class_count} 个班 ·
+                    已复核 {work.reviewed}/{work.total}
+                  </p>
+                </div>
+                <Link
+                  href={`/grading/${work.first_batch_id}/review?questionId=${work.question_id}&joint=1`}
+                >
+                  <Button>开始批改</Button>
+                </Link>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
       <Card className="space-y-4 p-5">
         <Select
           label="已发布作业"

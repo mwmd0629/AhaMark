@@ -7,7 +7,11 @@ from app.assignment_generation.answer_rubric import (
     validate_revision_candidates,
 )
 from app.assignment_generation.dispatcher import DispatchedProviderResult, dispatch_stage
-from app.assignment_generation.extraction_stage import build_fake_candidates, build_page_suggestions
+from app.assignment_generation.extraction_stage import (
+    build_fake_candidates,
+    build_page_suggestions,
+    materialize_draft_questions,
+)
 from app.assignment_generation.file_analysis import collect_file_analysis
 from app.assignment_generation.materializers import (
     ProviderSemanticError,
@@ -26,6 +30,7 @@ from app.assignment_generation.service import (
     STAGES,
     complete_stage_retry,
     ensure_current,
+    has_retryable_stage,
     issue,
     next_stage_generation,
     pages_for_job,
@@ -48,6 +53,7 @@ from app.models import (
     Question,
     RecognitionBlock,
     RecognitionJob,
+    RecognitionStatus,
     StoredFile,
     now_utc,
 )
@@ -167,14 +173,15 @@ def _claim_job(
         return job, revision, "duplicate_delivery"
     if retry_stage and job.current_stage != retry_stage:
         return job, revision, "retry_stage_mismatch"
-    job.attempt += 1
-    if job.attempt > job.max_attempts:
-        transition(job, "failed")
-        job.retryable = False
-        job.error_code = "GENERATION_MAX_ATTEMPTS_REACHED"
-        job.error_message = "生成任务已达到最大尝试次数"
-        db.commit()
-        return job, revision, "max_attempts_reached"
+    if not retry_stage:
+        job.attempt += 1
+        if job.attempt > job.max_attempts:
+            transition(job, "failed")
+            job.retryable = False
+            job.error_code = "GENERATION_MAX_ATTEMPTS_REACHED"
+            job.error_message = "生成任务已达到最大尝试次数"
+            db.commit()
+            return job, revision, "max_attempts_reached"
     if retry_stage:
         reserved = db.scalar(
             select(GenerationStageResult)
@@ -853,9 +860,7 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
             db.flush()
             analyses[file_candidate.stored_file_id] = analysis
             for code in file_candidate.warning_codes:
-                severity = (
-                    "blocking" if code == "ANSWER_SOURCE_CONFIRMATION_REQUIRED" else "warning"
-                )
+                severity = "warning"
                 created_issue = issue(
                     db,
                     job,
@@ -863,8 +868,9 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                     stage,
                     severity,
                     code,
-                    "文件角色或答案来源需要教师确认"
-                    if code in {"FILE_ROLE_REVIEW_REQUIRED", "ANSWER_SOURCE_CONFIRMATION_REQUIRED"}
+                    "文件用途无法可靠判断，需要教师选择"
+                    if code
+                    in {"FILE_ROLE_REVIEW_REQUIRED", "FILE_ROLE_CONFLICT_REVIEW_REQUIRED"}
                     else "检测到重复文件；系统不会自动删除",
                     {"stored_file_id": file_candidate.stored_file_id},
                 )
@@ -939,6 +945,9 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
             try:
                 extraction = materialize_questions(db, job, revision, extraction_output)
                 result.update(extraction)
+                result["materialized_draft_questions"] = materialize_draft_questions(
+                    db, job, revision
+                )
                 if extraction["manual_required"]:
                     issue(
                         db,
@@ -982,6 +991,10 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                     str(blocked),
                     "题目抽取前置条件未满足；未创建业务候选",
                     {"draft_only": True},
+                )
+            else:
+                result["materialized_draft_questions"] = materialize_draft_questions(
+                    db, job, revision
                 )
             if extraction.get("prompt_injection_detected"):
                 issue(
@@ -1160,6 +1173,7 @@ def _run(job_id: str, retry_stage: str | None) -> dict[str, Any]:
             return {"status": reason.lower(), "stages": outcomes}
         if retry_stage:
             complete_stage_retry(job)
+            job.retryable = has_retryable_stage(db, job)
         else:
             target = (
                 "partial"
@@ -1230,3 +1244,21 @@ def run_assignment_generation(
     self: Any, job_id: str, retry_stage: str | None = None
 ) -> dict[str, Any]:
     return run_traced_task(self, job_id, lambda: _guarded_run(job_id, retry_stage))
+
+
+@celery_app.task(
+    name="ahamark.assignment_generation.run_after_recognition",
+    bind=True,
+    max_retries=180,
+)
+def run_assignment_generation_after_recognition(
+    self: Any, job_id: str, recognition_job_id: str
+) -> dict[str, Any]:
+    with SessionLocal() as db:
+        recognition = db.get(RecognitionJob, uuid.UUID(recognition_job_id))
+        if recognition is not None and recognition.status in {
+            RecognitionStatus.queued,
+            RecognitionStatus.running,
+        }:
+            raise self.retry(countdown=2)
+    return run_traced_task(self, job_id, lambda: _guarded_run(job_id, None))

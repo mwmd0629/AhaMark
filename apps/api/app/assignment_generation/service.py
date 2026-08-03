@@ -385,6 +385,32 @@ def complete_stage_retry(job: AssignmentGenerationJob) -> None:
     job.completed_at = now_utc()
 
 
+def has_retryable_stage(db: Session, job: AssignmentGenerationJob) -> bool:
+    """Return whether any latest stage result still has retry budget.
+
+    ``job.max_attempts`` is a per-stage safety limit.  A teacher may need to
+    resolve more than one sequential prerequisite (file roles, page layout,
+    then questions), so retries of different stages must not consume a shared
+    whole-job budget.
+    """
+    rows = db.scalars(
+        select(GenerationStageResult)
+        .where(GenerationStageResult.job_id == job.id)
+        .order_by(
+            GenerationStageResult.stage,
+            GenerationStageResult.stage_generation.desc(),
+        )
+    ).all()
+    latest: dict[str, GenerationStageResult] = {}
+    for row in rows:
+        latest.setdefault(row.stage, row)
+    return any(
+        row.status in {"failed", "unavailable", "discarded"}
+        and row.stage_generation < job.max_attempts
+        for row in latest.values()
+    )
+
+
 def stage_history(db: Session, job_id: uuid.UUID) -> list[GenerationStageResult]:
     return list(
         db.scalars(

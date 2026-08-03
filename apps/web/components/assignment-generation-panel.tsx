@@ -101,13 +101,20 @@ export function AssignmentGenerationPanel({
   const activeFileAnalyses = fileAnalyses.filter(
     (row) => row.analysis_status !== "superseded",
   );
+  const needsRoleReview = (row: AssignmentFileAnalysis) =>
+    row.analysis_status === "suggested" &&
+    (row.suggested_role === "unknown" ||
+      row.role_confidence < 0.7 ||
+      row.warning_codes.includes("FILE_ROLE_CONFLICT_REVIEW_REQUIRED"));
   const fileAnalysisCounts = {
     confirmed: activeFileAnalyses.filter(
       (row) => row.analysis_status === "confirmed",
     ).length,
-    pending: activeFileAnalyses.filter(
-      (row) => row.analysis_status === "suggested",
+    automatic: activeFileAnalyses.filter(
+      (row) => row.analysis_status === "suggested" && !needsRoleReview(row),
     ).length,
+    needsReview: activeFileAnalyses.filter((row) => needsRoleReview(row))
+      .length,
     stale: activeFileAnalyses.filter((row) => row.analysis_status === "stale")
       .length,
   };
@@ -279,7 +286,7 @@ export function AssignmentGenerationPanel({
           <h2 className="font-bold">Codex 草稿生成</h2>
           <p className="mt-1 text-sm text-[var(--neutral-600)]">
             由 Codex
-            生成可编辑草稿，不会直接发布。完整内容由系统核对，仅在异常时提示教师处理。
+            一次生成题目、参考答案和评分标准草稿，不会直接发布。系统自动核对完整性，仅在异常时提示处理。
           </p>
         </div>
         <Button
@@ -293,7 +300,7 @@ export function AssignmentGenerationPanel({
             Boolean(current && ACTIVE.has(current.status))
           }
         >
-          {current ? "重新生成新版本" : "启动生成任务"}
+          {current ? "重新生成完整草稿" : "生成完整草稿"}
         </Button>
       </div>
 
@@ -306,10 +313,11 @@ export function AssignmentGenerationPanel({
             当前草稿生成方式：Codex（由当前 Codex 任务执行）
           </div>
           <div className="mt-1 text-[var(--neutral-600)]">
-            外部 Provider：不使用；仅生成建议草稿，不会自动发布。
+            外部
+            Provider：不使用；系统会先完成识别，再连续生成题目、答案和评分标准，不会自动发布。
           </div>
           <div className="mt-1 text-amber-700">
-            Codex 生成结果仍需教师逐项确认；页面不会伪造 Provider 已完成。
+            教师只需处理异常并在最后确认发布；页面不会把未完成阶段显示为成功。
           </div>
         </div>
       )}
@@ -598,9 +606,12 @@ export function AssignmentGenerationPanel({
             aria-label="文件分析"
           >
             <summary className="cursor-pointer rounded-lg px-3 py-3 font-semibold hover:bg-[var(--neutral-50)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--brand-600)]">
-              第二步 · 文件与页面异常分析（{activeFileAnalyses.length}{" "}
-              个文件：已确认 {fileAnalysisCounts.confirmed}，待确认{" "}
-              {fileAnalysisCounts.pending}
+              文件与页面（{activeFileAnalyses.length} 个文件：自动识别{" "}
+              {fileAnalysisCounts.automatic}，需要选择{" "}
+              {fileAnalysisCounts.needsReview}
+              {fileAnalysisCounts.confirmed > 0
+                ? `，已修改 ${fileAnalysisCounts.confirmed}`
+                : ""}
               {fileAnalysisCounts.stale > 0
                 ? `，已过期 ${fileAnalysisCounts.stale}`
                 : ""}
@@ -608,7 +619,7 @@ export function AssignmentGenerationPanel({
             </summary>
             <div className="mt-3">
               <p className="text-sm text-[var(--neutral-600)]">
-                只需确认文件用途。分析不会删除或发布文件。
+                系统会自动识别文件用途并直接生成。仅在无法判断或用途冲突时需要选择；识别结果仍可修改。
               </p>
               {fileAnalysisCounts.stale > 0 && (
                 <div
@@ -645,9 +656,13 @@ export function AssignmentGenerationPanel({
                 role: file.suggested_role,
                 source: "not_applicable",
               };
+              const requiresRoleReview = needsRoleReview(file);
               const pages = pageAnalyses[file.id] ?? [];
               const visibleWarningCodes = file.warning_codes.filter(
-                (code) => !code.includes("ANSWER_SOURCE"),
+                (code) =>
+                  !code.includes("ANSWER_SOURCE") &&
+                  !code.includes("FILE_ROLE_") &&
+                  !code.includes("ROLE_REVIEW_REQUIRED"),
               );
               return (
                 <article
@@ -664,7 +679,9 @@ export function AssignmentGenerationPanel({
                   <p>
                     checksum：<code>{file.checksum.slice(0, 12)}</code> · 状态{" "}
                     {file.analysis_status === "suggested"
-                      ? "待确认"
+                      ? requiresRoleReview
+                        ? "需要选择用途"
+                        : "已自动识别"
                       : file.analysis_status === "confirmed"
                         ? "已确认"
                         : file.analysis_status === "stale"
@@ -677,7 +694,7 @@ export function AssignmentGenerationPanel({
                     </p>
                   )}
                   <p>
-                    建议用途：
+                    文件用途：
                     {FILE_ROLE_LABEL[file.suggested_role] ??
                       file.suggested_role}
                     （{Math.round(file.role_confidence * 100)}%）
@@ -711,69 +728,135 @@ export function AssignmentGenerationPanel({
                         .join("；")}
                     </p>
                   )}
-                  {file.analysis_status === "suggested" && (
-                    <div className="grid gap-2 sm:grid-cols-2">
-                      <label>
-                        确认文件角色
-                        <select
-                          aria-label={`${file.file_name ?? file.id} 文件角色`}
-                          className="mt-1 w-full rounded border p-2"
-                          value={choice.role}
-                          onChange={(event) =>
-                            setFileChoices((old) => ({
-                              ...old,
-                              [file.id]: {
-                                ...choice,
-                                role: event.target.value,
-                                source:
-                                  event.target.value === "reference_answer"
-                                    ? choice.source === "not_applicable"
-                                      ? file.suggested_answer_source ===
-                                        "not_applicable"
-                                        ? "unknown"
-                                        : file.suggested_answer_source
-                                      : choice.source
-                                    : "not_applicable",
-                              },
-                            }))
+                  {file.analysis_status === "suggested" &&
+                    (requiresRoleReview ? (
+                      <div className="grid gap-2 rounded-lg bg-amber-50 p-3 sm:grid-cols-2">
+                        <label>
+                          选择文件用途
+                          <select
+                            aria-label={`${file.file_name ?? file.id} 文件角色`}
+                            className="mt-1 w-full rounded border p-2"
+                            value={choice.role}
+                            onChange={(event) =>
+                              setFileChoices((old) => ({
+                                ...old,
+                                [file.id]: {
+                                  ...choice,
+                                  role: event.target.value,
+                                  source:
+                                    event.target.value === "reference_answer"
+                                      ? choice.source === "not_applicable"
+                                        ? file.suggested_answer_source ===
+                                          "not_applicable"
+                                          ? "unknown"
+                                          : file.suggested_answer_source
+                                        : choice.source
+                                      : "not_applicable",
+                                },
+                              }))
+                            }
+                          >
+                            {[
+                              "question_paper",
+                              "reference_answer",
+                              "rubric",
+                              "instructions",
+                              "attachment",
+                              "unknown",
+                            ].map((role) => (
+                              <option key={role} value={role}>
+                                {FILE_ROLE_LABEL[role]}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <Button
+                          className="self-end"
+                          variant="outline"
+                          disabled={busy}
+                          onClick={() =>
+                            void review(() =>
+                              assignmentGenerationApi.confirmFileAnalysis(
+                                file.id,
+                                {
+                                  expected_teacher_edit_version:
+                                    file.teacher_edit_version,
+                                  confirmed_role: choice.role,
+                                  confirmed_answer_source: choice.source,
+                                },
+                              ),
+                            )
                           }
                         >
-                          {[
-                            "question_paper",
-                            "reference_answer",
-                            "rubric",
-                            "instructions",
-                            "attachment",
-                            "unknown",
-                          ].map((role) => (
-                            <option key={role} value={role}>
-                              {FILE_ROLE_LABEL[role]}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      <Button
-                        className="self-end"
-                        variant="outline"
-                        disabled={busy}
-                        onClick={() =>
-                          void review(() =>
-                            assignmentGenerationApi.confirmFileAnalysis(
-                              file.id,
-                              {
-                                expected_teacher_edit_version:
-                                  file.teacher_edit_version,
-                                confirmed_role: choice.role,
-                                confirmed_answer_source: choice.source,
-                              },
-                            ),
-                          )
-                        }
-                      >
-                        确认文件用途
-                      </Button>
-                    </div>
-                  )}
+                          保存文件用途
+                        </Button>
+                      </div>
+                    ) : (
+                      <details>
+                        <summary className="cursor-pointer text-sm text-[var(--brand-700)]">
+                          修改用途
+                        </summary>
+                        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                          <label>
+                            文件用途
+                            <select
+                              aria-label={`${file.file_name ?? file.id} 文件角色`}
+                              className="mt-1 w-full rounded border p-2"
+                              value={choice.role}
+                              onChange={(event) =>
+                                setFileChoices((old) => ({
+                                  ...old,
+                                  [file.id]: {
+                                    ...choice,
+                                    role: event.target.value,
+                                    source:
+                                      event.target.value === "reference_answer"
+                                        ? file.suggested_answer_source ===
+                                          "not_applicable"
+                                          ? "unknown"
+                                          : file.suggested_answer_source
+                                        : "not_applicable",
+                                  },
+                                }))
+                              }
+                            >
+                              {[
+                                "question_paper",
+                                "reference_answer",
+                                "rubric",
+                                "instructions",
+                                "attachment",
+                                "unknown",
+                              ].map((role) => (
+                                <option key={role} value={role}>
+                                  {FILE_ROLE_LABEL[role]}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <Button
+                            className="self-end"
+                            variant="outline"
+                            disabled={busy}
+                            onClick={() =>
+                              void review(() =>
+                                assignmentGenerationApi.confirmFileAnalysis(
+                                  file.id,
+                                  {
+                                    expected_teacher_edit_version:
+                                      file.teacher_edit_version,
+                                    confirmed_role: choice.role,
+                                    confirmed_answer_source: choice.source,
+                                  },
+                                ),
+                              )
+                            }
+                          >
+                            保存修改
+                          </Button>
+                        </div>
+                      </details>
+                    ))}
                 </article>
               );
             })}

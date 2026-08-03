@@ -14,6 +14,8 @@ const api = vi.hoisted(() => ({
   listAssignments: vi.fn(),
   jointPool: vi.fn(),
   ensureJointPool: vi.fn(),
+  jointInvitations: vi.fn(),
+  jointWork: vi.fn(),
 }));
 
 vi.mock("next/navigation", () => ({
@@ -24,11 +26,16 @@ vi.mock("@/lib/api", async (load) => {
   const actual = await load<typeof import("@/lib/api")>();
   return {
     ...actual,
-    assignmentsApi: { ...actual.assignmentsApi, list: api.listAssignments },
+    assignmentsApi: {
+      ...actual.assignmentsApi,
+      list: api.listAssignments,
+      jointInvitations: api.jointInvitations,
+    },
     gradingApi: {
       ...actual.gradingApi,
       jointPool: api.jointPool,
       ensureJointPool: api.ensureJointPool,
+      jointWork: api.jointWork,
     },
   };
 });
@@ -50,6 +57,8 @@ beforeEach(() => {
     ],
   });
   api.jointPool.mockResolvedValue({ items: [], questions: [] });
+  api.jointInvitations.mockResolvedValue([]);
+  api.jointWork.mockResolvedValue([]);
   api.ensureJointPool.mockResolvedValue({
     questions: [
       {

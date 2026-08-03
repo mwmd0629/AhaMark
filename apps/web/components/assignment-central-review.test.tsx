@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AssignmentCentralReview } from "./assignment-central-review";
 import {
   ApiError,
+  type AssignmentReadinessRecord,
   type AssignmentReviewBundle,
   type AssignmentReviewItemRecord,
 } from "@/lib/api";
@@ -396,8 +397,50 @@ it("allows a teacher-authored assignment to publish without an AI generation job
   expect(onPublished).toHaveBeenCalled();
 });
 
+it("groups many manual publish checks into at most three teacher tasks", async () => {
+  reviewApi.list.mockResolvedValue({ items: [] });
+  reviewApi.bundle.mockRejectedValue(
+    new ApiError(409, {
+      code: "GENERATION_REQUIRED",
+      message: "尚无可审查的生成任务",
+      details: {},
+      request_id: "request-1",
+    }),
+  );
+  manualApi.manualPublishReadiness.mockResolvedValue({
+    mode: "manual",
+    ready: false,
+    issues: [
+      { code: "NO_CLASSES", message: "请选择班级", step: 1 },
+      { code: "FILE_ROLE_UNCONFIRMED", message: "文件用途未确认", step: 2 },
+      { code: "PAPER_VARIANT_REVIEW", message: "试卷页面待核对", step: 3 },
+      ...Array.from({ length: 8 }, (_, index) => ({
+        code: "QUESTION_SCORE_REQUIRED",
+        message: `第 ${index + 1} 题分值未设置`,
+        step: 4,
+        question_id: `question-${index + 1}`,
+      })),
+      { code: "NO_RUBRIC", message: "请设置评分标准", step: 5 },
+    ],
+    state_hash: "m".repeat(64),
+    expected_assignment_updated_at: "2026-07-26T00:00:00Z",
+    class_ids: [],
+    due_at: null,
+    total_score: null,
+  });
+
+  renderReview();
+
+  expect(await screen.findByText("还有 3 件事")).toBeInTheDocument();
+  expect(screen.getByText("1. 完善发布范围")).toBeInTheDocument();
+  expect(screen.getByText("2. 核对试卷文件")).toBeInTheDocument();
+  expect(screen.getByText("3. 完善题目与评分标准")).toBeInTheDocument();
+  expect(screen.queryByText("还需完成 12 项")).not.toBeInTheDocument();
+  expect(screen.getAllByText(/查看系统检查记录/)).toHaveLength(3);
+});
+
 describe("AssignmentCentralReview preserved behavior", () => {
-  it("shows each question answer, full rubric, and teacher-readable blocker together", async () => {
+  it("folds question details and technical blockers behind concise review tasks", async () => {
     reviewApi.bundle.mockResolvedValue(
       reviewBundle({
         status: "action_required",
@@ -460,11 +503,10 @@ describe("AssignmentCentralReview preserved behavior", () => {
     expect(
       screen.getByText("请修改作业总分或题目分值，使二者完全一致。"),
     ).toBeInTheDocument();
-    const details = screen
-      .getByText("当前阻塞项")
-      .parentElement?.querySelector("details");
-    expect(details).not.toHaveAttribute("open");
-    expect(details).toHaveTextContent("TOTAL_SCORE_MISMATCH");
+    expect(screen.getByText("还有 1 件事")).toBeInTheDocument();
+    const audit = screen.getByText(/查看检查记录/).closest("details");
+    expect(audit).not.toHaveAttribute("open");
+    expect(audit).toHaveTextContent("TOTAL_SCORE_MISMATCH");
   });
 
   it("requires an explicit start and never creates or publishes on load", async () => {
@@ -529,7 +571,7 @@ describe("AssignmentCentralReview preserved behavior", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("opens and scrolls to the real file confirmation area", async () => {
+  it("opens the file area only for a genuinely ambiguous role", async () => {
     const target = document.createElement("details");
     target.id = "generation-file-analysis";
     target.scrollIntoView = vi.fn();
@@ -542,7 +584,7 @@ describe("AssignmentCentralReview preserved behavior", () => {
     );
     renderReview();
     fireEvent.click(
-      await screen.findByRole("button", { name: "打开文件确认区" }),
+      await screen.findByRole("button", { name: "处理异常文件" }),
     );
     expect(target.open).toBe(true);
   });
@@ -619,6 +661,35 @@ describe("AssignmentCentralReview preserved behavior", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "确认发布" })).toBeEnabled(),
     );
+  });
+
+  it("leaves the preparing state after a delayed readiness response", async () => {
+    const pending = deferred<AssignmentReadinessRecord>();
+    reviewApi.prepare.mockReturnValueOnce(pending.promise);
+    renderReview();
+
+    expect(
+      await screen.findByRole("button", { name: "正在核对发布状态…" }),
+    ).toBeDisabled();
+    await testingAct(async () => {
+      pending.resolve({
+        id: "readiness-delayed",
+        readiness_hash: "r".repeat(64),
+        status: "ready",
+        expires_at: "2026-08-01T00:00:00Z",
+        class_ids: [],
+        due_at: null,
+        total_score: "10.00",
+        paper_version_id: "paper-1",
+        legacy_rubric_version_id: "rubric-1",
+      });
+      await pending.promise;
+    });
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "确认发布" })).toBeEnabled(),
+    );
+    expect(reviewApi.prepare).toHaveBeenCalledOnce();
   });
 
   it("blocks when a required Bundle confirmation is absent", async () => {

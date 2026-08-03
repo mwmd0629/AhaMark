@@ -378,6 +378,9 @@ class AssignmentClass(Base):
     class_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("classes.id", ondelete="RESTRICT"), index=True
     )
+    authorized_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 

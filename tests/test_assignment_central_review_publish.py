@@ -33,6 +33,7 @@ from app.models import (
     AssignmentDraftRevision,
     AssignmentExplicitConfirmation,
     AssignmentGenerationJob,
+    AssignmentPublishReadinessSnapshot,
     AssignmentQuestionExtractionCandidate,
     AssignmentReviewItem,
     AssignmentReviewSession,
@@ -89,12 +90,12 @@ def test_stable_hash_ignores_mapping_insertion_order() -> None:
     )
 
 
-def test_bundle_blocker_status_policy_is_fail_closed() -> None:
+def test_bundle_blocker_status_policy_only_blocks_on_unresolved_blocking_issues() -> None:
     assert _issue_blocks_review_bundle("blocking", "open") is True
     assert _issue_blocks_review_bundle("blocking", "acknowledged") is True
     assert _issue_blocks_review_bundle("blocking", "resolved") is False
     assert _issue_blocks_review_bundle("blocking", "rejected") is False
-    assert _issue_blocks_review_bundle("warning", "open") is True
+    assert _issue_blocks_review_bundle("warning", "open") is False
     assert _issue_blocks_review_bundle("warning", "acknowledged") is False
     assert _issue_blocks_review_bundle("warning", "resolved") is False
     assert _issue_blocks_review_bundle("warning", "rejected") is False
@@ -465,18 +466,26 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
             validation_rule={"answer_type": "exact_scalar"},
         )
     )
-    provider_issue = GenerationIssue(
-        owner_id=actor.id,
-        assignment_id=assignment.id,
-        job_id=job.id,
-        draft_revision_id=revision.id,
-        stage="answer_rubric",
-        severity="blocking",
-        code="PROVIDER_UNAVAILABLE",
-        message="provider failed before teacher recovery",
-        resolution_status="open",
-    )
-    db.add(provider_issue)
+    recovered_issues = [
+        GenerationIssue(
+            owner_id=actor.id,
+            assignment_id=assignment.id,
+            job_id=job.id,
+            draft_revision_id=revision.id,
+            stage="answer_rubric",
+            severity="blocking",
+            code=code,
+            message=f"{code} before teacher recovery",
+            resolution_status="open",
+        )
+        for code in (
+            "PROVIDER_UNAVAILABLE",
+            "PAGE_ORGANIZATION_INCOMPLETE",
+            "QUESTION_PAPER_ROLE_UNCONFIRMED",
+            "VALIDATION_FAILED",
+        )
+    ]
+    db.add_all(recovered_issues)
     db.commit()
 
     created = client.post(f"/api/assignments/{assignment.id}/review-sessions")
@@ -485,15 +494,20 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
     review_items = client.get(f"/api/assignment-review-sessions/{session['id']}/items").json()[
         "items"
     ]
-    provider_review = next(
-        item for item in review_items if item["issue_code"] == "PROVIDER_UNAVAILABLE"
-    )
-    assert provider_review["severity"] == "info"
-    assert "无需再处理" in provider_review["message"]
+    for code in (
+        "PROVIDER_UNAVAILABLE",
+        "PAGE_ORGANIZATION_INCOMPLETE",
+        "QUESTION_PAPER_ROLE_UNCONFIRMED",
+        "VALIDATION_FAILED",
+    ):
+        recovered_review = next(item for item in review_items if item["issue_code"] == code)
+        assert recovered_review["severity"] == "info"
+        assert "无需再处理" in recovered_review["message"]
     original_session_id = session["id"]
-    provider_issue.resolution_status = "resolved"
-    provider_issue.resolved_by = actor.id
-    provider_issue.resolved_at = now_utc()
+    for issue in recovered_issues:
+        issue.resolution_status = "resolved"
+        issue.resolved_by = actor.id
+        issue.resolved_at = now_utc()
     db.commit()
     unchanged = client.post(f"/api/assignments/{assignment.id}/review-sessions")
     assert unchanged.status_code == 201, unchanged.text
@@ -511,9 +525,6 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
         "classes",
         "due_at",
         "total_score",
-        "file_roles",
-        "answer_sources",
-        "paper_version",
         "reference_answers",
         "structured_rubrics",
     }
@@ -529,7 +540,7 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
     db.commit()
     changed_content = client.get(f"/api/assignment-review-sessions/{session['id']}").json()
     assert "reference_answers" in changed_content["confirmations"]
-    assert "answer_sources" in changed_content["confirmations"]
+    assert "answer_sources" not in changed_content["confirmations"]
     answer.content_hash = "3" * 64
     answer.normalized_content = "3"
     db.commit()
@@ -604,9 +615,6 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
         "classes",
         "due_at",
         "total_score",
-        "file_roles",
-        "answer_sources",
-        "paper_version",
         "reference_answers",
         "structured_rubrics",
     }
@@ -625,6 +633,15 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
     assert binding.status_code == 200, binding.text
     assert binding.json()["manual_review_required"] is True
     assert binding.json()["conversion_warnings"] == ["VALIDATION_RULE_NOT_LOSSLESS"]
+    draft_binding_bundle = client.get(f"/api/assignments/{assignment.id}/review-bundle").json()
+    assert draft_binding_bundle["binding"]["status"] == "confirmed"
+    assert next(
+        item
+        for item in draft_binding_bundle["confirmations"]
+        if item["type"] == "legacy_binding"
+    )["origin"] == "system_auto"
+    assert draft_binding_bundle["binding"]["projection_current"] is True
+    assert draft_binding_bundle["binding"]["projection_reason"] is None
     session = client.get(f"/api/assignment-review-sessions/{session['id']}").json()
     repeated_binding = client.post(
         f"/api/assignment-review-sessions/{session['id']}/rubric-binding",
@@ -638,6 +655,21 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
 
     binding_row = db.get(AssignmentRubricPublicationBinding, uuid.UUID(binding.json()["id"]))
     assert binding_row is not None
+    binding_row.status = "stale"
+    db.commit()
+    rebuilt_stale_binding = client.post(
+        f"/api/assignment-review-sessions/{session['id']}/rubric-binding",
+        json={
+            "expected_review_version": session["review_version"],
+            "explicit_confirmation": True,
+        },
+    )
+    assert rebuilt_stale_binding.status_code == 200, rebuilt_stale_binding.text
+    assert rebuilt_stale_binding.json()["id"] != binding.json()["id"]
+    binding = rebuilt_stale_binding
+    binding_row = db.get(AssignmentRubricPublicationBinding, uuid.UUID(binding.json()["id"]))
+    assert binding_row is not None
+    session = client.get(f"/api/assignment-review-sessions/{session['id']}").json()
     replacement_rubric.title = "语义内容漂移"
     db.commit()
     source_drift = client.post(
@@ -698,18 +730,21 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
             "explicit_confirmation": True,
         },
     )
-    assert confirmed.status_code == 200, confirmed.text
-    human_bundle = client.get(f"/api/assignments/{assignment.id}/review-bundle").json()
-    assert human_bundle["binding"]["projection_current"] is True
-    assert human_bundle["binding"]["projection_reason"] is None
-    human_legacy_confirmation = next(
-        item for item in human_bundle["confirmations"] if item["type"] == "legacy_binding"
+    assert confirmed.status_code == 409
+    assert confirmed.json()["code"] == "BINDING_NOT_CONFIRMABLE"
+    automatic_binding_bundle = client.get(f"/api/assignments/{assignment.id}/review-bundle").json()
+    assert automatic_binding_bundle["binding"]["projection_current"] is True
+    assert automatic_binding_bundle["binding"]["projection_reason"] is None
+    automatic_legacy_confirmation = next(
+        item
+        for item in automatic_binding_bundle["confirmations"]
+        if item["type"] == "legacy_binding"
     )
-    assert human_legacy_confirmation["origin"] == "origin"
-    assert human_legacy_confirmation["binding_id"] == human_bundle["binding"]["id"]
+    assert automatic_legacy_confirmation["origin"] == "system_auto"
+    assert automatic_legacy_confirmation["binding_id"] == automatic_binding_bundle["binding"]["id"]
     assert (
-        human_legacy_confirmation["source_binding_hash"]
-        == human_bundle["binding"]["source_binding_hash"]
+        automatic_legacy_confirmation["source_binding_hash"]
+        == automatic_binding_bundle["binding"]["source_binding_hash"]
     )
     session = client.get(f"/api/assignment-review-sessions/{session['id']}").json()
     manual_blocker = GenerationIssue(
@@ -857,6 +892,31 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
         },
     )
     assert prepared.status_code == 200, prepared.text
+    repeated_prepared = client.post(
+        f"/api/assignment-review-sessions/{session['id']}/prepare-publication",
+        json={
+            "expected_review_version": session["review_version"],
+            "explicit_confirmation": True,
+        },
+    )
+    assert repeated_prepared.status_code == 200, repeated_prepared.text
+    assert repeated_prepared.json()["id"] == prepared.json()["id"]
+    snapshot = db.get(AssignmentPublishReadinessSnapshot, uuid.UUID(prepared.json()["id"]))
+    assert snapshot is not None
+    snapshot.status = "expired"
+    snapshot.expires_at = now_utc() - timedelta(minutes=1)
+    snapshot.invalidated_at = now_utc()
+    db.commit()
+    renewed_prepared = client.post(
+        f"/api/assignment-review-sessions/{session['id']}/prepare-publication",
+        json={
+            "expected_review_version": session["review_version"],
+            "explicit_confirmation": True,
+        },
+    )
+    assert renewed_prepared.status_code == 200, renewed_prepared.text
+    assert renewed_prepared.json()["id"] == prepared.json()["id"]
+    assert renewed_prepared.json()["status"] == "ready"
     db.refresh(assignment)
     assert assignment.status == "draft"
     legacy_item.title = "post-confirm target drift"

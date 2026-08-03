@@ -23,6 +23,7 @@ import {
 import { AssignmentGenerationPanel } from "@/components/assignment-generation-panel";
 import { AnswerRubricGenerationReview } from "@/components/answer-rubric-generation-review";
 import { AssignmentCentralReview } from "@/components/assignment-central-review";
+import { JointExamTeamPanel } from "@/components/joint-exam-team-panel";
 import {
   ApiError,
   assignmentsApi,
@@ -147,8 +148,13 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
     setDueValue(item?.due_at ? toLocalDateTimeInput(item.due_at) : "");
   }, [item?.id, item?.due_at]);
   useEffect(() => {
-    setSelectedClassIds(item?.classes.map((entry) => entry.id) ?? []);
-  }, [item?.classes]);
+    const ownedClassIds = new Set(classes.map((entry) => entry.id));
+    setSelectedClassIds(
+      item?.classes
+        .filter((entry) => ownedClassIds.has(entry.id))
+        .map((entry) => entry.id) ?? [],
+    );
+  }, [classes, item?.classes]);
   useEffect(() => {
     setDeliveryMode(item?.delivery_mode ?? "class_assignment");
   }, [item?.id, item?.delivery_mode]);
@@ -238,12 +244,8 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
       toast("请选择具体的截止日期和时间", "error");
       return;
     }
-    if (!selectedClassIds.length) {
+    if (deliveryMode !== "joint_exam" && !selectedClassIds.length) {
       toast("请至少选择一个班级", "error");
-      return;
-    }
-    if (deliveryMode === "joint_exam" && selectedClassIds.length < 2) {
-      toast("联考统批至少选择两个班级", "error");
       return;
     }
     setBusy(true);
@@ -546,7 +548,7 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
               )}
               <p className="text-xs text-slate-500">
                 {deliveryMode === "joint_exam"
-                  ? "至少选择两个班级；发布时冻结本次联考名单。"
+                  ? "可先选择自己的班级，再邀请其他老师授权其班级；发布前至少两个班级。"
                   : "发布前可以调整；发布后班级范围将锁定。"}
               </p>
             </fieldset>
@@ -1279,6 +1281,10 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
             进入发布检查
           </Button>
         </Card>
+      )}
+
+      {item.delivery_mode === "joint_exam" && (step === 1 || step === 6) && (
+        <JointExamTeamPanel assignmentId={item.id} onChanged={load} />
       )}
 
       {step === 6 && (

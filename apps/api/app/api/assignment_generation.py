@@ -14,6 +14,7 @@ from app.assignment_generation.service import (
     STAGES,
     create_job,
     ensure_current,
+    has_retryable_stage,
     issue,
     job_json,
     mark_stale,
@@ -46,10 +47,13 @@ from app.models import (
     PaperPageOrganizationSuggestion,
     PaperVersion,
     QuestionKnowledgePoint,
+    RecognitionJob,
+    RecognitionStatus,
     StoredFile,
     VersionStatus,
     now_utc,
 )
+from app.recognition.pipeline import provider_from_settings
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select, update
@@ -174,11 +178,69 @@ def dispatch_job(db: Session, job: AssignmentGenerationJob, stage: str | None = 
     try:
         from workers.celery_app import celery_app
 
-        task = celery_app.send_task(
-            "ahamark.assignment_generation.run",
-            args=[str(job.id)],
-            kwargs={"retry_stage": stage},
-        )
+        recognition_job = None
+        if stage is None:
+            assignment = db.get(Assignment, job.assignment_id)
+            if assignment is not None and assignment.active_paper_version_id is not None:
+                completed = db.scalar(
+                    select(RecognitionJob)
+                    .where(
+                        RecognitionJob.paper_version_id == assignment.active_paper_version_id,
+                        RecognitionJob.status.in_(
+                            {
+                                RecognitionStatus.completed,
+                                RecognitionStatus.partially_completed,
+                            }
+                        ),
+                    )
+                    .order_by(RecognitionJob.created_at.desc())
+                )
+                if completed is None:
+                    recognition_job = db.scalar(
+                        select(RecognitionJob)
+                        .where(
+                            RecognitionJob.paper_version_id == assignment.active_paper_version_id,
+                            RecognitionJob.status.in_(
+                                {RecognitionStatus.queued, RecognitionStatus.running}
+                            ),
+                        )
+                        .order_by(RecognitionJob.created_at.desc())
+                    )
+                    if recognition_job is None:
+                        provider = provider_from_settings(get_settings())
+                        available, _reason = provider.available()
+                        if available:
+                            recognition_job = RecognitionJob(
+                                owner_id=job.owner_id,
+                                assignment_id=job.assignment_id,
+                                paper_version_id=assignment.active_paper_version_id,
+                                provider=provider.name,
+                                provider_version=provider.version,
+                                config_version=get_settings().recognition_config_version,
+                                idempotency_key=f"assignment-generation:{job.id}",
+                            )
+                            db.add(recognition_job)
+                            audit(
+                                db,
+                                job.owner_id,
+                                "recognition.job.create_for_assignment_generation",
+                                "recognition_job",
+                                recognition_job.id,
+                                {"generation_job_id": str(job.id)},
+                            )
+                            db.commit()
+        if recognition_job is not None:
+            celery_app.send_task("ahamark.recognition.run", args=[str(recognition_job.id)])
+            task = celery_app.send_task(
+                "ahamark.assignment_generation.run_after_recognition",
+                args=[str(job.id), str(recognition_job.id)],
+            )
+        else:
+            task = celery_app.send_task(
+                "ahamark.assignment_generation.run",
+                args=[str(job.id)],
+                kwargs={"retry_stage": stage},
+            )
     except Exception:
         db.rollback()
         locked_job = db.scalar(
@@ -322,10 +384,6 @@ def retry_stage(job_id: uuid.UUID, data: RetryStageInput, db: Db, actor: Actor) 
     job = owned_job(db, actor.id, job_id, for_update=True)
     if job.status not in {"failed", "partial"}:
         raise ApiProblem(409, "GENERATION_STAGE_NOT_RETRYABLE", "任务当前不允许阶段重试")
-    if job.attempt >= job.max_attempts:
-        job.retryable = False
-        db.commit()
-        raise ApiProblem(409, "GENERATION_MAX_ATTEMPTS_REACHED", "生成任务已达到最大尝试次数")
     previous = db.scalar(
         select(GenerationStageResult)
         .where(
@@ -336,6 +394,15 @@ def retry_stage(job_id: uuid.UUID, data: RetryStageInput, db: Db, actor: Actor) 
     )
     if previous is None or previous.status not in {"failed", "unavailable", "discarded"}:
         raise ApiProblem(409, "GENERATION_STAGE_NOT_RETRYABLE", "该阶段没有可重试结果")
+    if previous.stage_generation >= job.max_attempts:
+        job.retryable = has_retryable_stage(db, job)
+        db.commit()
+        raise ApiProblem(
+            409,
+            "GENERATION_MAX_ATTEMPTS_REACHED",
+            "该阶段已达到最大尝试次数",
+            {"stage": data.stage, "max_attempts": job.max_attempts},
+        )
     stage_index = STAGES.index(data.stage)
     for prerequisite in STAGES[:stage_index]:
         ok = db.scalar(
@@ -913,7 +980,11 @@ def confirm_file_analysis(
         db,
         revision.id,
         actor.id,
-        {"FILE_ROLE_REVIEW_REQUIRED", "ANSWER_SOURCE_CONFIRMATION_REQUIRED"},
+        {
+            "FILE_ROLE_REVIEW_REQUIRED",
+            "FILE_ROLE_CONFLICT_REVIEW_REQUIRED",
+            "ANSWER_SOURCE_CONFIRMATION_REQUIRED",
+        },
         data.review_note,
         str(row.stored_file_id),
     )

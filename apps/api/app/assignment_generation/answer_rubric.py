@@ -325,7 +325,9 @@ def _current_questions(
             .where(
                 AssignmentQuestionExtractionCandidate.draft_revision_id == revision.id,
                 AssignmentQuestionExtractionCandidate.generation_job_id == job.id,
-                AssignmentQuestionExtractionCandidate.status.in_({"accepted", "modified"}),
+                AssignmentQuestionExtractionCandidate.status.in_(
+                    {"suggested", "accepted", "modified"}
+                ),
                 Question.status == "active",
             )
             .order_by(Question.display_order, Question.id)

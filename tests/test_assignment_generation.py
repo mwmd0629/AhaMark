@@ -326,6 +326,67 @@ def test_retry_stage_appends_generation_and_keeps_history(monkeypatch):
     ]
     assert [row["stage_generation"] for row in rows] == [1, 2]
     assert rows[0]["id"] == first["id"]
+    detail = client.get(f"/api/assignment-generation-jobs/{created['id']}").json()
+    assert detail["retryable"] is True
+    with SessionLocal() as db:
+        job = db.get(AssignmentGenerationJob, uuid.UUID(created["id"]))
+        assert job is not None
+        assert job.attempt == 1
+
+
+def test_retry_budget_is_independent_for_sequential_stages(monkeypatch):
+    monkeypatch.setattr("app.api.assignment_generation.dispatch_job", lambda *_args: None)
+    _actor, assignment = actor_and_assignment()
+    created = start(assignment.id).json()
+    _run(created["id"], None)
+
+    for stage in ("extracting_questions", "generating_rubrics"):
+        retried = client.post(
+            f"/api/assignment-generation-jobs/{created['id']}/retry-stage",
+            json={"stage": stage},
+        )
+        assert retried.status_code == 200
+        assert _run(created["id"], stage)["status"] == "partial"
+
+    detail = client.get(f"/api/assignment-generation-jobs/{created['id']}").json()
+    by_stage = {
+        stage: [row["stage_generation"] for row in detail["stages"] if row["stage"] == stage]
+        for stage in ("extracting_questions", "generating_rubrics")
+    }
+    assert by_stage == {
+        "extracting_questions": [1, 2],
+        "generating_rubrics": [1, 2],
+    }
+    with SessionLocal() as db:
+        job = db.get(AssignmentGenerationJob, uuid.UUID(created["id"]))
+        assert job is not None
+        assert job.attempt == 1
+
+
+def test_retry_budget_is_enforced_per_stage(monkeypatch):
+    monkeypatch.setattr("app.api.assignment_generation.dispatch_job", lambda *_args: None)
+    _actor, assignment = actor_and_assignment()
+    created = start(assignment.id).json()
+    _run(created["id"], None)
+    with SessionLocal() as db:
+        job = db.get(AssignmentGenerationJob, uuid.UUID(created["id"]))
+        assert job is not None
+        job.max_attempts = 2
+        db.commit()
+
+    first_retry = client.post(
+        f"/api/assignment-generation-jobs/{created['id']}/retry-stage",
+        json={"stage": "extracting_questions"},
+    )
+    assert first_retry.status_code == 200
+    _run(created["id"], "extracting_questions")
+
+    exhausted = client.post(
+        f"/api/assignment-generation-jobs/{created['id']}/retry-stage",
+        json={"stage": "extracting_questions"},
+    )
+    assert exhausted.status_code == 409
+    assert exhausted.json()["code"] == "GENERATION_MAX_ATTEMPTS_REACHED"
 
 
 def test_worker_edit_version_guard_and_snapshot_stability(monkeypatch):

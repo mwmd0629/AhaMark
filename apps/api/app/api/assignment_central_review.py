@@ -68,7 +68,11 @@ CONFIRMATION_TYPES = {
     "structured_rubrics",
     "legacy_binding",
 }
-REQUIRED_CONFIRMATIONS = CONFIRMATION_TYPES
+REQUIRED_CONFIRMATIONS = CONFIRMATION_TYPES - {
+    "answer_sources",
+    "file_roles",
+    "paper_version",
+}
 AUTOMATIC_CONFIRMATION_TYPES = REQUIRED_CONFIRMATIONS - {"legacy_binding"}
 LEGACY_PROJECTION_SCHEMA_VERSION = "structured-rubric-projection-v3"
 LEGACY_PROJECTION_PROFILE = "structured-to-legacy"
@@ -104,8 +108,11 @@ MANUAL_FALLBACK_WARNINGS = {
 RECOVERED_GENERATION_CODES = {
     "GENERATION_PARTIAL",
     "MANUAL_REVIEW_REQUIRED",
+    "PAGE_ORGANIZATION_INCOMPLETE",
     "PROVIDER_UNAVAILABLE",
     "QUESTION_CONFIRMATION_REQUIRED",
+    "QUESTION_PAPER_ROLE_UNCONFIRMED",
+    "VALIDATION_FAILED",
 }
 
 
@@ -658,6 +665,7 @@ def review_bundle(db: Session, actor_id: uuid.UUID, assignment_id: uuid.UUID) ->
             session,
             binding_id=binding.id if binding is not None else None,
             lock=False,
+            require_confirmed=False,
         )
         if session is not None and binding is not None
         else ProjectionValidation(None, None, False, "BINDING_NOT_CURRENT")
@@ -767,8 +775,6 @@ def review_bundle(db: Session, actor_id: uuid.UUID, assignment_id: uuid.UUID) ->
 def _issue_blocks_review_bundle(severity: str, status: str) -> bool:
     if severity == "blocking":
         return status not in {"resolved", "rejected"}
-    if severity == "warning":
-        return status not in {"acknowledged", "resolved", "rejected"}
     return False
 
 
@@ -981,12 +987,17 @@ def confirmation_value(db: Session, session: AssignmentReviewSession, kind: str)
                 .order_by(AssignmentSourceFileAnalysis.stored_file_id)
             )
         )
-        key = (
-            "teacher_confirmed_role" if kind == "file_roles" else "teacher_confirmed_answer_source"
-        )
         return {
             "files": [
-                {"id": f.stored_file_id, "value": getattr(f, key), "checksum": f.checksum}
+                {
+                    "id": f.stored_file_id,
+                    "value": (
+                        f.teacher_confirmed_role or f.suggested_role
+                        if kind == "file_roles"
+                        else f.teacher_confirmed_answer_source or f.suggested_answer_source
+                    ),
+                    "checksum": f.checksum,
+                }
                 for f in files
             ]
         }
@@ -1514,19 +1525,22 @@ def generated_issues(db: Session, session: AssignmentReviewSession) -> list[dict
                 entity="file",
                 entity_id=f.stored_file_id,
             )
-        if not f.teacher_confirmed_role:
+        effective_role = f.teacher_confirmed_role or f.suggested_role
+        role_needs_review = (
+            effective_role in {None, "unknown"}
+            or (
+                not f.teacher_confirmed_role
+                and (
+                    float(f.role_confidence or 0) < 0.7
+                    or "FILE_ROLE_CONFLICT_REVIEW_REQUIRED" in (f.warning_codes or [])
+                )
+            )
+        )
+        if role_needs_review:
             add(
                 "FILE_ROLE_UNCONFIRMED",
                 "files",
-                "文件角色尚未确认",
-                entity="file",
-                entity_id=f.stored_file_id,
-            )
-        if not f.teacher_confirmed_answer_source or f.teacher_confirmed_answer_source == "unknown":
-            add(
-                "ANSWER_SOURCE_UNCONFIRMED",
-                "answers",
-                "答案来源未知或尚未确认",
+                "文件用途无法可靠判断或存在冲突",
                 entity="file",
                 entity_id=f.stored_file_id,
             )
@@ -1545,9 +1559,7 @@ def generated_issues(db: Session, session: AssignmentReviewSession) -> list[dict
                 entity="page",
                 entity_id=page.paper_page_id,
             )
-        if (
-            page.mixed_document_suspected or page.variant_label
-        ) and "paper_version" not in confirms:
+        if page.mixed_document_suspected or page.variant_label not in {None, "", "unknown"}:
             add(
                 "PAPER_VARIANT_REVIEW",
                 "pages",
@@ -1564,7 +1576,15 @@ def generated_issues(db: Session, session: AssignmentReviewSession) -> list[dict
                 "page",
                 page.paper_page_id,
             )
-    if db.scalar(
+    generated_rows = selected_versions(db, paper.id)
+    complete_generated_content = bool(generated_rows) and all(
+        row["answer"] is not None
+        and row["answer"].status == "confirmed"
+        and row["rubric"] is not None
+        and row["rubric"].status == "confirmed"
+        for row in generated_rows
+    )
+    if not complete_generated_content and db.scalar(
         select(PaperPageOrganizationSuggestion.id).where(
             PaperPageOrganizationSuggestion.draft_revision_id == session.draft_revision_id,
             PaperPageOrganizationSuggestion.status.in_(["suggested", "stale"]),
@@ -1595,14 +1615,6 @@ def generated_issues(db: Session, session: AssignmentReviewSession) -> list[dict
                 candidate.id,
                 {"warning_codes": candidate.warning_codes},
             )
-    generated_rows = selected_versions(db, paper.id)
-    complete_generated_content = bool(generated_rows) and all(
-        row["answer"] is not None
-        and row["answer"].status == "confirmed"
-        and row["rubric"] is not None
-        and row["rubric"].status == "confirmed"
-        for row in generated_rows
-    )
     for issue in db.scalars(
         select(GenerationIssue).where(
             GenerationIssue.job_id == session.generation_job_id,
@@ -2115,7 +2127,7 @@ def automatic_confirmation_blocker(
                     | AssignmentPageAnalysis.missing_page_suspected.is_(True)
                     | AssignmentPageAnalysis.low_quality.is_(True)
                     | AssignmentPageAnalysis.mixed_document_suspected.is_(True)
-                    | AssignmentPageAnalysis.variant_label.is_not(None)
+                    | AssignmentPageAnalysis.variant_label.not_in(["", "unknown"])
                 ),
             )
         )
@@ -2314,7 +2326,7 @@ def create_binding(
             lock=True,
             require_confirmed=False,
         )
-        if validation.current:
+        if validation.current and old.status in {"draft", "validated", "confirmed"}:
             return binding_json(old)
         old.status = "stale"
         old.invalidated_at = now_utc()
@@ -2442,6 +2454,9 @@ def create_binding(
         )
         or 0
     ) + 1
+    known_compatibility_fallback = all(
+        item["code"] in MANUAL_FALLBACK_WARNINGS for item in loss_report
+    )
     binding = AssignmentRubricPublicationBinding(
         owner_id=actor.id,
         assignment_id=session.assignment_id,
@@ -2449,7 +2464,7 @@ def create_binding(
         paper_version_id=session.paper_version_id,
         legacy_rubric_version_id=legacy.id,
         binding_version=binding_version,
-        status="validated" if not warnings else "draft",
+        status="validated" if known_compatibility_fallback else "draft",
         source_binding_hash=source_hash,
         source_semantic_hash=source_hash,
         target_legacy_hash=target_legacy_hash(db, legacy.id),
@@ -2463,7 +2478,7 @@ def create_binding(
     db.add(binding)
     session.legacy_rubric_version_id = legacy.id
     db.flush()
-    if not loss_report:
+    if known_compatibility_fallback:
         binding.status = "confirmed"
         binding.confirmed_by = actor.id
         binding.confirmed_at = now_utc()
@@ -2656,6 +2671,8 @@ def prepare_publication(
 ) -> dict[str, Any]:
     session_hint = owned_session(db, actor.id, session_id)
     assignment = owned_assignment(db, actor.id, session_hint.assignment_id, lock=True)
+    if assignment.status != AssignmentStatus.draft:
+        raise ApiProblem(409, "ASSIGNMENT_NOT_DRAFT", "只有草稿可准备发布")
     session = owned_session(db, actor.id, session_id, lock=True)
     if session.review_version != data.expected_review_version:
         raise ApiProblem(409, "REVIEW_VERSION_CONFLICT", "审查版本已变化")
@@ -2680,11 +2697,11 @@ def prepare_publication(
             {"reason": projection.reason},
         )
     refresh(db, session)
-    if session.blocking_count or session.warning_count:
+    if session.blocking_count:
         raise ApiProblem(
             422,
             "REVIEW_NOT_READY",
-            "红色问题必须清零且黄色问题必须处理",
+            "仍有影响发布的问题需要处理",
             {"blocking": session.blocking_count, "warning": session.warning_count},
         )
     confirms = valid_confirmations(db, session)
@@ -2714,14 +2731,33 @@ def prepare_publication(
     }
     ready_hash = digest(ready_payload)
     old = db.scalar(
-        select(AssignmentPublishReadinessSnapshot).where(
+        select(AssignmentPublishReadinessSnapshot)
+        .where(
             AssignmentPublishReadinessSnapshot.review_session_id == session.id,
             AssignmentPublishReadinessSnapshot.readiness_hash == ready_hash,
-            AssignmentPublishReadinessSnapshot.status == "ready",
-            AssignmentPublishReadinessSnapshot.expires_at > now_utc(),
         )
+        .with_for_update()
     )
     if old:
+        now = now_utc()
+        expiry = (
+            old.expires_at.replace(tzinfo=UTC) if old.expires_at.tzinfo is None else old.expires_at
+        )
+        if old.status == "ready" and expiry > now:
+            return readiness_json(old)
+        if old.consumed_at is not None or old.status == "consumed":
+            raise ApiProblem(409, "READINESS_ALREADY_CONSUMED", "发布准备已消费")
+        old.status = "ready"
+        old.expires_at = now + timedelta(minutes=15)
+        old.invalidated_at = None
+        audit(
+            db,
+            actor.id,
+            "assignment_publication.renew",
+            "assignment_publish_readiness",
+            old.id,
+        )
+        db.commit()
         return readiness_json(old)
     snapshot = AssignmentPublishReadinessSnapshot(
         owner_id=actor.id,
@@ -2861,7 +2897,6 @@ def teacher_publish(
         or not legacy
         or binding.status != "confirmed"
         or session.blocking_count
-        or session.warning_count
         or REQUIRED_CONFIRMATIONS - set(valid_confirmations(db, session))
     ):
         raise ApiProblem(409, "READINESS_STALE", "发布门禁已变化")

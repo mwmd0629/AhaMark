@@ -1,9 +1,12 @@
 import io
 import uuid
 
+from app.api.actor import CurrentActor, get_current_actor
+from app.api.assignments import freeze_participant_roster
 from app.db.session import SessionLocal
 from app.main import app
 from app.models import (
+    Assignment,
     AssignmentParticipantSnapshot,
     ClassStudent,
     GradingCollaborator,
@@ -65,7 +68,10 @@ def test_joint_exam_requires_multiple_populated_non_overlapping_classes():
             "class_ids": [str(first.id)],
         },
     )
-    assert one_class.status_code == 422
+    assert one_class.status_code == 201
+    assert "JOINT_EXAM_CLASSES_REQUIRED" in {
+        issue["code"] for issue in one_class.json()["completeness"]["issues"]
+    }
 
     shared = add_student(db, actor.id, first, "J001", "重复学生")
     db.add(
@@ -88,6 +94,113 @@ def test_joint_exam_requires_multiple_populated_non_overlapping_classes():
     assert assignment.status_code == 201
     codes = {issue["code"] for issue in assignment.json()["completeness"]["issues"]}
     assert "JOINT_EXAM_DUPLICATE_STUDENT" in codes
+
+
+def test_cross_teacher_joint_exam_requires_invitation_and_class_owner_authorization():
+    owner, db = actor_and_db()
+    owner_class = active_class(db, owner.id, "主责老师班级")
+    owner_student = add_student(db, owner.id, owner_class, "O001", "主责班学生")
+    collaborator = User(
+        email="joint-class-owner@example.com",
+        password_hash="!test!",
+        display_name="参考班负责人",
+    )
+    outsider = User(
+        email="joint-outsider@example.com",
+        password_hash="!test!",
+        display_name="未受邀老师",
+    )
+    db.add_all([collaborator, outsider])
+    db.flush()
+    collaborator_class = active_class(db, collaborator.id, "协作老师班级")
+    collaborator_student = add_student(
+        db, collaborator.id, collaborator_class, "C001", "协作班学生"
+    )
+    outsider_class = active_class(db, outsider.id, "未授权班级")
+    add_student(db, outsider.id, outsider_class, "X001", "未授权学生")
+
+    created = client.post(
+        "/api/assignments",
+        json={
+            "title": "跨教师联考",
+            "delivery_mode": "joint_exam",
+            "class_ids": [str(owner_class.id)],
+        },
+    )
+    assert created.status_code == 201, created.text
+    assignment_id = created.json()["id"]
+
+    try:
+        app.dependency_overrides[get_current_actor] = lambda: CurrentActor(
+            outsider.id, outsider.email
+        )
+        uninvited = client.post(
+            f"/api/assignments/{assignment_id}/joint-classes",
+            json={"class_ids": [str(outsider_class.id)]},
+        )
+        assert uninvited.status_code == 404
+
+        app.dependency_overrides[get_current_actor] = lambda: CurrentActor(owner.id, owner.email)
+        invited = client.post(
+            f"/api/assignments/{assignment_id}/joint-team/collaborators",
+            json={"email": collaborator.email},
+        )
+        assert invited.status_code == 201, invited.text
+
+        app.dependency_overrides[get_current_actor] = lambda: CurrentActor(
+            collaborator.id, collaborator.email
+        )
+        invitations = client.get("/api/assignments/joint-exams/invitations")
+        assert invitations.status_code == 200, invitations.text
+        assert {item["assignment_id"] for item in invitations.json()} == {assignment_id}
+        cannot_authorize_other_owner = client.post(
+            f"/api/assignments/{assignment_id}/joint-classes",
+            json={"class_ids": [str(outsider_class.id)]},
+        )
+        assert cannot_authorize_other_owner.status_code == 403
+        authorized = client.post(
+            f"/api/assignments/{assignment_id}/joint-classes",
+            json={"class_ids": [str(collaborator_class.id)]},
+        )
+        assert authorized.status_code == 201, authorized.text
+        team = authorized.json()
+        cross_class = next(
+            row for row in team["classes"] if row["id"] == str(collaborator_class.id)
+        )
+        assert cross_class["authorized"] is True
+        assert cross_class["authorized_by"] == str(collaborator.id)
+
+        app.dependency_overrides[get_current_actor] = lambda: CurrentActor(owner.id, owner.email)
+        current = client.get(f"/api/assignments/{assignment_id}").json()
+        preserved = client.put(
+            f"/api/assignments/{assignment_id}/classes",
+            json={
+                "class_ids": [str(owner_class.id)],
+                "updated_at": current["updated_at"],
+            },
+        )
+        assert preserved.status_code == 200, preserved.text
+        assert {row["id"] for row in preserved.json()["classes"]} == {
+            str(owner_class.id),
+            str(collaborator_class.id),
+        }
+        assignment = db.get(Assignment, uuid.UUID(assignment_id))
+        assert assignment is not None
+        assert freeze_participant_roster(db, assignment) == 2
+        db.commit()
+        snapshots = list(
+            db.scalars(
+                select(AssignmentParticipantSnapshot).where(
+                    AssignmentParticipantSnapshot.assignment_id == assignment.id
+                )
+            )
+        )
+        assert {row.student_id for row in snapshots} == {
+            owner_student.id,
+            collaborator_student.id,
+        }
+    finally:
+        app.dependency_overrides.pop(get_current_actor, None)
 
 
 def test_joint_exam_freezes_roster_and_ensures_one_batch_per_class():
@@ -202,6 +315,15 @@ def test_joint_exam_freezes_roster_and_ensures_one_batch_per_class():
         )
         assert len(assignment_rows) == 2
         assert {row.assignee_id for row in assignment_rows} == {collaborator.id}
+        app.dependency_overrides[get_current_actor] = lambda: CurrentActor(
+            collaborator.id, collaborator.email
+        )
+        work = client.get("/api/joint-grading-work")
+        assert work.status_code == 200, work.text
+        assert work.json()[0]["assignment_id"] == assignment_id
+        assert work.json()[0]["question_id"] == question.json()["id"]
+        assert work.json()[0]["class_count"] == 2
+        app.dependency_overrides[get_current_actor] = lambda: CurrentActor(actor.id, actor.email)
         first_batch = next(
             item for item in pool.json()["items"] if item["class_id"] == str(first.id)
         )
@@ -232,4 +354,5 @@ def test_joint_exam_freezes_roster_and_ensures_one_batch_per_class():
         assert matched.status_code == 201, matched.text
         assert matched.json()["items"][0]["suggested_student_id"] == str(first_student.id)
     finally:
+        app.dependency_overrides.pop(get_current_actor, None)
         app.dependency_overrides.pop(get_storage, None)

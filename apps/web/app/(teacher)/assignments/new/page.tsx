@@ -155,14 +155,13 @@ export default function NewAssignmentPage() {
             </div>
           </fieldset>
           {deliveryMode === "joint_exam" && selected.length < 2 && (
-            <p className="text-sm text-amber-700">联考统批至少选择两个班级。</p>
+            <p className="text-sm text-blue-700">
+              可先创建联考，再邀请其他老师授权其班级；发布前至少两个班级。
+            </p>
           )}
           <Button
             loading={busy}
-            disabled={
-              !selected.length ||
-              (deliveryMode === "joint_exam" && selected.length < 2)
-            }
+            disabled={deliveryMode !== "joint_exam" && !selected.length}
           >
             保存草稿并继续
           </Button>
