@@ -36,6 +36,7 @@ const manualApi = vi.hoisted(() => ({
   manualPublishReadiness: vi.fn(),
   publishManual: vi.fn(),
 }));
+const toast = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/api", async (load) => {
   const actual = await load<typeof import("@/lib/api")>();
   return {
@@ -43,6 +44,10 @@ vi.mock("@/lib/api", async (load) => {
     assignmentReviewApi: reviewApi,
     assignmentsApi: { ...actual.assignmentsApi, ...manualApi },
   };
+});
+vi.mock("@/components/ui", async (load) => {
+  const actual = await load<typeof import("@/components/ui")>();
+  return { ...actual, useToast: () => toast };
 });
 
 const confirmationKinds = [
@@ -1016,6 +1021,157 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
     await waitFor(() => expect(reviewApi.autoConfirm).toHaveBeenCalledOnce());
     await waitFor(() => expect(reviewApi.createBinding).toHaveBeenCalledOnce());
     await waitFor(() => expect(reviewApi.bundle).toHaveBeenCalledTimes(3));
+  });
+
+  it("reports an automatic confirmation failure and retries only after a teacher rescan", async () => {
+    reviewApi.bundle.mockResolvedValue(
+      reviewBundle({
+        status: "action_required",
+        confirmations: confirmationKinds
+          .filter((kind) => kind !== "due_at")
+          .map((kind) => confirmation(kind)),
+      }),
+    );
+    reviewApi.autoConfirm
+      .mockRejectedValueOnce(new Error("temporary confirmation outage"))
+      .mockResolvedValueOnce({
+        confirmed: ["due_at"],
+        skipped: {},
+        review_version: 2,
+      });
+
+    renderReview();
+
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(
+        "自动核对暂时失败，请重新扫描。",
+        "error",
+      ),
+    );
+    const rescan = screen.getByRole("button", {
+      name: "重新扫描最新状态",
+    });
+    expect(rescan).toBeEnabled();
+    expect(reviewApi.autoConfirm).toHaveBeenCalledOnce();
+    await testingAct(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(reviewApi.autoConfirm).toHaveBeenCalledOnce();
+
+    fireEvent.click(rescan);
+    await waitFor(() => expect(reviewApi.autoConfirm).toHaveBeenCalledTimes(2));
+    await testingAct(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(reviewApi.autoConfirm).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports a lossless binding failure and allows a teacher-triggered retry", async () => {
+    reviewApi.bundle.mockResolvedValue(
+      reviewBundle({
+        status: "action_required",
+        binding: null,
+        confirmations: confirmationKinds.map((kind) => confirmation(kind)),
+      }),
+    );
+    reviewApi.createBinding
+      .mockRejectedValueOnce(new Error("temporary binding outage"))
+      .mockResolvedValueOnce({
+        id: "binding-1",
+        status: "draft",
+        mapping: [],
+        conversion_warnings: [],
+        manual_review_required: false,
+      });
+
+    renderReview();
+
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith(
+        "评分标准兼容检查暂时失败，请重新扫描。",
+        "error",
+      ),
+    );
+    const rescan = screen.getByRole("button", {
+      name: "重新扫描最新状态",
+    });
+    expect(rescan).toBeEnabled();
+    expect(reviewApi.createBinding).toHaveBeenCalledOnce();
+
+    fireEvent.click(rescan);
+    await waitFor(() =>
+      expect(reviewApi.createBinding).toHaveBeenCalledTimes(2),
+    );
+    await testingAct(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(reviewApi.createBinding).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores a late automatic confirmation failure from the previous assignment", async () => {
+    const oldConfirmation = deferred<{
+      confirmed: string[];
+      skipped: Record<string, string>;
+      review_version: number;
+    }>();
+    reviewApi.autoConfirm.mockReturnValueOnce(oldConfirmation.promise);
+    reviewApi.list.mockImplementation(async (assignmentId: string) => ({
+      items: [
+        session(`review-${assignmentId}`, {
+          assignment_id: assignmentId,
+        }),
+      ],
+    }));
+    reviewApi.get.mockImplementation(async (sessionId: string) =>
+      session(sessionId, {
+        assignment_id: sessionId.endsWith("assignment-2")
+          ? "assignment-2"
+          : "assignment-1",
+      }),
+    );
+    reviewApi.bundle.mockImplementation(async (assignmentId: string) =>
+      reviewBundle({
+        assignmentId,
+        status:
+          assignmentId === "assignment-2"
+            ? "ready_to_publish"
+            : "action_required",
+        confirmations: [
+          ...(assignmentId === "assignment-2"
+            ? confirmationKinds.map((kind) => confirmation(kind))
+            : confirmationKinds
+                .filter((kind) => kind !== "due_at")
+                .map((kind) => confirmation(kind))),
+          confirmation("legacy_binding", { origin: "system_auto" }),
+        ],
+      }),
+    );
+
+    const view = renderReview();
+    await waitFor(() => expect(reviewApi.autoConfirm).toHaveBeenCalledOnce());
+
+    view.rerender(
+      <AssignmentCentralReview
+        item={assignment({ id: "assignment-2", title: "作业 B" })}
+        onNavigate={vi.fn()}
+        onPublished={vi.fn()}
+      />,
+    );
+    expect(await screen.findByText("✓ 可自动兼容")).toBeInTheDocument();
+
+    await testingAct(async () => {
+      oldConfirmation.reject(new Error("late assignment A failure"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(toast).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "重新扫描最新状态" }),
+    ).toBeEnabled();
   });
 
   it("shows a fresh lossless binding as automatically compatible without a confirmation action", async () => {

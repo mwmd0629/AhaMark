@@ -174,6 +174,7 @@ export function AssignmentCentralReview({
   const mutationGeneration = useRef(0);
   const autoConfirmationAttempt = useRef("");
   const autoBindingAttempt = useRef("");
+  const automationRequest = useRef(0);
   const preparationRequest = useRef(0);
   const preparationInFlight = useRef(false);
   const assignmentEpoch = useRef({
@@ -192,6 +193,7 @@ export function AssignmentCentralReview({
     };
     requestGeneration.current += 1;
     mutationGeneration.current += 1;
+    automationRequest.current += 1;
   }
 
   const isCurrentRequest = useCallback(
@@ -323,6 +325,9 @@ export function AssignmentCentralReview({
     preparationInFlight.current = false;
     setPreparingReadiness(false);
     setBusy(false);
+    setAutomating(false);
+    autoConfirmationAttempt.current = "";
+    autoBindingAttempt.current = "";
     assignmentReviewApi
       .list(assignmentId)
       .then((result) => {
@@ -518,15 +523,18 @@ export function AssignmentCentralReview({
       .join(",")}`;
     if (autoConfirmationAttempt.current === key) return;
     autoConfirmationAttempt.current = key;
-    let cancelled = false;
+    const request = ++automationRequest.current;
+    const automationIsCurrent = () =>
+      automationRequest.current === request &&
+      isCurrentRequest(assignmentId, epoch);
     setAutomating(true);
     assignmentReviewApi
       .autoConfirm(session.id, session.review_version)
       .then(() => {
-        if (isCurrentRequest(assignmentId, epoch)) return load(session);
+        if (automationIsCurrent()) return load(session);
       })
       .catch((error) => {
-        if (!cancelled && isCurrentRequest(assignmentId, epoch)) {
+        if (automationIsCurrent()) {
           toast(
             error instanceof ApiError
               ? error.message
@@ -536,11 +544,8 @@ export function AssignmentCentralReview({
         }
       })
       .finally(() => {
-        if (isCurrentRequest(assignmentId, epoch)) setAutomating(false);
+        if (automationIsCurrent()) setAutomating(false);
       });
-    return () => {
-      cancelled = true;
-    };
   }, [
     automating,
     bundle,
@@ -570,15 +575,18 @@ export function AssignmentCentralReview({
     const key = `${session.id}:${session.review_version}`;
     if (autoBindingAttempt.current === key) return;
     autoBindingAttempt.current = key;
-    let cancelled = false;
+    const request = ++automationRequest.current;
+    const automationIsCurrent = () =>
+      automationRequest.current === request &&
+      isCurrentRequest(assignmentId, epoch);
     setAutomating(true);
     assignmentReviewApi
       .createBinding(session.id, session.review_version)
       .then(() => {
-        if (isCurrentRequest(assignmentId, epoch)) return load(session);
+        if (automationIsCurrent()) return load(session);
       })
       .catch((error) => {
-        if (!cancelled && isCurrentRequest(assignmentId, epoch)) {
+        if (automationIsCurrent()) {
           toast(
             error instanceof ApiError
               ? error.message
@@ -588,11 +596,8 @@ export function AssignmentCentralReview({
         }
       })
       .finally(() => {
-        if (isCurrentRequest(assignmentId, epoch)) setAutomating(false);
+        if (automationIsCurrent()) setAutomating(false);
       });
-    return () => {
-      cancelled = true;
-    };
   }, [
     automating,
     bundle,
@@ -1363,14 +1368,16 @@ export function AssignmentCentralReview({
       <div className="flex justify-end">
         <Button
           variant="outline"
-          disabled={busy}
-          onClick={() =>
-            act(
+          disabled={busy || automating}
+          onClick={() => {
+            autoConfirmationAttempt.current = "";
+            autoBindingAttempt.current = "";
+            void act(
               () =>
                 assignmentReviewApi.refresh(session.id, session.review_version),
               "审查已刷新",
-            )
-          }
+            );
+          }}
         >
           重新扫描最新状态
         </Button>
