@@ -1174,6 +1174,107 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
     ).toBeEnabled();
   });
 
+  it.each(["resolve", "reject"] as const)(
+    "ignores an automatic confirmation that settles after unmount (%s)",
+    async (outcome) => {
+      const pendingConfirmation = deferred<{
+        confirmed: string[];
+        skipped: Record<string, string>;
+        review_version: number;
+      }>();
+      reviewApi.autoConfirm.mockReturnValueOnce(pendingConfirmation.promise);
+      reviewApi.bundle.mockResolvedValue(
+        reviewBundle({
+          status: "action_required",
+          confirmations: confirmationKinds
+            .filter((kind) => kind !== "due_at")
+            .map((kind) => confirmation(kind)),
+        }),
+      );
+
+      const view = renderReview();
+      await waitFor(() => expect(reviewApi.autoConfirm).toHaveBeenCalledOnce());
+      const callsBeforeUnmount = {
+        bundle: reviewApi.bundle.mock.calls.length,
+        get: reviewApi.get.mock.calls.length,
+        items: reviewApi.items.mock.calls.length,
+      };
+
+      view.unmount();
+      await testingAct(async () => {
+        if (outcome === "resolve") {
+          pendingConfirmation.resolve({
+            confirmed: ["due_at"],
+            skipped: {},
+            review_version: 2,
+          });
+        } else {
+          pendingConfirmation.reject(new Error("late unmounted confirmation"));
+        }
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(toast).not.toHaveBeenCalled();
+      expect(reviewApi.bundle).toHaveBeenCalledTimes(callsBeforeUnmount.bundle);
+      expect(reviewApi.get).toHaveBeenCalledTimes(callsBeforeUnmount.get);
+      expect(reviewApi.items).toHaveBeenCalledTimes(callsBeforeUnmount.items);
+    },
+  );
+
+  it.each(["resolve", "reject"] as const)(
+    "ignores a lossless binding that settles after unmount (%s)",
+    async (outcome) => {
+      const pendingBinding = deferred<{
+        id: string;
+        status: string;
+        mapping: never[];
+        conversion_warnings: never[];
+        manual_review_required: boolean;
+      }>();
+      reviewApi.createBinding.mockReturnValueOnce(pendingBinding.promise);
+      reviewApi.bundle.mockResolvedValue(
+        reviewBundle({
+          status: "action_required",
+          binding: null,
+          confirmations: confirmationKinds.map((kind) => confirmation(kind)),
+        }),
+      );
+
+      const view = renderReview();
+      await waitFor(() =>
+        expect(reviewApi.createBinding).toHaveBeenCalledOnce(),
+      );
+      const callsBeforeUnmount = {
+        bundle: reviewApi.bundle.mock.calls.length,
+        get: reviewApi.get.mock.calls.length,
+        items: reviewApi.items.mock.calls.length,
+      };
+
+      view.unmount();
+      await testingAct(async () => {
+        if (outcome === "resolve") {
+          pendingBinding.resolve({
+            id: "binding-1",
+            status: "draft",
+            mapping: [],
+            conversion_warnings: [],
+            manual_review_required: false,
+          });
+        } else {
+          pendingBinding.reject(new Error("late unmounted binding"));
+        }
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(toast).not.toHaveBeenCalled();
+      expect(reviewApi.bundle).toHaveBeenCalledTimes(callsBeforeUnmount.bundle);
+      expect(reviewApi.get).toHaveBeenCalledTimes(callsBeforeUnmount.get);
+      expect(reviewApi.items).toHaveBeenCalledTimes(callsBeforeUnmount.items);
+    },
+  );
+
   it("shows a fresh lossless binding as automatically compatible without a confirmation action", async () => {
     renderReview();
 

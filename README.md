@@ -16,6 +16,7 @@
 - `0007` 固化保留当时跨方言语义：JSON 字段在 SQLite 为 JSON、在 PostgreSQL 为 JSONB，且没有把 ORM 客户端默认误写成 server default。新增回归覆盖固定字段/索引契约、SQLite 升降级往返、唯一 head，以及仅在显式本地隔离数据库名和 marker 同时匹配时运行的 fresh PostgreSQL `empty → head → head` 与 `empty → 0030 → head` 路径；隔离 PostgreSQL 全路径为 `3 passed`。
 - 中央核查前端修复自动化闭环：`setAutomating(true)` 与 Bundle reload 都会触发 effect cleanup，旧逻辑的 `!cancelled` 同时阻止成功后的 reload 并永久保留 `automating=true`，使后续无损 binding 或 ready Bundle 无法显示；现在成功回调与 finally 均由 assignment epoch 防串写，当前作业可以完成“自动核对 → 自动 binding → reload ready”，新增回归测试验证完整调用链。
 - PR 审查进一步发现同一 cleanup 也会静默吞掉自动核对或无损 binding 的失败提示，且已记录的 attempt key 会让同一会话无法重试。两个自动 effect 现使用独立 automation request generation 配合作业 epoch 判断成功、失败与 finally 是否仍属当前请求；失败会显示针对性 toast 并解除忙碌，但保留 attempt key 防止无限自动重试。教师点击“重新扫描最新状态”会显式清除两个 attempt key 并重新扫描，从而提供有界主动重试；旧作业迟到失败不能污染新作业。
+- 最终复审 P2 发现组件直接卸载时 assignment epoch 不变，主加载 effect cleanup 原先没有失效 automation request generation，pending 自动核对或 binding 的迟到回调仍可能跨页面 toast 或 reload。cleanup 现同步递增 automation generation；自动操作在卸载后无论成功或失败都不能写状态、提示或重新加载，同时保留作业切换保护、当前页面失败提示和主动重试链。
 - 浏览器 E2E 脚本同步新版创建/生成入口与 `system_auto` 判定：高置信无冲突用途不再被脚本误当作人工确认；合成教师已有完整正式答案和 Rubric 时，未采用的 AI suggestion 只保留审计，不为了发布逐条拒绝。
 
 已解决：历史生成问题冒充当前待办、恢复后的旧问题仍显示计数、兼容损失在生成区与中央区重复要求操作、生成区默认暴露历史风险数量、自动核对 reload 后无损 binding 被前端状态卡死，以及 `0007` 读取当前 ORM 元数据导致 fresh PostgreSQL 在 `0031` 重复加列。迁移修复已按 2026-08-04 的明确例外授权实施并通过新库/升级路径回归。
@@ -32,7 +33,7 @@ strict mypy 已使用同一 bundled Python 3.12.13、仓库根目录和标准命
 
 同一作业证据目录：`C:\Users\Lenovo\.codex\visualizations\2026\08\03\019fc78a-d972-75b1-bed0-62e54645f3b1\fresh-docker-e2e\same-assignment-two-pdf`。`pre-review.json` 保存发布前 ready Bundle 与无损 binding，`result.json` 保存一次最终发布及会话 0/0/0，`screenshots\two-pdf-generation.png` 与 `screenshots\ready-one-click.png` 分别保存自动识别和最终单击页面；临时脚本/override 位于 `C:\Users\Lenovo\AppData\Local\Temp\ahamark-5c49-review-20260803-04`。
 
-最终验证（2026-08-04）：fresh PostgreSQL 专项 `3 passed`；全部迁移命名测试加两个单-head 契约 `35 passed, 1 skipped`（skip 为未注入隔离 PG 变量的同一用例，已在专项中通过）；中央核查后端 `11 passed`；PR 审查 P1 修复后中央核查前端专项 `65 passed`、前端全量 `27 files / 179 tests passed`。Prettier、ESLint、TypeScript、全仓 Ruff check、标准 strict mypy `107 source files`、Next production build（19 个静态页面）及 `git diff --check` 均通过。P1 修复只改前端状态防陈旧逻辑、测试和本状态账本，未改变后端或迁移，因此复用本提交父节点已通过的后端、Ruff、strict mypy 与迁移证据。Next 仍提示缺少可选 SWC lockfile 条目并尝试修补失败，但构建退出码为 0，根与 Web lockfile 均无 diff。`ahamark.db` 守卫在各 pytest 运行中均通过。
+最终验证（2026-08-04）：fresh PostgreSQL 专项 `3 passed`；全部迁移命名测试加两个单-head 契约 `35 passed, 1 skipped`（skip 为未注入隔离 PG 变量的同一用例，已在专项中通过）；中央核查后端 `11 passed`；最终复审 P2 修复后中央核查前端专项 `69 passed`、前端全量 `27 files / 183 tests passed`。Prettier、ESLint、TypeScript、全仓 Ruff check、标准 strict mypy `107 source files`、Next production build（19 个静态页面）及 `git diff --check` 均通过。P2 修复只改前端卸载防陈旧逻辑、测试和本状态账本，未改变后端或迁移，因此复用本提交父节点已通过的后端、Ruff、strict mypy 与迁移证据。Next 仍提示缺少可选 SWC lockfile 条目并尝试修补失败，但构建退出码为 0，根与 Web lockfile 均无 diff。`ahamark.db` 守卫在各 pytest 运行中均通过。
 
 Docker 隔离状态：本任务仅启动并停止 `ahamark-5c49-migration-20260804-05` 的 PostgreSQL；容器为 `Exited (0)`，network/volume 保留，未执行 `down -v`、prune 或删除。其他 task 的 `ahamark-business-e2e` 与 `ahamark-business-e2e-4a09-20260803` 运行状态未被修改。临时 compose 位于 `C:\Users\Lenovo\AppData\Local\Temp\ahamark-5c49-migration-20260804-05\docker-compose.yml`。
 

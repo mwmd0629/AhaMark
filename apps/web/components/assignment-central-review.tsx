@@ -348,6 +348,7 @@ export function AssignmentCentralReview({
     return () => {
       requestGeneration.current += 1;
       mutationGeneration.current += 1;
+      automationRequest.current += 1;
     };
   }, [isCurrentRequest, item.id, load, loadBundle, reviewInputsRevision]);
 
