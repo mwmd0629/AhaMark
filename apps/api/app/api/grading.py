@@ -60,6 +60,7 @@ from app.recognition.answer_providers import (
     provider_from_settings as recognition_provider_from_settings,
 )
 from app.recognition.submission import mark_submission_stale
+from app.results.services import serialize_grade_release_mutation
 from app.security.files import UnsafeFile, inspect_upload, safe_filename
 from app.storage.base import ObjectStorage
 from app.storage.dependencies import get_storage
@@ -315,12 +316,24 @@ def owned_submission(db: Session, owner: uuid.UUID, submission_id: uuid.UUID) ->
 def _active_collaborator(
     db: Session, assignment_id: uuid.UUID, user_id: uuid.UUID
 ) -> GradingCollaborator | None:
-    return db.scalar(
+    collaborator = db.scalar(
         select(GradingCollaborator).where(
             GradingCollaborator.assignment_id == assignment_id,
             GradingCollaborator.user_id == user_id,
             GradingCollaborator.status == "active",
         )
+    )
+    if collaborator is None or not _is_active_teacher(db, user_id):
+        return None
+    return collaborator
+
+
+def _is_active_teacher(db: Session, user_id: uuid.UUID) -> bool:
+    user = db.get(User, user_id)
+    return bool(
+        user is not None
+        and user.status == "active"
+        and "teacher" in {role.name for role in user.roles}
     )
 
 
@@ -1032,6 +1045,8 @@ def _joint_pool_json(
 
 @router.get("/joint-grading-work")
 def list_joint_grading_work(db: Db, actor: Actor) -> list[dict[str, Any]]:
+    if not _is_active_teacher(db, actor.id):
+        raise ApiProblem(403, "TEACHER_ROLE_REQUIRED", "只有活动教师账号可以查看联考批改任务")
     rows = db.execute(
         select(Assignment, Question, GradingBatch)
         .join(GradingBatch, GradingBatch.assignment_id == Assignment.id)
@@ -1636,14 +1651,7 @@ def list_submissions(batch_id: uuid.UUID, db: Db, actor: Actor) -> list[dict[str
     student_query = select(Student).where(Student.id.in_(student_ids))
     if assignment is None or assignment.delivery_mode != "joint_exam":
         student_query = student_query.where(Student.owner_id == actor.id)
-    students = (
-        {
-            student.id: student
-            for student in db.scalars(student_query)
-        }
-        if student_ids
-        else {}
-    )
+    students = {student.id: student for student in db.scalars(student_query)} if student_ids else {}
     result: list[dict[str, Any]] = []
     for row in rows:
         student = students.get(row.student_id) if row.student_id is not None else None
@@ -3174,6 +3182,22 @@ def _confirm_results_plan_view(db: Session, plan: dict[str, Any]) -> dict[str, A
     }
 
 
+def _effective_batch_submissions(submissions: list[Submission]) -> list[Submission]:
+    """Return the one formal attempt per student, while preserving unmatched blockers."""
+    unmatched: list[Submission] = []
+    latest_by_student: dict[uuid.UUID, Submission] = {}
+    for submission in submissions:
+        if submission.status == "voided":
+            continue
+        if submission.student_id is None:
+            unmatched.append(submission)
+            continue
+        current = latest_by_student.get(submission.student_id)
+        if current is None or submission.attempt_number > current.attempt_number:
+            latest_by_student[submission.student_id] = submission
+    return sorted([*unmatched, *latest_by_student.values()], key=lambda item: item.id)
+
+
 def _confirm_results_state(
     db: Session,
     batch: GradingBatch,
@@ -3191,7 +3215,7 @@ def _confirm_results_state(
     )
     if lock:
         submission_query = submission_query.with_for_update()
-    submissions = db.scalars(submission_query).all()
+    submissions = _effective_batch_submissions(list(db.scalars(submission_query).all()))
     question_query = (
         select(Question)
         .where(
@@ -3855,6 +3879,13 @@ def confirm_results(
     replay = _confirm_results_replay(db, actor.id, batch_id, data)
     if replay is not None:
         return replay
+    batch_reference = db.scalar(
+        select(GradingBatch).where(GradingBatch.id == batch_id, GradingBatch.owner_id == actor.id)
+    )
+    if batch_reference is None:
+        raise ApiProblem(404, "GRADING_BATCH_NOT_FOUND", "批改批次不存在")
+    if not serialize_grade_release_mutation(db, actor.id, batch_reference.assignment_id):
+        raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     batch = db.scalar(
         select(GradingBatch)
         .where(GradingBatch.id == batch_id, GradingBatch.owner_id == actor.id)
@@ -4115,6 +4146,11 @@ def _collaboration_json(db: Session, batch: GradingBatch, actor_id: uuid.UUID) -
         )
         .order_by(User.display_name, User.email)
     ).all()
+    active_collaborators = [
+        (row, user)
+        for row, user in collaborators
+        if user.status == "active" and "teacher" in {role.name for role in user.roles}
+    ]
     assignments = {
         row.question_id: row
         for row in db.scalars(
@@ -4190,7 +4226,7 @@ def _collaboration_json(db: Session, batch: GradingBatch, actor_id: uuid.UUID) -
                 "email": user.email,
                 "role": row.role,
             }
-            for row, user in collaborators
+            for row, user in active_collaborators
         ],
         "questions": questions,
     }
@@ -4210,9 +4246,8 @@ def add_grading_collaborator(
     user = db.scalar(select(User).where(func.lower(User.email) == data.email.lower()))
     if user is None or user.status != "active":
         raise ApiProblem(404, "COLLABORATOR_NOT_FOUND", "未找到可用的教师账号")
-    role_names = {role.name for role in user.roles}
-    if "student" in role_names and "teacher" not in role_names:
-        raise ApiProblem(422, "COLLABORATOR_TEACHER_REQUIRED", "学生账号不能参与批改")
+    if "teacher" not in {role.name for role in user.roles}:
+        raise ApiProblem(422, "COLLABORATOR_TEACHER_REQUIRED", "仅教师账号可参与批改")
     if user.id == actor.id:
         raise ApiProblem(422, "OWNER_ALREADY_LEADS", "主责老师无需添加为协作者")
     row = db.scalar(
@@ -4453,6 +4488,7 @@ def review_workspace(
             answer_filters.append(StudentAnswer.question_id == question_id)
         answers = db.scalars(select(StudentAnswer).where(*answer_filters)).all()
         answer_items: list[dict[str, Any]] = []
+        allowed_page_ids: set[uuid.UUID] = set()
         for answer in answers:
             question = db.get(Question, answer.question_id)
             result = db.scalar(
@@ -4491,6 +4527,8 @@ def review_workspace(
                     StudentAnswerRegion.student_answer_id == answer.id
                 )
             ).all()
+            allowed_page_ids.update(item.submission_page_id for item in regions)
+            allowed_page_ids.update(item.submission_page_id for item in evidence)
             answer_items.append(
                 {
                     **answer_json(answer),
@@ -4609,16 +4647,26 @@ def review_workspace(
                     ],
                 }
             )
+        # A scoped grader must not be able to enumerate submissions or pages for
+        # which no assigned answer is present. Missing answer-to-page evidence is
+        # deliberately fail-closed: usability must not expose the whole script.
+        if not is_owner and not answer_items:
+            continue
         page_items: list[dict[str, Any]] = []
         for page in pages:
+            if not is_owner and page.id not in allowed_page_ids:
+                continue
             original = db.get(StoredFile, page.stored_file_id)
             page_items.append(
                 {
                     "id": str(page.id),
                     "page_number": page.page_number,
                     "status": page.status,
+                    # A SubmissionPage may reference the multi-page source PDF.
+                    # Only the owner receives that URL; scoped graders receive
+                    # page-specific processed/thumbnail evidence at most.
                     "original_url": storage.presigned_get(original.storage_key, 900)
-                    if original
+                    if is_owner and original
                     else None,
                     "processed_url": storage.presigned_get(page.processed_storage_key, 900)
                     if page.processed_storage_key

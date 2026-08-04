@@ -11,6 +11,9 @@ from app.models import (
     Role,
     ScoreRevision,
     StudentAnswer,
+    StudentAnswerRegion,
+    Submission,
+    SubmissionPage,
     TeacherReview,
     User,
     UserRole,
@@ -31,15 +34,35 @@ def test_question_scoped_collaboration_conflict_and_release_boundary() -> None:
     )
     db.add(collaborator)
     db.flush()
+    teacher_role = db.scalar(select(Role).where(Role.name == "teacher"))
+    if teacher_role is None:
+        teacher_role = Role(name="teacher", description="教师端")
+        db.add(teacher_role)
+        db.flush()
+    db.add(UserRole(user_id=collaborator.id, role_id=teacher_role.id))
     student_role = Role(name="student", description="学生端")
+    non_teacher_role = Role(name="auditor", description="只读审计")
     student_account = User(
         email="student-collaborator@example.com",
         password_hash="!test!",
         display_name="学生账号",
     )
-    db.add_all([student_role, student_account])
+    no_role_account = User(
+        email="no-role-collaborator@example.com",
+        password_hash="!test!",
+        display_name="无角色账号",
+    )
+    non_teacher_account = User(
+        email="auditor-collaborator@example.com",
+        password_hash="!test!",
+        display_name="审计账号",
+    )
+    db.add_all(
+        [student_role, non_teacher_role, student_account, no_role_account, non_teacher_account]
+    )
     db.flush()
     db.add(UserRole(user_id=student_account.id, role_id=student_role.id))
+    db.add(UserRole(user_id=non_teacher_account.id, role_id=non_teacher_role.id))
     answer = db.scalar(
         select(StudentAnswer).where(
             StudentAnswer.submission_id == submission_id,
@@ -87,6 +110,63 @@ def test_question_scoped_collaboration_conflict_and_release_boundary() -> None:
         requires_review=True,
     )
     db.add(unassigned_answer)
+    db.flush()
+    pages = db.scalars(
+        select(SubmissionPage)
+        .where(SubmissionPage.submission_id == submission_id)
+        .order_by(SubmissionPage.page_number)
+    ).all()
+    assert len(pages) == 3
+    pages[0].processed_storage_key = "scoped/assigned-page.png"
+    pages[1].processed_storage_key = "scoped/unassigned-page.png"
+    pages[2].processed_storage_key = "scoped/unmapped-page.png"
+    db.add_all(
+        [
+            StudentAnswerRegion(
+                student_answer_id=answer.id,
+                submission_page_id=pages[0].id,
+                x=Decimal("0"),
+                y=Decimal("0"),
+                width=Decimal("1"),
+                height=Decimal("1"),
+                source="manual",
+                status="confirmed",
+            ),
+            StudentAnswerRegion(
+                student_answer_id=unassigned_answer.id,
+                submission_page_id=pages[1].id,
+                x=Decimal("0"),
+                y=Decimal("0"),
+                width=Decimal("1"),
+                height=Decimal("1"),
+                source="manual",
+                status="confirmed",
+            ),
+        ]
+    )
+    original_submission = db.get(Submission, submission_id)
+    assert original_submission is not None
+    unrelated_submission = Submission(
+        owner_id=original_submission.owner_id,
+        grading_batch_id=original_submission.grading_batch_id,
+        assignment_id=original_submission.assignment_id,
+        class_id=original_submission.class_id,
+        student_id=None,
+        attempt_number=1,
+        status="uploaded",
+    )
+    db.add(unrelated_submission)
+    db.flush()
+    db.add(
+        SubmissionPage(
+            submission_id=unrelated_submission.id,
+            stored_file_id=pages[2].stored_file_id,
+            page_number=1,
+            source_page_number=1,
+            status="ready",
+            processed_storage_key="scoped/unrelated-page.png",
+        )
+    )
     db.commit()
 
     try:
@@ -96,6 +176,13 @@ def test_question_scoped_collaboration_conflict_and_release_boundary() -> None:
         )
         assert rejected_student.status_code == 422, rejected_student.text
         assert rejected_student.json()["code"] == "COLLABORATOR_TEACHER_REQUIRED"
+        for rejected_account in (no_role_account, non_teacher_account):
+            rejected = client.post(
+                f"/api/grading-batches/{batch_id}/collaborators",
+                json={"email": rejected_account.email},
+            )
+            assert rejected.status_code == 422, rejected.text
+            assert rejected.json()["code"] == "COLLABORATOR_TEACHER_REQUIRED"
 
         added = client.post(
             f"/api/grading-batches/{batch_id}/collaborators",
@@ -124,6 +211,24 @@ def test_question_scoped_collaboration_conflict_and_release_boundary() -> None:
             for submission in payload["items"]
             for item in submission["answers"]
         } == {question_id}
+        assert len(payload["items"]) == 1
+        assert [page["id"] for page in payload["items"][0]["pages"]] == [str(pages[0].id)]
+        assert payload["items"][0]["pages"][0]["original_url"] is None
+        assert payload["items"][0]["pages"][0]["processed_url"].endswith(
+            "/scoped/assigned-page.png"
+        )
+        forbidden_question = client.get(
+            f"/api/grading-batches/{batch_id}/review-workspace",
+            params={"question_id": str(unassigned_question.id)},
+        )
+        assert forbidden_question.status_code == 200, forbidden_question.text
+        assert forbidden_question.json()["items"] == []
+        unrelated = client.get(
+            f"/api/grading-batches/{batch_id}/review-workspace",
+            params={"submission_id": str(unrelated_submission.id)},
+        )
+        assert unrelated.status_code == 200, unrelated.text
+        assert unrelated.json()["items"] == []
 
         forbidden_release = client.get(f"/api/grading-batches/{batch_id}/confirm-results/readiness")
         assert forbidden_release.status_code == 404

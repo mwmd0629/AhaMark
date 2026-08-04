@@ -2,6 +2,28 @@
 
 ## 接手必读：当前状态、问题与下一步
 
+2026-08-04 独立提交前复审阻断跟进：复核确认旧 release 公开与 confirm-results 原先没有共同事务序列点；现统一先执行受 owner 限制的 assignment 自更新，PostgreSQL 获得行写锁、SQLite 获得写事务锁，且不改变 assignment 内容指纹，锁顺序统一为 assignment → narrower rows。公开在共同锁内重新读取 release 并保留“更高正式版本则 409”的历史审计语义。联考只读入口也已在查询 metadata 前要求 active teacher，撤权后返回 `403 TEACHER_ROLE_REQUIRED`。第二次复审指出原并发回归可能把慢调度误判为锁生效；测试现先确认真实 HTTP confirm 已发起，再监听 pytest 隔离数据库 engine 的 `before_cursor_execute`，确认请求实际发出 assignment serialization SQL 后，才验证 publish 持锁期间 `_confirm_results_state` 不可达。三组证据分别为：
+
+- 单次聚焦回归：`1 passed`。
+- 稳定性回归：10 个独立 pytest 进程、10 个独立 basetemp，`10/10 passed`。
+- mutation/bypass 反证：一次性 pytest collection hook 绕过共同锁，结果 `1 failed`；失败点为未观测到 assignment serialization SQL（`confirm did not reach the assignment serialization SQL`）。绕锁逻辑只存在于该一次性测试进程，未写入工作区。
+
+相关产品修复扩展专项保持 `88 passed`；完整 confirm-results、学生端和 results 发布专项为 `29 passed`、无 skip/error、耗时 `1:56`。上一轮后端全量 `576 passed, 18 skipped` 仅作为基线，本轮未重跑约 34 分钟全量，不能表述为本轮全量通过。全仓 Ruff check、本轮测试文件 Ruff format-check、strict mypy `107 source files` 与 `git diff --check` 均通过；Alembic 唯一 head 为 `0033_joint_exam_class_authorization`，根 lockfile 和 `0031_student_portal.py` blob 与 HEAD 一致，`ahamark.db` 与 Web lockfile 不存在，暂存区为空。没有产品、前端、模型、迁移或依赖改动；最终 README 澄清轮只修改本账本，未暂存文件总数仍为 13。
+
+2026-08-04 PR #1 独立审查修复专项：本 worktree 从 Draft PR #1 的远端 head `6d0941bd1d4ecb40810f4f6927d7e9f2967083e1` detached 起步；开始修改前已确认工作区/暂存区干净、PR 仍为 Draft 且没有新评论/审查/检查或协作者更新，Alembic 唯一 head 为 `0033_joint_exam_class_authorization`，Docker daemon 未运行，`ahamark.db` 与 Web lockfile 不存在且根 lockfile 无改动。五项 finding 均先独立复现，再按 fail-closed 边界修复：
+
+- 分题协作者的 review workspace 只返回其被分配答案通过 `StudentAnswerRegion` 或 `GradingEvidence` 明确映射的页面；映射不完整时不返回页面，协作者始终没有 `original_url`，无可见答案的 submission 也不进入响应。回归覆盖已分配/未分配/未映射页面、整份原文件 URL 和任意 unrelated `submission_id`。
+- 正式成绩统一选择每名学生非 `voided` submission 中最大的 `attempt_number`，最新 attempt 未完成时不得回退旧 attempt；未绑定 submission 仍保留为发布 blocker。readiness、snapshot、release item、学生端历史脏数据防御和 analytics 由同一规则保证唯一计数；split 回归确认 attempt 递增。
+- 作业文件删除改为两阶段：先把精确授权的 `ready` 文件持久化为 `pending` 并保留页面授权关联，再只删除该 `storage_key`，最后事务删除页面、重编号并标记 `deleted`。准备提交失败不会碰对象；对象失败或最终数据库提交失败均保持可重试状态，同一路由可幂等收口。没有 Bucket、前缀或未知对象删除，也没有新增迁移。
+- 若同 assignment/class 已存在更高的正式 released version，旧 release 首次公开返回 `409 GRADE_RELEASE_SUPERSEDED`；学生端当前成绩按 release `version` 优先而不是公开时间，历史版本仍可审计。
+- 联考和批改邀请显式要求 active teacher；无角色、student-only、其他角色均拒绝。既有协作记录、联考邀请列表、权限入口和协作 metadata 也会重新校验 active teacher，角色撤销立即失权。AI 仍仅生成建议，正式成绩仍只由主教师明确确认，学生仍只能读取账号绑定且明确公开的正式成绩。
+
+2026-08-04 browser E2E 契约跟进：后端全量中的两个失败不是上述五项修复造成的业务回归。Git blame 显示 `scripts/business_browser_e2e.mjs` 在 `99dd4fbb` 已同步“简化作业复核确认”产品语义，但 `test_business_browser_e2e_contract.py` 的两条断言仍停留在 `2b56046b`：其一仍要求所有 `suggested` 文件分析都人工确认，实际契约是高置信、无冲突项以 `system_auto` 采用，只有不能自动采用的 suggested 项进入人工按钮；其二仍要求逐条处置生成建议，实际契约是页面组织和题目抽取建议只读审计、`writes=[]` 且 `teacher_action_required=false`。测试现改为验证自动采用资格、冲突项人工确认、API 状态审计及无 disposition 写入；没有删除发布门禁断言，没有修改产品/API、扩大权限或改变成绩发布边界。该契约文件 `39 passed`；为满足改动文件 Ruff format 门禁，同一文件两个起点已有的单引号断言被格式化为双引号，属于无语义机械变化。
+
+最终验证使用唯一系统临时根 `C:\Users\Lenovo\AppData\Local\Temp\ahamark-pr1-review-9f3fd76b9fc0487e9cb1083b3082694a`，每组使用独立 `--basetemp`，并禁用只写工作区 `.pytest_cache` 的 cacheprovider，从而避开 Windows 旧 temp/cache 权限噪音。正确 worktree cwd 的后端全量为 `576 passed, 18 skipped`，耗时 `34:08`，`ahamark.db` 守卫 unchanged；18 个 skip 均为仓库既有条件型用例，其中 15 个需要显式隔离 PostgreSQL 环境、1 个受 Windows symlink 权限条件保护、2 个需要真实 RapidOCR 运行时，没有 test error。五项 finding 的 assignments/collaboration/confirm-results/joint-exam/student-portal/submission/results/analytics/authorization 扩展专项为 `74 passed`；browser E2E 契约文件为 `39 passed`；迁移命名测试为 `33 passed, 1 skipped`。全仓 Ruff check、11 个改动 Python 文件的 Ruff format check、strict mypy `107 source files` 与 `git diff --check` 均通过。最终只读复核确认根 lockfile 与 HEAD blob `e31e8009...` 一致，`0031_student_portal.py` 与 HEAD blob `517d2f0f...` 一致，`ahamark.db` 与 Web lockfile 不存在，Alembic 唯一 head 为 `0033_joint_exam_class_authorization`；本地仍为 detached `6d0941bd...`，远端 Draft PR #1 head 相同且没有新评论、审查、检查或协作者更新，暂存区为空。当前已具备独立提交前复审条件，但本轮仍未获暂存、提交或推送授权。
+
+剩余风险 / 下一位接手：证据映射不完整会有意隐藏协作者页面；改善可用性必须先建立可信题目到页面映射，不能回退整卷授权。对象删除失败后的 `pending` 当前依靠显式重试收口，没有后台 outbox worker。两个 browser E2E 基线契约已按当前真实产品语义修复且全量测试完成。本专项只修改 `assignments.py`、`grading.py`、`results.py`、`student_portal.py`、七个对应后端测试和本账本；没有前端、模型、迁移或依赖修改。仍禁止暂存、提交、推送、合并、部署或改变 PR 状态。
+
 更新时间：2026-08-04。当前专项基于 `2b24ab4001e9f36b0ea32337331a60f53c3d33c1` 的独立 worktree，保持 detached HEAD；对应本地起点分支为 `codex/grading-confirm-results-update`，远端 Draft PR #1 仍以 `master` 为 base 且未合并。禁止在未获再次授权时暂存、提交、推送、合并或部署。
 
 本轮修改及原因：

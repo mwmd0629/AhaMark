@@ -547,6 +547,11 @@ def test_page_reorder_split_merge_and_finalize_guard() -> None:
         )
         assert split.status_code == 201, split.text
         new_id = split.json()["new_submission_id"]
+        source = db.get(Submission, submission_id)
+        split_attempt = db.get(Submission, uuid.UUID(new_id))
+        assert source is not None and split_attempt is not None
+        assert split_attempt.student_id == source.student_id
+        assert split_attempt.attempt_number == source.attempt_number + 1
         merged = client.post(
             f"/api/submissions/{submission_id}/merge",
             json={"source_submission_id": new_id},
@@ -630,9 +635,7 @@ def test_recognized_page_reorder_is_noop_only_when_order_is_unchanged() -> None:
         )
         order = [str(page.id) for page in pages]
 
-        noop = client.put(
-            f"/api/submissions/{submission_id}/pages/order", json={"page_ids": order}
-        )
+        noop = client.put(f"/api/submissions/{submission_id}/pages/order", json={"page_ids": order})
         assert noop.status_code == 200, noop.text
         assert noop.json() == {"submission_id": str(submission_id), "page_ids": order}
         db.expire_all()
@@ -842,9 +845,7 @@ def test_subjective_boundary_recheck_disagreement_enters_review_queue(
         assert graded.json()["requires_review"] is True
         workspace = client.get(f"/api/grading-batches/{batch_id}/review-workspace").json()
         projected = workspace["items"][0]["answers"][0]
-        assert projected["result"]["quality_flags"] == [
-            "BOUNDARY_RECHECK_DISAGREEMENT"
-        ]
+        assert projected["result"]["quality_flags"] == ["BOUNDARY_RECHECK_DISAGREEMENT"]
         assert projected["criteria"][0]["title"] == "答案正确"
         assert projected["criteria"][0]["evidence_quotes"]
     finally:
@@ -1332,9 +1333,7 @@ def test_finalized_submission_rejects_answer_and_review_mutations() -> None:
         assert created_region.status_code == 409
         assert created_region.json()["code"] == "SUBMISSION_FINALIZED"
 
-        deleted_region = client.delete(
-            f"/api/student-answers/{answer.id}/regions/{region.id}"
-        )
+        deleted_region = client.delete(f"/api/student-answers/{answer.id}/regions/{region.id}")
         assert deleted_region.status_code == 409
         assert deleted_region.json()["code"] == "SUBMISSION_FINALIZED"
 

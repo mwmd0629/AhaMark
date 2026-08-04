@@ -571,9 +571,9 @@ def test_f_uses_safe_compatibility_finalize_without_confirming_results() -> None
     assert '"F must create exactly two complete snapshots' in f_stage
     assert "complete score snapshot IDs must be unique" in f_stage
     assert "finalizedBatchResponse.body.workflow.completed_count" in f_stage
-    assert 'finalizedBatchResponse.body.workflow.blocked' in f_stage
+    assert "finalizedBatchResponse.body.workflow.blocked" in f_stage
     assert 'item.status === "finalized" && item.workflow.stage === "completed"' in f_stage
-    assert 'evidence.finalized_workflow_verification' in f_stage
+    assert "evidence.finalized_workflow_verification" in f_stage
     assert (
         f_stage.index(progress_wait)
         < f_stage.index(confirm_button)
@@ -740,12 +740,19 @@ def test_file_analysis_wait_requires_materialization_and_durable_confirmation() 
     assert 'pollUntil("all file analyses teacher-confirmed", 90_000' in helper
     assert "if (files.length === 0)" in helper
     assert 'done: false, state: "analyses not materialized"' in helper
-    assert 'item.analysis_status === "suggested"' in helper
+    assert '!["suggested", "confirmed"].includes(item.analysis_status)' in helper
+    assert 'item.analysis_status !== "suggested"' in helper
+    assert "roleIsAutomatic" in helper
+    assert "sourceIsAutomatic" in helper
+    assert 'warnings.includes("FILE_ROLE_CONFLICT_REVIEW_REQUIRED")' in helper
+    assert "return !(roleIsAutomatic && sourceIsAutomatic)" in helper
+    assert "adoption:" in helper
+    assert '"system_auto"' in helper
     assert "teacher_confirmed_role" in helper
     assert "teacher_confirmed_answer_source" in helper
     assert "file analysis write-after-GET" in helper
     assert "if (before === 0) return" not in helper
-    pending = helper.index('item.analysis_status === "suggested"')
+    pending = helper.index("const pending = files.filter")
     expand = helper.index('"file analysis details expanded"', pending)
     button = helper.index('name: "确认文件分析"', expand)
     assert pending < expand < button
@@ -758,15 +765,22 @@ def test_file_analysis_wait_requires_materialization_and_durable_confirmation() 
     assert 'method: "PATCH"' not in helper
 
 
-def test_generated_suggestions_use_explicit_api_completion_not_zero_button_count() -> None:
+def test_generated_suggestions_are_audited_without_mandatory_disposition_writes() -> None:
     helper = SCRIPT.split("async function settleGeneratedSuggestions", 1)[1].split(
         "async function getReviewSession", 1
     )[0]
     assert "/page-organization-suggestions" in helper
     assert "/question-extraction-candidates" in helper
-    assert 'item.status === "suggested"' in helper
-    assert "if (suggested.length === 0)" in helper
-    assert "generated suggestion write-after-GET" in helper
+    assert 'assertApiOk(pagesResponse, "page suggestions GET")' in helper
+    assert 'assertApiOk(questionsResponse, "question candidates GET")' in helper
+    assert "page_statuses: pages.map" in helper
+    assert "question_statuses: questions.map" in helper
+    assert "materialized_question_id" in helper
+    assert "writes: []" in helper
+    assert "teacher_action_required: false" in helper
+    assert 'item.status === "suggested"' not in helper
+    assert 'method: "PATCH"' not in helper
+    assert 'method: "POST"' not in helper
     assert "generationReviewInputs" in SCRIPT
     assert "confirmed answer/rubric" in SCRIPT
 

@@ -85,6 +85,7 @@ class AssignmentInput(BaseModel):
     class_ids: list[uuid.UUID] = Field(default_factory=list)
     delivery_mode: Literal["class_assignment", "joint_exam"] = "class_assignment"
 
+
 class AssignmentPatch(BaseModel):
     title: str | None = Field(None, min_length=1, max_length=200)
     subject: str | None = Field(None, max_length=40)
@@ -199,20 +200,30 @@ def validate_classes(db: Session, actor_id: uuid.UUID, ids: list[uuid.UUID]) -> 
     return rows
 
 
+def _active_teacher_collaborator(db: Session, assignment_id: uuid.UUID, user_id: uuid.UUID) -> bool:
+    collaborator = db.scalar(
+        select(GradingCollaborator.id).where(
+            GradingCollaborator.assignment_id == assignment_id,
+            GradingCollaborator.user_id == user_id,
+            GradingCollaborator.status == "active",
+        )
+    )
+    user = db.get(User, user_id) if collaborator is not None else None
+    return bool(
+        collaborator is not None
+        and user is not None
+        and user.status == "active"
+        and "teacher" in {role.name for role in user.roles}
+    )
+
+
 def joint_exam_access(db: Session, actor_id: uuid.UUID, assignment_id: uuid.UUID) -> Assignment:
     item = db.get(Assignment, assignment_id)
     if item is None or item.delivery_mode != "joint_exam":
         raise ApiProblem(404, "JOINT_EXAM_NOT_FOUND", "联考不存在")
     if item.owner_id == actor_id:
         return item
-    collaborator = db.scalar(
-        select(GradingCollaborator.id).where(
-            GradingCollaborator.assignment_id == item.id,
-            GradingCollaborator.user_id == actor_id,
-            GradingCollaborator.status == "active",
-        )
-    )
-    if collaborator is None:
+    if not _active_teacher_collaborator(db, item.id, actor_id):
         raise ApiProblem(404, "JOINT_EXAM_NOT_FOUND", "联考不存在")
     return item
 
@@ -228,6 +239,11 @@ def joint_exam_team_json(db: Session, item: Assignment, actor_id: uuid.UUID) -> 
         )
         .order_by(User.display_name, User.email)
     ).all()
+    active_collaborators = [
+        (row, user)
+        for row, user in collaborators
+        if _active_teacher_collaborator(db, item.id, user.id)
+    ]
     class_rows = db.execute(
         select(AssignmentClass, SchoolClass, User)
         .join(SchoolClass, SchoolClass.id == AssignmentClass.class_id)
@@ -252,7 +268,7 @@ def joint_exam_team_json(db: Session, item: Assignment, actor_id: uuid.UUID) -> 
                 "email": user.email,
                 "role": row.role,
             }
-            for row, user in collaborators
+            for row, user in active_collaborators
         ],
         "classes": [
             {
@@ -261,8 +277,7 @@ def joint_exam_team_json(db: Session, item: Assignment, actor_id: uuid.UUID) -> 
                 "owner_id": str(cls.owner_id),
                 "owner_name": class_owner.display_name,
                 "authorized_by": str(link.authorized_by) if link.authorized_by else None,
-                "authorized": cls.owner_id == item.owner_id
-                or link.authorized_by == cls.owner_id,
+                "authorized": cls.owner_id == item.owner_id or link.authorized_by == cls.owner_id,
                 "mine": cls.owner_id == actor_id,
             }
             for link, cls, class_owner in class_rows
@@ -952,7 +967,11 @@ def list_joint_exam_invitations(db: Db, actor: Actor) -> list[dict[str, Any]]:
         )
         .order_by(Assignment.updated_at.desc(), Assignment.id)
     ).all()
-    return [joint_exam_team_json(db, item, actor.id) for item in items]
+    return [
+        joint_exam_team_json(db, item, actor.id)
+        for item in items
+        if _active_teacher_collaborator(db, item.id, actor.id)
+    ]
 
 
 @router.get("/{assignment_id}/joint-team")
@@ -975,9 +994,8 @@ def invite_joint_exam_collaborator(
     user = db.scalar(select(User).where(func.lower(User.email) == data.email.strip().lower()))
     if user is None or user.status != "active":
         raise ApiProblem(404, "COLLABORATOR_NOT_FOUND", "未找到可用的教师账号")
-    role_names = {role.name for role in user.roles}
-    if "student" in role_names and "teacher" not in role_names:
-        raise ApiProblem(422, "COLLABORATOR_TEACHER_REQUIRED", "学生账号不能参与联考")
+    if "teacher" not in {role.name for role in user.roles}:
+        raise ApiProblem(422, "COLLABORATOR_TEACHER_REQUIRED", "仅教师账号可参与联考")
     if user.id == actor.id:
         raise ApiProblem(422, "OWNER_ALREADY_LEADS", "主责老师无需邀请自己")
     row = db.scalar(
@@ -1416,7 +1434,7 @@ def delete_file(
         .where(
             StoredFile.id == file_id,
             StoredFile.owner_id == actor.id,
-            StoredFile.status == FileStatus.ready,
+            StoredFile.status.in_([FileStatus.ready, FileStatus.pending]),
             PaperPage.paper_version_id == pv.id,
         )
     )
@@ -1431,10 +1449,40 @@ def delete_file(
             )
         ).all()
     )
+    storage_key = sf.storage_key
+    if sf.status == FileStatus.ready:
+        # Persist a recoverable deletion marker before touching object storage. Keeping
+        # the pages until the object delete succeeds also preserves the exact
+        # assignment/file authorization link for retries.
+        sf.status = FileStatus.pending
+        audit(
+            db,
+            actor.id,
+            "assignment.file.delete_requested",
+            "assignment",
+            item.id,
+            {"stored_file_id": str(sf.id), "pages_pending": len(page_ids)},
+        )
+        try:
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise ApiProblem(
+                503,
+                "FILE_DELETE_PREPARE_FAILED",
+                "文件删除准备失败，对象未删除",
+            ) from exc
+
     try:
-        storage.delete(sf.storage_key)
+        # Delete only the exact key authorized through this assignment's PaperPage.
+        # Object deletion is required to be idempotent so a pending request can retry.
+        storage.delete(storage_key)
     except Exception as exc:
-        raise ApiProblem(503, "STORAGE_UNAVAILABLE", "对象存储不可用，文件未删除") from exc
+        raise ApiProblem(
+            503,
+            "STORAGE_UNAVAILABLE",
+            "对象存储不可用，删除已排队且可重试",
+        ) from exc
 
     db.execute(delete(PaperPage).where(PaperPage.id.in_(page_ids)))
     sf.status = FileStatus.deleted
@@ -1454,7 +1502,15 @@ def delete_file(
         item.id,
         {"stored_file_id": str(sf.id), "pages_deleted": len(page_ids)},
     )
-    db.commit()
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise ApiProblem(
+            503,
+            "FILE_DELETE_FINALIZE_FAILED",
+            "对象已删除，数据库收尾待重试",
+        ) from exc
     return {"id": str(sf.id), "pages_deleted": len(page_ids)}
 
 

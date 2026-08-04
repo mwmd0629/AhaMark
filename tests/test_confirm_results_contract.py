@@ -6,9 +6,13 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
+from threading import Event
 
 import pytest
+from app.api import grading as grading_api
+from app.api import results as results_api
 from app.core.config import get_settings
+from app.db.session import engine
 from app.main import app
 from app.models import (
     Assignment,
@@ -31,7 +35,7 @@ from app.models import (
     VersionStatus,
 )
 from app.storage.dependencies import get_storage
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 from test_submission_workflow import client, confirm_answer_regions, png, workflow
 
@@ -293,6 +297,83 @@ def test_confirm_results_materializes_review_complete_snapshot_and_one_release()
         assert _formal_counts(case.db) == (1, 1, 1)
 
 
+def test_confirm_results_uses_only_highest_non_voided_attempt_per_student() -> None:
+    with _confirmable_case() as case:
+        current = case.db.get(Submission, case.submission_id)
+        current_answer = case.db.get(StudentAnswer, case.answer_id)
+        current_result = case.db.get(GradingResult, case.result_id)
+        assert current is not None and current.student_id is not None
+        assert current_answer is not None and current_result is not None
+
+        current.attempt_number = 2
+        case.db.commit()
+        superseded = Submission(
+            owner_id=current.owner_id,
+            grading_batch_id=current.grading_batch_id,
+            assignment_id=current.assignment_id,
+            class_id=current.class_id,
+            student_id=current.student_id,
+            attempt_number=1,
+            status="matched",
+            source="split",
+        )
+        case.db.add(superseded)
+        case.db.flush()
+        superseded_answer = StudentAnswer(
+            submission_id=superseded.id,
+            question_id=current_answer.question_id,
+            question_version_reference=current_answer.question_version_reference,
+            status="ready_for_grading",
+            recognized_text="superseded synthetic attempt",
+            requires_review=False,
+        )
+        case.db.add(superseded_answer)
+        case.db.flush()
+        case.db.add(
+            GradingResult(
+                grading_job_id=current_result.grading_job_id,
+                student_answer_id=superseded_answer.id,
+                question_id=current_result.question_id,
+                rubric_version_id=current_result.rubric_version_id,
+                grading_method=current_result.grading_method,
+                provider=current_result.provider,
+                provider_version=current_result.provider_version,
+                prompt_version=current_result.prompt_version,
+                score=current_result.score,
+                max_score=current_result.max_score,
+                confidence=current_result.confidence,
+                requires_review=False,
+                status="suggested",
+            )
+        )
+        case.db.commit()
+
+        readiness = _readiness(case)
+        assert readiness["ready"] is True
+        assert [item["submission_id"] for item in readiness["plan"]] == [str(current.id)]
+        confirmed = _confirm(
+            case,
+            key=f"effective-attempt-{uuid.uuid4()}",
+            review_hash=str(readiness["review_hash"]),
+        )
+        assert confirmed.status_code == 201, confirmed.text
+        release_id = uuid.UUID(confirmed.json()["grade_release_id"])
+        release_items = list(
+            case.db.scalars(
+                select(GradeReleaseItem).where(GradeReleaseItem.grade_release_id == release_id)
+            )
+        )
+        assert len(release_items) == 1
+        assert release_items[0].submission_id == current.id
+        case.db.refresh(superseded)
+        assert superseded.status == "matched"
+        assert superseded.finalized_at is None
+
+        analytics = client.post(f"/api/grade-releases/{release_id}/analytics")
+        assert analytics.status_code == 201, analytics.text
+        assert analytics.json()["metrics"]["participant_count"] == 1
+
+
 def test_same_key_replays_same_ids_and_different_payload_conflicts() -> None:
     with _confirmable_case() as case:
         readiness = _readiness(case)
@@ -397,17 +478,10 @@ def test_reopen_one_submission_reuses_unchanged_snapshot_and_versions_release() 
         }
         assert second_items[second_submission_id] == first_items[second_submission_id]
         assert second_items[case.submission_id] != first_items[case.submission_id]
-        assert second_payload["new_snapshot_ids"] == [
-            str(second_items[case.submission_id])
-        ]
-        assert second_payload["reused_snapshot_ids"] == [
-            str(second_items[second_submission_id])
-        ]
+        assert second_payload["new_snapshot_ids"] == [str(second_items[case.submission_id])]
+        assert second_payload["reused_snapshot_ids"] == [str(second_items[second_submission_id])]
         assert case.db.get(SubmissionScoreSnapshot, first_items[case.submission_id]) is not None
-        assert (
-            case.db.scalar(select(func.count()).select_from(SubmissionScoreSnapshot))
-            == 3
-        )
+        assert case.db.scalar(select(func.count()).select_from(SubmissionScoreSnapshot)) == 3
         replay = _confirm(
             case,
             key=second_key,
@@ -421,6 +495,96 @@ def test_reopen_one_submission_reuses_unchanged_snapshot_and_versions_release() 
         assert current["ready"] is False
         assert current["previous_grade_release_id"] == str(second_release_id)
         assert current["confirmed_result"]["grade_release_id"] == str(second_release_id)
+
+
+def test_publish_and_confirm_share_assignment_serialization_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _confirmable_case() as case:
+        readiness = _readiness(case)
+        first = _confirm(
+            case,
+            key=f"serialized-first-{uuid.uuid4()}",
+            review_hash=str(readiness["review_hash"]),
+        )
+        assert first.status_code == 201, first.text
+        first_release_id = first.json()["grade_release_id"]
+
+        reopened = client.post(
+            f"/api/submissions/{case.submission_id}/reopen",
+            json={"reason": "Prepare a synthetic concurrent release"},
+        )
+        assert reopened.status_code == 200, reopened.text
+        changed_review = case.db.scalar(
+            select(TeacherReview).where(TeacherReview.student_answer_id == case.answer_id)
+        )
+        assert changed_review is not None
+        changed_review.final_feedback = "Synthetic concurrent correction"
+        case.db.commit()
+        second_readiness = _readiness(case)
+        assert second_readiness["ready"] is True
+
+        publish_at_visibility_write = Event()
+        allow_publish_to_commit = Event()
+        confirm_request_started = Event()
+        confirm_lock_sql_started = Event()
+        confirm_reached_state_read = Event()
+        original_results_now = results_api.now_utc
+        original_confirm_state = grading_api._confirm_results_state
+
+        def pause_publish_after_superseded_check():
+            publish_at_visibility_write.set()
+            assert allow_publish_to_commit.wait(5)
+            return original_results_now()
+
+        def observe_confirm_state(*args, **kwargs):
+            confirm_reached_state_read.set()
+            return original_confirm_state(*args, **kwargs)
+
+        def observe_assignment_lock_sql(
+            _conn, _cursor, statement, _parameters, _context, _executemany
+        ):
+            normalized = " ".join(statement.lower().split())
+            if normalized.startswith("update assignments set updated_at=assignments.updated_at"):
+                confirm_lock_sql_started.set()
+
+        def issue_confirm():
+            confirm_request_started.set()
+            return _confirm(
+                case,
+                key=f"serialized-second-{uuid.uuid4()}",
+                review_hash=str(second_readiness["review_hash"]),
+            )
+
+        monkeypatch.setattr(results_api, "now_utc", pause_publish_after_superseded_check)
+        monkeypatch.setattr(grading_api, "_confirm_results_state", observe_confirm_state)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            publish_future = executor.submit(
+                client.post,
+                f"/api/grade-releases/{first_release_id}/publish-to-students",
+            )
+            assert publish_at_visibility_write.wait(5)
+            event.listen(engine, "before_cursor_execute", observe_assignment_lock_sql)
+            try:
+                confirm_future = executor.submit(issue_confirm)
+                assert confirm_request_started.wait(5), "confirm HTTP request did not start"
+                assert confirm_lock_sql_started.wait(5), (
+                    "confirm did not reach the assignment serialization SQL"
+                )
+                assert not confirm_reached_state_read.wait(0.5), (
+                    "confirm crossed the assignment lock while publish still held it"
+                )
+            finally:
+                allow_publish_to_commit.set()
+                event.remove(engine, "before_cursor_execute", observe_assignment_lock_sql)
+            published = publish_future.result(timeout=5)
+            confirmed = confirm_future.result(timeout=5)
+
+        assert published.status_code == 200, published.text
+        assert confirmed.status_code == 201, confirmed.text
+        assert confirmed.json()["grade_release_version"] == 2
+        assert confirm_reached_state_read.is_set()
 
 
 def test_active_rubric_version_change_prevents_snapshot_reuse() -> None:
@@ -441,9 +605,7 @@ def test_active_rubric_version_change_prevents_snapshot_reuse() -> None:
         old_version = case.db.get(RubricVersion, assignment.active_rubric_version_id)
         assert old_version is not None
         old_rubric = case.db.scalar(
-            select(QuestionRubric).where(
-                QuestionRubric.rubric_version_id == old_version.id
-            )
+            select(QuestionRubric).where(QuestionRubric.rubric_version_id == old_version.id)
         )
         assert old_rubric is not None
         new_version = RubricVersion(
@@ -491,9 +653,11 @@ def test_active_rubric_version_change_prevents_snapshot_reuse() -> None:
         assert changed["ready"] is False
         assert changed["confirmed_result"] is None
         assert changed["reused_snapshot_count"] == 0
-        assert {
-            blocker["code"] for blocker in changed["blockers"]
-        } & {"SNAPSHOT_REUSE_MISMATCH", "RUBRIC_VERSION_MISMATCH", "STALE_RUBRIC"}
+        assert {blocker["code"] for blocker in changed["blockers"]} & {
+            "SNAPSHOT_REUSE_MISMATCH",
+            "RUBRIC_VERSION_MISMATCH",
+            "STALE_RUBRIC",
+        }
         blocked = _confirm(
             case,
             key=f"version-blocked-{uuid.uuid4()}",
@@ -546,9 +710,7 @@ def test_formal_explanation_change_prevents_snapshot_reuse_without_writes(
         changed = _readiness(case)
         assert changed["ready"] is False
         assert changed["confirmed_result"] is None
-        assert "SNAPSHOT_REUSE_MISMATCH" in {
-            blocker["code"] for blocker in changed["blockers"]
-        }
+        assert "SNAPSHOT_REUSE_MISMATCH" in {blocker["code"] for blocker in changed["blockers"]}
         blocked = _confirm(
             case,
             key=f"explanation-blocked-{mutation}-{uuid.uuid4()}",
@@ -589,9 +751,7 @@ def test_zero_active_questions_blocks_without_formal_writes() -> None:
 
         readiness = _readiness(case)
         assert readiness["ready"] is False
-        assert "QUESTION_MISSING" in {
-            blocker["code"] for blocker in readiness["blockers"]
-        }
+        assert "QUESTION_MISSING" in {blocker["code"] for blocker in readiness["blockers"]}
         assert _formal_counts(case.db) == (0, 0, 0)
 
         response = _confirm(
@@ -627,9 +787,7 @@ def test_version_binding_mismatch_blocks_without_formal_writes(
 
         readiness = _readiness(case)
         assert readiness["ready"] is False
-        assert expected_blocker in {
-            blocker["code"] for blocker in readiness["blockers"]
-        }
+        assert expected_blocker in {blocker["code"] for blocker in readiness["blockers"]}
         response = _confirm(
             case,
             key=f"binding-mismatch-{uuid.uuid4()}",
@@ -675,9 +833,7 @@ def test_review_bound_to_older_result_blocks_when_a_newer_result_exists() -> Non
 
         readiness = _readiness(case)
         assert readiness["ready"] is False
-        assert "REVIEW_RESULT_MISMATCH" in {
-            blocker["code"] for blocker in readiness["blockers"]
-        }
+        assert "REVIEW_RESULT_MISMATCH" in {blocker["code"] for blocker in readiness["blockers"]}
         response = _confirm(
             case,
             key=f"newer-result-{uuid.uuid4()}",

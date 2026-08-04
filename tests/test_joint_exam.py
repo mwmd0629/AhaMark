@@ -12,14 +12,16 @@ from app.models import (
     GradingCollaborator,
     GradingQuestionAssignment,
     MembershipStatus,
+    Role,
     Student,
     User,
+    UserRole,
     now_utc,
 )
 from app.storage.dependencies import get_storage
 from fastapi.testclient import TestClient
 from PIL import Image
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from test_assignments import FakeStorage, active_class
 
 client = TestClient(app)
@@ -110,8 +112,40 @@ def test_cross_teacher_joint_exam_requires_invitation_and_class_owner_authorizat
         password_hash="!test!",
         display_name="未受邀老师",
     )
-    db.add_all([collaborator, outsider])
+    no_role = User(
+        email="joint-no-role@example.com",
+        password_hash="!test!",
+        display_name="无角色账号",
+    )
+    student_only = User(
+        email="joint-student-only@example.com",
+        password_hash="!test!",
+        display_name="学生账号",
+    )
+    auditor = User(
+        email="joint-auditor@example.com",
+        password_hash="!test!",
+        display_name="审计账号",
+    )
+    db.add_all([collaborator, outsider, no_role, student_only, auditor])
     db.flush()
+    teacher_role = db.scalar(select(Role).where(Role.name == "teacher"))
+    if teacher_role is None:
+        teacher_role = Role(name="teacher", description="教师端")
+        db.add(teacher_role)
+        db.flush()
+    student_role = Role(name="student", description="学生端")
+    auditor_role = Role(name="auditor", description="只读审计")
+    db.add_all([student_role, auditor_role])
+    db.flush()
+    collaborator_teacher_link = UserRole(user_id=collaborator.id, role_id=teacher_role.id)
+    db.add_all(
+        [
+            collaborator_teacher_link,
+            UserRole(user_id=student_only.id, role_id=student_role.id),
+            UserRole(user_id=auditor.id, role_id=auditor_role.id),
+        ]
+    )
     collaborator_class = active_class(db, collaborator.id, "协作老师班级")
     collaborator_student = add_student(
         db, collaborator.id, collaborator_class, "C001", "协作班学生"
@@ -141,6 +175,13 @@ def test_cross_teacher_joint_exam_requires_invitation_and_class_owner_authorizat
         assert uninvited.status_code == 404
 
         app.dependency_overrides[get_current_actor] = lambda: CurrentActor(owner.id, owner.email)
+        for rejected_account in (no_role, student_only, auditor):
+            rejected = client.post(
+                f"/api/assignments/{assignment_id}/joint-team/collaborators",
+                json={"email": rejected_account.email},
+            )
+            assert rejected.status_code == 422, rejected.text
+            assert rejected.json()["code"] == "COLLABORATOR_TEACHER_REQUIRED"
         invited = client.post(
             f"/api/assignments/{assignment_id}/joint-team/collaborators",
             json={"email": collaborator.email},
@@ -169,6 +210,14 @@ def test_cross_teacher_joint_exam_requires_invitation_and_class_owner_authorizat
         )
         assert cross_class["authorized"] is True
         assert cross_class["authorized_by"] == str(collaborator.id)
+
+        db.delete(collaborator_teacher_link)
+        db.commit()
+        invitations_after_role_revocation = client.get("/api/assignments/joint-exams/invitations")
+        assert invitations_after_role_revocation.status_code == 200
+        assert invitations_after_role_revocation.json() == []
+        denied_after_role_revocation = client.get(f"/api/assignments/{assignment_id}/joint-team")
+        assert denied_after_role_revocation.status_code == 404
 
         app.dependency_overrides[get_current_actor] = lambda: CurrentActor(owner.id, owner.email)
         current = client.get(f"/api/assignments/{assignment_id}").json()
@@ -290,6 +339,12 @@ def test_joint_exam_freezes_roster_and_ensures_one_batch_per_class():
         )
         db.add(collaborator)
         db.flush()
+        teacher_role = db.scalar(select(Role).where(Role.name == "teacher"))
+        if teacher_role is None:
+            teacher_role = Role(name="teacher", description="教师端")
+            db.add(teacher_role)
+            db.flush()
+        db.add(UserRole(user_id=collaborator.id, role_id=teacher_role.id))
         db.add(
             GradingCollaborator(
                 assignment_id=uuid.UUID(assignment_id),
@@ -323,6 +378,17 @@ def test_joint_exam_freezes_roster_and_ensures_one_batch_per_class():
         assert work.json()[0]["assignment_id"] == assignment_id
         assert work.json()[0]["question_id"] == question.json()["id"]
         assert work.json()[0]["class_count"] == 2
+        db.execute(
+            delete(UserRole).where(
+                UserRole.user_id == collaborator.id,
+                UserRole.role_id == teacher_role.id,
+            )
+        )
+        db.commit()
+        revoked_work = client.get("/api/joint-grading-work")
+        assert revoked_work.status_code == 403
+        assert revoked_work.json()["code"] == "TEACHER_ROLE_REQUIRED"
+        assert assignment_id not in revoked_work.text
         app.dependency_overrides[get_current_actor] = lambda: CurrentActor(actor.id, actor.email)
         first_batch = next(
             item for item in pool.json()["items"] if item["class_id"] == str(first.id)

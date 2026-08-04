@@ -3,8 +3,18 @@ import uuid
 from app.api.auth import hash_password
 from app.db.session import SessionLocal
 from app.main import app
-from app.models import GradeRelease, Role, Status, Student, Submission, User, UserRole
+from app.models import (
+    GradeRelease,
+    GradeReleaseItem,
+    Role,
+    Status,
+    Student,
+    Submission,
+    User,
+    UserRole,
+)
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from test_confirm_results_contract import _confirm, _confirmable_case, _readiness
 
 
@@ -89,6 +99,76 @@ def test_student_only_sees_explicitly_linked_and_published_formal_grade() -> Non
             assert release is not None
             visible_at = release.student_visible_at
         assert visible_at is not None
+
+
+def test_older_release_cannot_be_published_after_newer_formal_version() -> None:
+    with _confirmable_case() as case:
+        submission = case.db.get(Submission, case.submission_id)
+        assert submission is not None and submission.student_id is not None
+        student = case.db.get(Student, submission.student_id)
+        assert student is not None
+        account = _student_account("out-of-order@example.com")
+        student.email = account.email
+        case.db.commit()
+        assert TestClient(app).post(f"/api/students/{student.id}/account-link").status_code == 200
+
+        readiness = _readiness(case)
+        confirmed = _confirm(
+            case,
+            key=f"out-of-order-{uuid.uuid4()}",
+            review_hash=str(readiness["review_hash"]),
+        )
+        assert confirmed.status_code == 201, confirmed.text
+        release_v1 = case.db.get(GradeRelease, uuid.UUID(confirmed.json()["grade_release_id"]))
+        assert release_v1 is not None
+        item_v1 = case.db.scalar(
+            select(GradeReleaseItem).where(GradeReleaseItem.grade_release_id == release_v1.id)
+        )
+        assert item_v1 is not None
+        release_v2 = GradeRelease(
+            owner_id=release_v1.owner_id,
+            assignment_id=release_v1.assignment_id,
+            class_id=release_v1.class_id,
+            version=2,
+            status="released",
+            release_mode=release_v1.release_mode,
+            released_at=release_v1.released_at,
+            created_by=release_v1.created_by,
+            notes="synthetic newer formal version",
+        )
+        case.db.add(release_v2)
+        case.db.flush()
+        case.db.add(
+            GradeReleaseItem(
+                grade_release_id=release_v2.id,
+                student_id=item_v1.student_id,
+                submission_id=item_v1.submission_id,
+                score_snapshot_id=item_v1.score_snapshot_id,
+            )
+        )
+        case.db.commit()
+
+        publish_v2 = TestClient(app).post(
+            f"/api/grade-releases/{release_v2.id}/publish-to-students"
+        )
+        assert publish_v2.status_code == 200, publish_v2.text
+        publish_v1 = TestClient(app).post(
+            f"/api/grade-releases/{release_v1.id}/publish-to-students"
+        )
+        assert publish_v1.status_code == 409
+        assert publish_v1.json()["code"] == "GRADE_RELEASE_SUPERSEDED"
+
+        student_client = TestClient(app)
+        assert (
+            student_client.post(
+                "/auth/login",
+                json={"email": account.email, "password": "student-pass-123"},
+            ).status_code
+            == 200
+        )
+        assignments = student_client.get("/api/student/assignments")
+        assert assignments.status_code == 200
+        assert [item["release_id"] for item in assignments.json()] == [str(release_v2.id)]
 
 
 def test_unlinked_account_cannot_probe_student_portal() -> None:

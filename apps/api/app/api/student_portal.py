@@ -14,6 +14,7 @@ from app.models import (
     Role,
     SchoolClass,
     Student,
+    Submission,
     UserRole,
 )
 from app.results.services import release_scores, student_report_pdf
@@ -62,16 +63,31 @@ def _visible_release_rows(
     )
     if release_id is not None:
         query = query.where(GradeRelease.id == release_id)
-    return cast(
+    rows = cast(
         list[tuple[GradeRelease, GradeReleaseItem, Student, Assignment, SchoolClass]],
         db.execute(
             query.order_by(
-                GradeRelease.student_visible_at.desc(),
                 GradeRelease.version.desc(),
+                GradeRelease.student_visible_at.desc(),
                 GradeRelease.id.desc(),
             )
         ).all(),
     )
+    effective: dict[
+        tuple[uuid.UUID, uuid.UUID],
+        tuple[int, tuple[GradeRelease, GradeReleaseItem, Student, Assignment, SchoolClass]],
+    ] = {}
+    for row in rows:
+        release, item, student, _assignment, _school_class = row
+        submission = db.get(Submission, item.submission_id)
+        if submission is None or submission.status == "voided":
+            continue
+        key = (release.id, student.id)
+        current = effective.get(key)
+        if current is None or submission.attempt_number > current[0]:
+            effective[key] = (submission.attempt_number, row)
+    selected = {id(row): row for _attempt, row in effective.values()}
+    return [row for row in rows if id(row) in selected]
 
 
 def _release_summary(
@@ -157,14 +173,8 @@ def student_assignment_detail(release_id: uuid.UUID, db: Db, actor: Actor) -> di
         point.id: point.name
         for point in db.scalars(select(KnowledgePoint).where(KnowledgePoint.id.in_(knowledge_ids)))
     }
-    versions = [
-        {
-            "release_id": str(version.id),
-            "version": version.version,
-            "student_visible_at": version.student_visible_at,
-            "current": version.id == release.id,
-        }
-        for version, version_item in db.execute(
+    visible_versions = list(
+        db.execute(
             select(GradeRelease, GradeReleaseItem)
             .join(GradeReleaseItem, GradeReleaseItem.grade_release_id == GradeRelease.id)
             .where(
@@ -178,6 +188,19 @@ def student_assignment_detail(release_id: uuid.UUID, db: Db, actor: Actor) -> di
             )
             .order_by(GradeRelease.version.desc())
         ).all()
+    )
+    unique_versions: dict[uuid.UUID, tuple[GradeRelease, GradeReleaseItem]] = {}
+    for version, version_item in visible_versions:
+        unique_versions.setdefault(version.id, (version, version_item))
+    current_release_id = next(iter(unique_versions), release.id)
+    versions = [
+        {
+            "release_id": str(version.id),
+            "version": version.version,
+            "student_visible_at": version.student_visible_at,
+            "current": version.id == current_release_id,
+        }
+        for version, version_item in unique_versions.values()
     ]
     return {
         **_release_summary(release, item, student, assignment, school_class),

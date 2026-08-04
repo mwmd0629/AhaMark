@@ -3,7 +3,7 @@ import uuid
 from decimal import Decimal
 
 from app.api.assignments import detail
-from app.db.session import SessionLocal, engine
+from app.db.session import SessionLocal, engine, get_db
 from app.main import app
 from app.models import (
     ArchiveStatus,
@@ -11,9 +11,12 @@ from app.models import (
     AssignmentClass,
     AssignmentGenerationJob,
     AuditLog,
+    FileStatus,
+    PaperPage,
     PaperVersion,
     Question,
     SchoolClass,
+    StoredFile,
     User,
 )
 from app.storage.base import ObjectMetadata
@@ -35,6 +38,7 @@ def actor_and_db():
 class FakeStorage:
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}
+        self.delete_calls: list[str] = []
 
     def ensure_bucket(self) -> None:
         pass
@@ -50,6 +54,7 @@ class FakeStorage:
         return io.BytesIO(self.objects[key])
 
     def delete(self, key: str) -> None:
+        self.delete_calls.append(key)
         self.objects.pop(key, None)
 
     def presigned_get(self, key: str, expires_seconds: int = 900) -> str:
@@ -266,6 +271,150 @@ def test_delete_draft_file_removes_object_pages_and_renumbers_remaining_pages():
         assert repeated.status_code == 404
         assert repeated.json()["code"] == "FILE_NOT_FOUND"
     finally:
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_delete_file_does_not_touch_object_when_pending_marker_commit_fails():
+    actor, db = actor_and_db()
+    from app.storage.dependencies import get_storage
+
+    fake = FakeStorage()
+    app.dependency_overrides[get_storage] = lambda: fake
+    try:
+        aid = create(client, active_class(db, actor.id, "删除标记失败班").id)["id"]
+        image = io.BytesIO()
+        Image.new("RGB", (100, 200), "white").save(image, "PNG")
+        uploaded = client.post(
+            f"/api/assignments/{aid}/files",
+            files={"file": ("prepare.png", image.getvalue(), "image/png")},
+        ).json()
+        storage_key = next(iter(fake.objects))
+
+        def failing_db():
+            with SessionLocal() as session:
+                original_commit = session.commit
+
+                def fail_first_commit() -> None:
+                    session.commit = original_commit  # type: ignore[method-assign]
+                    raise RuntimeError("synthetic pending-marker commit failure")
+
+                session.commit = fail_first_commit  # type: ignore[method-assign]
+                yield session
+
+        app.dependency_overrides[get_db] = failing_db
+        failed = client.delete(f"/api/assignments/{aid}/files/{uploaded['id']}")
+        assert failed.status_code == 503
+        assert failed.json()["code"] == "FILE_DELETE_PREPARE_FAILED"
+        assert fake.delete_calls == []
+        assert storage_key in fake.objects
+
+        db.expire_all()
+        stored = db.get(StoredFile, uuid.UUID(uploaded["id"]))
+        assert stored is not None and stored.status == FileStatus.ready
+        assert db.scalar(select(PaperPage).where(PaperPage.stored_file_id == stored.id)) is not None
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_delete_file_storage_failure_is_recoverable_and_retry_is_idempotent():
+    actor, db = actor_and_db()
+    from app.storage.dependencies import get_storage
+
+    class FailingDeleteStorage(FakeStorage):
+        fail_delete = True
+
+        def delete(self, key: str) -> None:
+            self.delete_calls.append(key)
+            if self.fail_delete:
+                raise RuntimeError("synthetic object delete failure")
+            self.objects.pop(key, None)
+
+    fake = FailingDeleteStorage()
+    app.dependency_overrides[get_storage] = lambda: fake
+    try:
+        aid = create(client, active_class(db, actor.id, "对象删除重试班").id)["id"]
+        image = io.BytesIO()
+        Image.new("RGB", (100, 200), "white").save(image, "PNG")
+        uploaded = client.post(
+            f"/api/assignments/{aid}/files",
+            files={"file": ("retry.png", image.getvalue(), "image/png")},
+        ).json()
+        storage_key = next(iter(fake.objects))
+
+        failed = client.delete(f"/api/assignments/{aid}/files/{uploaded['id']}")
+        assert failed.status_code == 503
+        assert failed.json()["code"] == "STORAGE_UNAVAILABLE"
+        assert fake.delete_calls == [storage_key]
+        assert storage_key in fake.objects
+        db.expire_all()
+        stored = db.get(StoredFile, uuid.UUID(uploaded["id"]))
+        assert stored is not None and stored.status == FileStatus.pending
+        assert db.scalar(select(PaperPage).where(PaperPage.stored_file_id == stored.id)) is not None
+
+        fake.fail_delete = False
+        retried = client.delete(f"/api/assignments/{aid}/files/{uploaded['id']}")
+        assert retried.status_code == 200, retried.text
+        assert fake.delete_calls == [storage_key, storage_key]
+        assert storage_key not in fake.objects
+        db.expire_all()
+        assert stored.status == FileStatus.deleted
+        assert db.scalar(select(PaperPage).where(PaperPage.stored_file_id == stored.id)) is None
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_delete_file_object_success_then_finalize_commit_failure_can_retry():
+    actor, db = actor_and_db()
+    from app.storage.dependencies import get_storage
+
+    fake = FakeStorage()
+    app.dependency_overrides[get_storage] = lambda: fake
+    try:
+        aid = create(client, active_class(db, actor.id, "数据库收尾重试班").id)["id"]
+        image = io.BytesIO()
+        Image.new("RGB", (100, 200), "white").save(image, "PNG")
+        uploaded = client.post(
+            f"/api/assignments/{aid}/files",
+            files={"file": ("finalize.png", image.getvalue(), "image/png")},
+        ).json()
+        storage_key = next(iter(fake.objects))
+
+        def failing_db():
+            with SessionLocal() as session:
+                original_commit = session.commit
+                commit_count = 0
+
+                def fail_second_commit() -> None:
+                    nonlocal commit_count
+                    commit_count += 1
+                    if commit_count == 2:
+                        raise RuntimeError("synthetic final commit failure")
+                    original_commit()
+
+                session.commit = fail_second_commit  # type: ignore[method-assign]
+                yield session
+
+        app.dependency_overrides[get_db] = failing_db
+        failed = client.delete(f"/api/assignments/{aid}/files/{uploaded['id']}")
+        assert failed.status_code == 503
+        assert failed.json()["code"] == "FILE_DELETE_FINALIZE_FAILED"
+        assert fake.delete_calls == [storage_key]
+        assert storage_key not in fake.objects
+        db.expire_all()
+        stored = db.get(StoredFile, uuid.UUID(uploaded["id"]))
+        assert stored is not None and stored.status == FileStatus.pending
+        assert db.scalar(select(PaperPage).where(PaperPage.stored_file_id == stored.id)) is not None
+
+        app.dependency_overrides.pop(get_db, None)
+        retried = client.delete(f"/api/assignments/{aid}/files/{uploaded['id']}")
+        assert retried.status_code == 200, retried.text
+        assert fake.delete_calls == [storage_key, storage_key]
+        db.expire_all()
+        assert stored.status == FileStatus.deleted
+        assert db.scalar(select(PaperPage).where(PaperPage.stored_file_id == stored.id)) is None
+    finally:
+        app.dependency_overrides.pop(get_db, None)
         app.dependency_overrides.pop(get_storage, None)
 
 

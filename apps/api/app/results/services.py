@@ -22,11 +22,12 @@ from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.models import (
     AnalyticsSnapshot,
+    Assignment,
     GradeRelease,
     GradeReleaseItem,
     KnowledgePoint,
@@ -39,6 +40,24 @@ from app.models import (
     TeacherReview,
     now_utc,
 )
+
+
+def serialize_grade_release_mutation(
+    db: Session, owner_id: uuid.UUID, assignment_id: uuid.UUID
+) -> bool:
+    """Serialize release creation/publication on one assignment transaction.
+
+    The self-update is intentional: PostgreSQL takes an assignment row lock and
+    SQLite takes its write lock without changing the assignment fingerprint.
+    Every release mutation must acquire this lock before narrower rows.
+    """
+    locked_id = db.scalar(
+        update(Assignment)
+        .where(Assignment.id == assignment_id, Assignment.owner_id == owner_id)
+        .values(updated_at=Assignment.updated_at)
+        .returning(Assignment.id)
+    )
+    return locked_id is not None
 
 
 class SnapshotDetail(BaseModel):

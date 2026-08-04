@@ -26,7 +26,12 @@ from app.models import (
     TeachingInsight,
     now_utc,
 )
-from app.results.services import FinalScoreService, create_analytics, release_scores
+from app.results.services import (
+    FinalScoreService,
+    create_analytics,
+    release_scores,
+    serialize_grade_release_mutation,
+)
 from app.storage.base import ObjectStorage
 from app.storage.dependencies import get_storage
 from fastapi import APIRouter, Depends, Request
@@ -295,7 +300,28 @@ def get_release(release_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
 @router.post("/grade-releases/{release_id}/publish-to-students")
 def publish_release_to_students(release_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
     release = released_release(db, actor.id, release_id)
+    if not serialize_grade_release_mutation(db, actor.id, release.assignment_id):
+        raise ApiProblem(404, "GRADE_RELEASE_NOT_FOUND", "成绩发布批次不存在")
+    db.refresh(release)
+    if release.status != "released":
+        raise ApiProblem(409, "GRADE_RELEASE_NOT_ACTIVE", "只有已发布版本可向学生公开")
     if release.student_visible_at is None:
+        newer_release_id = db.scalar(
+            select(GradeRelease.id).where(
+                GradeRelease.owner_id == release.owner_id,
+                GradeRelease.assignment_id == release.assignment_id,
+                GradeRelease.class_id == release.class_id,
+                GradeRelease.status == "released",
+                GradeRelease.version > release.version,
+            )
+        )
+        if newer_release_id is not None:
+            raise ApiProblem(
+                409,
+                "GRADE_RELEASE_SUPERSEDED",
+                "已有更新的正式成绩版本，旧版本不能再向学生公开",
+                {"newer_grade_release_id": str(newer_release_id)},
+            )
         release.student_visible_at = now_utc()
         release.student_visible_by = actor.id
         audit(
