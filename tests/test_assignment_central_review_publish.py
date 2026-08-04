@@ -15,7 +15,6 @@ from app.api.assignment_central_review import (
     _rubric_content_payload,
     digest,
     disposition,
-    generated_issues,
     owned_assignment,
     owned_session,
     prepare_publication,
@@ -466,6 +465,23 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
             validation_rule={"answer_type": "exact_scalar"},
         )
     )
+    db.add(
+        AssignmentQuestionExtractionCandidate(
+            owner_id=actor.id,
+            assignment_id=assignment.id,
+            generation_job_id=job.id,
+            draft_revision_id=revision.id,
+            paper_version_id=paper.id,
+            candidate_version=1,
+            question_number="AI-suggestion-only",
+            question_type="calculation",
+            content_text="unused generated suggestion",
+            overall_confidence=1,
+            extraction_method="fake",
+            status="suggested",
+            source_snapshot_hash=job.source_snapshot_hash,
+        )
+    )
     recovered_issues = [
         GenerationIssue(
             owner_id=actor.id,
@@ -494,15 +510,14 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
     review_items = client.get(f"/api/assignment-review-sessions/{session['id']}/items").json()[
         "items"
     ]
-    for code in (
+    assert not {
         "PROVIDER_UNAVAILABLE",
         "PAGE_ORGANIZATION_INCOMPLETE",
         "QUESTION_PAPER_ROLE_UNCONFIRMED",
         "VALIDATION_FAILED",
-    ):
-        recovered_review = next(item for item in review_items if item["issue_code"] == code)
-        assert recovered_review["severity"] == "info"
-        assert "无需再处理" in recovered_review["message"]
+        "QUESTION_NOT_MATERIALIZED",
+    } & {item["issue_code"] for item in review_items}
+    assert created.json()["counts"]["info"] == 0
     original_session_id = session["id"]
     for issue in recovered_issues:
         issue.resolution_status = "resolved"
@@ -635,11 +650,14 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
     assert binding.json()["conversion_warnings"] == ["VALIDATION_RULE_NOT_LOSSLESS"]
     draft_binding_bundle = client.get(f"/api/assignments/{assignment.id}/review-bundle").json()
     assert draft_binding_bundle["binding"]["status"] == "confirmed"
-    assert next(
-        item
-        for item in draft_binding_bundle["confirmations"]
-        if item["type"] == "legacy_binding"
-    )["origin"] == "system_auto"
+    assert (
+        next(
+            item
+            for item in draft_binding_bundle["confirmations"]
+            if item["type"] == "legacy_binding"
+        )["origin"]
+        == "system_auto"
+    )
     assert draft_binding_bundle["binding"]["projection_current"] is True
     assert draft_binding_bundle["binding"]["projection_reason"] is None
     session = client.get(f"/api/assignment-review-sessions/{session['id']}").json()
@@ -772,75 +790,15 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
     assert refreshed.status_code == 200, refreshed.text
     session = refreshed.json()
     open_bundle = client.get(f"/api/assignments/{assignment.id}/review-bundle").json()
-    assert open_bundle["status"] == "action_required"
-    open_blockers = [
-        item for item in open_bundle["blockers"] if item["code"] == "TEST_MANUAL_BLOCKER"
-    ]
-    assert len(open_blockers) == 1
-    assert open_blockers[0]["status"] == "open"
-    first_item = db.scalar(
-        select(AssignmentReviewItem).where(
-            AssignmentReviewItem.review_session_id == uuid.UUID(session["id"]),
-            AssignmentReviewItem.issue_code == "TEST_MANUAL_BLOCKER",
-            AssignmentReviewItem.source_hash == open_blockers[0]["source_hash"],
-        )
-    )
-    assert first_item is not None
-    resolved = client.patch(
-        f"/api/assignment-review-items/{first_item.id}/disposition",
-        json={
-            "expected_review_version": session["review_version"],
-            "action": "resolve_manual",
-            "note": "teacher resolved the first fact",
-        },
-    )
-    assert resolved.status_code == 200, resolved.text
-    session["review_version"] = resolved.json()["review_version"]
-    resolved_bundle = client.get(f"/api/assignments/{assignment.id}/review-bundle").json()
-    assert "TEST_MANUAL_BLOCKER" not in {item["code"] for item in resolved_bundle["blockers"]}
-
-    manual_blocker.message = "second blocking fact"
-    db.commit()
-    review_row = db.get(AssignmentReviewSession, uuid.UUID(session["id"]))
-    assert review_row is not None
-    second_issue = next(
-        item for item in generated_issues(db, review_row) if item["code"] == "TEST_MANUAL_BLOCKER"
-    )
-    assert second_issue["source_hash"] != first_item.source_hash
-    second_item = AssignmentReviewItem(
-        review_session_id=review_row.id,
-        section=second_issue["section"],
-        entity_type=second_issue["entity"],
-        entity_id=second_issue["entity_id"],
-        severity=second_issue["severity"],
-        issue_code=second_issue["code"],
-        title=second_issue["code"].replace("_", " "),
-        message=second_issue["message"],
-        evidence=second_issue["evidence"],
-        source_hash=second_issue["source_hash"],
-        status="open",
-    )
-    db.add(second_item)
-    db.commit()
-    db.refresh(first_item)
-    assert first_item.status == "resolved"
-    changed_bundle = client.get(f"/api/assignments/{assignment.id}/review-bundle").json()
-    changed_blockers = [
-        item for item in changed_bundle["blockers"] if item["code"] == "TEST_MANUAL_BLOCKER"
-    ]
-    assert len(changed_blockers) == 1
-    assert changed_blockers[0]["source_hash"] == second_issue["source_hash"]
-    assert changed_blockers[0]["status"] == "open"
-    resolved_second = client.patch(
-        f"/api/assignment-review-items/{second_item.id}/disposition",
-        json={
-            "expected_review_version": session["review_version"],
-            "action": "resolve_manual",
-            "note": "teacher resolved the changed fact",
-        },
-    )
-    assert resolved_second.status_code == 200, resolved_second.text
-    session["review_version"] = resolved_second.json()["review_version"]
+    assert open_bundle["status"] == "ready_to_publish"
+    assert "TEST_MANUAL_BLOCKER" not in {item["code"] for item in open_bundle["blockers"]}
+    persisted_codes = {
+        item["issue_code"]
+        for item in client.get(f"/api/assignment-review-sessions/{session['id']}/items").json()[
+            "items"
+        ]
+    }
+    assert "TEST_MANUAL_BLOCKER" not in persisted_codes
     counts_before_bundle_reads = tuple(
         db.scalar(select(func.count(model.id)))
         for model in (

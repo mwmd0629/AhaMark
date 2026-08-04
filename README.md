@@ -1,5 +1,48 @@
 # AhaMark
 
+## 接手必读：当前状态、问题与下一步
+
+更新时间：2026-08-04。当前专项基于 `2b24ab4001e9f36b0ea32337331a60f53c3d33c1` 的独立 worktree，保持 detached HEAD；对应本地起点分支为 `codex/grading-confirm-results-update`，远端 Draft PR #1 仍以 `master` 为 base 且未合并。禁止在未获再次授权时暂存、提交、推送、合并或部署。
+
+本轮修改及原因：
+
+- 中央核查不再读取 `GenerationIssue` 或 `risk_summary` 生成当前待办；两者只保留为生成历史审计。原因是旧生成失败即使内容已恢复，也不能计入老师当前问题数量或阻塞发布。
+- 当前中央问题由数据库中的班级、题目、文件/页面分析、正式参考答案、结构化评分标准和当前投影重新计算；每条新问题记录附带对象、原因、发布影响、修复动作、步骤和锚点。
+- 文件、页面、缺分和总分冲突文案使用文件名、页码、题号与实际分值，避免只显示泛化错误码或内部 UUID。
+- 移除中央问题列表中的 `LEGACY_CONVERSION_REVIEW` 重复项；有损投影只在“评分标准兼容说明”产生一次有针对性的人工决策，无损投影继续自动完成。
+- 生成区默认只显示进度和草稿状态；`risk_summary` 与 `GenerationIssue` 数量移入折叠的“生成记录/技术详情”，并明确不是当前发布待办。
+- 新增前后端回归断言，覆盖历史生成问题不进入中央队列、技术历史默认折叠，以及教师可见问题文案契约。
+- fresh Docker 验收发现历史 `0007` 迁移会通过当前 ORM 元数据提前创建 `grade_releases.student_visible_*`，随后 `0031_student_portal` 重复加列而使全新数据库无法升级。用户已于 2026-08-04 明确授权最小历史迁移例外：`0007` 现改为其首次入库提交 `f7783f0` 中实际生成的五张固定表定义，不再导入当前 `Base.metadata`；没有带入 `0008+` 的字段、外键、索引或约束。历史模型与固化定义编译出的完整 PostgreSQL DDL SHA-256 均为 `bf74e6ca6bd83f6fa8cc8175f819d90c17b62a565c90eb79ef498971c4626855`。`0031` 继续保持 HEAD 原文且不作为兼容修复点。
+- `0007` 固化保留当时跨方言语义：JSON 字段在 SQLite 为 JSON、在 PostgreSQL 为 JSONB，且没有把 ORM 客户端默认误写成 server default。新增回归覆盖固定字段/索引契约、SQLite 升降级往返、唯一 head，以及仅在显式本地隔离数据库名和 marker 同时匹配时运行的 fresh PostgreSQL `empty → head → head` 与 `empty → 0030 → head` 路径；隔离 PostgreSQL 全路径为 `3 passed`。
+- 中央核查前端修复自动化闭环：`setAutomating(true)` 与 Bundle reload 都会触发 effect cleanup，旧逻辑的 `!cancelled` 同时阻止成功后的 reload 并永久保留 `automating=true`，使后续无损 binding 或 ready Bundle 无法显示；现在成功回调与 finally 均由 assignment epoch 防串写，当前作业可以完成“自动核对 → 自动 binding → reload ready”，新增回归测试验证完整调用链。
+- 浏览器 E2E 脚本同步新版创建/生成入口与 `system_auto` 判定：高置信无冲突用途不再被脚本误当作人工确认；合成教师已有完整正式答案和 Rubric 时，未采用的 AI suggestion 只保留审计，不为了发布逐条拒绝。
+
+已解决：历史生成问题冒充当前待办、恢复后的旧问题仍显示计数、兼容损失在生成区与中央区重复要求操作、生成区默认暴露历史风险数量、自动核对 reload 后无损 binding 被前端状态卡死，以及 `0007` 读取当前 ORM 元数据导致 fresh PostgreSQL 在 `0031` 重复加列。迁移修复已按 2026-08-04 的明确例外授权实施并通过新库/升级路径回归。
+
+2026-08-03 失败复现：隔离 project `ahamark-5c49-migration-20260803-03` 使用全新 `postgres_data`、host port `55440`，仅执行原始迁移链。`alembic upgrade head` 在 `0031_student_portal` 稳定失败为 `DuplicateColumn: student_visible_at`；数据库回滚后再次仅升级到 `0030_collaborative_grading`，查询确认两列已被 `0007` 提前创建。真实根因是 `0007_grade_release_reports_analytics.py` 通过当前 `Base.metadata` 动态创建历史表，不是 `create_all`、stamp、旧卷或启动顺序；失败发生在 `0031`，新增 `0034` 技术上无法在失败点之后执行并挽救。
+
+2026-08-04 授权后修复复验：隔离 project `ahamark-5c49-migration-20260804-05`、host port `55442`、数据库 `ahamark_migration_0007_20260804m7fresh` 与全新卷 `ahamark-5c49-migration-20260804-05_postgres_data` 运行受保护回归，结果 `3 passed`。完全空库 `upgrade head` 成功；已在 head 再次 `upgrade head` 幂等成功；仅重置该显式隔离库后，`upgrade 0030` 时 `student_visible_*` 均不存在，再升级 head 后两列、`fk_grade_release_student_visible_by` 和 `ix_grade_releases_student_visible_at` 各存在一次，唯一 head 为 `0033_joint_exam_class_authorization`。证据：`C:\Users\Lenovo\.codex\visualizations\2026\08\03\019fc78a-d972-75b1-bed0-62e54645f3b1\fresh-docker-e2e\migration-0007-20260804\result.json`。已在 head 的既有数据库由 `alembic_version` 标记当前 revision，`upgrade head` 不会重跑已完成的 `0007`，所以其表结构与数据语义不变；该例外只纠正未来从未执行 `0007` 的迁移链。
+
+strict mypy 已使用同一 bundled Python 3.12.13、仓库根目录和标准命令 `python -m mypy` 对账：当前 worktree 与临时解包的基线 `2b24ab4` 均为 `Success: no issues found in 107 source files`。此前两个 Celery decorator 错误来自不同的显式文件/参数调用，不是仓库标准全量门禁，也不是本轮差异触发。
+
+同一作业双 PDF 浏览器验收使用 fresh project `ahamark-5c49-review-20260803-04`，ports 为 Web `43301`、API `48801`、MinIO `49902/49903`、PostgreSQL `55441`，三组 project-scoped volumes 全新创建。因正式空库迁移仍被 `0007/0031` 阻塞，临时 override 仅在测试启动时先迁移到 `0030`、删除被 `0007` 过早创建的两列、再继续到 head；该垫片不在 Git 中，不是生产方案。API 容器后续为重建 Web 被 Compose 一并重建时垫片重复执行，导致本项目的 `student_visible_*` 再次被删除而 Alembic head 不会重补；因此 project 04 只能作为 assignment 业务流证据，不能作为最终迁移一致性证据。
+
+同一合成作业 `2e6d42e6-fd05-4c6a-986b-43f00a87d313` 已完成：上传 `synthetic-question-paper.pdf` 与 `synthetic-third-party-answer-and-rubric.pdf` 均为 HTTP 201；Fake Provider 自动识别为 `question_paper 0.72` 与 `reference_answer 0.70 / third_party`，无角色冲突、无文件用途确认点击；生成并物化一题。Fake Provider 不具备可靠 PDF 分值/答案/Rubric 抽取能力，因此由已认证合成教师把明确标记为第三方的合成资料转录为正式答案与评分标准，没有配置或冒充官方 Provider。最新简化 Rubric 使用 `manual_only` 且不含扩展规则，binding 为 confirmed、`loss_report=[]`、实时会话 `blocking=0/warning=0/info=0`；页面显示“已自动核对”、不显示 `CONFIRM_*`，主教师只点击一次“确认发布”，两次写请求为 prepare-publication 200 与 publish 200，最终 assignment 为 `published`。这证明同一作业的 UI/HTTP/持久化编排与发布门禁，不证明真实 PDF 内容质量；“完全由 Provider 从两 PDF 自动抽取正式答案/Rubric 且零教师转录”仍未通过。
+
+同一作业证据目录：`C:\Users\Lenovo\.codex\visualizations\2026\08\03\019fc78a-d972-75b1-bed0-62e54645f3b1\fresh-docker-e2e\same-assignment-two-pdf`。`pre-review.json` 保存发布前 ready Bundle 与无损 binding，`result.json` 保存一次最终发布及会话 0/0/0，`screenshots\two-pdf-generation.png` 与 `screenshots\ready-one-click.png` 分别保存自动识别和最终单击页面；临时脚本/override 位于 `C:\Users\Lenovo\AppData\Local\Temp\ahamark-5c49-review-20260803-04`。
+
+最终验证（2026-08-04）：fresh PostgreSQL 专项 `3 passed`；全部迁移命名测试加两个单-head 契约 `35 passed, 1 skipped`（skip 为未注入隔离 PG 变量的同一用例，已在专项中通过）；中央核查后端 `11 passed`；前端相关组件 `74 passed`；前端全量 `27 files / 176 tests passed`。Prettier、ESLint、TypeScript、全仓 Ruff check、标准 strict mypy `107 source files`、Next production build（19 个静态页面）及 `git diff --check` 均通过。Next 仍提示缺少可选 SWC lockfile 条目并尝试修补失败，但构建退出码为 0，根与 Web lockfile 均无 diff。`ahamark.db` 守卫在各 pytest 运行中均通过。
+
+Docker 隔离状态：本任务仅启动并停止 `ahamark-5c49-migration-20260804-05` 的 PostgreSQL；容器为 `Exited (0)`，network/volume 保留，未执行 `down -v`、prune 或删除。其他 task 的 `ahamark-business-e2e` 与 `ahamark-business-e2e-4a09-20260803` 运行状态未被修改。临时 compose 位于 `C:\Users\Lenovo\AppData\Local\Temp\ahamark-5c49-migration-20260804-05\docker-compose.yml`。
+
+Git 守卫：最终提交前审查起点为 detached `2b24ab4001e9f36b0ea32337331a60f53c3d33c1`；`ahamark.db`、根 `package-lock.json`、`apps/web/package-lock.json` 与 `0031_student_portal.py` 均无真实 diff。`0031` 工作树与 HEAD blob 均为 `517d2f0f42b1a4c9d18b4ce0f401aaa8b5044426`，Windows 行尾/stat 会使本地 `git status` 显示伪 `M`，不得暂存。用户已于 2026-08-04 授权在最终只读审查通过后，以明确文件 allowlist 暂存、提交并安全推送到现有 Draft PR #1 分支；仍禁止合并、部署或把 PR 转为 ready。
+
+提交前结论：本专项最终只读审查已通过，没有 P0/P1、安全边界、迁移准确性或范围阻塞；授权范围仅包含把本专项提交并推送到现有 Draft PR #1，提交与远端结果以 Git/PR 当前 head 为准，不包含合并或部署。
+
+remaining risks / 下一位接手：如需把验收结论提升为“同一个标准参考答案+评分标准 PDF 从上传直至发布完整通过”，必须配置受控的非 Fake 内容 Provider 或扩展明确标记的合成 fixture，使参考答案来源可确定且不冒充真实 Provider；还应将 `business_browser_e2e.mjs` 的历史“先 OCR 手工建题、再一次生成”顺序整体迁移到新版“一次生成优先”流程，避免旧脚本人为生成重复题。不要修改 `ahamark.db`，不要删除上述证据卷；启动本轮项目后仍须只用对应 project 名操作。
+
+下一位接手事项：先完整阅读本节，再从 Draft PR #1 当前 head 审查本专项提交，特别确认授权例外只修改 `0007`、`0031` 无真实 diff、新迁移测试的数据库保护条件充分。`npm install` 按现有锁文件安装测试依赖时报告 4 个 high severity advisories，本轮未执行会改动依赖的 `npm audit fix`；后续应另开依赖安全专项评估。不得修改 `ahamark.db`，不得删除上述证据卷。
+
 > **当前仓库状态（2026-07-28）：** 本地 `master` 功能基线位于
 > `2377cd3`（包含线性代数批改第 1–4 部分），尚未 push；Alembic
 > 唯一 head 为 `0025_ai_grading_audit_contract`。第 5 部分离线评测命令见

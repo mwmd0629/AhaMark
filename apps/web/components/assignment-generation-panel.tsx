@@ -411,9 +411,6 @@ export function AssignmentGenerationPanel({
             })}
           </div>
           <div className="flex flex-wrap items-center gap-3 text-sm">
-            <span>风险：信息 {risk.info}</span>
-            <span>警告 {risk.warning}</span>
-            <span>阻断 {risk.blocking}</span>
             {current.provider_mode === "unavailable" &&
               (codexQuestionDraftReady ? (
                 <strong className="text-emerald-700">
@@ -437,8 +434,12 @@ export function AssignmentGenerationPanel({
           {current.issues.length > 0 && (
             <details className="rounded-lg border text-sm">
               <summary className="cursor-pointer rounded-lg px-3 py-3 font-medium hover:bg-[var(--neutral-50)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--brand-600)]">
-                风险与技术详情（{current.issues.length}）
+                生成记录/技术详情（{current.issues.length}）
               </summary>
+              <p className="px-3 pb-2 text-[var(--neutral-600)]">
+                历史记录：信息 {risk.info} · 警告 {risk.warning} · 阻断{" "}
+                {risk.blocking}。这些数量不代表当前发布待办。
+              </p>
               <ul className="grid gap-1 px-3 pb-3">
                 {current.issues.map((item) => (
                   <li key={item.id}>

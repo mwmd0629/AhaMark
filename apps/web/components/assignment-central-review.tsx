@@ -523,8 +523,7 @@ export function AssignmentCentralReview({
     assignmentReviewApi
       .autoConfirm(session.id, session.review_version)
       .then(() => {
-        if (!cancelled && isCurrentRequest(assignmentId, epoch))
-          return load(session);
+        if (isCurrentRequest(assignmentId, epoch)) return load(session);
       })
       .catch((error) => {
         if (!cancelled && isCurrentRequest(assignmentId, epoch)) {
@@ -537,8 +536,7 @@ export function AssignmentCentralReview({
         }
       })
       .finally(() => {
-        if (!cancelled && isCurrentRequest(assignmentId, epoch))
-          setAutomating(false);
+        if (isCurrentRequest(assignmentId, epoch)) setAutomating(false);
       });
     return () => {
       cancelled = true;
@@ -577,8 +575,7 @@ export function AssignmentCentralReview({
     assignmentReviewApi
       .createBinding(session.id, session.review_version)
       .then(() => {
-        if (!cancelled && isCurrentRequest(assignmentId, epoch))
-          return load(session);
+        if (isCurrentRequest(assignmentId, epoch)) return load(session);
       })
       .catch((error) => {
         if (!cancelled && isCurrentRequest(assignmentId, epoch)) {
@@ -591,8 +588,7 @@ export function AssignmentCentralReview({
         }
       })
       .finally(() => {
-        if (!cancelled && isCurrentRequest(assignmentId, epoch))
-          setAutomating(false);
+        if (isCurrentRequest(assignmentId, epoch)) setAutomating(false);
       });
     return () => {
       cancelled = true;
@@ -782,6 +778,15 @@ export function AssignmentCentralReview({
 
   const renderReview = (review: AssignmentReviewItemRecord) => {
     const copy = getReviewCopy(review.issue_code);
+    const guidance = review.evidence?.teacher_guidance as
+      | {
+          reason?: string;
+          impact?: string;
+          action?: string;
+          step?: number;
+          anchor?: string;
+        }
+      | undefined;
     return (
       <li key={review.id} className="rounded-xl border p-4">
         <div className="flex items-start justify-between gap-3">
@@ -808,7 +813,9 @@ export function AssignmentCentralReview({
             {isResolved(review) ? "已解决" : "待处理"}
           </span>
         </div>
-        <p className="mt-2 text-sm text-slate-700">{copy.message}</p>
+        <p className="mt-2 text-sm text-slate-700">
+          {guidance ? review.message : copy.message}
+        </p>
         {isResolved(review) && (
           <dl className="mt-3 grid gap-1 rounded-lg bg-slate-50 p-3 text-sm">
             {review.teacher_action && (

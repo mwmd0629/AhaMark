@@ -29,7 +29,6 @@ from app.models import (
     AssignmentSourceFileAnalysis,
     AssignmentStatus,
     ClassStudent,
-    GenerationIssue,
     MembershipStatus,
     PaperPage,
     PaperPageOrganizationSuggestion,
@@ -105,14 +104,17 @@ MANUAL_FALLBACK_WARNINGS = {
     "COMMON_ERROR_CODES_NOT_LOSSLESS",
     "FEEDBACK_TEMPLATE_NOT_LOSSLESS",
 }
-RECOVERED_GENERATION_CODES = {
-    "GENERATION_PARTIAL",
-    "MANUAL_REVIEW_REQUIRED",
-    "PAGE_ORGANIZATION_INCOMPLETE",
-    "PROVIDER_UNAVAILABLE",
-    "QUESTION_CONFIRMATION_REQUIRED",
-    "QUESTION_PAPER_ROLE_UNCONFIRMED",
-    "VALIDATION_FAILED",
+SECTION_GUIDANCE: dict[str, tuple[int, str, str]] = {
+    "classes": (1, "assignment-basics", "去第 1 步选择可发布的有效班级"),
+    "due_at": (1, "assignment-basics", "去第 1 步设置截止时间或选择无截止时间"),
+    "files": (2, "generation-file-analysis", "去第 2 步处理对应文件"),
+    "pages": (3, "paper-pages", "去第 3 步检查对应页面"),
+    "questions": (4, "question-editor", "去第 4 步修改对应题目"),
+    "total_score": (4, "question-editor", "去第 4 步校正题目分值或作业总分"),
+    "answers": (5, "answer-rubric-editor", "去第 5 步补全对应题目的参考答案"),
+    "rubrics": (5, "answer-rubric-editor", "去第 5 步修改对应题目的评分标准"),
+    "publication": (6, "assignment-central-review", "留在第 6 步重新生成发布兼容版本"),
+    "validation": (6, "assignment-central-review", "留在第 6 步基于最新内容重新核查"),
 }
 
 
@@ -1469,14 +1471,32 @@ def generated_issues(db: Session, session: AssignmentReviewSession) -> list[dict
         entity: str = "assignment",
         entity_id: Any | None = None,
         evidence: dict[str, Any] | None = None,
+        action: str | None = None,
     ) -> None:
+        step, anchor, default_action = SECTION_GUIDANCE.get(
+            section,
+            (6, "assignment-central-review", "在中央核查中处理该问题"),
+        )
+        teacher_action = action or default_action
+        impact = "未修复前不能发布" if severity == "blocking" else "不会单独阻塞发布"
+        teacher_message = f"{message}；{impact}；{teacher_action}。"
         payload = {
             "code": code,
             "section": section,
-            "message": message,
+            "message": teacher_message,
             "entity": entity,
             "entity_id": str(entity_id or assignment.id),
-            "evidence": evidence or {},
+            "evidence": (evidence or {})
+            | {
+                "teacher_guidance": {
+                    "object": f"{entity}:{entity_id or assignment.id}",
+                    "reason": message,
+                    "impact": impact,
+                    "action": teacher_action,
+                    "step": step,
+                    "anchor": anchor,
+                }
+            },
         }
         out.append(payload | {"severity": severity, "source_hash": digest(payload)})
 
@@ -1507,40 +1527,59 @@ def generated_issues(db: Session, session: AssignmentReviewSession) -> list[dict
     if not qs:
         add("QUESTIONS_REQUIRED", "questions", "当前试卷没有已物化题目")
     if any(q.max_score is None for q in qs):
-        add("QUESTION_SCORE_REQUIRED", "total_score", "所有题目必须设置分值")
+        missing_numbers = "、".join(q.question_number for q in qs if q.max_score is None)
+        add(
+            "QUESTION_SCORE_REQUIRED",
+            "total_score",
+            f"第 {missing_numbers} 题尚未设置满分",
+        )
     elif assignment.total_score is None or sum(
         (Decimal(q.max_score) for q in qs if q.max_score is not None), Decimal()
     ) != Decimal(assignment.total_score):
-        add("TOTAL_SCORE_MISMATCH", "total_score", "题目分值合计必须等于总分")
+        question_total = sum(
+            (Decimal(q.max_score) for q in qs if q.max_score is not None), Decimal()
+        )
+        mismatch_message = (
+            f"题目分值合计为 {question_total} 分，"
+            f"作业总分为 {assignment.total_score} 分，二者不一致"
+        )
+        add(
+            "TOTAL_SCORE_MISMATCH",
+            "total_score",
+            mismatch_message,
+        )
     for f in db.scalars(
         select(AssignmentSourceFileAnalysis).where(
             AssignmentSourceFileAnalysis.draft_revision_id == session.draft_revision_id
         )
     ):
+        stored_file = db.get(StoredFile, f.stored_file_id)
+        file_label = (
+            f"文件“{stored_file.original_name}”"
+            if stored_file is not None
+            else f"文件 {f.stored_file_id}"
+        )
         if f.analysis_status in {"failed", "corrupted"}:
             add(
                 "FILE_CORRUPTED",
                 "files",
-                "文件分析失败或损坏",
+                f"{file_label}分析失败或文件已损坏",
                 entity="file",
                 entity_id=f.stored_file_id,
             )
         effective_role = f.teacher_confirmed_role or f.suggested_role
-        role_needs_review = (
-            effective_role in {None, "unknown"}
-            or (
-                not f.teacher_confirmed_role
-                and (
-                    float(f.role_confidence or 0) < 0.7
-                    or "FILE_ROLE_CONFLICT_REVIEW_REQUIRED" in (f.warning_codes or [])
-                )
+        role_needs_review = effective_role in {None, "unknown"} or (
+            not f.teacher_confirmed_role
+            and (
+                float(f.role_confidence or 0) < 0.7
+                or "FILE_ROLE_CONFLICT_REVIEW_REQUIRED" in (f.warning_codes or [])
             )
         )
         if role_needs_review:
             add(
                 "FILE_ROLE_UNCONFIRMED",
                 "files",
-                "文件用途无法可靠判断或存在冲突",
+                f"{file_label}的用途置信度不足或与其他文件角色冲突",
                 entity="file",
                 entity_id=f.stored_file_id,
             )
@@ -1549,13 +1588,25 @@ def generated_issues(db: Session, session: AssignmentReviewSession) -> list[dict
             AssignmentPageAnalysis.draft_revision_id == session.draft_revision_id
         )
     ):
+        paper_page = db.get(PaperPage, page.paper_page_id)
+        page_label = (
+            f"第 {paper_page.page_number} 页"
+            if paper_page is not None
+            else f"页面 {page.paper_page_id}"
+        )
         if page.corrupted:
-            add("PAGE_CORRUPTED", "pages", "页面损坏", entity="page", entity_id=page.paper_page_id)
+            add(
+                "PAGE_CORRUPTED",
+                "pages",
+                f"{page_label}无法读取或已损坏",
+                entity="page",
+                entity_id=page.paper_page_id,
+            )
         if page.missing_page_suspected:
             add(
                 "MISSING_PAGE_SUSPECTED",
                 "pages",
-                "疑似缺页尚未解决",
+                f"{page_label}附近的页码或内容连续性异常，系统怀疑缺页",
                 entity="page",
                 entity_id=page.paper_page_id,
             )
@@ -1563,7 +1614,7 @@ def generated_issues(db: Session, session: AssignmentReviewSession) -> list[dict
             add(
                 "PAPER_VARIANT_REVIEW",
                 "pages",
-                "疑似混合文档或 A/B 卷",
+                f"{page_label}的版式或版本标记与当前试卷不一致，可能混入其他试卷或 A/B 卷",
                 entity="page",
                 entity_id=page.paper_page_id,
             )
@@ -1571,7 +1622,7 @@ def generated_issues(db: Session, session: AssignmentReviewSession) -> list[dict
             add(
                 "PAGE_LOW_QUALITY",
                 "pages",
-                "页面质量较低，必须查看",
+                f"{page_label}清晰度较低，部分内容可能无法可靠识别",
                 "warning",
                 "page",
                 page.paper_page_id,
@@ -1591,56 +1642,35 @@ def generated_issues(db: Session, session: AssignmentReviewSession) -> list[dict
         )
     ):
         add("PAGE_ORGANIZATION_INCOMPLETE", "pages", "页面整理建议尚未完成")
-    for candidate in db.scalars(
-        select(AssignmentQuestionExtractionCandidate).where(
-            AssignmentQuestionExtractionCandidate.draft_revision_id == session.draft_revision_id,
-            AssignmentQuestionExtractionCandidate.status.not_in(STALE_CANDIDATE_STATUSES),
-        )
-    ):
-        if candidate.materialized_question_id is None:
-            add(
-                "QUESTION_NOT_MATERIALIZED",
-                "questions",
-                "题目候选尚未物化",
-                entity="question_candidate",
-                entity_id=candidate.id,
+    if not complete_generated_content:
+        for candidate in db.scalars(
+            select(AssignmentQuestionExtractionCandidate).where(
+                AssignmentQuestionExtractionCandidate.draft_revision_id
+                == session.draft_revision_id,
+                AssignmentQuestionExtractionCandidate.status.not_in(STALE_CANDIDATE_STATUSES),
             )
-        elif candidate.warning_codes or candidate.manual_required:
-            add(
-                "QUESTION_EXTRACTION_REVIEW",
-                "questions",
-                "题目候选包含冲突或人工风险",
-                "warning",
-                "question_candidate",
-                candidate.id,
-                {"warning_codes": candidate.warning_codes},
-            )
-    for issue in db.scalars(
-        select(GenerationIssue).where(
-            GenerationIssue.job_id == session.generation_job_id,
-            GenerationIssue.resolution_status.not_in(["resolved", "rejected"]),
-        )
-    ):
-        generation_recovered = (
-            issue.code in RECOVERED_GENERATION_CODES and complete_generated_content
-        )
-        add(
-            issue.code,
-            "validation",
-            (
-                "生成阶段曾报告异常，但题目、参考答案和评分标准现已完整并确认，无需再处理"
-                if generation_recovered
-                else issue.message
-            ),
-            (
-                "info"
-                if generation_recovered
-                else ("blocking" if issue.severity == "blocking" else "warning")
-            ),
-            issue.entity_type or "generation",
-            issue.entity_id or issue.id,
-            issue.evidence,
-        )
+        ):
+            if candidate.materialized_question_id is None:
+                add(
+                    "QUESTION_NOT_MATERIALIZED",
+                    "questions",
+                    "题目候选尚未物化",
+                    entity="question_candidate",
+                    entity_id=candidate.id,
+                )
+            elif candidate.warning_codes or candidate.manual_required:
+                add(
+                    "QUESTION_EXTRACTION_REVIEW",
+                    "questions",
+                    "题目候选包含冲突或人工风险",
+                    "warning",
+                    "question_candidate",
+                    candidate.id,
+                    {"warning_codes": candidate.warning_codes},
+                )
+    # GenerationIssue and revision.risk_summary are append-only generation audit.
+    # They are intentionally not projected into the live teacher queue: every
+    # publication issue below is recomputed from the current persisted content.
     for row in selected_versions(db, paper.id):
         q, answer, rubric, criteria = row["question"], row["answer"], row["rubric"], row["criteria"]
         if answer is None or answer.status != "confirmed":
@@ -1690,18 +1720,6 @@ def generated_issues(db: Session, session: AssignmentReviewSession) -> list[dict
                 f"第 {q.question_number} 题 Rubric 分值不一致",
                 entity="question",
                 entity_id=q.id,
-            )
-        elif any(
-            c.dependencies or c.metadata_.get("alternative_group") or c.validation_rule
-            for c in criteria
-        ):
-            add(
-                "LEGACY_CONVERSION_REVIEW",
-                "rubrics",
-                f"第 {q.question_number} 题包含 legacy 无法无损表达的规则",
-                "warning",
-                "question",
-                q.id,
             )
     for kind in sorted(REQUIRED_CONFIRMATIONS - {"legacy_binding"} - set(confirms)):
         add(

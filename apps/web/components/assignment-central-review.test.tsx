@@ -538,6 +538,33 @@ describe("AssignmentCentralReview preserved behavior", () => {
     expect(screen.getByText(/TOTAL_SCORE_MISMATCH/)).toBeInTheDocument();
   });
 
+  it("shows the current issue object, cause, impact, action, and step contract", async () => {
+    reviewApi.items.mockResolvedValue({
+      items: [
+        reviewItem({
+          message:
+            "第 3 题评分标准缺少 2 分；未修复前不能发布；去第 5 步修改对应题目的评分标准。",
+          evidence: {
+            teacher_guidance: {
+              object: "question:question-3",
+              reason: "评分项合计 8 分但题目满分 10 分",
+              impact: "未修复前不能发布",
+              action: "去第 5 步修改对应题目的评分标准",
+              step: 5,
+              anchor: "answer-rubric-editor",
+            },
+          },
+        }),
+      ],
+    });
+    renderReview();
+    fireEvent.click(await screen.findByText(/查看全部待处理明细/));
+    expect(
+      screen.getAllByText(/第 3 题评分标准缺少 2 分.*未修复前不能发布.*第 5 步/)
+        .length,
+    ).toBeGreaterThan(0);
+  });
+
   it("keeps resolved items folded until the teacher expands them", async () => {
     reviewApi.items.mockResolvedValue({
       items: [
@@ -963,6 +990,32 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
     expect(
       screen.queryByTestId("review-confirmation-due_at"),
     ).not.toBeInTheDocument();
+  });
+
+  it("continues to automatic binding after routine confirmation reloads the bundle", async () => {
+    reviewApi.bundle
+      .mockResolvedValueOnce(
+        reviewBundle({
+          status: "action_required",
+          binding: null,
+          confirmations: confirmationKinds
+            .filter((kind) => kind !== "due_at")
+            .map((kind) => confirmation(kind)),
+        }),
+      )
+      .mockResolvedValue(
+        reviewBundle({
+          status: "action_required",
+          binding: null,
+          confirmations: confirmationKinds.map((kind) => confirmation(kind)),
+        }),
+      );
+
+    renderReview();
+
+    await waitFor(() => expect(reviewApi.autoConfirm).toHaveBeenCalledOnce());
+    await waitFor(() => expect(reviewApi.createBinding).toHaveBeenCalledOnce());
+    await waitFor(() => expect(reviewApi.bundle).toHaveBeenCalledTimes(3));
   });
 
   it("shows a fresh lossless binding as automatically compatible without a confirmation action", async () => {

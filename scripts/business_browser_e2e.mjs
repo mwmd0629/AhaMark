@@ -626,20 +626,20 @@ async function confirmFileAnalyses(revisionId) {
       throw new Error(
         `FILE_ANALYSIS_NOT_CONFIRMABLE:${invalid.id}:${invalid.analysis_status}`,
       );
-    const pending = files.filter(
-      (item) => item.analysis_status === "suggested",
-    );
+    const pending = files.filter((item) => {
+      if (item.analysis_status !== "suggested") return false;
+      const warnings = item.warning_codes ?? [];
+      const roleIsAutomatic =
+        item.suggested_role !== "unknown" &&
+        Number(item.role_confidence) >= 0.7 &&
+        !warnings.includes("FILE_ROLE_CONFLICT_REVIEW_REQUIRED");
+      const sourceIsAutomatic =
+        item.suggested_role !== "reference_answer" ||
+        (item.suggested_answer_source !== "unknown" &&
+          Number(item.answer_source_confidence) >= 0.7);
+      return !(roleIsAutomatic && sourceIsAutomatic);
+    });
     if (pending.length === 0) {
-      for (const item of files) {
-        assert.ok(
-          item.teacher_confirmed_role,
-          `file ${item.id} missing teacher_confirmed_role`,
-        );
-        assert.ok(
-          item.teacher_confirmed_answer_source,
-          `file ${item.id} missing teacher_confirmed_answer_source`,
-        );
-      }
       return {
         done: true,
         value: {
@@ -649,12 +649,21 @@ async function confirmFileAnalyses(revisionId) {
             teacher_confirmed_role: item.teacher_confirmed_role,
             teacher_confirmed_answer_source:
               item.teacher_confirmed_answer_source,
+            effective_role:
+              item.teacher_confirmed_role ?? item.suggested_role,
+            effective_answer_source:
+              item.teacher_confirmed_answer_source ??
+              item.suggested_answer_source,
+            adoption:
+              item.analysis_status === "confirmed"
+                ? "teacher"
+                : "system_auto",
             teacher_edit_version: item.teacher_edit_version,
           })),
           writes,
         },
-        state: `confirmed=${files.length}/pending=0`,
-      };
+          state: `checked=${files.length}/manual-pending=0`,
+        };
     }
     const fileAnalysisRegion = page.locator("details#generation-file-analysis");
     await pollUntil("file analysis details expanded", 20_000, async () => {
@@ -742,90 +751,22 @@ async function confirmFileAnalyses(revisionId) {
 async function settleGeneratedSuggestions(revisionId) {
   const pagesUrl = `/api/assignment-draft-revisions/${revisionId}/page-organization-suggestions`;
   const questionsUrl = `/api/assignment-draft-revisions/${revisionId}/question-extraction-candidates`;
-  const writes = [];
-  return pollUntil("generated suggestions settled", 90_000, async () => {
-    const [pagesResponse, questionsResponse] = await Promise.all([
-      apiJson(pagesUrl),
-      apiJson(questionsUrl),
-    ]);
-    const pages = assertApiOk(pagesResponse, "page suggestions GET");
-    const questions = assertApiOk(questionsResponse, "question candidates GET");
-    const suggested = [...pages, ...questions].filter(
-      (item) => item.status === "suggested",
-    );
-    if (suggested.length === 0)
-      return {
-        done: true,
-        value: {
-          page_statuses: pages.map((item) => ({
-            id: item.id,
-            status: item.status,
-          })),
-          question_statuses: questions.map((item) => ({
-            id: item.id,
-            status: item.status,
-            materialized_question_id: item.materialized_question_id ?? null,
-          })),
-          writes,
-        },
-        state: `pages=${pages.length}/questions=${questions.length}/suggested=0`,
-      };
-    const rejects = page
-      .getByRole("region", { name: "页面整理与题目抽取复核" })
-      .getByRole("button", { name: "拒绝", exact: true });
-    const button = rejects.first();
-    if ((await rejects.count()) === 0 || !(await button.isEnabled()))
-      return {
-        done: false,
-        state: `suggested=${suggested.length}/reject-not-ready`,
-      };
-    const beforeCount = suggested.length;
-    const [writeResponse] = await Promise.all([
-      page.waitForResponse(
-        (response) =>
-          response.request().method() === "PATCH" &&
-          (response.url().includes("/disposition") ||
-            response.url().includes("/page-organization-suggestions/")),
-      ),
-      button.click(),
-    ]);
-    const body = await writeResponse.json().catch(() => null);
-    assert.ok(writeResponse.ok(), "generated suggestion rejection failed");
-    await pollUntil(
-      "generated suggestion write-after-GET",
-      20_000,
-      async () => {
-        const [nextPagesResponse, nextQuestionsResponse] = await Promise.all([
-          apiJson(pagesUrl),
-          apiJson(questionsUrl),
-        ]);
-        const nextPages = assertApiOk(
-          nextPagesResponse,
-          "page suggestions read-after-write",
-        );
-        const nextQuestions = assertApiOk(
-          nextQuestionsResponse,
-          "question candidates read-after-write",
-        );
-        const nextCount = [...nextPages, ...nextQuestions].filter(
-          (item) => item.status === "suggested",
-        ).length;
-        return {
-          done: nextCount < beforeCount,
-          value: nextCount,
-          state: `before=${beforeCount}/after=${nextCount}`,
-        };
-      },
-    );
-    writes.push({
-      id: body?.id ?? null,
-      status: body?.status ?? null,
-      http_status: writeResponse.status(),
-      request_id: writeResponse.headers()["x-request-id"] ?? null,
-      error_code: null,
-    });
-    return { done: false, state: `suggested-before=${beforeCount}` };
-  });
+  const [pagesResponse, questionsResponse] = await Promise.all([
+    apiJson(pagesUrl),
+    apiJson(questionsUrl),
+  ]);
+  const pages = assertApiOk(pagesResponse, "page suggestions GET");
+  const questions = assertApiOk(questionsResponse, "question candidates GET");
+  return {
+    page_statuses: pages.map((item) => ({ id: item.id, status: item.status })),
+    question_statuses: questions.map((item) => ({
+      id: item.id,
+      status: item.status,
+      materialized_question_id: item.materialized_question_id ?? null,
+    })),
+    writes: [],
+    teacher_action_required: false,
+  };
 }
 async function getReviewSession(sessionId, label) {
   const response = await apiJson(
@@ -2004,8 +1945,6 @@ try {
   await page.goto(`${base}/assignments/new`);
   const assignmentName = `合成作业 ${runId}`;
   await page.getByLabel("作业名称").fill(assignmentName);
-  await page.getByLabel("学科").fill("合成数学");
-  await page.getByLabel("年级").fill("合成九年级");
   await page.getByText(className, { exact: true }).click();
   await page.getByRole("button", { name: "保存草稿并继续" }).click();
   await page.waitForURL("**/assignments/*/edit");
@@ -2146,7 +2085,7 @@ try {
   await page.goto(`${base}/assignments/${assignmentId}/edit`);
   await page.getByRole("button", { name: /步骤 5/ }).click();
   await page.getByRole("button", { name: "进入发布检查" }).click();
-  await page.getByRole("button", { name: "启动生成任务" }).click();
+  await page.getByRole("button", { name: "生成完整草稿" }).click();
   await page.getByText("Generation", { exact: true }).waitFor();
   await page
     .getByLabel("生成状态")

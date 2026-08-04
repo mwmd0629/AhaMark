@@ -140,7 +140,15 @@ it("恢复 partial/unavailable、风险与草稿历史并允许单阶段重试",
     "部分完成",
   );
   expect(screen.getAllByText("等待 Codex 代生成").length).toBeGreaterThan(0);
-  expect(screen.getByText("阻断 2")).toBeInTheDocument();
+  expect(screen.queryByText("阻断 2")).not.toBeInTheDocument();
+  const generationDetails = screen
+    .getByText(/生成记录\/技术详情/)
+    .closest("details");
+  expect(generationDetails).not.toHaveAttribute("open");
+  fireEvent.click(screen.getByText(/生成记录\/技术详情/));
+  expect(
+    screen.getByText(/历史记录：信息 0 · 警告 1 · 阻断 2/),
+  ).toBeInTheDocument();
   expect(screen.getByText("草稿历史版本（1）")).toBeInTheDocument();
   expect(
     screen.getByText(/一次生成题目、参考答案和评分标准草稿，不会直接发布/),
