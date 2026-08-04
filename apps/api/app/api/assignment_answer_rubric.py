@@ -126,6 +126,7 @@ def _materialize_rubric_or_conflict(
 
 
 def _answer_json(row: AssignmentAnswerDraftCandidate) -> dict[str, Any]:
+    ineligibility_reasons = _answer_ineligibility_reasons(row)
     return {
         "id": str(row.id),
         "question_id": str(row.question_id),
@@ -153,6 +154,8 @@ def _answer_json(row: AssignmentAnswerDraftCandidate) -> dict[str, Any]:
         else None,
         "reviewed_at": row.reviewed_at,
         "review_note": row.review_note,
+        "server_eligible": not ineligibility_reasons,
+        "ineligibility_reasons": ineligibility_reasons,
     }
 
 
@@ -180,6 +183,7 @@ def _criterion_json(row: AssignmentRubricCriterionDraft) -> dict[str, Any]:
 
 
 def _rubric_json(db: Session, row: AssignmentRubricDraftCandidate) -> dict[str, Any]:
+    ineligibility_reasons = _rubric_ineligibility_reasons(db, row)
     return {
         "id": str(row.id),
         "question_id": str(row.question_id),
@@ -206,6 +210,8 @@ def _rubric_json(db: Session, row: AssignmentRubricDraftCandidate) -> dict[str, 
         "reviewed_at": row.reviewed_at,
         "review_note": row.review_note,
         "criteria": [_criterion_json(item) for item in _criteria(db, row.id)],
+        "server_eligible": not ineligibility_reasons,
+        "ineligibility_reasons": ineligibility_reasons,
     }
 
 
@@ -570,21 +576,61 @@ def disposition_rubric(
     return _rubric_json(db, row)
 
 
-def _eligible_answer(row: AssignmentAnswerDraftCandidate) -> bool:
+def _answer_ineligibility_reasons(row: AssignmentAnswerDraftCandidate) -> list[str]:
     blocked = {
         "PROMPT_INJECTION_CONTENT_DETECTED",
         "FORMULA_ANSWER_REVIEW_REQUIRED",
         "MANUAL_ANSWER_REQUIRED",
         "ANSWER_SCHEMA_INVALID",
     }
-    return (
-        row.status == "suggested"
-        and row.source_type != "unknown"
-        and float(row.confidence) >= 0.8
-        and not row.manual_required
-        and bool(row.evidence)
-        and not blocked.intersection(row.warning_codes)
+    reasons: list[str] = []
+    if row.status != "suggested":
+        reasons.append("CANDIDATE_NOT_SUGGESTED")
+    if row.source_type == "unknown":
+        reasons.append("ANSWER_SOURCE_UNKNOWN")
+    if float(row.confidence) < 0.8:
+        reasons.append("ANSWER_CONFIDENCE_LOW")
+    if row.manual_required:
+        reasons.append("MANUAL_REVIEW_REQUIRED")
+    if not row.evidence:
+        reasons.append("ANSWER_EVIDENCE_MISSING")
+    reasons.extend(sorted(blocked.intersection(row.warning_codes)))
+    return sorted(set(reasons))
+
+
+def _eligible_answer(row: AssignmentAnswerDraftCandidate) -> bool:
+    return not _answer_ineligibility_reasons(row)
+
+
+def _rubric_ineligibility_reasons(db: Session, row: AssignmentRubricDraftCandidate) -> list[str]:
+    answer = db.get(AssignmentAnswerDraftCandidate, row.answer_candidate_id)
+    structural = validate_candidate_structure(
+        Decimal(row.total_points) if row.total_points is not None else None,
+        row.scoring_mode,
+        _criteria(db, row.id),
     )
+    validations = set(
+        db.scalars(
+            select(AssignmentRubricValidationResult.status).where(
+                AssignmentRubricValidationResult.rubric_candidate_id == row.id
+            )
+        )
+    )
+    reasons: list[str] = []
+    if row.status != "suggested":
+        reasons.append("CANDIDATE_NOT_SUGGESTED")
+    if answer is None:
+        reasons.append("ANSWER_CANDIDATE_MISSING")
+    elif answer.status not in {"accepted", "modified"}:
+        reasons.append("ANSWER_CANDIDATE_NOT_ACCEPTED")
+    reasons.extend(structural.blocking)
+    if row.manual_required:
+        reasons.append("MANUAL_REVIEW_REQUIRED")
+    if row.scoring_mode != "deterministic":
+        reasons.append("SCORING_MODE_NOT_DETERMINISTIC")
+    if "indeterminate" in validations:
+        reasons.append("VALIDATION_INDETERMINATE")
+    return sorted(set(reasons))
 
 
 @router.post("/assignment-draft-revisions/{revision_id}/answer-draft-candidates/accept-eligible")
@@ -598,12 +644,15 @@ def accept_eligible_answers(
     ):
         raise ApiProblem(409, "CANDIDATE_EDIT_CONFLICT", "草稿版本已变化")
     accepted: list[str] = []
-    for probe in db.scalars(
+    skipped: list[dict[str, Any]] = []
+    probes = db.scalars(
         select(AssignmentAnswerDraftCandidate).where(
             AssignmentAnswerDraftCandidate.draft_revision_id == revision.id,
             AssignmentAnswerDraftCandidate.owner_id == actor.id,
+            AssignmentAnswerDraftCandidate.status == "suggested",
         )
-    ).all():
+    ).all()
+    for probe in probes:
         _, _, row = _ensure_current(
             db,
             probe,
@@ -612,7 +661,8 @@ def accept_eligible_answers(
             probe.question_version,
             data.expected_source_snapshot,
         )
-        if _eligible_answer(row):
+        reasons = _answer_ineligibility_reasons(row)
+        if not reasons:
             row.status, row.reviewed_by, row.reviewed_at = "accepted", actor.id, now_utc()
             row.teacher_edit_version += 1
             _materialize_reference_or_conflict(db, row, actor.id)
@@ -625,11 +675,22 @@ def accept_eligible_answers(
                 row.id,
                 {"source_type": row.source_type},
             )
+        else:
+            skipped.append(
+                {
+                    "candidate_id": str(row.id),
+                    "question_id": str(row.question_id),
+                    "reason_codes": reasons,
+                }
+            )
     revision.teacher_edit_version += len(accepted)
     db.commit()
     return {
         "accepted_ids": accepted,
         "accepted_count": len(accepted),
+        "considered_count": len(probes),
+        "skipped_count": len(skipped),
+        "skipped": skipped,
         "source_labels_unchanged": True,
     }
 
@@ -645,6 +706,7 @@ def accept_eligible_rubrics(
     ):
         raise ApiProblem(409, "CANDIDATE_EDIT_CONFLICT", "草稿版本已变化")
     accepted: list[str] = []
+    skipped: list[dict[str, Any]] = []
     probes = db.scalars(
         select(AssignmentRubricDraftCandidate).where(
             AssignmentRubricDraftCandidate.draft_revision_id == revision.id,
@@ -661,28 +723,8 @@ def accept_eligible_rubrics(
             probe.question_version,
             data.expected_source_snapshot,
         )
-        answer = db.get(AssignmentAnswerDraftCandidate, row.answer_candidate_id)
-        criteria = _criteria(db, row.id)
-        structural = validate_candidate_structure(
-            Decimal(row.total_points) if row.total_points is not None else None,
-            row.scoring_mode,
-            criteria,
-        )
-        validations = list(
-            db.scalars(
-                select(AssignmentRubricValidationResult.status).where(
-                    AssignmentRubricValidationResult.rubric_candidate_id == row.id
-                )
-            )
-        )
-        if (
-            answer
-            and answer.status in {"accepted", "modified"}
-            and structural.valid
-            and not row.manual_required
-            and row.scoring_mode == "deterministic"
-            and "indeterminate" not in validations
-        ):
+        reasons = _rubric_ineligibility_reasons(db, row)
+        if not reasons:
             row.status, row.reviewed_by, row.reviewed_at = "accepted", actor.id, now_utc()
             row.teacher_edit_version += 1
             _materialize_rubric_or_conflict(db, row, actor.id)
@@ -695,6 +737,20 @@ def accept_eligible_rubrics(
                 row.id,
                 {"scoring_mode": row.scoring_mode},
             )
+        else:
+            skipped.append(
+                {
+                    "candidate_id": str(row.id),
+                    "question_id": str(row.question_id),
+                    "reason_codes": reasons,
+                }
+            )
     revision.teacher_edit_version += len(accepted)
     db.commit()
-    return {"accepted_ids": accepted, "accepted_count": len(accepted)}
+    return {
+        "accepted_ids": accepted,
+        "accepted_count": len(accepted),
+        "considered_count": len(probes),
+        "skipped_count": len(skipped),
+        "skipped": skipped,
+    }

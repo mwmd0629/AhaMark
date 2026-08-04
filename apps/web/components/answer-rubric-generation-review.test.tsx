@@ -363,4 +363,60 @@ describe("AnswerRubricGenerationReview Bundle lifecycle", () => {
       screen.queryByRole("button", { name: "批量接受可用答案" }),
     ).not.toBeInTheDocument();
   });
+
+  it("explains when bulk rubric acceptance succeeds with zero accepted items", async () => {
+    generationApi.acceptEligibleRubrics.mockResolvedValue({
+      accepted_ids: [],
+      accepted_count: 0,
+      considered_count: 1,
+      skipped_count: 1,
+      skipped: [
+        {
+          candidate_id: "rubric-candidate-1",
+          question_id: "question-1",
+          reason_codes: ["RUBRIC_VALIDATION_CONFIG_INVALID"],
+        },
+      ],
+    });
+
+    render(<AnswerRubricGenerationReview {...props} />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "批量接受可用评分标准",
+      }),
+    );
+
+    expect(
+      await screen.findByText(
+        /没有可自动接受的评分标准.*第 1 题：确定性校验规则不完整/,
+      ),
+    ).toBeInTheDocument();
+    expect(generationApi.acceptEligibleRubrics).toHaveBeenCalledWith(
+      "revision-1",
+      {
+        expected_draft_revision_edit_version: 0,
+        expected_source_snapshot: "a".repeat(64),
+      },
+    );
+  });
+
+  it("fails visibly when an older bulk endpoint omits skip diagnostics", async () => {
+    generationApi.acceptEligibleRubrics.mockResolvedValue({
+      accepted_ids: [],
+      accepted_count: 0,
+    });
+
+    render(<AnswerRubricGenerationReview {...props} />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "批量接受可用评分标准",
+      }),
+    );
+
+    expect(
+      await screen.findByText(
+        "没有接受任何评分标准，但服务端未返回跳过原因；请刷新页面后重试",
+      ),
+    ).toBeInTheDocument();
+  });
 });

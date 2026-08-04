@@ -2,6 +2,12 @@
 
 ## 接手必读：当前状态、问题与下一步
 
+2026-08-04 教师实测“点击后没反应”改进专项：从远端 Draft PR #1 head `609673089c0e8e1f9fb35cd815e0cf7b3bbb80f9` 创建干净隔离 worktree；接手时 PR 仍为 Draft/open、base `master`，无评论、审查或检查更新，本轮没有改动正在运行的测试数据库、Docker、正式答案/成绩或发布状态。实测接口证据表明，“批量接受可用评分标准”实际 HTTP 200 但 `accepted_count=0`，旧响应不报告考虑了哪些候选及为何跳过，前端又无条件显示成功；五份合成评分标准的 criterion `validation_rule={}`，因此均被 `RUBRIC_VALIDATION_CONFIG_INVALID` 阻断。同时中央核查在正式答案/评分标准未完成时已允许点击“生成兼容版本”，后端只能返回 422，形成第二个看似无反应的入口。这里的候选来自明确标记的 `codex_simulated` 测试资料，不宣称是真实外部 Provider 输出质量。
+
+本轮后端为答案与评分标准候选返回服务端权威的 `server_eligible` 和 `ineligibility_reasons`；两个批量接口统一返回 accepted/considered/skipped 数量、ID、题号和原因码，只统计仍为 `suggested` 的当前候选，继续保持未知来源、低置信、缺证据、人工复核、结构无效、非 deterministic 或验证 indeterminate 时 fail-closed。前端对零接受和部分接受分别显示明确计数、题号、中文原因与修复动作，不再把“接受 0 项”显示为成功；候选卡片直接解释为何不能自动接受。新增字段按可选字段兼容旧缓存/滚动升级，服务端未明确返回 `false` 时不会使旧页面数据崩溃。中央核查只有在非 binding blocker 清零且正式答案、评分标准确认完成后才自动或手动创建兼容 binding；前置条件不满足时按钮禁用并提示先完成哪些内容。AI 仍仅为 suggestion-only，未增加任何自动教师确认、正式成绩写入或发布路径。
+
+最终验证（2026-08-05）：后端全量使用唯一系统临时目录 `C:\\Users\\Lenovo\\AppData\\Local\\Temp\\ahamark-provider-feedback-full-20260804-01` 且禁用 cacheprovider，结果 `579 passed, 18 skipped, 339 warnings`，无失败或 setup error，耗时 `44:49`，`ahamark.db` 守卫 unchanged；18 个 skip 均为仓库既有条件型用例。答案/评分标准生成专项 `18 passed`；前端相关组件 `78 passed`，前端全量 `27 files / 186 tests passed`；Prettier、ESLint、TypeScript、Next production build（19 个静态页面）、全仓 Ruff check、仓库标准 strict mypy（107 source files）、Alembic 单一 head `0033_joint_exam_class_authorization` 与 `git diff --check` 均通过。Next build 输出仓库既有的 SWC lockfile 自动修补警告，但构建退出码为 0，构建前后根 lockfile 均无 diff，Web lockfile 仍不存在。依赖安装仅用于隔离 worktree 验证；npm 报告既有 4 个 high advisories，未运行会改锁文件的自动修复。未运行 fresh browser E2E，不能把组件回归夸大为浏览器端到端验证；当前 `localhost:3300` 仍是旧测试实例，本轮不部署或替换它。本专项 7 个产品/测试文件加 README 将按用户授权精确暂存、提交并安全推送到现有 Draft PR #1，仍不合并、不部署、不改变 PR 状态。
+
 2026-08-04 独立提交前复审阻断跟进：复核确认旧 release 公开与 confirm-results 原先没有共同事务序列点；现统一先执行受 owner 限制的 assignment 自更新，PostgreSQL 获得行写锁、SQLite 获得写事务锁，且不改变 assignment 内容指纹，锁顺序统一为 assignment → narrower rows。公开在共同锁内重新读取 release 并保留“更高正式版本则 409”的历史审计语义。联考只读入口也已在查询 metadata 前要求 active teacher，撤权后返回 `403 TEACHER_ROLE_REQUIRED`。第二次复审指出原并发回归可能把慢调度误判为锁生效；测试现先确认真实 HTTP confirm 已发起，再监听 pytest 隔离数据库 engine 的 `before_cursor_execute`，确认请求实际发出 assignment serialization SQL 后，才验证 publish 持锁期间 `_confirm_results_state` 不可达。三组证据分别为：
 
 - 单次聚焦回归：`1 passed`。

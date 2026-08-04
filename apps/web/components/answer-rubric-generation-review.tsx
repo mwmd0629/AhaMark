@@ -11,6 +11,7 @@ import {
   type AnswerDraftCandidate,
   type AssignmentDraftRevision,
   type AssignmentReviewBundle,
+  type BulkCandidateAcceptance,
   type RubricDraftCandidate,
   type RubricDraftValidation,
 } from "@/lib/api";
@@ -23,6 +24,34 @@ const validationLabels: Record<string, string> = {
   failed: "验证失败，仅作为风险",
   stale: "结果已失效",
 };
+
+const eligibilityReasonLabels: Record<string, string> = {
+  CANDIDATE_NOT_SUGGESTED: "这项建议已经处理或已失效",
+  ANSWER_SOURCE_UNKNOWN: "答案来源尚未确定",
+  ANSWER_CONFIDENCE_LOW: "答案置信度不足 0.80",
+  ANSWER_EVIDENCE_MISSING: "答案缺少可核对证据",
+  ANSWER_CANDIDATE_MISSING: "缺少对应参考答案候选",
+  ANSWER_CANDIDATE_NOT_ACCEPTED: "请先接受对应参考答案",
+  MANUAL_REVIEW_REQUIRED: "系统判定需要教师人工核对",
+  SCORING_MODE_NOT_DETERMINISTIC: "评分模式不是可自动接受的确定性模式",
+  VALIDATION_INDETERMINATE: "数学校验结果仍无法确定",
+  RUBRIC_SCHEMA_INVALID: "评分项结构不完整",
+  RUBRIC_DEPENDENCY_MISSING: "评分项引用了不存在的前置项",
+  RUBRIC_DEPENDENCY_CYCLE: "评分项之间存在循环依赖",
+  RUBRIC_PARTIAL_CREDIT_INVALID: "部分得分规则超过该项分值",
+  RUBRIC_DEDUCTION_INVALID: "扣分规则超过该项分值",
+  RUBRIC_VALIDATION_CONFIG_INVALID: "确定性校验规则不完整",
+  RUBRIC_SCORE_REQUIRED: "评分标准缺少总分",
+  RUBRIC_POINTS_MISMATCH: "评分项分值合计与题目总分不一致",
+  RUBRIC_ALTERNATIVE_PATH_CONFLICT: "可选得分路径的分值存在冲突",
+  PROMPT_INJECTION_CONTENT_DETECTED: "内容含有可疑指令，需要人工核对",
+  FORMULA_ANSWER_REVIEW_REQUIRED: "公式答案需要人工核对",
+  MANUAL_ANSWER_REQUIRED: "答案需要人工填写",
+  ANSWER_SCHEMA_INVALID: "答案结构不完整",
+};
+
+const eligibilityReason = (code: string) =>
+  eligibilityReasonLabels[code] ?? `需要人工核对（${code}）`;
 
 type QuestionOption = {
   id: string;
@@ -247,6 +276,69 @@ export function AnswerRubricGenerationReview({
     }
   };
 
+  const performBulk = async (
+    label: "答案" | "评分标准",
+    work: () => Promise<BulkCandidateAcceptance>,
+  ) => {
+    setBusy(true);
+    try {
+      const result = await work();
+      await load();
+      const diagnosticsAvailable =
+        result.considered_count !== undefined &&
+        result.skipped_count !== undefined &&
+        result.skipped !== undefined;
+      if (!diagnosticsAvailable && result.accepted_count === 0) {
+        const text = `没有接受任何${label}，但服务端未返回跳过原因；请刷新页面后重试`;
+        setMessage(text);
+        toast(text, "error");
+        return;
+      }
+      const consideredCount = result.considered_count ?? result.accepted_count;
+      const skipped = result.skipped ?? [];
+      const skippedCount = result.skipped_count ?? skipped.length;
+      if (consideredCount === 0) {
+        const text = `没有待处理的${label}建议`;
+        setMessage("");
+        toast(text);
+        return;
+      }
+      const details = skipped
+        .slice(0, 5)
+        .map((item) => {
+          const question = questions.find(
+            (entry) => entry.id === item.question_id,
+          );
+          const prefix = question
+            ? `第 ${question.question_number} 题`
+            : "未识别题目";
+          return `${prefix}：${item.reason_codes.map(eligibilityReason).join("、")}`;
+        })
+        .join("；");
+      const omitted = Math.max(skippedCount - 5, 0);
+      const skippedText = skippedCount
+        ? `；${skippedCount} 项不能自动接受：${details}${omitted ? `；另有 ${omitted} 项` : ""}`
+        : "";
+      const text =
+        result.accepted_count > 0
+          ? `已批量接受 ${result.accepted_count} 项${label}${skippedText}`
+          : `没有可自动接受的${label}${skippedText}`;
+      setMessage(skippedCount ? text : "");
+      toast(text, result.accepted_count === 0 ? "error" : "success");
+    } catch (error) {
+      const text =
+        error instanceof ApiError && error.status === 409
+          ? `并发冲突：${error.message}，请刷新后重试`
+          : error instanceof Error
+            ? error.message
+            : "操作失败";
+      setMessage(text);
+      toast(text, "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   if (!revision && !bundle?.questions.length)
     return (
       <Card className="space-y-3 p-4" data-testid="answer-rubric-empty">
@@ -296,14 +388,12 @@ export function AnswerRubricGenerationReview({
           disabled={busy || !revision}
           onClick={() =>
             revision &&
-            void perform(
-              () =>
-                assignmentGenerationApi.acceptEligibleAnswers(revision.id, {
-                  expected_draft_revision_edit_version:
-                    revision.teacher_edit_version,
-                  expected_source_snapshot: revision.source_snapshot_hash,
-                }),
-              "服务器判定的低风险答案已接受",
+            void performBulk("答案", () =>
+              assignmentGenerationApi.acceptEligibleAnswers(revision.id, {
+                expected_draft_revision_edit_version:
+                  revision.teacher_edit_version,
+                expected_source_snapshot: revision.source_snapshot_hash,
+              }),
             )
           }
         >
@@ -314,14 +404,12 @@ export function AnswerRubricGenerationReview({
           disabled={busy || !revision}
           onClick={() =>
             revision &&
-            void perform(
-              () =>
-                assignmentGenerationApi.acceptEligibleRubrics(revision.id, {
-                  expected_draft_revision_edit_version:
-                    revision.teacher_edit_version,
-                  expected_source_snapshot: revision.source_snapshot_hash,
-                }),
-              "服务器判定的低风险评分标准已保存，等待教师确认",
+            void performBulk("评分标准", () =>
+              assignmentGenerationApi.acceptEligibleRubrics(revision.id, {
+                expected_draft_revision_edit_version:
+                  revision.teacher_edit_version,
+                expected_source_snapshot: revision.source_snapshot_hash,
+              }),
             )
           }
         >
@@ -533,6 +621,20 @@ export function AnswerRubricGenerationReview({
                 </span>
                 <span>置信度 {answer.confidence.toFixed(2)}</span>
               </div>
+              {answer.server_eligible === false &&
+                (answer.ineligibility_reasons?.length ?? 0) > 0 && (
+                  <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm">
+                    <p className="font-medium">此答案不能自动接受</p>
+                    <ul className="mt-1 list-disc pl-5">
+                      {answer.ineligibility_reasons?.map((code) => (
+                        <li key={code}>{eligibilityReason(code)}</li>
+                      ))}
+                    </ul>
+                    <p className="mt-1 text-slate-700">
+                      请核对内容后使用“接受答案”或“修改后接受”。
+                    </p>
+                  </div>
+                )}
               <label className="grid gap-1 text-sm font-medium">
                 标准答案（纯文本安全渲染）
                 <textarea
@@ -825,6 +927,20 @@ export function AnswerRubricGenerationReview({
                 总分：{rubric.total_points ?? "未知（阻止确认）"} · confidence{" "}
                 {rubric.confidence.toFixed(2)}
               </p>
+              {rubric.server_eligible === false &&
+                (rubric.ineligibility_reasons?.length ?? 0) > 0 && (
+                  <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm">
+                    <p className="font-medium">此评分标准不能自动接受</p>
+                    <ul className="mt-1 list-disc pl-5">
+                      {rubric.ineligibility_reasons?.map((code) => (
+                        <li key={code}>{eligibilityReason(code)}</li>
+                      ))}
+                    </ul>
+                    <p className="mt-1 text-slate-700">
+                      请补全校验规则，或核对后使用“修改后接受”。
+                    </p>
+                  </div>
+                )}
               <div className="space-y-2" aria-label="Rubric 评分项">
                 {rubric.criteria.map((criterion) => (
                   <div

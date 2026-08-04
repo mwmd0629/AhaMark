@@ -739,6 +739,29 @@ describe("AssignmentCentralReview preserved behavior", () => {
     ).toBeDisabled();
   });
 
+  it("does not attempt a compatibility binding while rubric content is incomplete", async () => {
+    reviewApi.bundle.mockResolvedValue(
+      reviewBundle({
+        status: "action_required",
+        binding: null,
+        confirmations: confirmationKinds.map((kind) => confirmation(kind)),
+        blockers: [
+          blocker("STRUCTURED_RUBRIC_UNCONFIRMED", "第 1 题缺少已确认评分标准"),
+        ],
+      }),
+    );
+
+    renderReview();
+
+    expect(
+      await screen.findByRole("button", { name: "生成兼容版本" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText(/请先完成上方仍影响发布的参考答案和评分标准/),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(reviewApi.createBinding).not.toHaveBeenCalled());
+  });
+
   it("offers to rebuild a stale binding", async () => {
     reviewApi.bundle.mockResolvedValue(
       reviewBundle({

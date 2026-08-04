@@ -435,6 +435,13 @@ export function AssignmentCentralReview({
   const requiredConfirmationsComplete = confirmations.every(([kind]) =>
     bundleConfirmations.has(kind),
   );
+  const hasPreBindingBlocker =
+    bundle?.blockers.some(
+      (blocker) =>
+        blocker.severity === "blocking" && !bindingIssueCodes.has(blocker.code),
+    ) ?? true;
+  const bindingPrerequisitesComplete =
+    requiredConfirmationsComplete && !hasPreBindingBlocker;
   const legacyBindingConfirmation =
     bundleConfirmationsByType.get("legacy_binding");
   const legacyBindingIssueOpen =
@@ -568,7 +575,7 @@ export function AssignmentCentralReview({
       bundleError ||
       busy ||
       automating ||
-      !requiredConfirmationsComplete
+      !bindingPrerequisitesComplete
     )
       return;
     const assignmentId = item.id;
@@ -607,7 +614,7 @@ export function AssignmentCentralReview({
     isCurrentRequest,
     item.id,
     load,
-    requiredConfirmationsComplete,
+    bindingPrerequisitesComplete,
     session,
     toast,
   ]);
@@ -1607,7 +1614,7 @@ export function AssignmentCentralReview({
             (bindingIsLossless && !bindingIsAutoCompatible)) && (
             <Button
               data-testid="prepare-rubric-publication-binding"
-              disabled={busy}
+              disabled={busy || !bindingPrerequisitesComplete}
               onClick={() =>
                 act(
                   () =>
@@ -1621,6 +1628,11 @@ export function AssignmentCentralReview({
             >
               {bundle?.binding ? "重新生成兼容版本" : "生成兼容版本"}
             </Button>
+          )}
+          {!bindingPrerequisitesComplete && !bundle?.binding && (
+            <p className="text-sm text-amber-700">
+              请先完成上方仍影响发布的参考答案和评分标准；完成后系统会自动生成兼容版本。
+            </p>
           )}
           {bundle?.binding && (
             <details

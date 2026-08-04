@@ -234,6 +234,102 @@ def test_generation_requires_materialized_question_and_provider_unavailable_is_e
         assert db.scalar(select(AssignmentRubricDraftCandidate)) is None
 
 
+def _bulk_accept_answers(revision_id: uuid.UUID, snapshot: str) -> dict[str, object]:
+    response = client.post(
+        f"/api/assignment-draft-revisions/{revision_id}/answer-draft-candidates/accept-eligible",
+        json={
+            "expected_draft_revision_edit_version": 0,
+            "expected_source_snapshot": snapshot,
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_bulk_rubric_accept_reports_structural_skip_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id, revision_id, question_id = generation_context(monkeypatch)
+    with SessionLocal() as db:
+        from app.assignment_generation.answer_rubric import generate_candidates
+
+        job = db.get(AssignmentGenerationJob, job_id)
+        revision = db.get(AssignmentDraftRevision, revision_id)
+        assert job is not None and revision is not None
+        generate_candidates(db, job, revision, provider_available=True)
+        db.flush()
+        criterion_row = db.scalar(select(AssignmentRubricCriterionDraft))
+        assert criterion_row is not None
+        criterion_row.validation_rule = {}
+        snapshot = revision.source_snapshot_hash
+        db.commit()
+
+    answer_result = _bulk_accept_answers(revision_id, snapshot)
+    assert answer_result["accepted_count"] == 1
+    response = client.post(
+        f"/api/assignment-draft-revisions/{revision_id}/rubric-draft-candidates/accept-eligible",
+        json={
+            "expected_draft_revision_edit_version": 1,
+            "expected_source_snapshot": snapshot,
+        },
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload == {
+        "accepted_ids": [],
+        "accepted_count": 0,
+        "considered_count": 1,
+        "skipped_count": 1,
+        "skipped": [
+            {
+                "candidate_id": payload["skipped"][0]["candidate_id"],
+                "question_id": str(question_id),
+                "reason_codes": ["RUBRIC_VALIDATION_CONFIG_INVALID"],
+            }
+        ],
+    }
+    listed = client.get(f"/api/assignment-draft-revisions/{revision_id}/rubric-draft-candidates")
+    assert listed.status_code == 200, listed.text
+    assert listed.json()[0]["server_eligible"] is False
+    assert listed.json()[0]["ineligibility_reasons"] == ["RUBRIC_VALIDATION_CONFIG_INVALID"]
+
+
+def test_bulk_rubric_accept_reports_and_materializes_eligible_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id, revision_id, _question_id = generation_context(monkeypatch)
+    with SessionLocal() as db:
+        from app.assignment_generation.answer_rubric import generate_candidates
+
+        job = db.get(AssignmentGenerationJob, job_id)
+        revision = db.get(AssignmentDraftRevision, revision_id)
+        assert job is not None and revision is not None
+        generate_candidates(db, job, revision, provider_available=True)
+        snapshot = revision.source_snapshot_hash
+        db.commit()
+
+    answer_result = _bulk_accept_answers(revision_id, snapshot)
+    assert answer_result["accepted_count"] == 1
+    response = client.post(
+        f"/api/assignment-draft-revisions/{revision_id}/rubric-draft-candidates/accept-eligible",
+        json={
+            "expected_draft_revision_edit_version": 1,
+            "expected_source_snapshot": snapshot,
+        },
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["accepted_count"] == 1
+    assert payload["considered_count"] == 1
+    assert payload["skipped_count"] == 0
+    assert payload["skipped"] == []
+    with SessionLocal() as db:
+        rubric = db.scalar(select(AssignmentRubricDraftCandidate))
+        assert rubric is not None
+        assert rubric.status == "accepted"
+        assert rubric.materialized_structured_rubric_id is not None
+
+
 def test_teacher_disposition_materializes_drafts_and_keeps_confirmed_immutable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

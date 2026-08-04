@@ -2327,6 +2327,8 @@ export type AnswerDraftCandidate = {
   manual_required: boolean;
   teacher_edit_version: number;
   materialized_reference_answer_id?: string | null;
+  server_eligible?: boolean;
+  ineligibility_reasons?: string[];
 };
 export type RubricCriterionDraft = {
   id: string;
@@ -2370,6 +2372,22 @@ export type RubricDraftCandidate = {
   teacher_edit_version: number;
   materialized_structured_rubric_id?: string | null;
   criteria: RubricCriterionDraft[];
+  server_eligible?: boolean;
+  ineligibility_reasons?: string[];
+};
+
+export type BulkCandidateSkip = {
+  candidate_id: string;
+  question_id: string;
+  reason_codes: string[];
+};
+
+export type BulkCandidateAcceptance = {
+  accepted_ids: string[];
+  accepted_count: number;
+  considered_count?: number;
+  skipped_count?: number;
+  skipped?: BulkCandidateSkip[];
 };
 export type RubricDraftValidation = {
   id: string;
@@ -2663,12 +2681,12 @@ export const assignmentGenerationApi = {
       `/api/rubric-draft-candidates/${candidateId}/validation`,
     ),
   acceptEligibleAnswers: (revisionId: string, data: Record<string, unknown>) =>
-    request<{ accepted_ids: string[]; accepted_count: number }>(
+    request<BulkCandidateAcceptance & { source_labels_unchanged: true }>(
       `/api/assignment-draft-revisions/${revisionId}/answer-draft-candidates/accept-eligible`,
       { method: "POST", body: JSON.stringify(data) },
     ),
   acceptEligibleRubrics: (revisionId: string, data: Record<string, unknown>) =>
-    request<{ accepted_ids: string[]; accepted_count: number }>(
+    request<BulkCandidateAcceptance>(
       `/api/assignment-draft-revisions/${revisionId}/rubric-draft-candidates/accept-eligible`,
       { method: "POST", body: JSON.stringify(data) },
     ),
