@@ -4,6 +4,7 @@ import urllib.error
 
 import pytest
 from app.assignment_generation.providers import (
+    DeterministicFakeAssignmentGenerationProvider,
     OpenAICompatibleAssignmentGenerationProvider,
     provider_from_settings,
     select_provider,
@@ -224,3 +225,26 @@ def test_external_provider_requests_require_server_side_enablement() -> None:
     assert selection.name == "unavailable"
     assert selection.available is False
     assert selection.error_code == "PROVIDER_EXTERNAL_REQUESTS_DISABLED"
+
+
+def test_fake_answer_rubric_uses_provider_interface_schema_and_hashes() -> None:
+    provider = DeterministicFakeAssignmentGenerationProvider()
+    payload = {
+        "question": {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "number": "1",
+            "type": "calculation",
+            "text": "计算 1+1",
+            "latex": None,
+            "max_score": "5",
+        }
+    }
+    answer = provider.generate("answer_generation", payload)
+    rubric = provider.generate("rubric_generation", payload)
+    assert answer.output is not None
+    assert rubric.output is not None
+    assert answer.request_hash and answer.response_hash
+    assert rubric.request_hash and rubric.response_hash
+    assert answer.model_snapshot == "deterministic-test-only"
+    assert answer.output.degradation_reason is None
+    assert answer.output.criteria[0].degradation_reason is None

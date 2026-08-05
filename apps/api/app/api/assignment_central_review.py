@@ -2160,6 +2160,137 @@ def automatic_confirmation_blocker(
     return None
 
 
+def _safe_prepared_versions(db: Session, rows: list[dict[str, Any]]) -> bool:
+    from app.api.assignment_answer_rubric import (
+        _answer_ineligibility_reasons,
+        _rubric_ineligibility_reasons,
+    )
+
+    for row in rows:
+        answer = row["answer"]
+        rubric = row["rubric"]
+        if answer is None or rubric is None:
+            return False
+        if answer.status == "draft":
+            answer_candidate = (
+                db.get(AssignmentAnswerDraftCandidate, answer.origin_answer_candidate_id)
+                if answer.origin_answer_candidate_id
+                else None
+            )
+            if answer_candidate is None:
+                return False
+            if (
+                answer_candidate.status in {"accepted", "modified"}
+                and answer_candidate.reviewed_by is not None
+            ):
+                pass
+            elif answer_candidate.status == "system_prepared":
+                reasons = set(_answer_ineligibility_reasons(answer_candidate)) - {
+                    "CANDIDATE_NOT_SUGGESTED"
+                }
+                if reasons:
+                    return False
+            else:
+                return False
+        elif answer.status != "confirmed":
+            return False
+        if rubric.status == "draft":
+            rubric_candidate = (
+                db.get(AssignmentRubricDraftCandidate, rubric.origin_rubric_candidate_id)
+                if rubric.origin_rubric_candidate_id
+                else None
+            )
+            if rubric_candidate is None:
+                return False
+            if (
+                rubric_candidate.status in {"accepted", "modified"}
+                and rubric_candidate.reviewed_by is not None
+            ):
+                pass
+            elif rubric_candidate.status == "system_prepared":
+                reasons = set(_rubric_ineligibility_reasons(db, rubric_candidate)) - {
+                    "CANDIDATE_NOT_SUGGESTED",
+                    "ANSWER_CANDIDATE_NOT_ACCEPTED",
+                }
+                if reasons:
+                    return False
+            else:
+                return False
+        elif rubric.status != "confirmed":
+            return False
+    return True
+
+
+def _system_prepare_eligible_candidates(
+    db: Session,
+    revision: AssignmentDraftRevision,
+    actor: Actor,
+) -> dict[str, int]:
+    from app.api.assignment_answer_rubric import (
+        _answer_ineligibility_reasons,
+        _rubric_ineligibility_reasons,
+    )
+    from app.assignment_generation.answer_rubric import materialize_reference, materialize_rubric
+
+    prepared_answers = 0
+    prepared_rubrics = 0
+    answers = list(
+        db.scalars(
+            select(AssignmentAnswerDraftCandidate)
+            .where(
+                AssignmentAnswerDraftCandidate.draft_revision_id == revision.id,
+                AssignmentAnswerDraftCandidate.owner_id == actor.id,
+                AssignmentAnswerDraftCandidate.status == "suggested",
+            )
+            .with_for_update()
+        )
+    )
+    for answer_candidate in answers:
+        if _answer_ineligibility_reasons(answer_candidate):
+            continue
+        answer_candidate.status = "system_prepared"
+        answer_candidate.teacher_edit_version += 1
+        materialize_reference(db, answer_candidate, actor.id)
+        prepared_answers += 1
+        audit(
+            db,
+            actor.id,
+            "assignment_candidate.system_prepare",
+            "assignment_answer_draft_candidate",
+            answer_candidate.id,
+            {"teacher_reviewed": False, "source_type": answer_candidate.source_type},
+        )
+    db.flush()
+    rubrics = list(
+        db.scalars(
+            select(AssignmentRubricDraftCandidate)
+            .where(
+                AssignmentRubricDraftCandidate.draft_revision_id == revision.id,
+                AssignmentRubricDraftCandidate.owner_id == actor.id,
+                AssignmentRubricDraftCandidate.status == "suggested",
+            )
+            .with_for_update()
+        )
+    )
+    for rubric_candidate in rubrics:
+        if _rubric_ineligibility_reasons(db, rubric_candidate):
+            continue
+        rubric_candidate.status = "system_prepared"
+        rubric_candidate.teacher_edit_version += 1
+        materialize_rubric(db, rubric_candidate, actor.id)
+        prepared_rubrics += 1
+        audit(
+            db,
+            actor.id,
+            "assignment_candidate.system_prepare",
+            "assignment_rubric_draft_candidate",
+            rubric_candidate.id,
+            {"teacher_reviewed": False, "scoring_mode": rubric_candidate.scoring_mode},
+        )
+    revision.teacher_edit_version += prepared_answers + prepared_rubrics
+    return {"answers": prepared_answers, "rubrics": prepared_rubrics}
+
+
 def add_confirmation(
     db: Session,
     session: AssignmentReviewSession,
@@ -2352,17 +2483,11 @@ def create_binding(
             {"stale_binding_id": old.id, "previous_source_hash": source_hash}
         )
         db.flush()
-    if any(
-        row["answer"] is None
-        or row["answer"].status != "confirmed"
-        or row["rubric"] is None
-        or row["rubric"].status != "confirmed"
-        for row in rows
-    ):
+    if not _safe_prepared_versions(db, rows):
         raise ApiProblem(
             422,
             "BINDING_SOURCE_UNCONFIRMED",
-            "发布绑定只能使用已确认的答案和 Structured Rubric",
+            "发布绑定只能使用已确认或通过服务端资格检查的安全草稿",
         )
     warnings: list[str] = [item["code"] for item in loss_report]
     legacy_version = (
@@ -2496,7 +2621,7 @@ def create_binding(
     db.add(binding)
     session.legacy_rubric_version_id = legacy.id
     db.flush()
-    if known_compatibility_fallback:
+    if known_compatibility_fallback and not loss_report:
         binding.status = "confirmed"
         binding.confirmed_by = actor.id
         binding.confirmed_at = now_utc()
@@ -2715,7 +2840,23 @@ def prepare_publication(
             {"reason": projection.reason},
         )
     refresh(db, session)
-    if session.blocking_count:
+    prepared_rows = selected_versions(db, session.paper_version_id)
+    blocking_codes = set(
+        db.scalars(
+            select(AssignmentReviewItem.issue_code).where(
+                AssignmentReviewItem.review_session_id == session.id,
+                AssignmentReviewItem.severity == "blocking",
+                AssignmentReviewItem.status == "open",
+            )
+        )
+    )
+    prepared_draft_blockers = {
+        "REFERENCE_ANSWER_UNCONFIRMED",
+        "STRUCTURED_RUBRIC_UNCONFIRMED",
+    }
+    safe_bundle_approval = bool(blocking_codes) and blocking_codes <= prepared_draft_blockers
+    safe_bundle_approval = safe_bundle_approval and _safe_prepared_versions(db, prepared_rows)
+    if session.blocking_count and not safe_bundle_approval:
         raise ApiProblem(
             422,
             "REVIEW_NOT_READY",
@@ -2808,6 +2949,7 @@ def prepare_publication(
 
 def readiness_json(x: AssignmentPublishReadinessSnapshot) -> dict[str, Any]:
     return {
+        "preparation_status": "ready",
         "id": str(x.id),
         "assignment_id": str(x.assignment_id),
         "review_session_id": str(x.review_session_id),
@@ -2821,7 +2963,116 @@ def readiness_json(x: AssignmentPublishReadinessSnapshot) -> dict[str, Any]:
         "class_ids": x.class_ids,
         "due_at": x.due_at,
         "total_score": str(x.total_score),
+        "bundle": {
+            "assignment_state_hash": x.assignment_state_hash,
+            "risk_ledger_hash": x.risk_ledger_hash,
+            "source_snapshot_hash": x.source_snapshot_hash,
+            "generation": x.generation,
+            "draft_revision_id": str(x.draft_revision_id),
+            "issue_counts": x.issue_counts,
+        },
     }
+
+
+@router.post("/assignments/{assignment_id}/prepare-publication")
+def prepare_assignment_publication(
+    assignment_id: uuid.UUID, db: Db, actor: Actor
+) -> dict[str, Any]:
+    """Idempotently drive safe review preparation and report a pollable state."""
+
+    session_payload = create_review_session(assignment_id, db, actor)
+    session_id = uuid.UUID(session_payload["id"])
+    session = owned_session(db, actor.id, session_id)
+    job = db.get(AssignmentGenerationJob, session.generation_job_id)
+    if job is not None and job.status in {
+        "queued",
+        "analyzing",
+        "processing_pages",
+        "extracting_questions",
+        "generating_rubrics",
+        "validating",
+    }:
+        return {
+            "preparation_status": "preparing",
+            "assignment_id": str(assignment_id),
+            "review_session_id": str(session.id),
+            "review_version": session.review_version,
+            "stage": job.current_stage or job.status,
+            "progress": job.progress,
+            "retryable": True,
+        }
+
+    revision = db.get(AssignmentDraftRevision, session.draft_revision_id)
+    assert revision is not None
+    prepared = _system_prepare_eligible_candidates(db, revision, actor)
+    if prepared["answers"] or prepared["rubrics"]:
+        db.commit()
+        session_payload = create_review_session(assignment_id, db, actor)
+        session = owned_session(db, actor.id, uuid.UUID(session_payload["id"]))
+
+    auto_confirm_review_inputs(
+        session.id,
+        VersionedAction(expected_review_version=session.review_version),
+        db,
+        actor,
+    )
+    session = owned_session(db, actor.id, session.id)
+    confirms = valid_confirmations(db, session)
+    binding_error: ApiProblem | None = None
+    if not (REQUIRED_CONFIRMATIONS - {"legacy_binding"} - set(confirms)):
+        try:
+            create_binding(
+                session.id,
+                VersionedAction(expected_review_version=session.review_version),
+                db,
+                actor,
+            )
+        except ApiProblem as exc:
+            binding_error = exc
+    session = owned_session(db, actor.id, session.id)
+    try:
+        return prepare_publication(
+            session.id,
+            VersionedAction(expected_review_version=session.review_version),
+            db,
+            actor,
+        )
+    except ApiProblem as exc:
+        if exc.status not in {409, 422}:
+            raise
+        bundle = review_bundle(db, actor.id, assignment_id)
+        exceptions = [
+            {
+                "code": item["code"],
+                "severity": item["severity"],
+                "message": item["message"],
+                "entity_type": item.get("entity_type"),
+                "entity_id": item.get("entity_id"),
+            }
+            for item in bundle["blockers"]
+            if item["severity"] in {"blocking", "warning"}
+        ]
+        if binding_error is not None and not any(
+            item["code"] == binding_error.code for item in exceptions
+        ):
+            exceptions.append(
+                {
+                    "code": binding_error.code,
+                    "severity": "blocking",
+                    "message": binding_error.message,
+                    "entity_type": "rubric_binding",
+                    "entity_id": None,
+                }
+            )
+        return {
+            "preparation_status": "exception_required",
+            "assignment_id": str(assignment_id),
+            "review_session_id": str(session.id),
+            "review_version": session.review_version,
+            "retryable": exc.status == 409,
+            "exceptions": exceptions,
+            "bundle_hash": bundle["version"]["bundle_hash"],
+        }
 
 
 @router.get("/assignment-publish-readiness/{snapshot_id}")
@@ -2905,8 +3156,47 @@ def teacher_publish(
             "发布投影或 legacy 确认已漂移",
             {"reason": projection.reason},
         )
-    refresh(db, session)
     paper = db.get(PaperVersion, snapshot.paper_version_id)
+    if (
+        paper is None
+        or digest(state_payload(db, assignment, paper)) != snapshot.assignment_state_hash
+        or session.risk_ledger_hash != snapshot.risk_ledger_hash
+        or session.generation != snapshot.generation
+        or session.draft_revision_id != snapshot.draft_revision_id
+    ):
+        snapshot.status, snapshot.invalidated_at = "invalidated", now
+        raise ApiProblem(409, "READINESS_STALE", "作业、Bundle 或审查状态已变化")
+    selected = selected_versions(db, session.paper_version_id)
+    if not _safe_prepared_versions(db, selected):
+        snapshot.status, snapshot.invalidated_at = "invalidated", now
+        raise ApiProblem(409, "READINESS_STALE", "Bundle 中的答案或评分标准已失去资格")
+    for selected_row in selected:
+        answer = selected_row["answer"]
+        rubric = selected_row["rubric"]
+        assert answer is not None and rubric is not None
+        if answer.status == "draft":
+            answer.status = "confirmed"
+            answer.teacher_confirmed_at = now
+            audit(
+                db,
+                actor_id,
+                "assignment_bundle.confirm_reference",
+                "reference_answer_version",
+                answer.id,
+                {"readiness_snapshot_id": str(snapshot.id)},
+            )
+        if rubric.status == "draft":
+            rubric.status, rubric.confirmed_by, rubric.confirmed_at = "confirmed", actor_id, now
+            audit(
+                db,
+                actor_id,
+                "assignment_bundle.confirm_rubric",
+                "structured_rubric_version",
+                rubric.id,
+                {"readiness_snapshot_id": str(snapshot.id)},
+            )
+    db.flush()
+    refresh(db, session)
     binding = projection.binding
     legacy = db.get(RubricVersion, snapshot.legacy_rubric_version_id)
     if (
@@ -2918,15 +3208,6 @@ def teacher_publish(
         or REQUIRED_CONFIRMATIONS - set(valid_confirmations(db, session))
     ):
         raise ApiProblem(409, "READINESS_STALE", "发布门禁已变化")
-    if (
-        assignment.updated_at != data.expected_assignment_updated_at
-        or digest(state_payload(db, assignment, paper)) != snapshot.assignment_state_hash
-        or session.risk_ledger_hash != snapshot.risk_ledger_hash
-        or session.generation != snapshot.generation
-        or session.draft_revision_id != snapshot.draft_revision_id
-    ):
-        snapshot.status, snapshot.invalidated_at = "invalidated", now
-        raise ApiProblem(409, "READINESS_STALE", "作业或审查状态已变化")
     from app.api.assignments import freeze_participant_roster, publish_issues
 
     assignment.active_paper_version_id, assignment.active_rubric_version_id = paper.id, legacy.id

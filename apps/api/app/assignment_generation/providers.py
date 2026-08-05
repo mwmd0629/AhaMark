@@ -14,7 +14,10 @@ from typing import Any, Literal, Protocol, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from app.ai_grading.providers import canonical_hash, sanitize_text
-from app.assignment_generation.answer_rubric import AnswerRubricProviderOutput
+from app.assignment_generation.answer_rubric import (
+    AnswerRubricProviderOutput,
+    deterministic_fake_output,
+)
 from app.assignment_generation.question_extraction import ExtractionOutput
 from app.assignment_generation.schemas import FileAnalysisOutput, MetadataProviderOutput
 from app.core.config import Settings
@@ -84,6 +87,44 @@ class UnavailableAssignmentGenerationProvider:
 
     def generate(self, stage: StageName, payload: dict[str, Any]) -> AssignmentProviderResponse:
         return AssignmentProviderResponse(None, error="provider_unavailable")
+
+
+class DeterministicFakeAssignmentGenerationProvider:
+    """Test-only provider that still obeys the production provider boundary."""
+
+    name, endpoint_mode = "fake", "deterministic_test_only"
+
+    def generate(self, stage: StageName, payload: dict[str, Any]) -> AssignmentProviderResponse:
+        if stage not in {"answer_generation", "rubric_generation"}:
+            return AssignmentProviderResponse(None, error="unsupported_stage")
+        question_payload = payload.get("question")
+        if not isinstance(question_payload, dict):
+            return AssignmentProviderResponse(None, error="provider_schema_invalid")
+        try:
+            question = type(
+                "SyntheticProviderQuestion",
+                (),
+                {
+                    "id": question_payload["id"],
+                    "question_number": question_payload["number"],
+                    "question_type": question_payload["type"],
+                    "content_text": question_payload.get("text"),
+                    "content_latex": question_payload.get("latex"),
+                    "max_score": question_payload.get("max_score"),
+                },
+            )()
+            raw = deterministic_fake_output(question)
+            output = AnswerRubricProviderOutput.model_validate(raw.model_dump(mode="json"))
+        except (KeyError, TypeError, ValueError, ValidationError):
+            return AssignmentProviderResponse(None, error="provider_schema_invalid")
+        request_hash = canonical_hash({"stage": stage, "payload": payload})
+        response_payload = output.model_dump(mode="json")
+        return AssignmentProviderResponse(
+            output,
+            request_hash=request_hash,
+            response_hash=canonical_hash(response_payload),
+            model_snapshot="deterministic-test-only",
+        )
 
 
 def _safe_base_url(value: str, *, allow_private_for_tests: bool) -> str:
@@ -363,4 +404,6 @@ def provider_from_settings(settings: Settings) -> AssignmentGenerationProvider:
     selection = select_provider(settings)
     if selection.name == "openai_compatible" and selection.available:
         return OpenAICompatibleAssignmentGenerationProvider(settings)
+    if selection.name == "fake" and selection.available:
+        return DeterministicFakeAssignmentGenerationProvider()
     return UnavailableAssignmentGenerationProvider()

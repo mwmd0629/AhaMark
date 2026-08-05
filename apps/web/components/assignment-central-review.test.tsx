@@ -9,9 +9,13 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AssignmentCentralReview } from "./assignment-central-review";
+import {
+  AssignmentCentralReview,
+  assignmentPreparationPolling,
+} from "./assignment-central-review";
 import {
   ApiError,
+  type AssignmentPreparationRecord,
   type AssignmentReadinessRecord,
   type AssignmentReviewBundle,
   type AssignmentReviewItemRecord,
@@ -30,6 +34,7 @@ const reviewApi = vi.hoisted(() => ({
   createBinding: vi.fn(),
   confirmBinding: vi.fn(),
   prepare: vi.fn(),
+  prepareAssignment: vi.fn(),
   publish: vi.fn(),
 }));
 const manualApi = vi.hoisted(() => ({
@@ -317,6 +322,33 @@ const deferred = <T,>() => {
   });
   return { promise, reject, resolve };
 };
+const flushAsyncWork = async () => {
+  await testingAct(async () => {
+    for (let index = 0; index < 12; index += 1) await Promise.resolve();
+  });
+};
+const assignmentPreparationBundle = () =>
+  reviewBundle({
+    status: "action_required",
+    blockers: [
+      blocker("REFERENCE_ANSWER_UNCONFIRMED", "系统正在准备参考答案"),
+      blocker("STRUCTURED_RUBRIC_UNCONFIRMED", "系统正在准备评分标准"),
+    ],
+  });
+const readyPreparation = (
+  id = "readiness-assignment",
+): AssignmentReadinessRecord => ({
+  id,
+  readiness_hash: "p".repeat(64),
+  status: "ready",
+  preparation_status: "ready",
+  expires_at: "2026-08-01T00:00:00Z",
+  class_ids: [],
+  due_at: null,
+  total_score: "10.00",
+  paper_version_id: "paper-1",
+  legacy_rubric_version_id: "legacy-1",
+});
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -352,6 +384,15 @@ beforeEach(() => {
     paper_version_id: "paper-1",
     legacy_rubric_version_id: "legacy-1",
   });
+  reviewApi.prepareAssignment.mockResolvedValue({
+    preparation_status: "exception_required",
+    assignment_id: "assignment-1",
+    review_session_id: "review-1",
+    review_version: 1,
+    retryable: false,
+    bundle_hash: "b".repeat(64),
+    exceptions: [],
+  });
   manualApi.manualPublishReadiness.mockResolvedValue({
     mode: "manual",
     ready: true,
@@ -366,6 +407,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -691,8 +733,50 @@ describe("AssignmentCentralReview preserved behavior", () => {
     });
     renderReview();
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "确认发布" })).toBeEnabled(),
+      expect(screen.getByRole("button", { name: "确认并发布" })).toBeEnabled(),
     );
+  });
+
+  it("publishes the complete Bundle with one click and no browser confirmation", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    reviewApi.publish.mockResolvedValue({ status: "published" });
+    renderReview();
+    const publish = await screen.findByRole("button", { name: "确认并发布" });
+    await waitFor(() => expect(publish).toBeEnabled());
+    fireEvent.click(publish);
+    await waitFor(() => expect(reviewApi.publish).toHaveBeenCalledOnce());
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("reloads clean Bundle state and retries one time after a 409", async () => {
+    reviewApi.prepareAssignment.mockResolvedValueOnce({
+      id: "readiness-2",
+      readiness_hash: "s".repeat(64),
+      status: "ready",
+      preparation_status: "ready",
+      expires_at: "2026-08-01T00:00:00Z",
+      class_ids: [],
+      due_at: null,
+      total_score: "10.00",
+      paper_version_id: "paper-1",
+      legacy_rubric_version_id: "legacy-1",
+    });
+    reviewApi.publish
+      .mockRejectedValueOnce(
+        new ApiError(409, {
+          code: "READINESS_STALE",
+          message: "来源已变化",
+          details: {},
+          request_id: "request-stale",
+        }),
+      )
+      .mockResolvedValueOnce({ status: "published" });
+    renderReview();
+    const publish = await screen.findByRole("button", { name: "确认并发布" });
+    await waitFor(() => expect(publish).toBeEnabled());
+    fireEvent.click(publish);
+    await waitFor(() => expect(reviewApi.publish).toHaveBeenCalledTimes(2));
+    expect(reviewApi.prepareAssignment).toHaveBeenCalledOnce();
   });
 
   it("leaves the preparing state after a delayed readiness response", async () => {
@@ -719,9 +803,200 @@ describe("AssignmentCentralReview preserved behavior", () => {
     });
 
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "确认发布" })).toBeEnabled(),
+      expect(screen.getByRole("button", { name: "确认并发布" })).toBeEnabled(),
     );
     expect(reviewApi.prepare).toHaveBeenCalledOnce();
+  });
+
+  it("accepts a ready assignment preparation response", async () => {
+    reviewApi.bundle.mockResolvedValue(assignmentPreparationBundle());
+    reviewApi.prepareAssignment.mockResolvedValue(readyPreparation());
+
+    renderReview();
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "确认并发布" })).toBeEnabled(),
+    );
+    expect(reviewApi.prepareAssignment).toHaveBeenCalledOnce();
+  });
+
+  it("polls a bounded preparing response until it becomes ready", async () => {
+    vi.useFakeTimers();
+    reviewApi.bundle.mockResolvedValue(assignmentPreparationBundle());
+    reviewApi.prepareAssignment
+      .mockResolvedValueOnce({
+        preparation_status: "preparing",
+        assignment_id: "assignment-1",
+        review_session_id: "review-1",
+        review_version: 1,
+        stage: "generating_rubrics",
+        progress: 55,
+        retryable: true,
+      })
+      .mockResolvedValueOnce({
+        preparation_status: "preparing",
+        assignment_id: "assignment-1",
+        review_session_id: "review-1",
+        review_version: 1,
+        stage: "validating_rubrics",
+        progress: 80,
+        retryable: true,
+      })
+      .mockResolvedValueOnce(readyPreparation("readiness-polled"));
+
+    renderReview();
+    await flushAsyncWork();
+
+    expect(screen.getByText(/generating_rubrics：55%/)).toBeInTheDocument();
+    expect(reviewApi.prepareAssignment).toHaveBeenCalledOnce();
+
+    await testingAct(async () => {
+      await vi.advanceTimersByTimeAsync(
+        assignmentPreparationPolling.intervalMs,
+      );
+    });
+    expect(screen.getByText(/validating_rubrics：80%/)).toBeInTheDocument();
+    expect(reviewApi.prepareAssignment).toHaveBeenCalledTimes(2);
+
+    await testingAct(async () => {
+      await vi.advanceTimersByTimeAsync(
+        assignmentPreparationPolling.intervalMs,
+      );
+    });
+    expect(screen.getByRole("button", { name: "确认并发布" })).toBeEnabled();
+    expect(reviewApi.prepareAssignment).toHaveBeenCalledTimes(3);
+  });
+
+  it("stops after the two-minute budget and keeps publication safely blocked", async () => {
+    vi.useFakeTimers();
+    reviewApi.bundle.mockResolvedValue(assignmentPreparationBundle());
+    reviewApi.prepareAssignment.mockResolvedValue({
+      preparation_status: "preparing",
+      assignment_id: "assignment-1",
+      review_session_id: "review-1",
+      review_version: 1,
+      stage: "generating_rubrics",
+      progress: 55,
+      retryable: true,
+    });
+
+    renderReview();
+    await flushAsyncWork();
+    await testingAct(async () => {
+      await vi.advanceTimersByTimeAsync(assignmentPreparationPolling.timeoutMs);
+    });
+
+    expect(
+      screen.getByText(/已达到本次自动等待上限.*重新扫描最新状态/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/generating_rubrics：55%/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认并发布" })).toBeDisabled();
+    expect(reviewApi.prepareAssignment).toHaveBeenCalledTimes(
+      assignmentPreparationPolling.timeoutMs /
+        assignmentPreparationPolling.intervalMs +
+        1,
+    );
+  });
+
+  it("shows server-authoritative preparation exceptions and blocks publication", async () => {
+    reviewApi.bundle.mockResolvedValue(assignmentPreparationBundle());
+    reviewApi.prepareAssignment.mockResolvedValue({
+      preparation_status: "exception_required",
+      assignment_id: "assignment-1",
+      review_session_id: "review-1",
+      review_version: 1,
+      retryable: true,
+      bundle_hash: "bundle-a",
+      exceptions: [
+        {
+          code: "LEGACY_BINDING_STALE",
+          severity: "blocking",
+          message: "兼容 binding 已过期，请重新生成",
+          entity_type: "binding",
+          entity_id: "binding-1",
+        },
+      ],
+    });
+
+    renderReview();
+
+    expect(
+      await screen.findByRole("region", { name: "统一准备异常" }),
+    ).toHaveTextContent("兼容 binding 已过期，请重新生成");
+    expect(screen.getByRole("button", { name: "确认并发布" })).toBeDisabled();
+    expect(reviewApi.prepareAssignment).toHaveBeenCalledOnce();
+  });
+
+  it("ignores an old preparation response after the Bundle inputs change", async () => {
+    const oldPreparation = deferred<AssignmentPreparationRecord>();
+    reviewApi.bundle.mockResolvedValue(assignmentPreparationBundle());
+    reviewApi.prepareAssignment
+      .mockReturnValueOnce(oldPreparation.promise)
+      .mockResolvedValueOnce(readyPreparation("readiness-new-inputs"));
+    const view = renderReview();
+    await waitFor(() =>
+      expect(reviewApi.prepareAssignment).toHaveBeenCalledOnce(),
+    );
+
+    view.rerender(
+      <AssignmentCentralReview
+        item={assignment()}
+        reviewInputsRevision={1}
+        onNavigate={vi.fn()}
+        onPublished={vi.fn()}
+      />,
+    );
+    await waitFor(() =>
+      expect(reviewApi.prepareAssignment).toHaveBeenCalledTimes(2),
+    );
+    oldPreparation.resolve({
+      preparation_status: "exception_required",
+      assignment_id: "assignment-1",
+      review_session_id: "review-1",
+      review_version: 1,
+      retryable: false,
+      bundle_hash: "bundle-old",
+      exceptions: [
+        {
+          code: "OLD_EXCEPTION",
+          severity: "blocking",
+          message: "旧响应不得显示",
+        },
+      ],
+    });
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "确认并发布" })).toBeEnabled(),
+    );
+    expect(screen.queryByText("旧响应不得显示")).not.toBeInTheDocument();
+  });
+
+  it("cancels the scheduled poll when the review unmounts", async () => {
+    vi.useFakeTimers();
+    reviewApi.bundle.mockResolvedValue(assignmentPreparationBundle());
+    reviewApi.prepareAssignment.mockResolvedValue({
+      preparation_status: "preparing",
+      assignment_id: "assignment-1",
+      review_session_id: "review-1",
+      review_version: 1,
+      stage: "generating_rubrics",
+      progress: 55,
+      retryable: true,
+    });
+    const view = renderReview();
+    await flushAsyncWork();
+    expect(reviewApi.prepareAssignment).toHaveBeenCalledOnce();
+
+    view.unmount();
+    await testingAct(async () => {
+      await vi.advanceTimersByTimeAsync(
+        assignmentPreparationPolling.timeoutMs +
+          assignmentPreparationPolling.intervalMs,
+      );
+    });
+
+    expect(reviewApi.prepareAssignment).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("blocks when a required Bundle confirmation is absent", async () => {
@@ -735,7 +1010,7 @@ describe("AssignmentCentralReview preserved behavior", () => {
     );
     renderReview();
     expect(
-      await screen.findByRole("button", { name: "确认发布" }),
+      await screen.findByRole("button", { name: "确认并发布" }),
     ).toBeDisabled();
   });
 
@@ -881,7 +1156,7 @@ describe("AssignmentCentralReview Bundle authority and races", () => {
     expect(
       await screen.findByText("请修改作业总分或题目分值，使二者完全一致。"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "确认发布" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "确认并发布" })).toBeDisabled();
   });
 
   it("fails closed when Bundle loading fails", async () => {
@@ -890,7 +1165,7 @@ describe("AssignmentCentralReview Bundle authority and races", () => {
     expect(
       await screen.findByText("暂时无法确认当前发布条件"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "确认发布" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "确认并发布" })).toBeDisabled();
   });
 
   it("clears an old readiness snapshot when the Bundle hash changes", async () => {
@@ -899,13 +1174,13 @@ describe("AssignmentCentralReview Bundle authority and races", () => {
       .mockResolvedValueOnce(reviewBundle({ hash: "hash-1" }))
       .mockResolvedValue(reviewBundle({ hash: "hash-2" }));
     renderReview();
-    await screen.findByRole("button", { name: "确认发布" });
+    await screen.findByRole("button", { name: "确认并发布" });
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "确认发布" })).toBeEnabled(),
+      expect(screen.getByRole("button", { name: "确认并发布" })).toBeEnabled(),
     );
     fireEvent.click(screen.getByRole("button", { name: "重新扫描最新状态" }));
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "确认发布" })).toBeDisabled(),
+      expect(screen.getByRole("button", { name: "确认并发布" })).toBeDisabled(),
     );
   });
 
@@ -914,9 +1189,9 @@ describe("AssignmentCentralReview Bundle authority and races", () => {
       .mockResolvedValueOnce(reviewBundle({ hash: "hash-ready" }))
       .mockRejectedValueOnce(new Error("network"));
     renderReview();
-    await screen.findByRole("button", { name: "确认发布" });
+    await screen.findByRole("button", { name: "确认并发布" });
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "确认发布" })).toBeEnabled(),
+      expect(screen.getByRole("button", { name: "确认并发布" })).toBeEnabled(),
     );
 
     fireEvent.click(screen.getByRole("button", { name: "重新扫描最新状态" }));
@@ -924,7 +1199,7 @@ describe("AssignmentCentralReview Bundle authority and races", () => {
     expect(
       await screen.findByText("暂时无法确认当前发布条件"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "确认发布" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "确认并发布" })).toBeDisabled();
   });
 
   it("ignores late responses from an older load", async () => {
@@ -993,7 +1268,7 @@ describe("AssignmentCentralReview Bundle authority and races", () => {
     expect(
       await screen.findByText("请修改作业总分或题目分值，使二者完全一致。"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "确认发布" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "确认并发布" })).toBeDisabled();
   });
 });
 
@@ -1309,7 +1584,7 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
       screen.queryByText("内容未变，已沿用确认", { exact: false }),
     ).not.toBeInTheDocument();
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "确认发布" })).toBeEnabled(),
+      expect(screen.getByRole("button", { name: "确认并发布" })).toBeEnabled(),
     );
   });
 
@@ -1446,7 +1721,7 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
       screen.queryByTestId("rubric-binding-loss-confirm"),
     ).not.toBeInTheDocument();
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "确认发布" })).toBeEnabled(),
+      expect(screen.getByRole("button", { name: "确认并发布" })).toBeEnabled(),
     );
   });
 
@@ -1474,7 +1749,7 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
     expect(
       screen.queryByTestId("rubric-binding-loss-confirm"),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "确认发布" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "确认并发布" })).toBeDisabled();
     const details = screen.getByTestId("rubric-binding-technical-details");
     expect(details).not.toHaveAttribute("open");
     expect(details).toHaveTextContent("UNKNOWN_LOSS");
@@ -1571,9 +1846,9 @@ describe("AssignmentCentralReview fail-closed publication contract", () => {
       renderReview();
 
       expect(
-        await screen.findByRole("button", { name: "确认发布" }),
+        await screen.findByRole("button", { name: "确认并发布" }),
       ).toBeDisabled();
-      expect(screen.getByRole("button", { name: "确认发布" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "确认并发布" })).toBeDisabled();
     },
   );
 
@@ -1650,7 +1925,7 @@ describe("AssignmentCentralReview fail-closed publication contract", () => {
       screen.queryByTestId("review-confirmation-due_at"),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "确认发布" }),
+      screen.queryByRole("button", { name: "确认并发布" }),
     ).not.toBeInTheDocument();
     expect(reviewApi.confirm).not.toHaveBeenCalled();
   });

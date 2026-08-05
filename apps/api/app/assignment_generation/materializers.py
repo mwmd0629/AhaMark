@@ -475,7 +475,7 @@ def materialize_answer(
             "generation_job_id": str(job.id),
             "revision_id": str(revision.id),
             "question_id": str(question.id),
-            "provider": "openai_compatible",
+            "provider": audit.get("provider", "openai_compatible"),
             "provider_config_version": job.provider_config_version,
             "prompt_version": job.prompt_version,
             "schema_version": job.schema_version,
@@ -484,7 +484,13 @@ def materialize_answer(
         },
         confidence=output.confidence,
         evidence=[item.model_dump(mode="json") for item in output.evidence],
-        warning_codes=sorted(set(output.warning_codes + route_warnings)),
+        warning_codes=sorted(
+            set(
+                output.warning_codes
+                + route_warnings
+                + (["PROVIDER_OUTPUT_DEGRADED"] if output.degradation_reason else [])
+            )
+        ),
         status="manual_required" if manual else "suggested",
         manual_required=manual,
         source_snapshot_hash=job.source_snapshot_hash,
@@ -543,7 +549,18 @@ def materialize_rubric(
         feedback_templates=output.feedback_templates,
         confidence=output.confidence,
         evidence=[item.model_dump(mode="json") for item in output.evidence],
-        warning_codes=sorted(set(output.warning_codes + route_warnings)),
+        warning_codes=sorted(
+            set(
+                output.warning_codes
+                + route_warnings
+                + (["PROVIDER_OUTPUT_DEGRADED"] if output.degradation_reason else [])
+                + (
+                    ["PROVIDER_CRITERION_DEGRADED"]
+                    if any(item.degradation_reason for item in output.criteria)
+                    else []
+                )
+            )
+        ),
         status="manual_required" if routed_manual else "suggested",
         manual_required=routed_manual,
         source_snapshot_hash=job.source_snapshot_hash,
@@ -555,7 +572,7 @@ def materialize_rubric(
             AssignmentRubricCriterionDraft(
                 rubric_candidate_id=rubric.id,
                 display_order=order,
-                **criterion.model_dump(exclude={"evidence"}),
+                **criterion.model_dump(exclude={"evidence", "degradation_reason"}),
                 evidence=[item.model_dump(mode="json") for item in criterion.evidence],
             )
         )

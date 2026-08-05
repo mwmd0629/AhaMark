@@ -279,7 +279,6 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
     error_code = None
     invocation = None
     extraction_provider_available = False
-    rubric_provider_available = False
     if stage == "analyzing":
         provider = select_provider(get_settings(), job.provider_mode)
         assignment = db.get(Assignment, job.assignment_id)
@@ -437,7 +436,7 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
     elif stage == "processing_pages":
         pages = list(pages_for_job(db, job))
         provider = select_provider(get_settings(), job.provider_mode)
-        if provider.name == "openai_compatible" and provider.available:
+        if provider.available and provider.name == "openai_compatible":
             file_ids = {page.stored_file_id for page in pages}
             files = list(db.scalars(select(StoredFile).where(StoredFile.id.in_(file_ids))).all())
             dispatched = dispatch_stage(
@@ -491,7 +490,10 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
         request_hash = canonical_hash(
             {"job_id": job.id, "stage": stage, "snapshot": job.source_snapshot_hash}
         )
-        if provider.name == "openai_compatible" and provider.available:
+        if provider.available and (
+            provider.name == "openai_compatible"
+            or (provider.name == "fake" and stage == "generating_rubrics")
+        ):
             if stage == "extracting_questions":
                 pages = list(pages_for_job(db, job))
                 blocks = list(
@@ -601,10 +603,13 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                                 "rubric_request_hash": rubric_dispatch.response.request_hash,
                                 "rubric_response_hash": rubric_dispatch.response.response_hash,
                                 "model_snapshot": answer_dispatch.response.model_snapshot,
+                                "provider": provider.name,
                             },
                         )
                     )
-                result["capability"] = "openai_compatible"
+                result["capability"] = (
+                    "fake_test" if provider.name == "fake" else "openai_compatible"
+                )
                 result["question_count"] = len(questions)
         else:
             invocation = AssignmentGenerationProviderInvocation(
@@ -646,7 +651,6 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
             )
         elif provider.name == "fake":
             extraction_provider_available = stage == "extracting_questions"
-            rubric_provider_available = stage == "generating_rubrics"
             result["capability"] = "fake_test"
     elif stage == "validating":
         result["checks"] = {
@@ -869,8 +873,7 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                     severity,
                     code,
                     "文件用途无法可靠判断，需要教师选择"
-                    if code
-                    in {"FILE_ROLE_REVIEW_REQUIRED", "FILE_ROLE_CONFLICT_REVIEW_REQUIRED"}
+                    if code in {"FILE_ROLE_REVIEW_REQUIRED", "FILE_ROLE_CONFLICT_REVIEW_REQUIRED"}
                     else "检测到重复文件；系统不会自动删除",
                     {"stored_file_id": file_candidate.stored_file_id},
                 )
@@ -1063,7 +1066,7 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                     {"draft_only": True},
                 )
         else:
-            generated = generate_candidates(db, job, revision, rubric_provider_available)
+            generated = generate_candidates(db, job, revision, False)
         result.update(generated)
         if generated["question_count"] == 0:
             status = "unavailable"

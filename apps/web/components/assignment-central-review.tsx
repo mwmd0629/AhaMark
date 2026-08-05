@@ -6,6 +6,7 @@ import {
   ApiError,
   assignmentReviewApi,
   assignmentsApi,
+  type AssignmentPreparationRecord,
   type AssignmentReadinessRecord,
   type AssignmentReviewBundle,
   type AssignmentRecord,
@@ -56,6 +57,23 @@ const projectionProfile = "structured-to-legacy";
 const projectionVersion = "structured-rubric-projection-v3";
 const confirmationFingerprintVersion = "confirmation-fingerprint-v2";
 const sha256Pattern = /^[0-9a-f]{64}$/i;
+export const assignmentPreparationPolling = Object.freeze({
+  intervalMs: 3_000,
+  timeoutMs: 120_000,
+});
+type PreparationProgress = Extract<
+  AssignmentPreparationRecord,
+  { preparation_status: "preparing" }
+>;
+type PreparationException = Extract<
+  AssignmentPreparationRecord,
+  { preparation_status: "exception_required" }
+>["exceptions"][number];
+
+const preparationProgressPercent = (progress: number) =>
+  Number.isFinite(progress)
+    ? Math.min(100, Math.max(0, Math.round(progress)))
+    : 0;
 
 const isCurrentBundleContract = (
   value: AssignmentReviewBundle,
@@ -97,6 +115,10 @@ const bindingIssueCodes = new Set([
   "LEGACY_BINDING_REQUIRED",
   "CONFIRM_LEGACY_BINDING_REQUIRED",
   "LEGACY_BINDING_STALE",
+]);
+const bundleApprovalIssueCodes = new Set([
+  "REFERENCE_ANSWER_UNCONFIRMED",
+  "STRUCTURED_RUBRIC_UNCONFIRMED",
 ]);
 
 const manuallyResolvableBlockingCodes = new Set([
@@ -165,6 +187,13 @@ export function AssignmentCentralReview({
     useState<ManualPublishReadiness>();
   const [manualMode, setManualMode] = useState(false);
   const [preparingReadiness, setPreparingReadiness] = useState(false);
+  const [preparationProgress, setPreparationProgress] =
+    useState<PreparationProgress>();
+  const [preparationWaitExhausted, setPreparationWaitExhausted] =
+    useState(false);
+  const [preparationExceptions, setPreparationExceptions] = useState<
+    PreparationException[]
+  >([]);
   const [severity, setSeverity] = useState("all");
   const [section, setSection] = useState("all");
   const [busy, setBusy] = useState(false);
@@ -176,7 +205,10 @@ export function AssignmentCentralReview({
   const autoBindingAttempt = useRef("");
   const automationRequest = useRef(0);
   const preparationRequest = useRef(0);
+  const preparationAttempt = useRef("");
   const preparationInFlight = useRef(false);
+  const preparationPollCancel = useRef<() => void>(() => undefined);
+  const committedBundleHash = useRef("");
   const assignmentEpoch = useRef({
     id: item.id,
     reviewInputsRevision,
@@ -194,6 +226,8 @@ export function AssignmentCentralReview({
     requestGeneration.current += 1;
     mutationGeneration.current += 1;
     automationRequest.current += 1;
+    preparationPollCancel.current();
+    preparationRequest.current += 1;
   }
 
   const isCurrentRequest = useCallback(
@@ -213,6 +247,17 @@ export function AssignmentCentralReview({
           "审查内容版本与当前作业不一致，请重新加载后再继续发布。",
         );
         return false;
+      }
+      if (committedBundleHash.current !== next.version.bundle_hash) {
+        committedBundleHash.current = next.version.bundle_hash;
+        preparationPollCancel.current();
+        preparationRequest.current += 1;
+        preparationInFlight.current = false;
+        preparationAttempt.current = "";
+        setPreparingReadiness(false);
+        setPreparationProgress(undefined);
+        setPreparationWaitExhausted(false);
+        setPreparationExceptions([]);
       }
       setBundle((previous) => {
         if (
@@ -321,13 +366,18 @@ export function AssignmentCentralReview({
     setBundleError("");
     setManualMode(false);
     setManualReadiness(undefined);
+    preparationPollCancel.current();
     preparationRequest.current += 1;
     preparationInFlight.current = false;
     setPreparingReadiness(false);
+    setPreparationProgress(undefined);
+    setPreparationWaitExhausted(false);
+    setPreparationExceptions([]);
     setBusy(false);
     setAutomating(false);
     autoConfirmationAttempt.current = "";
     autoBindingAttempt.current = "";
+    preparationAttempt.current = "";
     assignmentReviewApi
       .list(assignmentId)
       .then((result) => {
@@ -349,6 +399,9 @@ export function AssignmentCentralReview({
       requestGeneration.current += 1;
       mutationGeneration.current += 1;
       automationRequest.current += 1;
+      preparationPollCancel.current();
+      preparationRequest.current += 1;
+      preparationInFlight.current = false;
     };
   }, [isCurrentRequest, item.id, load, loadBundle, reviewInputsRevision]);
 
@@ -504,12 +557,19 @@ export function AssignmentCentralReview({
         !bindingIssueCodes.has(blocker.code) &&
         !routineConfirmationIssueCodes.has(blocker.code),
     ) ?? [];
+  const effectiveBundleBlockers =
+    readiness?.status === "ready"
+      ? (bundle?.blockers.filter(
+          (blocker) => !bundleApprovalIssueCodes.has(blocker.code),
+        ) ?? [])
+      : (bundle?.blockers ?? []);
   const publicationBlocked =
     !bundle ||
     !!bundleError ||
+    preparationExceptions.length > 0 ||
     !bundleContractIsCurrent ||
-    bundle.status !== "ready_to_publish" ||
-    bundle.blockers.length > 0 ||
+    (bundle.status !== "ready_to_publish" && readiness?.status !== "ready") ||
+    effectiveBundleBlockers.length > 0 ||
     !requiredConfirmationsComplete ||
     !bindingPublicationReady;
   useEffect(() => {
@@ -620,33 +680,92 @@ export function AssignmentCentralReview({
   ]);
   useEffect(() => {
     if (
-      publicationBlocked ||
       !session ||
+      !bundle ||
+      bundleError ||
+      busy ||
+      automating ||
+      !requiredConfirmationsComplete ||
+      (!bundle.binding && bindingPrerequisitesComplete) ||
       readiness ||
       manualMode ||
       preparationInFlight.current
     )
       return;
+    const attemptKey = `${session.id}:${session.review_version}:${bundle?.version.bundle_hash ?? ""}`;
+    if (preparationAttempt.current === attemptKey) return;
+    preparationAttempt.current = attemptKey;
     const assignmentId = item.id;
     const epoch = assignmentEpoch.current.value;
     const request = ++preparationRequest.current;
     preparationInFlight.current = true;
     setPreparingReadiness(true);
-    assignmentReviewApi
-      .prepare(session.id, session.review_version)
-      .then((next) => {
-        if (
-          preparationRequest.current === request &&
-          isCurrentRequest(assignmentId, epoch)
-        ) {
+    setPreparationWaitExhausted(false);
+    const preparationIsCurrent = () =>
+      preparationRequest.current === request &&
+      isCurrentRequest(assignmentId, epoch);
+    const prepare = async () => {
+      if (!publicationBlocked) {
+        const next = await assignmentReviewApi.prepare(
+          session.id,
+          session.review_version,
+        );
+        if (preparationIsCurrent()) setReadiness(next);
+        return;
+      }
+
+      const startedAt = Date.now();
+      const waitForNextPoll = (delayMs: number) =>
+        new Promise<void>((resolve) => {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            if (timer !== undefined) clearTimeout(timer);
+            if (preparationPollCancel.current === finish) {
+              preparationPollCancel.current = () => undefined;
+            }
+            resolve();
+          };
+          preparationPollCancel.current = finish;
+          timer = setTimeout(finish, delayMs);
+        });
+
+      while (preparationIsCurrent()) {
+        const next = await assignmentReviewApi.prepareAssignment(assignmentId);
+        if (!preparationIsCurrent()) return;
+        if ("id" in next) {
+          setPreparationProgress(undefined);
+          setPreparationWaitExhausted(false);
+          setPreparationExceptions([]);
           setReadiness(next);
+          return;
         }
-      })
+        if (next.preparation_status === "exception_required") {
+          setReadiness(undefined);
+          setPreparationProgress(undefined);
+          setPreparationWaitExhausted(false);
+          setPreparationExceptions(next.exceptions);
+          return;
+        }
+        setPreparationProgress(next);
+        setPreparationExceptions([]);
+        const remainingMs =
+          assignmentPreparationPolling.timeoutMs - (Date.now() - startedAt);
+        if (remainingMs <= 0) {
+          setPreparationWaitExhausted(true);
+          return;
+        }
+        await waitForNextPoll(
+          Math.min(assignmentPreparationPolling.intervalMs, remainingMs),
+        );
+      }
+    };
+    void prepare()
       .catch((error) => {
-        if (
-          preparationRequest.current === request &&
-          isCurrentRequest(assignmentId, epoch)
-        ) {
+        if (preparationIsCurrent()) {
+          setPreparationWaitExhausted(false);
           setBundleError(
             error instanceof ApiError
               ? error.message
@@ -658,10 +777,7 @@ export function AssignmentCentralReview({
         if (preparationRequest.current === request) {
           preparationInFlight.current = false;
         }
-        if (
-          preparationRequest.current === request &&
-          isCurrentRequest(assignmentId, epoch)
-        ) {
+        if (preparationIsCurrent()) {
           setPreparingReadiness(false);
         }
       });
@@ -669,7 +785,15 @@ export function AssignmentCentralReview({
     isCurrentRequest,
     item.id,
     manualMode,
+    automating,
+    bundle,
+    bundle?.version.bundle_hash,
+    bundleError,
+    busy,
+    bindingPrerequisitesComplete,
+    requiredConfirmationsComplete,
     publicationBlocked,
+    preparationExceptions.length,
     readiness,
     session,
   ]);
@@ -1227,7 +1351,44 @@ export function AssignmentCentralReview({
           </details>
         </section>
       ) : null}
-      {teacherVisibleBlockers.length > 0 ? (
+      {preparationExceptions.length > 0 ? (
+        <section
+          className="rounded-xl border border-red-200 bg-red-50 p-4"
+          aria-label="统一准备异常"
+        >
+          <h3 className="font-semibold text-red-900">
+            系统准备发现需要处理的问题
+          </h3>
+          <p className="mt-1 text-sm text-red-800">
+            以下内容来自服务器的最新核查；处理后请重新扫描，系统不会在异常未解决时发布。
+          </p>
+          <ul className="mt-3 list-inside list-disc space-y-2 text-sm text-red-900">
+            {preparationExceptions.map((exception, index) => (
+              <li key={`${exception.code}:${exception.entity_id ?? index}`}>
+                {exception.message}
+                <span className="ml-2 text-xs text-red-700">
+                  ({exception.code})
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : preparationProgress &&
+        (preparingReadiness || preparationWaitExhausted) ? (
+        <section
+          className="rounded-xl border border-sky-200 bg-sky-50 p-4"
+          aria-label="自动发布检查"
+        >
+          <h3 className="font-semibold text-sky-900">正在自动完成发布检查</h3>
+          <p className="mt-1 text-sm text-sky-800">
+            {preparationProgress.stage}：
+            {preparationProgressPercent(preparationProgress.progress)}%。
+            {preparationWaitExhausted
+              ? "系统仍在准备，已达到本次自动等待上限；可点击“重新扫描最新状态”继续检查。"
+              : "系统会在两分钟内持续检查，无需手动刷新。"}
+          </p>
+        </section>
+      ) : teacherVisibleBlockers.length > 0 ? (
         <section
           className="rounded-xl border border-red-200 bg-red-50 p-4"
           aria-label="发布阻断说明"
@@ -1354,7 +1515,9 @@ export function AssignmentCentralReview({
         >
           <h3 className="font-semibold text-sky-900">正在自动完成发布检查</h3>
           <p className="mt-1 text-sm text-sky-800">
-            无需逐项确认；检查完成后将直接开放“确认发布”。
+            {preparationProgress
+              ? `${preparationProgress.stage}：${preparationProgressPercent(preparationProgress.progress)}%。系统会在两分钟内持续检查；如仍未完成，可重新扫描继续。`
+              : "无需逐项确认；检查完成后将直接开放“确认并发布”。"}
           </p>
         </section>
       ) : (
@@ -1380,6 +1543,14 @@ export function AssignmentCentralReview({
           onClick={() => {
             autoConfirmationAttempt.current = "";
             autoBindingAttempt.current = "";
+            preparationAttempt.current = "";
+            preparationPollCancel.current();
+            preparationRequest.current += 1;
+            preparationInFlight.current = false;
+            setPreparingReadiness(false);
+            setPreparationProgress(undefined);
+            setPreparationWaitExhausted(false);
+            setPreparationExceptions([]);
             void act(
               () =>
                 assignmentReviewApi.refresh(session.id, session.review_version),
@@ -1688,24 +1859,33 @@ export function AssignmentCentralReview({
               busy
             }
             onClick={() => {
-              if (
-                !readiness ||
-                !window.confirm(
-                  `确认由教师发布？\n班级：${readiness.class_ids.length}\n截止：${readiness.due_at ?? "无截止时间"}\n总分：${readiness.total_score}`,
-                )
-              )
-                return;
+              if (!readiness) return;
               void act(async () => {
-                await assignmentReviewApi.publish(
-                  item.id,
-                  readiness,
-                  item.updated_at,
-                );
+                try {
+                  await assignmentReviewApi.publish(
+                    item.id,
+                    readiness,
+                    item.updated_at,
+                  );
+                } catch (error) {
+                  if (!(error instanceof ApiError) || error.status !== 409)
+                    throw error;
+                  const refreshed = await assignmentReviewApi.prepareAssignment(
+                    item.id,
+                  );
+                  if (!("id" in refreshed) || refreshed.status !== "ready")
+                    throw error;
+                  await assignmentReviewApi.publish(
+                    item.id,
+                    refreshed,
+                    item.updated_at,
+                  );
+                }
                 onPublished();
               }, "作业已由教师发布");
             }}
           >
-            {preparingReadiness ? "正在核对发布状态…" : "确认发布"}
+            {preparingReadiness ? "正在核对发布状态…" : "确认并发布"}
           </Button>
         </div>
       </div>

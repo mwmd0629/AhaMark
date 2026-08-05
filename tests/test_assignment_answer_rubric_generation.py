@@ -29,6 +29,7 @@ from app.models import (
     AssignmentQuestionExtractionCandidate,
     AssignmentRubricCriterionDraft,
     AssignmentRubricDraftCandidate,
+    AssignmentRubricValidationResult,
     PaperVersion,
     Question,
     ReferenceAnswerVersion,
@@ -55,6 +56,14 @@ def criterion(
         criterion_type="result",
         validation_rule={"answer_type": "exact_scalar"},
         confidence=0.9,
+        evidence=[
+            {
+                "kind": "question",
+                "reference_id": "00000000-0000-0000-0000-000000000001",
+                "summary": "合成题目证据",
+            }
+        ],
+        degradation_reason=None,
         **values,
     )
 
@@ -69,11 +78,122 @@ def test_provider_schema_rejects_privileged_and_unknown_fields() -> None:
         "total_points": "5",
         "validation_config": {"answer_type": "exact_scalar"},
         "confidence": 0.9,
+        "evidence": [
+            {
+                "kind": "question",
+                "reference_id": "00000000-0000-0000-0000-000000000001",
+                "summary": "合成题目证据",
+            }
+        ],
+        "degradation_reason": None,
         "criteria": [criterion().model_dump(mode="json")],
         "published": True,
     }
     with pytest.raises(ValidationError):
         AnswerRubricProviderOutput.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("validation_config", "criterion_rule"),
+    [({}, {"answer_type": "exact_scalar"}), ({"answer_type": "exact_scalar"}, {})],
+)
+def test_deterministic_provider_schema_rejects_empty_validation_rules(
+    validation_config: dict[str, str], criterion_rule: dict[str, str]
+) -> None:
+    payload = {
+        "raw_content": "2",
+        "normalized_content": "2",
+        "structured_content": {"answer_type": "exact_scalar", "value": 2},
+        "title": "评分标准",
+        "requested_scoring_mode": "deterministic",
+        "total_points": "5",
+        "validation_config": validation_config,
+        "confidence": 0.9,
+        "evidence": [
+            {
+                "kind": "question",
+                "reference_id": "00000000-0000-0000-0000-000000000001",
+                "summary": "合成题目证据",
+            }
+        ],
+        "degradation_reason": None,
+        "criteria": [criterion().model_dump(mode="json") | {"validation_rule": criterion_rule}],
+    }
+    with pytest.raises(ValidationError):
+        AnswerRubricProviderOutput.model_validate(payload)
+
+
+def provider_output_payload(
+    requested_scoring_mode: str = "deterministic",
+    degradation_reason: str | None = None,
+) -> dict[str, object]:
+    return {
+        "raw_content": "2",
+        "normalized_content": "2",
+        "structured_content": {"answer_type": "exact_scalar", "value": 2},
+        "title": "评分标准",
+        "requested_scoring_mode": requested_scoring_mode,
+        "total_points": "5",
+        "validation_config": {"answer_type": "exact_scalar"},
+        "confidence": 0.99,
+        "evidence": [
+            {
+                "kind": "question",
+                "reference_id": "00000000-0000-0000-0000-000000000001",
+                "summary": "合成题目证据",
+            }
+        ],
+        "degradation_reason": degradation_reason,
+        "criteria": [criterion().model_dump(mode="json")],
+    }
+
+
+@pytest.mark.parametrize("requested_mode", ["manual_only", "hybrid", "ai_suggestion"])
+def test_provider_requested_degraded_mode_is_never_upgraded(requested_mode: str) -> None:
+    output = AnswerRubricProviderOutput.model_validate(
+        provider_output_payload(requested_mode, "Provider 明确要求降级")
+    )
+    question = SimpleNamespace(
+        question_type="calculation", content_text="1 + 1", content_latex=None
+    )
+
+    mode, manual, warnings = route_scoring_mode(question, output)
+
+    assert mode == requested_mode
+    assert manual is True
+    assert "PROVIDER_NON_DETERMINISTIC_MODE" in warnings
+    if requested_mode in {"manual_only", "hybrid"}:
+        assert "MANUAL_RUBRIC_REQUIRED" in warnings
+
+
+@pytest.mark.parametrize("reason", [None, "", "   "])
+def test_provider_schema_rejects_degraded_mode_without_reason(reason: str | None) -> None:
+    with pytest.raises(ValidationError, match="degradation_reason"):
+        AnswerRubricProviderOutput.model_validate(provider_output_payload("ai_suggestion", reason))
+
+
+def test_valid_deterministic_provider_output_remains_deterministic() -> None:
+    output = AnswerRubricProviderOutput.model_validate(provider_output_payload())
+    question = SimpleNamespace(
+        question_type="calculation", content_text="1 + 1", content_latex=None
+    )
+
+    assert route_scoring_mode(question, output) == ("deterministic", False, [])
+
+
+def test_semantic_route_fails_closed_if_schema_is_bypassed_without_degradation_reason() -> None:
+    output = AnswerRubricProviderOutput.model_construct(
+        **provider_output_payload("ai_suggestion", None)
+    )
+    question = SimpleNamespace(
+        question_type="calculation", content_text="1 + 1", content_latex=None
+    )
+
+    assert route_scoring_mode(question, output) == (
+        "manual_only",
+        True,
+        ["PROVIDER_DEGRADATION_REASON_REQUIRED"],
+    )
 
 
 def test_structure_validates_points_dependency_cycle_and_partial_credit() -> None:
@@ -284,14 +404,20 @@ def test_bulk_rubric_accept_reports_structural_skip_reason(
             {
                 "candidate_id": payload["skipped"][0]["candidate_id"],
                 "question_id": str(question_id),
-                "reason_codes": ["RUBRIC_VALIDATION_CONFIG_INVALID"],
+                "reason_codes": [
+                    "RUBRIC_VALIDATION_CONFIG_INVALID",
+                    "VALIDATION_INDETERMINATE",
+                ],
             }
         ],
     }
     listed = client.get(f"/api/assignment-draft-revisions/{revision_id}/rubric-draft-candidates")
     assert listed.status_code == 200, listed.text
     assert listed.json()[0]["server_eligible"] is False
-    assert listed.json()[0]["ineligibility_reasons"] == ["RUBRIC_VALIDATION_CONFIG_INVALID"]
+    assert listed.json()[0]["ineligibility_reasons"] == [
+        "RUBRIC_VALIDATION_CONFIG_INVALID",
+        "VALIDATION_INDETERMINATE",
+    ]
 
 
 def test_bulk_rubric_accept_reports_and_materializes_eligible_candidate(
@@ -299,12 +425,21 @@ def test_bulk_rubric_accept_reports_and_materializes_eligible_candidate(
 ) -> None:
     job_id, revision_id, _question_id = generation_context(monkeypatch)
     with SessionLocal() as db:
-        from app.assignment_generation.answer_rubric import generate_candidates
+        from app.assignment_generation.answer_rubric import (
+            generate_candidates,
+            validate_revision_candidates,
+        )
 
         job = db.get(AssignmentGenerationJob, job_id)
         revision = db.get(AssignmentDraftRevision, revision_id)
         assert job is not None and revision is not None
         generate_candidates(db, job, revision, provider_available=True)
+        db.flush()
+        validate_revision_candidates(db, job, revision)
+        db.flush()
+        validation = db.scalar(select(AssignmentRubricValidationResult))
+        assert validation is not None
+        validation.status = "verified"
         snapshot = revision.source_snapshot_hash
         db.commit()
 
@@ -328,6 +463,47 @@ def test_bulk_rubric_accept_reports_and_materializes_eligible_candidate(
         assert rubric is not None
         assert rubric.status == "accepted"
         assert rubric.materialized_structured_rubric_id is not None
+
+
+def test_system_prepares_only_verified_candidates_without_teacher_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id, revision_id, _question_id = generation_context(monkeypatch)
+    with SessionLocal() as db:
+        from app.api.actor import CurrentActor
+        from app.api.assignment_central_review import _system_prepare_eligible_candidates
+        from app.assignment_generation.answer_rubric import (
+            generate_candidates,
+            validate_revision_candidates,
+        )
+
+        job = db.get(AssignmentGenerationJob, job_id)
+        revision = db.get(AssignmentDraftRevision, revision_id)
+        assert job is not None and revision is not None
+        generate_candidates(db, job, revision, provider_available=True)
+        db.flush()
+        validate_revision_candidates(db, job, revision)
+        db.flush()
+        validation = db.scalar(select(AssignmentRubricValidationResult))
+        assert validation is not None
+        validation.status = "verified"
+        user = db.get(User, job.owner_id)
+        assert user is not None
+        prepared = _system_prepare_eligible_candidates(
+            db, revision, CurrentActor(user.id, user.email)
+        )
+        db.commit()
+        assert prepared == {"answers": 1, "rubrics": 1}
+        answer = db.scalar(select(AssignmentAnswerDraftCandidate))
+        rubric = db.scalar(select(AssignmentRubricDraftCandidate))
+        assert answer is not None and rubric is not None
+        assert answer.status == rubric.status == "system_prepared"
+        assert answer.reviewed_by is None and rubric.reviewed_by is None
+        formal = db.get(ReferenceAnswerVersion, answer.materialized_reference_answer_id)
+        assert formal is not None
+        assert formal.status == "draft"
+        assert "teacher_reviewed_by" not in formal.provenance
+        assert formal.provenance["system_prepared_by"] == str(user.id)
 
 
 def test_teacher_disposition_materializes_drafts_and_keeps_confirmed_immutable(

@@ -515,7 +515,7 @@ def _apply_rubric_value(
             db.delete(old)
         db.flush()
         for order, criterion in enumerate(value.criteria):
-            data = criterion.model_dump(exclude={"evidence"})
+            data = criterion.model_dump(exclude={"evidence", "degradation_reason"})
             db.add(
                 AssignmentRubricCriterionDraft(
                     rubric_candidate_id=row.id,
@@ -582,6 +582,7 @@ def _answer_ineligibility_reasons(row: AssignmentAnswerDraftCandidate) -> list[s
         "FORMULA_ANSWER_REVIEW_REQUIRED",
         "MANUAL_ANSWER_REQUIRED",
         "ANSWER_SCHEMA_INVALID",
+        "PROVIDER_OUTPUT_DEGRADED",
     }
     reasons: list[str] = []
     if row.status != "suggested":
@@ -609,27 +610,35 @@ def _rubric_ineligibility_reasons(db: Session, row: AssignmentRubricDraftCandida
         row.scoring_mode,
         _criteria(db, row.id),
     )
-    validations = set(
-        db.scalars(
-            select(AssignmentRubricValidationResult.status).where(
-                AssignmentRubricValidationResult.rubric_candidate_id == row.id
-            )
-        )
+    latest_validation = db.scalar(
+        select(AssignmentRubricValidationResult.status)
+        .where(AssignmentRubricValidationResult.rubric_candidate_id == row.id)
+        .order_by(AssignmentRubricValidationResult.created_at.desc())
+        .limit(1)
     )
     reasons: list[str] = []
     if row.status != "suggested":
         reasons.append("CANDIDATE_NOT_SUGGESTED")
     if answer is None:
         reasons.append("ANSWER_CANDIDATE_MISSING")
-    elif answer.status not in {"accepted", "modified"}:
+    elif answer.status not in {"accepted", "modified", "system_prepared"}:
         reasons.append("ANSWER_CANDIDATE_NOT_ACCEPTED")
     reasons.extend(structural.blocking)
+    if float(row.confidence) < 0.8:
+        reasons.append("RUBRIC_CONFIDENCE_LOW")
+    if not row.evidence:
+        reasons.append("RUBRIC_EVIDENCE_MISSING")
+    if {"PROVIDER_OUTPUT_DEGRADED", "PROVIDER_CRITERION_DEGRADED"}.intersection(row.warning_codes):
+        reasons.append("PROVIDER_OUTPUT_DEGRADED")
     if row.manual_required:
         reasons.append("MANUAL_REVIEW_REQUIRED")
     if row.scoring_mode != "deterministic":
         reasons.append("SCORING_MODE_NOT_DETERMINISTIC")
-    if "indeterminate" in validations:
-        reasons.append("VALIDATION_INDETERMINATE")
+    if latest_validation != "verified":
+        if latest_validation is None or latest_validation == "indeterminate":
+            reasons.append("VALIDATION_INDETERMINATE")
+        else:
+            reasons.append(f"VALIDATION_{latest_validation.upper()}")
     return sorted(set(reasons))
 
 

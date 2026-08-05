@@ -649,15 +649,10 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
     assert binding.json()["manual_review_required"] is True
     assert binding.json()["conversion_warnings"] == ["VALIDATION_RULE_NOT_LOSSLESS"]
     draft_binding_bundle = client.get(f"/api/assignments/{assignment.id}/review-bundle").json()
-    assert draft_binding_bundle["binding"]["status"] == "confirmed"
-    assert (
-        next(
-            item
-            for item in draft_binding_bundle["confirmations"]
-            if item["type"] == "legacy_binding"
-        )["origin"]
-        == "system_auto"
-    )
+    assert draft_binding_bundle["binding"]["status"] == "validated"
+    assert "legacy_binding" not in {
+        item["type"] for item in draft_binding_bundle["confirmations"]
+    }
     assert draft_binding_bundle["binding"]["projection_current"] is True
     assert draft_binding_bundle["binding"]["projection_reason"] is None
     session = client.get(f"/api/assignment-review-sessions/{session['id']}").json()
@@ -748,8 +743,7 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
             "explicit_confirmation": True,
         },
     )
-    assert confirmed.status_code == 409
-    assert confirmed.json()["code"] == "BINDING_NOT_CONFIRMABLE"
+    assert confirmed.status_code == 200, confirmed.text
     automatic_binding_bundle = client.get(f"/api/assignments/{assignment.id}/review-bundle").json()
     assert automatic_binding_bundle["binding"]["projection_current"] is True
     assert automatic_binding_bundle["binding"]["projection_reason"] is None
@@ -758,7 +752,7 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
         for item in automatic_binding_bundle["confirmations"]
         if item["type"] == "legacy_binding"
     )
-    assert automatic_legacy_confirmation["origin"] == "system_auto"
+    assert automatic_legacy_confirmation["origin"] == "origin"
     assert automatic_legacy_confirmation["binding_id"] == automatic_binding_bundle["binding"]["id"]
     assert (
         automatic_legacy_confirmation["source_binding_hash"]
@@ -859,6 +853,18 @@ def test_green_teacher_review_binding_readiness_and_publish() -> None:
     )
     assert repeated_prepared.status_code == 200, repeated_prepared.text
     assert repeated_prepared.json()["id"] == prepared.json()["id"]
+    orchestrated = client.post(f"/api/assignments/{assignment.id}/prepare-publication")
+    assert orchestrated.status_code == 200, orchestrated.text
+    assert orchestrated.json()["preparation_status"] == "ready"
+    assert orchestrated.json()["id"] == prepared.json()["id"]
+    assert set(orchestrated.json()["bundle"]) == {
+        "assignment_state_hash",
+        "risk_ledger_hash",
+        "source_snapshot_hash",
+        "generation",
+        "draft_revision_id",
+        "issue_counts",
+    }
     snapshot = db.get(AssignmentPublishReadinessSnapshot, uuid.UUID(prepared.json()["id"]))
     assert snapshot is not None
     snapshot.status = "expired"

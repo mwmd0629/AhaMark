@@ -39,6 +39,7 @@ export type AssignmentReviewItemRecord = {
 };
 
 export type AssignmentReadinessRecord = {
+  preparation_status?: "ready";
   id: string;
   readiness_hash: string;
   status: string;
@@ -49,6 +50,33 @@ export type AssignmentReadinessRecord = {
   paper_version_id: string;
   legacy_rubric_version_id: string;
 };
+
+export type AssignmentPreparationRecord =
+  | AssignmentReadinessRecord
+  | {
+      preparation_status: "preparing";
+      assignment_id: string;
+      review_session_id: string;
+      review_version: number;
+      stage: string;
+      progress: number;
+      retryable: true;
+    }
+  | {
+      preparation_status: "exception_required";
+      assignment_id: string;
+      review_session_id: string;
+      review_version: number;
+      retryable: boolean;
+      bundle_hash: string;
+      exceptions: Array<{
+        code: string;
+        severity: "blocking" | "warning";
+        message: string;
+        entity_type?: string | null;
+        entity_id?: string | null;
+      }>;
+    };
 
 export type AssignmentRubricBindingRecord = {
   id: string;
@@ -336,6 +364,11 @@ export const assignmentReviewApi = {
     request<AssignmentReadinessRecord>(
       `/api/assignment-review-sessions/${sessionId}/prepare-publication`,
       { method: "POST", body: JSON.stringify(reviewAction(reviewVersion)) },
+    ),
+  prepareAssignment: (assignmentId: string) =>
+    request<AssignmentPreparationRecord>(
+      `/api/assignments/${assignmentId}/prepare-publication`,
+      { method: "POST" },
     ),
   publish: (
     assignmentId: string,

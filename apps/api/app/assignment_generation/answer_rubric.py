@@ -118,6 +118,7 @@ class CriterionDraftSchema(BaseModel):
     feedback_template: str | None = Field(None, max_length=2000)
     confidence: float = Field(ge=0, le=1)
     evidence: list[EvidenceRef] = Field(default_factory=list, max_length=30)
+    degradation_reason: str | None = Field(None, max_length=500)
     manual_required: bool = False
 
     @field_validator("dependency_keys")
@@ -130,6 +131,11 @@ class CriterionDraftSchema(BaseModel):
         return value
 
 
+class ProviderCriterionDraftSchema(CriterionDraftSchema):
+    evidence: list[EvidenceRef] = Field(min_length=1, max_length=30)
+    degradation_reason: str | None = Field(max_length=500)
+
+
 class AnswerRubricProviderOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     raw_content: str | None = Field(None, max_length=20000)
@@ -138,20 +144,40 @@ class AnswerRubricProviderOutput(BaseModel):
     alternative_answers: list[AlternativeAnswer] = Field(default_factory=list, max_length=20)
     title: str = Field(min_length=1, max_length=200)
     requested_scoring_mode: Literal["deterministic", "ai_suggestion", "hybrid", "manual_only"]
-    total_points: Decimal | None = Field(None, gt=0, le=1000000)
+    total_points: Decimal | None = Field(gt=0, le=1000000)
     allow_partial_credit: bool = True
     domain_requirements: dict[str, Any] = Field(default_factory=dict)
     validation_config: dict[str, Any] = Field(default_factory=dict)
     common_error_types: list[dict[str, Any]] = Field(default_factory=list, max_length=30)
     feedback_templates: dict[str, Any] = Field(default_factory=dict)
     confidence: float = Field(ge=0, le=1)
-    evidence: list[EvidenceRef] = Field(default_factory=list, max_length=30)
+    evidence: list[EvidenceRef] = Field(min_length=1, max_length=30)
+    degradation_reason: str | None = Field(max_length=500)
     warning_codes: list[str] = Field(default_factory=list, max_length=30)
-    criteria: list[CriterionDraftSchema] = Field(min_length=1, max_length=60)
+    criteria: list[ProviderCriterionDraftSchema] = Field(min_length=1, max_length=60)
 
     @model_validator(mode="after")
     def reject_privileged_fields(self) -> AnswerRubricProviderOutput:
-        # extra=forbid is the actual boundary; this keeps the security intent visible in the schema.
+        degradation_reason = (self.degradation_reason or "").strip()
+        if self.requested_scoring_mode != "deterministic" and not degradation_reason:
+            raise ValueError("non-deterministic output requires degradation_reason")
+        if self.requested_scoring_mode == "deterministic" and degradation_reason:
+            raise ValueError("deterministic output cannot declare degradation_reason")
+        if self.requested_scoring_mode == "deterministic":
+            answer_type = self.validation_config.get("answer_type")
+            if answer_type not in VALIDATION_RULES - {"manual_only"}:
+                raise ValueError("deterministic output requires a supported answer_type")
+            if self.total_points is None:
+                raise ValueError("deterministic output requires total_points")
+            for criterion in self.criteria:
+                if criterion.manual_required or (criterion.degradation_reason or "").strip():
+                    raise ValueError("deterministic criterion cannot be degraded")
+                criterion_answer_type = criterion.validation_rule.get("answer_type")
+                if criterion_answer_type not in VALIDATION_RULES - {"manual_only"}:
+                    raise ValueError(
+                        "deterministic criterion requires a supported validation_rule answer_type"
+                    )
+        # extra=forbid is the actual privileged-field boundary.
         return self
 
 
@@ -170,6 +196,19 @@ def question_version(question: Question) -> str:
 def route_scoring_mode(
     question: Question, output: AnswerRubricProviderOutput
 ) -> tuple[str, bool, list[str]]:
+    if output.requested_scoring_mode != "deterministic":
+        if not (output.degradation_reason or "").strip():
+            return "manual_only", True, ["PROVIDER_DEGRADATION_REASON_REQUIRED"]
+        warnings = ["PROVIDER_NON_DETERMINISTIC_MODE"]
+        if output.requested_scoring_mode in {"manual_only", "hybrid"}:
+            warnings.append("MANUAL_RUBRIC_REQUIRED")
+        return output.requested_scoring_mode, True, warnings
+
+    if (output.degradation_reason or "").strip() or any(
+        item.manual_required or (item.degradation_reason or "").strip() for item in output.criteria
+    ):
+        return "manual_only", True, ["PROVIDER_DETERMINISTIC_CONTRACT_INVALID"]
+
     text = " ".join(
         filter(None, [question.question_type, question.content_text, question.content_latex])
     )
@@ -292,9 +331,10 @@ def deterministic_fake_output(question: Question) -> AnswerRubricProviderOutput:
         evidence=[
             EvidenceRef(kind="question", reference_id=str(question.id), summary="当前已物化题目")
         ],
+        degradation_reason="题型需要人工评分" if manual else None,
         warning_codes=warnings,
         criteria=[
-            CriterionDraftSchema(
+            ProviderCriterionDraftSchema(
                 criterion_key="result",
                 title="结果与过程",
                 points=points,
@@ -306,6 +346,7 @@ def deterministic_fake_output(question: Question) -> AnswerRubricProviderOutput:
                         kind="question", reference_id=str(question.id), summary="题目满分与类型"
                     )
                 ],
+                degradation_reason="题型需要人工评分" if manual else None,
                 manual_required=manual,
             )
         ],
@@ -468,7 +509,7 @@ def generate_candidates(
                 AssignmentRubricCriterionDraft(
                     rubric_candidate_id=rubric.id,
                     display_order=order,
-                    **criterion.model_dump(exclude={"evidence"}),
+                    **criterion.model_dump(exclude={"evidence", "degradation_reason"}),
                     evidence=[item.model_dump() for item in criterion.evidence],
                 )
             )
@@ -770,7 +811,9 @@ def materialize_reference(
         version=version,
         provenance={
             **candidate.provenance,
-            "teacher_reviewed_by": str(actor_id),
+            (
+                "teacher_reviewed_by" if candidate.reviewed_by is not None else "system_prepared_by"
+            ): str(actor_id),
             "candidate_id": str(candidate.id),
         },
         created_by=actor_id,
@@ -808,7 +851,7 @@ def materialize_rubric(
     answer = db.get(AssignmentAnswerDraftCandidate, candidate.answer_candidate_id)
     if (
         answer is None
-        or answer.status not in {"accepted", "modified"}
+        or answer.status not in {"accepted", "modified", "system_prepared"}
         or answer.materialized_reference_answer_id is None
     ):
         raise ValueError("ANSWER_CANDIDATE_NOT_ACCEPTED")

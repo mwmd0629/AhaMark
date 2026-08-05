@@ -212,6 +212,21 @@ export function AnswerRubricGenerationReview({
     : questions.length
       ? questions
       : (bundle?.questions ?? []);
+  const hasLocalEdits =
+    (!!answer &&
+      (answerText !== (answer.raw_content ?? "") ||
+        alternativeText !==
+          (answer.alternative_answers ?? [])
+            .map((entry) => String(entry.content ?? ""))
+            .filter(Boolean)
+            .join("\n"))) ||
+    (!!rubric &&
+      (rubricTitle !== rubric.title ||
+        scoringMode !== rubric.scoring_mode ||
+        domainJson !==
+          JSON.stringify(rubric.domain_requirements ?? {}, null, 2) ||
+        validationJson !==
+          JSON.stringify(rubric.validation_config ?? {}, null, 2)));
 
   useEffect(() => {
     if (
@@ -263,12 +278,18 @@ export function AnswerRubricGenerationReview({
       await load();
       toast(success);
     } catch (error) {
-      const text =
-        error instanceof ApiError && error.status === 409
-          ? `并发冲突：${error.message}，请刷新后重试`
-          : error instanceof Error
-            ? error.message
-            : "操作失败";
+      let text: string;
+      if (error instanceof ApiError && error.status === 409) {
+        if (hasLocalEdits) {
+          text = `服务器内容已变化：${error.message}。本地编辑尚未保存，请复制或核对编辑内容后再决定是否刷新。`;
+        } else {
+          await load();
+          text =
+            "服务器内容已变化，系统已自动载入最新草稿；请再次执行刚才的操作。";
+        }
+      } else {
+        text = error instanceof Error ? error.message : "操作失败";
+      }
       setMessage(text);
       toast(text, "error");
     } finally {
