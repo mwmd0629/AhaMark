@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from app.api.assignment_central_review import projection_loss_report
 from app.api.domain import ApiProblem
 from app.assignment_generation.answer_rubric import (
     AnswerRubricProviderOutput,
@@ -24,7 +23,6 @@ from app.models import (
     AssignmentAnswerDraftCandidate,
     AssignmentClass,
     AssignmentDraftRevision,
-    AssignmentExplicitConfirmation,
     AssignmentGenerationJob,
     AssignmentQuestionExtractionCandidate,
     AssignmentRubricCriterionDraft,
@@ -612,17 +610,7 @@ def test_teacher_disposition_materializes_drafts_and_keeps_confirmed_immutable(
                 select(RubricCriterion).where(RubricCriterion.rubric_version_id == structured.id)
             )
         )
-        projection_rows = [
-            {
-                "question": db.get(Question, question_id),
-                "criteria": formal_criteria,
-            }
-        ]
-        assert projection_loss_report(projection_rows) == []
-        formal_criteria[0].validation_rule = {"answer_type": "exact_scalar"}
-        assert {item["code"] for item in projection_loss_report(projection_rows)} == {
-            "VALIDATION_RULE_NOT_LOSSLESS"
-        }
+        assert formal_criteria[0].validation_rule == {"answer_type": "manual_only"}
     confirmed = client.post(f"/api/reference-answers/{reference_id}/confirm")
     assert confirmed.status_code == 200
     confirmed_rubric = client.post(f"/api/structured-rubrics/{structured_id}/confirm")
@@ -668,30 +656,19 @@ def test_teacher_disposition_materializes_drafts_and_keeps_confirmed_immutable(
         )
         assert confirmation.status_code == 200, confirmation.text
         review_payload["review_version"] = confirmation.json()["review_version"]
-    binding = client.post(
-        f"/api/assignment-review-sessions/{review_payload['id']}/rubric-binding",
+    rubric_set = client.post(
+        f"/api/assignment-review-sessions/{review_payload['id']}/structured-rubric-set",
         json={
             "expected_review_version": review_payload["review_version"],
             "explicit_confirmation": True,
         },
     )
-    assert binding.status_code == 200, binding.text
-    assert binding.json()["loss_report"] == []
-    assert binding.json()["status"] == "confirmed"
-    with SessionLocal() as db:
-        automatic = db.scalar(
-            select(AssignmentExplicitConfirmation).where(
-                AssignmentExplicitConfirmation.review_session_id == uuid.UUID(review_payload["id"]),
-                AssignmentExplicitConfirmation.confirmation_type == "legacy_binding",
-            )
-        )
-        assert automatic is not None
-        assert automatic.confirmation_origin == "system_auto"
+    assert rubric_set.status_code == 200, rubric_set.text
+    assert rubric_set.json()["status"] == "draft"
+    assert rubric_set.json()["items"][0]["structured_rubric_version_id"] == structured_id
     bundle = client.get(f"/api/assignments/{assignment_id}/review-bundle")
     assert bundle.status_code == 200, bundle.text
-    assert "CONFIRM_LEGACY_BINDING_REQUIRED" not in {
-        item["code"] for item in bundle.json()["blockers"]
-    }
+    assert bundle.json()["structured_rubric_set"]["current"] is True
     immutable = client.put(
         f"/api/reference-answers/{reference_id}",
         json={

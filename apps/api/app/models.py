@@ -365,7 +365,10 @@ class Assignment(TimestampMixin, Base):
         ForeignKey("assignments.id", ondelete="SET NULL")
     )
     active_paper_version_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
-    active_rubric_version_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    active_structured_rubric_set_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("structured_rubric_sets.id", ondelete="RESTRICT", use_alter=True),
+        nullable=True,
+    )
 
 
 class AssignmentClass(Base):
@@ -1232,59 +1235,6 @@ class QuestionRegion(TimestampMixin, Base):
     confidence: Mapped[Any | None] = mapped_column(Numeric(6, 5))
 
 
-class RubricVersion(Base):
-    __tablename__ = "rubric_versions"
-    __table_args__ = (UniqueConstraint("assignment_id", "version", name="uq_rubric_version"),)
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    assignment_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("assignments.id", ondelete="CASCADE"), index=True
-    )
-    version: Mapped[int] = mapped_column(Integer)
-    status: Mapped[VersionStatus] = mapped_column(
-        Enum(VersionStatus), default=VersionStatus.draft, index=True
-    )
-    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
-    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    notes: Mapped[str | None] = mapped_column(Text)
-
-
-class QuestionRubric(TimestampMixin, Base):
-    __tablename__ = "question_rubrics"
-    __table_args__ = (
-        UniqueConstraint("rubric_version_id", "question_id", name="uq_question_rubric"),
-    )
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    rubric_version_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("rubric_versions.id", ondelete="CASCADE"), index=True
-    )
-    question_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("questions.id", ondelete="CASCADE"), index=True
-    )
-    standard_answer: Mapped[str | None] = mapped_column(Text)
-    alternative_answers: Mapped[list[str]] = mapped_column(JSON, default=list)
-    scoring_notes: Mapped[str | None] = mapped_column(Text)
-    allow_step_score: Mapped[bool] = mapped_column(default=True)
-    unit_requirement: Mapped[str | None] = mapped_column(Text)
-    format_requirement: Mapped[str | None] = mapped_column(Text)
-    precision_requirement: Mapped[str | None] = mapped_column(Text)
-
-
-class RubricItem(TimestampMixin, Base):
-    __tablename__ = "rubric_items"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    question_rubric_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("question_rubrics.id", ondelete="CASCADE"), index=True
-    )
-    display_order: Mapped[int] = mapped_column(Integer)
-    title: Mapped[str] = mapped_column(String(120))
-    description: Mapped[str | None] = mapped_column(Text)
-    points: Mapped[Any] = mapped_column(Numeric(10, 2))
-    item_type: Mapped[str] = mapped_column(String(30), default="step")
-    required: Mapped[bool] = mapped_column(default=False)
-    deduction_rule: Mapped[str | None] = mapped_column(Text)
-
-
 class KnowledgePoint(TimestampMixin, Base):
     __tablename__ = "knowledge_points"
     __table_args__ = (
@@ -1938,8 +1888,11 @@ class GradingJob(TimestampMixin, Base):
     question_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("questions.id", ondelete="RESTRICT"), index=True
     )
-    rubric_version_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("rubric_versions.id", ondelete="RESTRICT")
+    structured_rubric_set_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("structured_rubric_sets.id", ondelete="RESTRICT"), index=True
+    )
+    structured_rubric_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("structured_rubric_versions.id", ondelete="RESTRICT"), index=True
     )
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
     provider: Mapped[str] = mapped_column(String(80))
@@ -1967,8 +1920,11 @@ class GradingResult(TimestampMixin, Base):
     question_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("questions.id", ondelete="RESTRICT"), index=True
     )
-    rubric_version_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("rubric_versions.id", ondelete="RESTRICT"), index=True
+    structured_rubric_set_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("structured_rubric_sets.id", ondelete="RESTRICT"), index=True
+    )
+    structured_rubric_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("structured_rubric_versions.id", ondelete="RESTRICT"), index=True
     )
     grading_method: Mapped[str] = mapped_column(String(30))
     provider: Mapped[str] = mapped_column(String(80))
@@ -1991,8 +1947,8 @@ class GradingCriterionResult(Base):
     grading_result_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("grading_results.id", ondelete="CASCADE"), index=True
     )
-    rubric_item_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("rubric_items.id", ondelete="RESTRICT")
+    criterion_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("rubric_criteria.id", ondelete="RESTRICT"), index=True
     )
     status: Mapped[str] = mapped_column(String(30))
     awarded_points: Mapped[Any | None] = mapped_column(Numeric(10, 2))
@@ -2081,8 +2037,8 @@ class SubmissionScoreSnapshot(Base):
     paper_version_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("paper_versions.id", ondelete="RESTRICT")
     )
-    rubric_version_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("rubric_versions.id", ondelete="RESTRICT")
+    structured_rubric_set_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("structured_rubric_sets.id", ondelete="RESTRICT"), index=True
     )
     total_score: Mapped[Any | None] = mapped_column(Numeric(10, 2))
     max_score: Mapped[Any] = mapped_column(Numeric(10, 2))
@@ -2197,6 +2153,64 @@ class RubricCriterion(Base):
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
 
 
+class StructuredRubricSet(Base):
+    __tablename__ = "structured_rubric_sets"
+    __table_args__ = (
+        UniqueConstraint("assignment_id", "version", name="uq_structured_rubric_set_version"),
+        UniqueConstraint("assignment_id", "content_hash", name="uq_structured_rubric_set_hash"),
+        CheckConstraint("version > 0", name="ck_structured_rubric_set_version_positive"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assignments.id", ondelete="RESTRICT"), index=True
+    )
+    paper_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("paper_versions.id", ondelete="RESTRICT"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24), default="draft", index=True)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    source_snapshot_hash: Mapped[str] = mapped_column(String(64))
+    total_points: Mapped[Any] = mapped_column(Numeric(10, 2))
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    confirmed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT")
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class StructuredRubricSetItem(Base):
+    __tablename__ = "structured_rubric_set_items"
+    __table_args__ = (
+        UniqueConstraint("rubric_set_id", "question_id", name="uq_structured_set_question"),
+        UniqueConstraint("rubric_set_id", "display_order", name="uq_structured_set_order"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    rubric_set_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("structured_rubric_sets.id", ondelete="CASCADE"), index=True
+    )
+    question_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("questions.id", ondelete="RESTRICT"), index=True
+    )
+    question_version: Mapped[str] = mapped_column(String(100))
+    reference_answer_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("reference_answer_versions.id", ondelete="RESTRICT"), index=True
+    )
+    structured_rubric_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("structured_rubric_versions.id", ondelete="RESTRICT"), index=True
+    )
+    answer_content_hash: Mapped[str] = mapped_column(String(64))
+    rubric_content_hash: Mapped[str] = mapped_column(String(64))
+    criteria_hash: Mapped[str] = mapped_column(String(64))
+    display_order: Mapped[int] = mapped_column(Integer)
+    max_points: Mapped[Any] = mapped_column(Numeric(10, 2))
+
+
 class AssignmentReviewSession(TimestampMixin, Base):
     __tablename__ = "assignment_review_sessions"
     __table_args__ = (
@@ -2208,11 +2222,11 @@ class AssignmentReviewSession(TimestampMixin, Base):
             unique=True,
             sqlite_where=text(
                 "status IN ('draft','in_review','changes_required',"
-                "'ready_for_binding','ready_to_publish')"
+                "'ready_for_set','ready_to_publish')"
             ),
             postgresql_where=text(
                 "status IN ('draft','in_review','changes_required',"
-                "'ready_for_binding','ready_to_publish')"
+                "'ready_for_set','ready_to_publish')"
             ),
         ),
     )
@@ -2241,9 +2255,9 @@ class AssignmentReviewSession(TimestampMixin, Base):
     paper_version_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("paper_versions.id", ondelete="RESTRICT")
     )
-    structured_binding_hash: Mapped[str] = mapped_column(String(64))
-    legacy_rubric_version_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("rubric_versions.id", ondelete="RESTRICT")
+    structured_set_hash: Mapped[str] = mapped_column(String(64))
+    structured_rubric_set_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("structured_rubric_sets.id", ondelete="RESTRICT")
     )
     created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -2317,50 +2331,6 @@ class AssignmentExplicitConfirmation(Base):
     invalidation_reason: Mapped[str | None] = mapped_column(String(160))
 
 
-class AssignmentRubricPublicationBinding(Base):
-    __tablename__ = "assignment_rubric_publication_bindings"
-    __table_args__ = (
-        UniqueConstraint("assignment_id", "binding_version", name="uq_assignment_binding_version"),
-        UniqueConstraint(
-            "review_session_id", "source_binding_hash", name="uq_review_binding_source"
-        ),
-        CheckConstraint("binding_version > 0", name="ck_assignment_binding_version_positive"),
-    )
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    owner_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="RESTRICT"), index=True
-    )
-    assignment_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("assignments.id", ondelete="RESTRICT"), index=True
-    )
-    review_session_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("assignment_review_sessions.id", ondelete="RESTRICT"), index=True
-    )
-    paper_version_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("paper_versions.id", ondelete="RESTRICT")
-    )
-    legacy_rubric_version_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("rubric_versions.id", ondelete="RESTRICT"), unique=True
-    )
-    binding_version: Mapped[int] = mapped_column(Integer)
-    status: Mapped[str] = mapped_column(String(24), default="draft", index=True)
-    source_binding_hash: Mapped[str] = mapped_column(String(64))
-    source_semantic_hash: Mapped[str | None] = mapped_column(String(64))
-    target_legacy_hash: Mapped[str | None] = mapped_column(String(64))
-    projection_profile: Mapped[str | None] = mapped_column(String(64))
-    projection_version: Mapped[str | None] = mapped_column(String(40))
-    loss_report: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
-    loss_report_hash: Mapped[str | None] = mapped_column(String(64))
-    mapping: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
-    confirmed_by: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("users.id", ondelete="RESTRICT")
-    )
-    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
 class AssignmentPublishReadinessSnapshot(Base):
     __tablename__ = "assignment_publish_readiness_snapshots"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -2376,11 +2346,8 @@ class AssignmentPublishReadinessSnapshot(Base):
     paper_version_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("paper_versions.id", ondelete="RESTRICT")
     )
-    legacy_rubric_version_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("rubric_versions.id", ondelete="RESTRICT")
-    )
-    binding_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("assignment_rubric_publication_bindings.id", ondelete="RESTRICT")
+    structured_rubric_set_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("structured_rubric_sets.id", ondelete="RESTRICT")
     )
     generation: Mapped[int] = mapped_column(Integer)
     draft_revision_id: Mapped[uuid.UUID] = mapped_column(
@@ -2426,6 +2393,9 @@ class MathValidationJob(TimestampMixin, Base):
     scoring_input_version: Mapped[str] = mapped_column(String(160))
     reference_answer_version_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("reference_answer_versions.id", ondelete="RESTRICT")
+    )
+    structured_rubric_set_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("structured_rubric_sets.id", ondelete="RESTRICT"), index=True
     )
     rubric_version_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("structured_rubric_versions.id", ondelete="RESTRICT")
@@ -2631,6 +2601,9 @@ class AIScoringJob(TimestampMixin, Base):
     )
     reference_answer_version_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("reference_answer_versions.id", ondelete="RESTRICT")
+    )
+    structured_rubric_set_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("structured_rubric_sets.id", ondelete="RESTRICT"), index=True
     )
     rubric_version_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("structured_rubric_versions.id", ondelete="RESTRICT")

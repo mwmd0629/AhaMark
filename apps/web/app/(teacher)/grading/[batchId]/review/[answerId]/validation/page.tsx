@@ -63,7 +63,8 @@ export default function MathValidationReviewPage() {
             <summary className="cursor-pointer font-semibold">技术信息</summary>
             <div className="mt-2 space-y-1 text-slate-600">
               <p>输入版本：{current.scoring_input_version}</p>
-              <p>评分标准版本：{current.rubric_version_id}</p>
+              <p>评分标准集：{current.structured_rubric_set_id}</p>
+              <p>评分标准版本：{current.structured_rubric_version_id}</p>
               <p>参考答案版本：{current.reference_answer_version_id}</p>
               <p>状态：{current.status}</p>
             </div>

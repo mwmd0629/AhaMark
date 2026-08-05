@@ -25,7 +25,6 @@ from app.models import (
     AssignmentReviewItem,
     AssignmentReviewSession,
     AssignmentRubricDraftCandidate,
-    AssignmentRubricPublicationBinding,
     AssignmentSourceFileAnalysis,
     AssignmentStatus,
     ClassStudent,
@@ -34,19 +33,19 @@ from app.models import (
     PaperPageOrganizationSuggestion,
     PaperVersion,
     Question,
-    QuestionRubric,
     QuestionStatus,
     ReferenceAnswerVersion,
     RubricCriterion,
-    RubricItem,
-    RubricVersion,
     SchoolClass,
     StoredFile,
+    StructuredRubricSet,
+    StructuredRubricSetItem,
     StructuredRubricVersion,
     Student,
     VersionStatus,
     now_utc,
 )
+from app.question_versions import question_version_token
 from app.semantic_content import reference_answer_semantic_payload, semantic_hash
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -55,7 +54,7 @@ from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/api", tags=["assignment-central-review"])
 Db = Annotated[Session, Depends(get_db)]
-ACTIVE = {"draft", "in_review", "changes_required", "ready_for_binding", "ready_to_publish"}
+ACTIVE = {"draft", "in_review", "changes_required", "ready_for_set", "ready_to_publish"}
 CONFIRMATION_TYPES = {
     "classes",
     "due_at",
@@ -65,45 +64,27 @@ CONFIRMATION_TYPES = {
     "paper_version",
     "reference_answers",
     "structured_rubrics",
-    "legacy_binding",
 }
 REQUIRED_CONFIRMATIONS = CONFIRMATION_TYPES - {
     "answer_sources",
     "file_roles",
     "paper_version",
 }
-AUTOMATIC_CONFIRMATION_TYPES = REQUIRED_CONFIRMATIONS - {"legacy_binding"}
-LEGACY_PROJECTION_SCHEMA_VERSION = "structured-rubric-projection-v3"
-LEGACY_PROJECTION_PROFILE = "structured-to-legacy"
+AUTOMATIC_CONFIRMATION_TYPES = REQUIRED_CONFIRMATIONS
 CONFIRMATION_FINGERPRINT_VERSION = "confirmation-fingerprint-v2"
 REVIEW_SOURCE_SCHEMA_VERSION = "publish-content-v3"
-BUNDLE_SCHEMA_VERSION = "assignment-review-bundle-v1"
-PROJECTION_WRITE_LOCK_ORDER = (
+BUNDLE_SCHEMA_VERSION = "assignment-review-bundle-v2"
+STRUCTURED_SET_WRITE_LOCK_ORDER = (
     "assignment",
     "snapshot",
     "session",
     "paper",
     "questions",
-    "binding",
+    "structured_set",
     "formal_versions",
     "criteria",
-    "legacy_rubric",
-    "legacy_items",
-    "confirmation",
+    "structured_set_items",
 )
-MANUAL_FALLBACK_WARNINGS = {
-    "DEPENDENCY_NOT_LOSSLESS",
-    "ALTERNATIVE_PATH_NOT_LOSSLESS",
-    "VALIDATION_RULE_NOT_LOSSLESS",
-    "EXPECTED_EVIDENCE_NOT_LOSSLESS",
-    "MANUAL_REVIEW_POLICY_NOT_LOSSLESS",
-    "PARTIAL_CREDIT_POLICY_NOT_LOSSLESS",
-    "ERROR_CATEGORY_NOT_LOSSLESS",
-    "CRITERION_METADATA_NOT_LOSSLESS",
-    "DEDUCTION_RULE_NOT_LOSSLESS",
-    "COMMON_ERROR_CODES_NOT_LOSSLESS",
-    "FEEDBACK_TEMPLATE_NOT_LOSSLESS",
-}
 SECTION_GUIDANCE: dict[str, tuple[int, str, str]] = {
     "classes": (1, "assignment-basics", "去第 1 步选择可发布的有效班级"),
     "due_at": (1, "assignment-basics", "去第 1 步设置截止时间或选择无截止时间"),
@@ -113,7 +94,7 @@ SECTION_GUIDANCE: dict[str, tuple[int, str, str]] = {
     "total_score": (4, "question-editor", "去第 4 步校正题目分值或作业总分"),
     "answers": (5, "answer-rubric-editor", "去第 5 步补全对应题目的参考答案"),
     "rubrics": (5, "answer-rubric-editor", "去第 5 步修改对应题目的评分标准"),
-    "publication": (6, "assignment-central-review", "留在第 6 步重新生成发布兼容版本"),
+    "publication": (6, "assignment-central-review", "留在第 6 步重新准备发布版本"),
     "validation": (6, "assignment-central-review", "留在第 6 步基于最新内容重新核查"),
 }
 
@@ -284,7 +265,7 @@ def selected_question_version(db: Session, question: Question) -> dict[str, Any]
         "rubric": rubric,
         "criteria": criteria,
         "answer_versions": answers,
-        "rubric_versions": rubrics,
+        "structured_rubric_versions": rubrics,
         "candidate": current_candidate,
         "candidate_history": candidates,
     }
@@ -551,7 +532,10 @@ def _rubric_lifecycle(
         "candidate_history": [_rubric_candidate_json(item) for item in candidates],
         "materialized": _rubric_bundle_json(db, materialized),
         "selected": _rubric_bundle_json(db, row["rubric"]),
-        "history": [_rubric_bundle_json(db, item) for item in row["rubric_versions"]],
+        "history": [
+            _rubric_bundle_json(db, item)
+            for item in row["structured_rubric_versions"]
+        ],
         "visibility": "teacher",
     }
 
@@ -570,17 +554,9 @@ def review_bundle(db: Session, actor_id: uuid.UUID, assignment_id: uuid.UUID) ->
         .order_by(AssignmentReviewSession.created_at.desc(), AssignmentReviewSession.id)
         .limit(1)
     )
-    binding = (
-        db.scalar(
-            select(AssignmentRubricPublicationBinding)
-            .where(AssignmentRubricPublicationBinding.review_session_id == session.id)
-            .order_by(
-                AssignmentRubricPublicationBinding.binding_version.desc(),
-                AssignmentRubricPublicationBinding.id,
-            )
-            .limit(1)
-        )
-        if session is not None
+    rubric_set = (
+        db.get(StructuredRubricSet, session.structured_rubric_set_id)
+        if session is not None and session.structured_rubric_set_id is not None
         else None
     )
     rows = selected_versions(db, paper.id)
@@ -660,19 +636,17 @@ def review_bundle(db: Session, actor_id: uuid.UUID, assignment_id: uuid.UUID) ->
                 "visibility": "teacher",
             }
         )
-    expected_binding_hash = binding_source_hash(db, session) if session is not None else None
-    projection_validation = (
-        validate_current_projection_under_locks(
+    set_validation = (
+        validate_current_structured_set_under_locks(
             db,
             session,
-            binding_id=binding.id if binding is not None else None,
+            rubric_set_id=rubric_set.id if rubric_set is not None else None,
             lock=False,
             require_confirmed=False,
         )
-        if session is not None and binding is not None
-        else ProjectionValidation(None, None, False, "BINDING_NOT_CURRENT")
+        if session is not None and rubric_set is not None
+        else StructuredSetValidation(None, False, "STRUCTURED_SET_REQUIRED")
     )
-    binding_projection_current = projection_validation.current
     confirmations = [
         {
             "id": str(item.id),
@@ -682,60 +656,24 @@ def review_bundle(db: Session, actor_id: uuid.UUID, assignment_id: uuid.UUID) ->
             "origin": item.confirmation_origin or "origin",
             "inherited": item.confirmation_origin == "inherited",
             "fingerprint_schema_version": item.fingerprint_schema_version,
-            "binding_id": (
-                str(item.confirmed_value["binding_id"])
-                if kind == "legacy_binding"
-                and projection_validation.current
-                and projection_validation.confirmation is not None
-                and projection_validation.confirmation.id == item.id
-                else None
-            ),
-            "source_binding_hash": (
-                item.confirmed_value["source_binding_hash"]
-                if kind == "legacy_binding"
-                and projection_validation.current
-                and projection_validation.confirmation is not None
-                and projection_validation.confirmation.id == item.id
-                else None
-            ),
             "confirmed_at": item.confirmed_at,
             "visibility": "teacher",
         }
         for kind, item in sorted(confirms.items())
     ]
-    binding_is_current = (
-        binding is not None
-        and binding.status == "confirmed"
-        and expected_binding_hash is not None
-        and binding.source_binding_hash == expected_binding_hash
-        and binding_projection_current
-    )
-    binding_payload = (
+    set_payload = (
         {
-            "id": str(binding.id),
-            "status": (
-                "stale"
-                if expected_binding_hash is None
-                or binding.source_binding_hash != expected_binding_hash
-                or not binding_projection_current
-                else binding.status
-            ),
-            "binding_version": binding.binding_version,
-            "source_binding_hash": binding.source_binding_hash,
-            "source_semantic_hash": binding.source_semantic_hash,
-            "target_legacy_hash": binding.target_legacy_hash,
-            "projection_profile": binding.projection_profile,
-            "projection_version": binding.projection_version,
-            "mapping": binding.mapping,
-            "loss_report": binding.loss_report or [],
-            "loss_report_hash": binding.loss_report_hash,
-            "manual_review_required": bool(binding.loss_report),
-            "projection_current": projection_validation.current,
-            "projection_reason": projection_validation.reason,
-            "expected_source_binding_hash": expected_binding_hash,
+            "id": str(rubric_set.id),
+            "status": rubric_set.status if set_validation.current else "stale",
+            "version": rubric_set.version,
+            "content_hash": rubric_set.content_hash,
+            "source_snapshot_hash": rubric_set.source_snapshot_hash,
+            "total_points": str(rubric_set.total_points),
+            "current": set_validation.current,
+            "reason": set_validation.reason,
             "visibility": "teacher",
         }
-        if binding is not None
+        if rubric_set is not None
         else None
     )
     payload: dict[str, Any] = {
@@ -753,7 +691,9 @@ def review_bundle(db: Session, actor_id: uuid.UUID, assignment_id: uuid.UUID) ->
             if session is None
             else (
                 "ready_to_publish"
-                if binding_is_current and not blockers and REQUIRED_CONFIRMATIONS <= set(confirms)
+                if set_validation.current
+                and not blockers
+                and REQUIRED_CONFIRMATIONS <= set(confirms)
                 else "action_required"
             )
         ),
@@ -767,7 +707,7 @@ def review_bundle(db: Session, actor_id: uuid.UUID, assignment_id: uuid.UUID) ->
             ),
         ),
         "confirmations": confirmations,
-        "binding": binding_payload,
+        "structured_rubric_set": set_payload,
     }
     hash_payload = payload | {"version": payload["version"] | {"bundle_hash": None}}
     payload["version"]["bundle_hash"] = digest(hash_payload)
@@ -1045,19 +985,7 @@ def confirmation_value(db: Session, session: AssignmentReviewSession, kind: str)
                 for x in rows
             ]
         }
-    binding = db.scalar(
-        select(AssignmentRubricPublicationBinding)
-        .where(
-            AssignmentRubricPublicationBinding.review_session_id == session.id,
-            AssignmentRubricPublicationBinding.status == "confirmed",
-        )
-        .order_by(AssignmentRubricPublicationBinding.binding_version.desc())
-        .limit(1)
-    )
-    return {
-        "binding_id": binding.id if binding else None,
-        "source_binding_hash": binding.source_binding_hash if binding else None,
-    }
+    raise ApiProblem(422, "CONFIRMATION_TYPE_INVALID", "不支持的确认类型")
 
 
 def confirmation_fingerprint(
@@ -1092,168 +1020,64 @@ def confirmation_fingerprint(
     return value, source_hash, scope_hash
 
 
-def binding_source_hash(db: Session, session: AssignmentReviewSession) -> str:
-    _, answer_hash, _ = confirmation_fingerprint(db, session, "reference_answers")
-    _, rubric_hash, _ = confirmation_fingerprint(db, session, "structured_rubrics")
-    return semantic_hash(
-        {
-            "structured_rubrics": rubric_hash,
-            "reference_answers": answer_hash,
-            "projection_profile": LEGACY_PROJECTION_PROFILE,
-        }
-    )
-
-
-def projection_loss_report(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    messages = {
-        "DEPENDENCY_NOT_LOSSLESS": "评分项依赖关系无法由旧版评分标准完整表达",
-        "ALTERNATIVE_PATH_NOT_LOSSLESS": "备选评分路径无法由旧版评分标准完整表达",
-        "VALIDATION_RULE_NOT_LOSSLESS": "结构化校验规则无法由旧版评分标准执行",
-        "EXPECTED_EVIDENCE_NOT_LOSSLESS": "证据要求无法由旧版评分标准完整表达",
-        "MANUAL_REVIEW_POLICY_NOT_LOSSLESS": "人工复核策略无法由旧版评分标准完整表达",
-        "PARTIAL_CREDIT_POLICY_NOT_LOSSLESS": "部分分策略无法由旧版评分标准完整表达",
-        "ERROR_CATEGORY_NOT_LOSSLESS": "错误分类无法由旧版评分标准完整表达",
-        "CRITERION_METADATA_NOT_LOSSLESS": "扩展评分元数据无法由旧版评分标准完整表达",
-        "DEDUCTION_RULE_NOT_LOSSLESS": "结构化扣分规则无法由旧版评分标准完整执行",
-        "COMMON_ERROR_CODES_NOT_LOSSLESS": "多项错误代码无法由旧版评分标准完整表达",
-        "FEEDBACK_TEMPLATE_NOT_LOSSLESS": "反馈模板无法由旧版评分标准完整表达",
-    }
-    report: list[dict[str, Any]] = []
-    for row in rows:
+def _structured_set_entries(db: Session, session: AssignmentReviewSession) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for row in selected_versions(db, session.paper_version_id):
         question = row["question"]
-        for criterion in row["criteria"]:
-            codes: list[str] = []
-            if criterion.dependencies:
-                codes.append("DEPENDENCY_NOT_LOSSLESS")
-            if criterion.metadata_.get("alternative_group"):
-                codes.append("ALTERNATIVE_PATH_NOT_LOSSLESS")
-            if _validation_rule_requires_loss(criterion.validation_rule):
-                codes.append("VALIDATION_RULE_NOT_LOSSLESS")
-            if _meaningful_projection_value(criterion.expected_evidence):
-                codes.append("EXPECTED_EVIDENCE_NOT_LOSSLESS")
-            if _meaningful_projection_value(criterion.manual_review_policy):
-                codes.append("MANUAL_REVIEW_POLICY_NOT_LOSSLESS")
-            if _meaningful_projection_value(criterion.partial_credit_policy):
-                codes.append("PARTIAL_CREDIT_POLICY_NOT_LOSSLESS")
-            if criterion.error_category:
-                codes.append("ERROR_CATEGORY_NOT_LOSSLESS")
-            metadata = criterion.metadata_ or {}
-            if _meaningful_projection_value(metadata.get("deduction_rule")):
-                codes.append("DEDUCTION_RULE_NOT_LOSSLESS")
-            if _meaningful_projection_value(metadata.get("common_error_codes")):
-                codes.append("COMMON_ERROR_CODES_NOT_LOSSLESS")
-            if _meaningful_projection_value(metadata.get("feedback_template")):
-                codes.append("FEEDBACK_TEMPLATE_NOT_LOSSLESS")
-            metadata_extra = set(metadata) - {
-                "domain_requirements",
-                "alternative_group",
-                "deduction_rule",
-                "common_error_codes",
-                "feedback_template",
-                "scoring_mode",
-            }
-            if any(_meaningful_projection_value(metadata[key]) for key in metadata_extra):
-                codes.append("CRITERION_METADATA_NOT_LOSSLESS")
-            report.extend(
-                {
-                    "code": code,
-                    "question_id": str(question.id),
-                    "question_number": question.question_number,
-                    "criterion_key": criterion.stable_key,
-                    "teacher_message": messages[code],
-                    "technical": {
-                        "projection_profile": LEGACY_PROJECTION_PROFILE,
-                        "projection_version": LEGACY_PROJECTION_SCHEMA_VERSION,
-                    },
-                }
-                for code in codes
+        answer = row["answer"]
+        rubric = row["rubric"]
+        if answer is None or rubric is None or question.max_score is None:
+            raise ApiProblem(
+                422,
+                "STRUCTURED_SET_INCOMPLETE",
+                "题目、参考答案、结构化评分标准或分值不完整",
+                {"question_id": str(question.id)},
             )
-    return sorted(
-        report,
-        key=lambda item: (
-            item["question_number"],
-            item["criterion_key"],
-            item["code"],
-        ),
-    )
-
-
-def _meaningful_projection_value(value: Any) -> bool:
-    if value is None or value is False:
-        return False
-    if isinstance(value, str):
-        return bool(value.strip())
-    if isinstance(value, dict):
-        return any(_meaningful_projection_value(item) for item in value.values())
-    if isinstance(value, (list, tuple, set)):
-        return any(_meaningful_projection_value(item) for item in value)
-    return True
-
-
-def _validation_rule_requires_loss(value: Any) -> bool:
-    if not _meaningful_projection_value(value):
-        return False
-    return bool(value != {"answer_type": "manual_only"})
-
-
-def target_legacy_hash(db: Session, legacy_id: uuid.UUID) -> str:
-    question_rubrics = list(
-        db.scalars(
-            select(QuestionRubric)
-            .where(QuestionRubric.rubric_version_id == legacy_id)
-            .order_by(QuestionRubric.question_id)
-        )
-    )
-    return semantic_hash(
-        [
+        criteria = _rubric_criteria(db, rubric.id)
+        entries.append(
             {
-                "question_id": row.question_id,
-                "standard_answer": row.standard_answer,
-                "alternative_answers": row.alternative_answers,
-                "scoring_notes": row.scoring_notes,
-                "allow_step_score": row.allow_step_score,
-                "unit_requirement": row.unit_requirement,
-                "format_requirement": row.format_requirement,
-                "precision_requirement": row.precision_requirement,
-                "items": [
-                    {
-                        "display_order": item.display_order,
-                        "title": item.title,
-                        "description": item.description,
-                        "points": item.points,
-                        "item_type": item.item_type,
-                        "required": item.required,
-                        "deduction_rule": item.deduction_rule,
-                    }
-                    for item in db.scalars(
-                        select(RubricItem)
-                        .where(RubricItem.question_rubric_id == row.id)
-                        .order_by(RubricItem.display_order, RubricItem.id)
-                    )
-                ],
+                "question_id": str(question.id),
+                "question_version": rubric.question_version,
+                "reference_answer_version_id": str(answer.id),
+                "structured_rubric_version_id": str(rubric.id),
+                "answer_content_hash": semantic_hash(_answer_content_payload(answer)),
+                "rubric_content_hash": semantic_hash(_rubric_content_payload(db, rubric)),
+                "criteria_hash": semantic_hash([_criterion_payload(item) for item in criteria]),
+                "display_order": question.display_order,
+                "max_points": str(question.max_score),
             }
-            for row in question_rubrics
-        ]
-    )
+        )
+    return entries
+
+
+def _structured_set_payload(db: Session, session: AssignmentReviewSession) -> dict[str, Any]:
+    entries = _structured_set_entries(db, session)
+    return {
+        "assignment_id": str(session.assignment_id),
+        "paper_version_id": str(session.paper_version_id),
+        "source_snapshot_hash": session.source_snapshot_hash,
+        "total_points": str(sum(Decimal(item["max_points"]) for item in entries)),
+        "items": entries,
+    }
 
 
 @dataclass(frozen=True)
-class ProjectionValidation:
-    binding: AssignmentRubricPublicationBinding | None
-    confirmation: AssignmentExplicitConfirmation | None
+class StructuredSetValidation:
+    rubric_set: StructuredRubricSet | None
     current: bool
     reason: str | None
 
 
-def validate_current_projection_under_locks(
+def validate_current_structured_set_under_locks(
     db: Session,
     session: AssignmentReviewSession,
     *,
-    binding_id: uuid.UUID | None = None,
+    rubric_set_id: uuid.UUID | None = None,
     lock: bool,
     require_confirmed: bool = True,
-) -> ProjectionValidation:
-    """Validate one exact projection after acquiring the global publication lock order."""
+    require_current_selection: bool = True,
+) -> StructuredSetValidation:
+    """Validate one immutable Structured Rubric Set under the publication lock order."""
     paper_query = (
         select(PaperVersion)
         .where(PaperVersion.id == session.paper_version_id)
@@ -1271,25 +1095,7 @@ def validate_current_projection_under_locks(
     paper = db.scalar(paper_query)
     locked_questions = list(db.scalars(question_query))
     if paper is None:
-        return ProjectionValidation(None, None, False, "PAPER_NOT_CURRENT")
-
-    binding_query = (
-        select(AssignmentRubricPublicationBinding)
-        .where(
-            AssignmentRubricPublicationBinding.review_session_id == session.id,
-            AssignmentRubricPublicationBinding.invalidated_at.is_(None),
-        )
-        .order_by(
-            AssignmentRubricPublicationBinding.binding_version.desc(),
-            AssignmentRubricPublicationBinding.id,
-        )
-        .execution_options(populate_existing=True)
-    )
-    if binding_id is not None:
-        binding_query = binding_query.where(AssignmentRubricPublicationBinding.id == binding_id)
-    if lock:
-        binding_query = binding_query.with_for_update()
-    bindings = list(db.scalars(binding_query))
+        return StructuredSetValidation(None, False, "PAPER_NOT_CURRENT")
 
     question_ids = [
         question.id for question in locked_questions if question.status == QuestionStatus.active
@@ -1329,98 +1135,81 @@ def validate_current_projection_under_locks(
         criterion_query = criterion_query.with_for_update()
     list(db.scalars(criterion_query))
 
-    current_source = binding_source_hash(db, session)
-    binding = next(
-        (
-            row
-            for row in bindings
-            if row.source_binding_hash == current_source
-            and (binding_id is None or row.id == binding_id)
-        ),
-        None,
-    )
-    if binding is None:
-        return ProjectionValidation(None, None, False, "BINDING_NOT_CURRENT")
-
-    legacy_query = (
-        select(RubricVersion)
-        .where(RubricVersion.id == binding.legacy_rubric_version_id)
-        .execution_options(populate_existing=True)
-    )
-    question_rubric_query = (
-        select(QuestionRubric)
-        .where(QuestionRubric.rubric_version_id == binding.legacy_rubric_version_id)
-        .order_by(QuestionRubric.question_id, QuestionRubric.id)
+    target_id = rubric_set_id or session.structured_rubric_set_id
+    if target_id is None:
+        return StructuredSetValidation(None, False, "STRUCTURED_SET_REQUIRED")
+    set_query = (
+        select(StructuredRubricSet)
+        .where(StructuredRubricSet.id == target_id)
         .execution_options(populate_existing=True)
     )
     if lock:
-        legacy_query = legacy_query.with_for_update()
-        question_rubric_query = question_rubric_query.with_for_update()
-    legacy = db.scalar(legacy_query)
-    legacy_question_rows = list(db.scalars(question_rubric_query))
-    legacy_question_ids = [row.id for row in legacy_question_rows]
-    item_query = (
-        select(RubricItem)
-        .where(RubricItem.question_rubric_id.in_(legacy_question_ids))
-        .order_by(RubricItem.question_rubric_id, RubricItem.display_order, RubricItem.id)
+        set_query = set_query.with_for_update()
+    rubric_set = db.scalar(set_query)
+    if rubric_set is None or rubric_set.assignment_id != session.assignment_id:
+        return StructuredSetValidation(None, False, "STRUCTURED_SET_NOT_FOUND")
+    items_query = (
+        select(StructuredRubricSetItem)
+        .where(StructuredRubricSetItem.rubric_set_id == rubric_set.id)
+        .order_by(StructuredRubricSetItem.display_order, StructuredRubricSetItem.id)
         .execution_options(populate_existing=True)
     )
     if lock:
-        item_query = item_query.with_for_update()
-    list(db.scalars(item_query))
-
-    current_loss = projection_loss_report(selected_versions(db, session.paper_version_id))
-    current_loss_hash = semantic_hash(current_loss)
-    current_target = target_legacy_hash(db, binding.legacy_rubric_version_id)
-    evidence_current = (
-        legacy is not None
-        and binding.source_semantic_hash == current_source
-        and binding.target_legacy_hash == current_target
-        and binding.projection_profile == LEGACY_PROJECTION_PROFILE
-        and binding.projection_version == LEGACY_PROJECTION_SCHEMA_VERSION
-        and binding.loss_report_hash == current_loss_hash
-        and semantic_hash(binding.loss_report or []) == current_loss_hash
-    )
-    if not evidence_current:
-        return ProjectionValidation(binding, None, False, "BINDING_PROJECTION_STALE")
-    assert legacy is not None
-    if require_confirmed and (
-        binding.status != "confirmed" or legacy.status != VersionStatus.confirmed
+        items_query = items_query.with_for_update()
+    stored_items = list(db.scalars(items_query))
+    stored_payload = [
+        {
+            "question_id": str(item.question_id),
+            "question_version": item.question_version,
+            "reference_answer_version_id": str(item.reference_answer_version_id),
+            "structured_rubric_version_id": str(item.structured_rubric_version_id),
+            "answer_content_hash": item.answer_content_hash,
+            "rubric_content_hash": item.rubric_content_hash,
+            "criteria_hash": item.criteria_hash,
+            "display_order": item.display_order,
+            "max_points": str(item.max_points),
+        }
+        for item in stored_items
+    ]
+    payload = {
+        "assignment_id": str(rubric_set.assignment_id),
+        "paper_version_id": str(rubric_set.paper_version_id),
+        "source_snapshot_hash": rubric_set.source_snapshot_hash,
+        "total_points": str(rubric_set.total_points),
+        "items": stored_payload,
+    }
+    if (
+        rubric_set.paper_version_id != session.paper_version_id
+        or rubric_set.source_snapshot_hash != session.source_snapshot_hash
+        or rubric_set.content_hash != semantic_hash(payload)
     ):
-        return ProjectionValidation(binding, None, False, "BINDING_NOT_CONFIRMED")
-
-    confirmation_query = (
-        select(AssignmentExplicitConfirmation)
-        .where(
-            AssignmentExplicitConfirmation.review_session_id == session.id,
-            AssignmentExplicitConfirmation.confirmation_type == "legacy_binding",
-            AssignmentExplicitConfirmation.invalidated_at.is_(None),
-        )
-        .order_by(
-            AssignmentExplicitConfirmation.confirmation_version.desc(),
-            AssignmentExplicitConfirmation.id,
-        )
-        .execution_options(populate_existing=True)
-    )
-    if lock:
-        confirmation_query = confirmation_query.with_for_update()
-    confirmation = db.scalar(confirmation_query)
-    if not require_confirmed:
-        return ProjectionValidation(binding, confirmation, True, None)
-    _, confirmation_hash, scope_hash = confirmation_fingerprint(db, session, "legacy_binding")
-    confirmation_current = (
-        confirmation is not None
-        and confirmation.fingerprint_schema_version == CONFIRMATION_FINGERPRINT_VERSION
-        and confirmation.confirmation_origin in {"origin", "system_auto"}
-        and confirmation.paper_version_id == session.paper_version_id
-        and confirmation.question_scope_hash == scope_hash
-        and confirmation.source_hash == confirmation_hash
-        and str(confirmation.confirmed_value.get("binding_id")) == str(binding.id)
-        and confirmation.confirmed_value.get("source_binding_hash") == binding.source_binding_hash
-    )
-    if not confirmation_current:
-        return ProjectionValidation(binding, confirmation, False, "LEGACY_CONFIRMATION_STALE")
-    return ProjectionValidation(binding, confirmation, True, None)
+        return StructuredSetValidation(rubric_set, False, "STRUCTURED_SET_STALE")
+    for item in stored_items:
+        question = db.get(Question, item.question_id)
+        answer = db.get(ReferenceAnswerVersion, item.reference_answer_version_id)
+        rubric = db.get(StructuredRubricVersion, item.structured_rubric_version_id)
+        if (
+            question is None
+            or answer is None
+            or rubric is None
+            or item.question_version != question_version_token(question)
+            or answer.question_id != item.question_id
+            or rubric.question_id != item.question_id
+            or rubric.reference_answer_version_id != answer.id
+            or rubric.question_version != item.question_version
+            or semantic_hash(_answer_content_payload(answer)) != item.answer_content_hash
+            or semantic_hash(_rubric_content_payload(db, rubric)) != item.rubric_content_hash
+            or semantic_hash([_criterion_payload(row) for row in _rubric_criteria(db, rubric.id)])
+            != item.criteria_hash
+        ):
+            return StructuredSetValidation(rubric_set, False, "STRUCTURED_SET_STALE")
+        if require_confirmed and (answer.status != "confirmed" or rubric.status != "confirmed"):
+            return StructuredSetValidation(rubric_set, False, "STRUCTURED_SET_NOT_CONFIRMED")
+    if require_current_selection and _structured_set_entries(db, session) != stored_payload:
+        return StructuredSetValidation(rubric_set, False, "STRUCTURED_SET_STALE")
+    if require_confirmed and rubric_set.status not in {"confirmed", "active"}:
+        return StructuredSetValidation(rubric_set, False, "STRUCTURED_SET_NOT_CONFIRMED")
+    return StructuredSetValidation(rubric_set, True, None)
 
 
 def valid_confirmations(
@@ -1442,17 +1231,11 @@ def valid_confirmations(
             and row.paper_version_id == session.paper_version_id
             and row.question_scope_hash == scope_hash
             and row.source_hash == source_hash
-            and (
-                row.confirmation_type != "legacy_binding"
-                or row.confirmation_origin in {"origin", "system_auto"}
-            )
         )
-        is_same_session_legacy = (
-            row.fingerprint_schema_version is None
-            and row.confirmation_type != "legacy_binding"
-            and row.source_hash == digest(confirmation_value(db, session, row.confirmation_type))
+        is_same_session_v1 = row.fingerprint_schema_version is None and row.source_hash == digest(
+            confirmation_value(db, session, row.confirmation_type)
         )
-        if row.confirmation_type not in found and (is_v2 or is_same_session_legacy):
+        if row.confirmation_type not in found and (is_v2 or is_same_session_v1):
             found[row.confirmation_type] = row
     return found
 
@@ -1508,7 +1291,7 @@ def generated_issues(db: Session, session: AssignmentReviewSession) -> list[dict
         or current_paper.id != session.paper_version_id
         or job.source_snapshot_hash != session.source_snapshot_hash
         or review_source_hash(db, assignment, job, revision, current_paper)
-        != session.structured_binding_hash
+        != session.structured_set_hash
     ):
         add("SOURCE_STALE", "validation", "生成、修订或试卷版本已变化")
     links = list(
@@ -1721,7 +1504,7 @@ def generated_issues(db: Session, session: AssignmentReviewSession) -> list[dict
                 entity="question",
                 entity_id=q.id,
             )
-    for kind in sorted(REQUIRED_CONFIRMATIONS - {"legacy_binding"} - set(confirms)):
+    for kind in sorted(REQUIRED_CONFIRMATIONS - set(confirms)):
         add(
             f"CONFIRM_{kind.upper()}_REQUIRED",
             {
@@ -1731,23 +1514,20 @@ def generated_issues(db: Session, session: AssignmentReviewSession) -> list[dict
             }.get(kind, kind),
             f"必须由教师明确确认 {kind}",
         )
-    binding = db.scalar(
-        select(AssignmentRubricPublicationBinding)
-        .where(
-            AssignmentRubricPublicationBinding.review_session_id == session.id,
-            AssignmentRubricPublicationBinding.status == "confirmed",
+    if session.structured_rubric_set_id is not None:
+        validation = validate_current_structured_set_under_locks(
+            db,
+            session,
+            rubric_set_id=session.structured_rubric_set_id,
+            lock=False,
+            require_confirmed=False,
         )
-        .order_by(AssignmentRubricPublicationBinding.binding_version.desc())
-        .limit(1)
-    )
-    if binding is None:
-        add("LEGACY_BINDING_REQUIRED", "publication", "必须准备并确认 legacy Rubric 绑定")
-    elif not validate_current_projection_under_locks(
-        db, session, binding_id=binding.id, lock=False
-    ).current:
-        add("LEGACY_BINDING_STALE", "publication", "legacy Rubric 绑定已过期")
-    if "legacy_binding" not in confirms:
-        add("CONFIRM_LEGACY_BINDING_REQUIRED", "publication", "必须明确确认 legacy Rubric 绑定")
+        if not validation.current:
+            add(
+                "STRUCTURED_SET_STALE",
+                "publication",
+                "待发布的结构化评分标准集合已过期，请重新准备",
+            )
     return sorted(out, key=lambda x: (x["section"], x["severity"], x["code"], x["entity_id"]))
 
 
@@ -1812,7 +1592,7 @@ def refresh(db: Session, session: AssignmentReviewSession) -> None:
         else (
             "in_review"
             if session.warning_count
-            else ("ready_to_publish" if session.legacy_rubric_version_id else "ready_for_binding")
+            else ("ready_to_publish" if session.structured_rubric_set_id else "ready_for_set")
         )
     )
 
@@ -1832,8 +1612,8 @@ def session_json(db: Session, s: AssignmentReviewSession) -> dict[str, Any]:
         "counts": {"blocking": s.blocking_count, "warning": s.warning_count, "info": s.info_count},
         "confirmations": sorted(confirmed_types),
         "paper_version_id": str(s.paper_version_id),
-        "legacy_rubric_version_id": str(s.legacy_rubric_version_id)
-        if s.legacy_rubric_version_id
+        "structured_rubric_set_id": str(s.structured_rubric_set_id)
+        if s.structured_rubric_set_id
         else None,
         "created_at": s.created_at,
         "updated_at": s.updated_at,
@@ -1872,7 +1652,7 @@ def create_review_session(assignment_id: uuid.UUID, db: Db, actor: Actor) -> dic
         and old.generation_job_id == job.id
         and old.draft_revision_id == revision.id
         and old.paper_version_id == paper.id
-        and old.structured_binding_hash == source
+        and old.structured_set_hash == source
     ):
         refresh(db, old)
         db.commit()
@@ -1892,7 +1672,7 @@ def create_review_session(assignment_id: uuid.UUID, db: Db, actor: Actor) -> dic
         risk_ledger_hash=digest([]),
         expected_assignment_updated_at=assignment.updated_at,
         paper_version_id=paper.id,
-        structured_binding_hash=source,
+        structured_set_hash=source,
         created_by=actor.id,
     )
     db.add(row)
@@ -1900,8 +1680,7 @@ def create_review_session(assignment_id: uuid.UUID, db: Db, actor: Actor) -> dic
     inherited_types: list[str] = []
     for kind, previous in inherited.items():
         if (
-            kind == "legacy_binding"
-            or previous.fingerprint_schema_version != CONFIRMATION_FINGERPRINT_VERSION
+            previous.fingerprint_schema_version != CONFIRMATION_FINGERPRINT_VERSION
             or previous.paper_version_id != paper.id
         ):
             continue
@@ -2331,7 +2110,7 @@ def confirm(
     session_id: uuid.UUID, confirmation_type: str, data: VersionedAction, db: Db, actor: Actor
 ) -> dict[str, Any]:
     confirmation_type = confirmation_type.replace("-", "_")
-    if confirmation_type not in CONFIRMATION_TYPES - {"legacy_binding"}:
+    if confirmation_type not in CONFIRMATION_TYPES:
         raise ApiProblem(404, "CONFIRMATION_TYPE_NOT_FOUND", "确认类型不存在")
     session = owned_session(db, actor.id, session_id, lock=True)
     if session.review_version != data.expected_review_version:
@@ -2441,371 +2220,164 @@ def auto_confirm_review_inputs(
     }
 
 
-@router.post("/assignment-review-sessions/{session_id}/rubric-binding")
-def create_binding(
+@router.post("/assignment-review-sessions/{session_id}/structured-rubric-set")
+def create_structured_rubric_set(
     session_id: uuid.UUID, data: VersionedAction, db: Db, actor: Actor
 ) -> dict[str, Any]:
     session = owned_session(db, actor.id, session_id, lock=True)
+    assignment = owned_assignment(db, actor.id, session.assignment_id, lock=True)
+    if assignment.status != AssignmentStatus.draft:
+        raise ApiProblem(409, "ASSIGNMENT_NOT_DRAFT", "只有草稿可准备发布")
     if session.review_version != data.expected_review_version:
         raise ApiProblem(409, "REVIEW_VERSION_CONFLICT", "审查版本已变化")
-    confirms = valid_confirmations(db, session)
-    required = REQUIRED_CONFIRMATIONS - {"legacy_binding"}
-    if required - set(confirms):
+    job, revision, paper = current_inputs(db, assignment)
+    if (
+        job.id != session.generation_job_id
+        or revision.id != session.draft_revision_id
+        or paper.id != session.paper_version_id
+        or job.source_snapshot_hash != session.source_snapshot_hash
+        or review_source_hash(db, assignment, job, revision, paper) != session.structured_set_hash
+    ):
+        raise ApiProblem(409, "REVIEW_SOURCE_STALE", "生成、修订或试卷来源已变化")
+    missing = REQUIRED_CONFIRMATIONS - set(valid_confirmations(db, session))
+    if missing:
         raise ApiProblem(
             422,
-            "CONFIRMATIONS_INCOMPLETE",
-            "绑定前必须完成全部显式确认",
-            {"missing": sorted(required - set(confirms))},
+            "STRUCTURED_SET_CONFIRMATIONS_REQUIRED",
+            "当前发布内容尚未完成安全确认",
+            {"missing": sorted(missing)},
         )
-    source_hash = binding_source_hash(db, session)
-    rows = selected_versions(db, session.paper_version_id)
-    loss_report = projection_loss_report(rows)
-    loss_hash = semantic_hash(loss_report)
-    old = db.scalar(
-        select(AssignmentRubricPublicationBinding).where(
-            AssignmentRubricPublicationBinding.review_session_id == session.id,
-            AssignmentRubricPublicationBinding.source_binding_hash == source_hash,
+    prepared_rows = selected_versions(db, session.paper_version_id)
+    if not _safe_prepared_versions(db, prepared_rows):
+        raise ApiProblem(422, "STRUCTURED_SET_INELIGIBLE", "答案或结构化评分标准尚未达到待发布资格")
+    payload = _structured_set_payload(db, session)
+    content_hash = semantic_hash(payload)
+    rubric_set = db.scalar(
+        select(StructuredRubricSet)
+        .where(
+            StructuredRubricSet.assignment_id == assignment.id,
+            StructuredRubricSet.content_hash == content_hash,
         )
+        .execution_options(populate_existing=True)
+        .with_for_update()
     )
-    if old:
-        validation = validate_current_projection_under_locks(
-            db,
-            session,
-            binding_id=old.id,
-            lock=True,
-            require_confirmed=False,
-        )
-        if validation.current and old.status in {"draft", "validated", "confirmed"}:
-            return binding_json(old)
-        old.status = "stale"
-        old.invalidated_at = now_utc()
-        old.source_binding_hash = digest(
-            {"stale_binding_id": old.id, "previous_source_hash": source_hash}
-        )
-        db.flush()
-    if not _safe_prepared_versions(db, rows):
-        raise ApiProblem(
-            422,
-            "BINDING_SOURCE_UNCONFIRMED",
-            "发布绑定只能使用已确认或通过服务端资格检查的安全草稿",
-        )
-    warnings: list[str] = [item["code"] for item in loss_report]
-    legacy_version = (
-        db.scalar(
-            select(func.max(RubricVersion.version)).where(
-                RubricVersion.assignment_id == session.assignment_id
-            )
-        )
-        or 0
-    ) + 1
-    legacy = RubricVersion(
-        assignment_id=session.assignment_id,
-        version=legacy_version,
-        status=VersionStatus.draft,
-        created_by=actor.id,
-        notes="由教师触发的 Structured Rubric 确定性发布投影",
-    )
-    db.add(legacy)
-    db.flush()
-    mapping: list[dict[str, Any]] = []
-    for row in rows:
-        q, answer, rubric, criteria = row["question"], row["answer"], row["rubric"], row["criteria"]
-        if answer is None or rubric is None or not answer.normalized_content.strip():
-            raise ApiProblem(422, "BINDING_SOURCE_INCOMPLETE", "答案或 Structured Rubric 不完整")
-        domain = criteria[0].metadata_.get("domain_requirements", {}) if criteria else {}
-        qr = QuestionRubric(
-            rubric_version_id=legacy.id,
-            question_id=q.id,
-            standard_answer=answer.normalized_content or answer.raw_content,
-            alternative_answers=list(answer.structured_content.get("alternative_answers", [])),
-            scoring_notes=rubric.title,
-            allow_step_score=any(bool(c.partial_credit_policy) for c in criteria),
-            unit_requirement=domain.get("unit"),
-            format_requirement=domain.get("format"),
-            precision_requirement=domain.get("precision"),
-        )
-        db.add(qr)
-        db.flush()
-        criterion_map = []
-        question_warnings: list[str] = []
-        for c in criteria:
-            conversion_warnings = [
-                item["code"]
-                for item in loss_report
-                if item["question_id"] == str(q.id) and item["criterion_key"] == c.stable_key
-            ]
-            question_warnings.extend(conversion_warnings)
-            fallback_payload = {
-                "projection_mode": "manual_review" if conversion_warnings else "legacy_native",
-                "structured_criterion_id": str(c.id),
-                "dependencies": list(c.dependencies),
-                "validation_rule": c.validation_rule,
-                "alternative_group": c.metadata_.get("alternative_group"),
-                "manual_review_policy": c.manual_review_policy,
-                "conversion_warnings": conversion_warnings,
-            }
-            item = RubricItem(
-                question_rubric_id=qr.id,
-                display_order=c.display_order,
-                title=c.title,
-                description=c.description,
-                points=c.max_points,
-                item_type=c.criterion_type,
-                required=c.required,
-                deduction_rule=json.dumps(fallback_payload, ensure_ascii=False, sort_keys=True),
-            )
-            db.add(item)
-            db.flush()
-            criterion_map.append(
-                {
-                    "criterion_id": str(c.id),
-                    "rubric_item_id": str(item.id),
-                    "points": str(c.max_points),
-                    "warnings": conversion_warnings,
-                    "manual_review_required": bool(conversion_warnings),
-                }
-            )
-        if question_warnings:
-            qr.allow_step_score = True
-            qr.scoring_notes = (
-                f"{rubric.title}；高级结构化规则保留在 Structured Rubric，"
-                "旧版评分项须由教师人工核查"
-            )
-        if q.max_score is None or sum(
-            (Decimal(c.max_points) for c in criteria), Decimal()
-        ) != Decimal(q.max_score):
-            raise ApiProblem(422, "BINDING_POINTS_MISMATCH", "RubricItem 分值必须等于题目分值")
-        mapping.append(
-            {
-                "question_id": str(q.id),
-                "reference_answer_version_id": str(answer.id),
-                "answer_source": answer.source_type,
-                "structured_rubric_version_id": str(rubric.id),
-                "structured_rubric_hash": rubric.content_hash,
-                "legacy_question_rubric_id": str(qr.id),
-                "criteria": criterion_map,
-                "points": str(q.max_score),
-                "conversion_warnings": sorted(set(question_warnings)),
-                "manual_review_required": bool(question_warnings),
-            }
-        )
-    binding_version = (
-        db.scalar(
-            select(func.max(AssignmentRubricPublicationBinding.binding_version)).where(
-                AssignmentRubricPublicationBinding.assignment_id == session.assignment_id
-            )
-        )
-        or 0
-    ) + 1
-    known_compatibility_fallback = all(
-        item["code"] in MANUAL_FALLBACK_WARNINGS for item in loss_report
-    )
-    binding = AssignmentRubricPublicationBinding(
-        owner_id=actor.id,
-        assignment_id=session.assignment_id,
-        review_session_id=session.id,
-        paper_version_id=session.paper_version_id,
-        legacy_rubric_version_id=legacy.id,
-        binding_version=binding_version,
-        status="validated" if known_compatibility_fallback else "draft",
-        source_binding_hash=source_hash,
-        source_semantic_hash=source_hash,
-        target_legacy_hash=target_legacy_hash(db, legacy.id),
-        projection_profile=LEGACY_PROJECTION_PROFILE,
-        projection_version=LEGACY_PROJECTION_SCHEMA_VERSION,
-        loss_report=loss_report,
-        loss_report_hash=loss_hash,
-        mapping=mapping,
-        created_by=actor.id,
-    )
-    db.add(binding)
-    session.legacy_rubric_version_id = legacy.id
-    db.flush()
-    if known_compatibility_fallback and not loss_report:
-        binding.status = "confirmed"
-        binding.confirmed_by = actor.id
-        binding.confirmed_at = now_utc()
-        legacy.status = VersionStatus.confirmed
-        legacy.confirmed_at = binding.confirmed_at
-        db.flush()
-        value, legacy_hash, scope_hash = confirmation_fingerprint(db, session, "legacy_binding")
-        confirmation_version = (
+    created = False
+    if rubric_set is None:
+        version = (
             db.scalar(
-                select(func.max(AssignmentExplicitConfirmation.confirmation_version)).where(
-                    AssignmentExplicitConfirmation.review_session_id == session.id,
-                    AssignmentExplicitConfirmation.confirmation_type == "legacy_binding",
+                select(func.max(StructuredRubricSet.version)).where(
+                    StructuredRubricSet.assignment_id == assignment.id
                 )
             )
             or 0
         ) + 1
-        db.add(
-            AssignmentExplicitConfirmation(
-                review_session_id=session.id,
-                assignment_id=session.assignment_id,
-                confirmation_type="legacy_binding",
-                confirmed_value=canonical(value),
-                source_hash=legacy_hash,
-                fingerprint_schema_version=CONFIRMATION_FINGERPRINT_VERSION,
-                paper_version_id=session.paper_version_id,
-                question_scope_hash=scope_hash,
-                confirmation_origin="system_auto",
-                confirmation_version=confirmation_version,
-                confirmed_by=actor.id,
-            )
-        )
-        db.flush()
-    session.review_version += 1
-    refresh(db, session)
-    audit(
-        db,
-        actor.id,
-        "assignment_rubric_binding.create",
-        "assignment_rubric_publication_binding",
-        binding.id,
-        {"warnings": sorted(set(warnings))},
-    )
-    db.commit()
-    return binding_json(binding)
-
-
-def binding_json(x: AssignmentRubricPublicationBinding) -> dict[str, Any]:
-    warnings = sorted({w for row in x.mapping for w in row.get("conversion_warnings", [])})
-    return {
-        "id": str(x.id),
-        "assignment_id": str(x.assignment_id),
-        "review_session_id": str(x.review_session_id),
-        "paper_version_id": str(x.paper_version_id),
-        "legacy_rubric_version_id": str(x.legacy_rubric_version_id),
-        "binding_version": x.binding_version,
-        "status": x.status,
-        "source_binding_hash": x.source_binding_hash,
-        "source_semantic_hash": x.source_semantic_hash,
-        "target_legacy_hash": x.target_legacy_hash,
-        "projection_profile": x.projection_profile,
-        "projection_version": x.projection_version,
-        "loss_report": x.loss_report or [],
-        "loss_report_hash": x.loss_report_hash,
-        "mapping": x.mapping,
-        "conversion_warnings": warnings,
-        "manual_review_required": bool(x.loss_report),
-    }
-
-
-@router.get("/assignment-review-sessions/{session_id}/rubric-binding")
-def get_binding(session_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
-    session = owned_session(db, actor.id, session_id)
-    row = db.scalar(
-        select(AssignmentRubricPublicationBinding)
-        .where(AssignmentRubricPublicationBinding.review_session_id == session.id)
-        .order_by(AssignmentRubricPublicationBinding.binding_version.desc())
-        .limit(1)
-    )
-    if row is None:
-        raise ApiProblem(404, "BINDING_NOT_FOUND", "绑定不存在")
-    return binding_json(row)
-
-
-@router.post("/assignment-rubric-publication-bindings/{binding_id}/confirm")
-def confirm_binding(
-    binding_id: uuid.UUID, data: VersionedAction, db: Db, actor: Actor
-) -> dict[str, Any]:
-    binding_hint = db.scalar(
-        select(AssignmentRubricPublicationBinding).where(
-            AssignmentRubricPublicationBinding.id == binding_id,
-            AssignmentRubricPublicationBinding.owner_id == actor.id,
-        )
-    )
-    if binding_hint is None:
-        raise ApiProblem(404, "BINDING_NOT_FOUND", "绑定不存在")
-    session = owned_session(db, actor.id, binding_hint.review_session_id, lock=True)
-    if session.review_version != data.expected_review_version:
-        raise ApiProblem(409, "REVIEW_VERSION_CONFLICT", "审查版本已变化")
-    validation = validate_current_projection_under_locks(
-        db,
-        session,
-        binding_id=binding_id,
-        lock=True,
-        require_confirmed=False,
-    )
-    if not validation.current or validation.binding is None:
-        raise ApiProblem(409, "BINDING_PROJECTION_STALE", "发布投影已漂移，请重新审查")
-    binding = validation.binding
-    if binding.status not in {"validated", "draft"}:
-        raise ApiProblem(409, "BINDING_NOT_CONFIRMABLE", "绑定不可确认")
-    warnings = sorted({item["code"] for item in binding.loss_report or []})
-    unsupported_warnings = sorted(set(warnings) - MANUAL_FALLBACK_WARNINGS)
-    if unsupported_warnings:
-        raise ApiProblem(
-            422,
-            "BINDING_NOT_LOSSLESS",
-            "存在尚未支持降级处理的规则，需教师先修改 Structured Rubric",
-            {"warnings": unsupported_warnings},
-        )
-    binding.status, binding.confirmed_by, binding.confirmed_at = "confirmed", actor.id, now_utc()
-    legacy = db.get(RubricVersion, binding.legacy_rubric_version_id)
-    assert legacy
-    legacy.status, legacy.confirmed_at = VersionStatus.confirmed, now_utc()
-    value = confirmation_value(db, session, "legacy_binding") | {
-        "binding_id": binding.id,
-        "source_binding_hash": binding.source_binding_hash,
-    }
-    version = (
-        db.scalar(
-            select(func.max(AssignmentExplicitConfirmation.confirmation_version)).where(
-                AssignmentExplicitConfirmation.review_session_id == session.id,
-                AssignmentExplicitConfirmation.confirmation_type == "legacy_binding",
-            )
-        )
-        or 0
-    ) + 1
-    db.add(
-        AssignmentExplicitConfirmation(
-            review_session_id=session.id,
-            assignment_id=session.assignment_id,
-            confirmation_type="legacy_binding",
-            confirmed_value=canonical(value),
-            source_hash=digest(value),
-            fingerprint_schema_version=CONFIRMATION_FINGERPRINT_VERSION,
+        rubric_set = StructuredRubricSet(
+            owner_id=actor.id,
+            assignment_id=assignment.id,
             paper_version_id=session.paper_version_id,
-            question_scope_hash=confirmation_fingerprint(db, session, "legacy_binding")[2],
-            confirmation_origin="origin",
-            confirmation_version=version,
-            confirmed_by=actor.id,
+            version=version,
+            status="draft",
+            content_hash=content_hash,
+            source_snapshot_hash=session.source_snapshot_hash,
+            total_points=Decimal(payload["total_points"]),
+            created_by=actor.id,
         )
-    )
-    for review_item in db.scalars(
-        select(AssignmentReviewItem)
-        .where(
-            AssignmentReviewItem.review_session_id == session.id,
-            AssignmentReviewItem.issue_code == "LEGACY_CONVERSION_REVIEW",
-            AssignmentReviewItem.status == "open",
-        )
-        .execution_options(populate_existing=True)
-        .with_for_update()
-    ).all():
-        review_item.status = "acknowledged"
-        review_item.teacher_action = "acknowledge"
-        review_item.teacher_note = (
-            "教师已确认保留 Structured Rubric，并将旧版无法表达的规则转为人工核查"
-        )
-        review_item.reviewed_by = actor.id
-        review_item.reviewed_at = now_utc()
-    session.review_version += 1
+        db.add(rubric_set)
+        db.flush()
+        for item in payload["items"]:
+            db.add(
+                StructuredRubricSetItem(
+                    rubric_set_id=rubric_set.id,
+                    question_id=uuid.UUID(item["question_id"]),
+                    question_version=item["question_version"],
+                    reference_answer_version_id=uuid.UUID(item["reference_answer_version_id"]),
+                    structured_rubric_version_id=uuid.UUID(item["structured_rubric_version_id"]),
+                    answer_content_hash=item["answer_content_hash"],
+                    rubric_content_hash=item["rubric_content_hash"],
+                    criteria_hash=item["criteria_hash"],
+                    display_order=item["display_order"],
+                    max_points=Decimal(item["max_points"]),
+                )
+            )
+        created = True
+    if session.structured_rubric_set_id != rubric_set.id:
+        session.structured_rubric_set_id = rubric_set.id
+        session.review_version += 1
     db.flush()
     refresh(db, session)
     audit(
         db,
         actor.id,
-        "assignment_rubric_binding.confirm",
-        "assignment_rubric_publication_binding",
-        binding.id,
-        {
-            "conversion_warnings": warnings,
-            "degradation_mode": "manual_review" if warnings else "lossless",
-        },
+        "assignment.structured_rubric_set.prepare",
+        "structured_rubric_set",
+        rubric_set.id,
+        {"created": created, "content_hash": content_hash, "version": rubric_set.version},
     )
     db.commit()
-    return binding_json(binding) | {"review_version": session.review_version}
+    return structured_rubric_set_json(db, rubric_set) | {
+        "created": created,
+        "review_version": session.review_version,
+    }
+
+
+def structured_rubric_set_json(db: Session, rubric_set: StructuredRubricSet) -> dict[str, Any]:
+    items = list(
+        db.scalars(
+            select(StructuredRubricSetItem)
+            .where(StructuredRubricSetItem.rubric_set_id == rubric_set.id)
+            .order_by(StructuredRubricSetItem.display_order, StructuredRubricSetItem.id)
+        )
+    )
+    return {
+        "id": str(rubric_set.id),
+        "assignment_id": str(rubric_set.assignment_id),
+        "paper_version_id": str(rubric_set.paper_version_id),
+        "version": rubric_set.version,
+        "status": rubric_set.status,
+        "content_hash": rubric_set.content_hash,
+        "source_snapshot_hash": rubric_set.source_snapshot_hash,
+        "total_points": str(rubric_set.total_points),
+        "confirmed_by": str(rubric_set.confirmed_by) if rubric_set.confirmed_by else None,
+        "confirmed_at": rubric_set.confirmed_at,
+        "activated_at": rubric_set.activated_at,
+        "items": [
+            {
+                "id": str(item.id),
+                "question_id": str(item.question_id),
+                "question_version": item.question_version,
+                "reference_answer_version_id": str(item.reference_answer_version_id),
+                "structured_rubric_version_id": str(item.structured_rubric_version_id),
+                "answer_content_hash": item.answer_content_hash,
+                "rubric_content_hash": item.rubric_content_hash,
+                "criteria_hash": item.criteria_hash,
+                "display_order": item.display_order,
+                "max_points": str(item.max_points),
+            }
+            for item in items
+        ],
+    }
+
+
+@router.get("/assignment-review-sessions/{session_id}/structured-rubric-set")
+def get_structured_rubric_set(session_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
+    session = owned_session(db, actor.id, session_id)
+    if session.structured_rubric_set_id is None:
+        raise ApiProblem(404, "STRUCTURED_SET_NOT_FOUND", "尚未准备结构化评分标准集合")
+    rubric_set = db.get(StructuredRubricSet, session.structured_rubric_set_id)
+    if rubric_set is None or rubric_set.assignment_id != session.assignment_id:
+        raise ApiProblem(404, "STRUCTURED_SET_NOT_FOUND", "结构化评分标准集合不存在")
+    validation = validate_current_structured_set_under_locks(
+        db,
+        session,
+        rubric_set_id=rubric_set.id,
+        lock=False,
+        require_confirmed=False,
+    )
+    return structured_rubric_set_json(db, rubric_set) | {
+        "current": validation.current,
+        "reason": validation.reason,
+        "review_version": session.review_version,
+    }
 
 
 @router.post("/assignment-review-sessions/{session_id}/prepare-publication")
@@ -2826,18 +2398,18 @@ def prepare_publication(
         or paper_now.id != session.paper_version_id
         or job.source_snapshot_hash != session.source_snapshot_hash
         or review_source_hash(db, assignment, job, revision, paper_now)
-        != session.structured_binding_hash
+        != session.structured_set_hash
     ):
         raise ApiProblem(409, "REVIEW_SOURCE_STALE", "生成、修订或试卷来源已变化")
-    projection = validate_current_projection_under_locks(
-        db, session, lock=True, require_confirmed=True
+    set_validation = validate_current_structured_set_under_locks(
+        db, session, lock=True, require_confirmed=False
     )
-    if not projection.current or projection.binding is None:
+    if not set_validation.current or set_validation.rubric_set is None:
         raise ApiProblem(
             409,
-            "BINDING_PROJECTION_STALE",
-            "发布投影或 legacy 确认已漂移",
-            {"reason": projection.reason},
+            "STRUCTURED_SET_STALE",
+            "待发布的结构化评分标准集合已漂移",
+            {"reason": set_validation.reason},
         )
     refresh(db, session)
     prepared_rows = selected_versions(db, session.paper_version_id)
@@ -2871,12 +2443,11 @@ def prepare_publication(
             "显式确认不完整",
             {"missing": sorted(REQUIRED_CONFIRMATIONS - set(confirms))},
         )
-    binding = projection.binding
-    if binding is None or assignment.total_score is None:
+    rubric_set = set_validation.rubric_set
+    if rubric_set is None or assignment.total_score is None:
         raise ApiProblem(422, "PUBLICATION_INPUT_INCOMPLETE", "发布输入不完整")
     paper = db.get(PaperVersion, session.paper_version_id)
-    legacy = db.get(RubricVersion, binding.legacy_rubric_version_id)
-    assert paper and legacy
+    assert paper
     payload = state_payload(db, assignment, paper)
     state_hash = digest(payload)
     class_ids = payload["assignment"]["class_ids"]
@@ -2885,7 +2456,7 @@ def prepare_publication(
         "review_version": session.review_version,
         "state_hash": state_hash,
         "risk_hash": session.risk_ledger_hash,
-        "binding_id": binding.id,
+        "structured_rubric_set_id": rubric_set.id,
         "source_hash": session.source_snapshot_hash,
     }
     ready_hash = digest(ready_payload)
@@ -2923,8 +2494,7 @@ def prepare_publication(
         assignment_id=assignment.id,
         review_session_id=session.id,
         paper_version_id=paper.id,
-        legacy_rubric_version_id=legacy.id,
-        binding_id=binding.id,
+        structured_rubric_set_id=rubric_set.id,
         generation=session.generation,
         draft_revision_id=session.draft_revision_id,
         risk_ledger_hash=session.risk_ledger_hash,
@@ -2958,8 +2528,7 @@ def readiness_json(x: AssignmentPublishReadinessSnapshot) -> dict[str, Any]:
         "expires_at": x.expires_at,
         "consumed_at": x.consumed_at,
         "paper_version_id": str(x.paper_version_id),
-        "legacy_rubric_version_id": str(x.legacy_rubric_version_id),
-        "binding_id": str(x.binding_id),
+        "structured_rubric_set_id": str(x.structured_rubric_set_id),
         "class_ids": x.class_ids,
         "due_at": x.due_at,
         "total_score": str(x.total_score),
@@ -3018,17 +2587,17 @@ def prepare_assignment_publication(
     )
     session = owned_session(db, actor.id, session.id)
     confirms = valid_confirmations(db, session)
-    binding_error: ApiProblem | None = None
-    if not (REQUIRED_CONFIRMATIONS - {"legacy_binding"} - set(confirms)):
+    set_error: ApiProblem | None = None
+    if not (REQUIRED_CONFIRMATIONS - set(confirms)):
         try:
-            create_binding(
+            create_structured_rubric_set(
                 session.id,
                 VersionedAction(expected_review_version=session.review_version),
                 db,
                 actor,
             )
         except ApiProblem as exc:
-            binding_error = exc
+            set_error = exc
     session = owned_session(db, actor.id, session.id)
     try:
         return prepare_publication(
@@ -3052,15 +2621,13 @@ def prepare_assignment_publication(
             for item in bundle["blockers"]
             if item["severity"] in {"blocking", "warning"}
         ]
-        if binding_error is not None and not any(
-            item["code"] == binding_error.code for item in exceptions
-        ):
+        if set_error is not None and not any(item["code"] == set_error.code for item in exceptions):
             exceptions.append(
                 {
-                    "code": binding_error.code,
+                    "code": set_error.code,
                     "severity": "blocking",
-                    "message": binding_error.message,
-                    "entity_type": "rubric_binding",
+                    "message": set_error.message,
+                    "entity_type": "structured_rubric_set",
                     "entity_id": None,
                 }
             )
@@ -3137,24 +2704,24 @@ def teacher_publish(
         or paper_now.id != session.paper_version_id
         or job.source_snapshot_hash != session.source_snapshot_hash
         or review_source_hash(db, assignment, job, revision, paper_now)
-        != session.structured_binding_hash
+        != session.structured_set_hash
     ):
         snapshot.status, snapshot.invalidated_at = "invalidated", now
         raise ApiProblem(409, "READINESS_STALE", "生成、修订或试卷来源已变化")
-    projection = validate_current_projection_under_locks(
+    set_validation = validate_current_structured_set_under_locks(
         db,
         session,
-        binding_id=snapshot.binding_id,
+        rubric_set_id=snapshot.structured_rubric_set_id,
         lock=True,
-        require_confirmed=True,
+        require_confirmed=False,
     )
-    if not projection.current or projection.binding is None:
+    if not set_validation.current or set_validation.rubric_set is None:
         snapshot.status, snapshot.invalidated_at = "invalidated", now
         raise ApiProblem(
             409,
             "READINESS_STALE",
-            "发布投影或 legacy 确认已漂移",
-            {"reason": projection.reason},
+            "结构化评分标准集合已漂移",
+            {"reason": set_validation.reason},
         )
     paper = db.get(PaperVersion, snapshot.paper_version_id)
     if (
@@ -3197,26 +2764,35 @@ def teacher_publish(
             )
     db.flush()
     refresh(db, session)
-    binding = projection.binding
-    legacy = db.get(RubricVersion, snapshot.legacy_rubric_version_id)
+    rubric_set = set_validation.rubric_set
+    final_set_validation = validate_current_structured_set_under_locks(
+        db,
+        session,
+        rubric_set_id=snapshot.structured_rubric_set_id,
+        lock=True,
+        require_confirmed=False,
+    )
     if (
         not paper
-        or not binding
-        or not legacy
-        or binding.status != "confirmed"
+        or not rubric_set
+        or not final_set_validation.current
         or session.blocking_count
         or REQUIRED_CONFIRMATIONS - set(valid_confirmations(db, session))
     ):
         raise ApiProblem(409, "READINESS_STALE", "发布门禁已变化")
     from app.api.assignments import freeze_participant_roster, publish_issues
 
-    assignment.active_paper_version_id, assignment.active_rubric_version_id = paper.id, legacy.id
+    assignment.active_paper_version_id = paper.id
+    assignment.active_structured_rubric_set_id = rubric_set.id
     issues = publish_issues(db, assignment)
     if issues:
         raise ApiProblem(422, "ASSIGNMENT_INCOMPLETE", "现有发布门禁未通过", {"issues": issues})
     participant_count = freeze_participant_roster(db, assignment)
     paper.status, paper.confirmed_at = VersionStatus.confirmed, paper.confirmed_at or now
-    legacy.status, legacy.confirmed_at = VersionStatus.confirmed, legacy.confirmed_at or now
+    rubric_set.status = "active"
+    rubric_set.confirmed_by = actor_id
+    rubric_set.confirmed_at = rubric_set.confirmed_at or now
+    rubric_set.activated_at = now
     assignment.status, assignment.published_at = AssignmentStatus.published, now
     snapshot.status, snapshot.consumed_at = "consumed", now
     session.status, session.completed_at = "published", now
@@ -3229,9 +2805,8 @@ def teacher_publish(
         {
             "readiness_snapshot_id": str(snapshot.id),
             "review_session_id": str(session.id),
-            "binding_id": str(binding.id),
+            "structured_rubric_set_id": str(rubric_set.id),
             "paper_version_id": str(paper.id),
-            "rubric_version_id": str(legacy.id),
             "participant_count": participant_count,
         },
     )

@@ -112,7 +112,7 @@ def test_fake_job_candidates_corrections_confirmation_and_idempotency() -> None:
             f"/api/assignments/{aid}/rubrics/{unknown_question.id}",
             json={"standard_answer": "答案", "items": [{"title": "正确", "points": 1}]},
         )
-        assert rubric.status_code == 422 and rubric.json()["code"] == "QUESTION_SCORE_REQUIRED"
+        assert rubric.status_code == 404
         assert client.post(f"/api/assignments/{aid}/publish").status_code == 422
         edited = client.patch(
             f"/api/assignments/{aid}/recognition/jobs/{job['id']}/candidates/{candidate['id']}",

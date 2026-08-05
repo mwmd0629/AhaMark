@@ -6,7 +6,6 @@ import json
 import uuid
 import zipfile
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 
 from openpyxl import Workbook, load_workbook
 from PIL import Image, ImageDraw
@@ -28,13 +27,14 @@ from app.models import (
     PaperPage,
     Question,
     QuestionKnowledgePoint,
-    QuestionRubric,
     ReportJob,
-    RubricItem,
-    RubricVersion,
+    RubricCriterion,
     SchoolClass,
     ScoreRevision,
     StoredFile,
+    StructuredRubricSet,
+    StructuredRubricSetItem,
+    StructuredRubricVersion,
     Student,
     Submission,
     SubmissionPage,
@@ -258,7 +258,7 @@ def main() -> None:
         complete = db.get(SubmissionScoreSnapshot, item.score_snapshot_id)
         if complete is None:
             raise RuntimeError("release snapshot missing")
-        rubric = db.get(RubricVersion, complete.rubric_version_id)
+        rubric_set = db.get(StructuredRubricSet, complete.structured_rubric_set_id)
         question = db.scalar(
             select(Question)
             .where(Question.paper_version_id == complete.paper_version_id)
@@ -269,43 +269,37 @@ def main() -> None:
             .where(KnowledgePoint.owner_id == teacher.id)
             .order_by(KnowledgePoint.id)
         )
-        if rubric is None or question is None or knowledge_point is None:
-            raise RecoveryGuardError("capacity rubric, question, or knowledge point is missing")
-        question_rubric = db.scalar(
-            select(QuestionRubric).where(
-                QuestionRubric.rubric_version_id == rubric.id,
-                QuestionRubric.question_id == question.id,
+        if rubric_set is None or question is None or knowledge_point is None:
+            raise RecoveryGuardError(
+                "capacity Structured Rubric Set, question, or knowledge point is missing"
+            )
+        if (
+            rubric_set.assignment_id != complete.assignment_id
+            or rubric_set.paper_version_id != complete.paper_version_id
+            or rubric_set.status != "active"
+        ):
+            raise RecoveryGuardError("capacity Structured Rubric Set is inconsistent")
+        set_item = db.scalar(
+            select(StructuredRubricSetItem).where(
+                StructuredRubricSetItem.rubric_set_id == rubric_set.id,
+                StructuredRubricSetItem.question_id == question.id,
             )
         )
-        expected_question_rubric_id = recovery_uid(identity.run_id, "question-rubric")
-        if question_rubric is None:
-            question_rubric = QuestionRubric(
-                id=expected_question_rubric_id,
-                rubric_version_id=rubric.id,
-                question_id=question.id,
-                standard_answer="Synthetic recovery answer",
-                scoring_notes=f"Synthetic recovery rubric {identity.run_id}",
-            )
-            db.add(question_rubric)
-            db.flush()
-        elif question_rubric.id != expected_question_rubric_id:
-            raise RecoveryGuardError("question rubric belongs to a different recovery run")
-        rubric_item_id = recovery_uid(identity.run_id, "rubric-item")
-        rubric_item = db.get(RubricItem, rubric_item_id)
-        if rubric_item is None:
-            db.add(
-                RubricItem(
-                    id=rubric_item_id,
-                    question_rubric_id=question_rubric.id,
-                    display_order=1,
-                    title=f"Synthetic recovery criterion {identity.run_id}",
-                    description="Synthetic recovery-only rubric item",
-                    points=Decimal("1"),
-                    required=True,
-                )
-            )
-        elif rubric_item.question_rubric_id != question_rubric.id:
-            raise RecoveryGuardError("rubric item relationship is inconsistent")
+        if set_item is None:
+            raise RecoveryGuardError("capacity Structured Rubric Set item is missing")
+        rubric = db.get(StructuredRubricVersion, set_item.structured_rubric_version_id)
+        criterion = (
+            db.scalar(select(RubricCriterion).where(RubricCriterion.rubric_version_id == rubric.id))
+            if rubric is not None
+            else None
+        )
+        if (
+            rubric is None
+            or criterion is None
+            or rubric.question_id != question.id
+            or set_item.reference_answer_version_id != rubric.reference_answer_version_id
+        ):
+            raise RecoveryGuardError("capacity Structured Rubric manifest is incomplete")
         question_point = db.get(
             QuestionKnowledgePoint,
             {"question_id": question.id, "knowledge_point_id": knowledge_point.id},
@@ -331,7 +325,7 @@ def main() -> None:
                     assignment_id=complete.assignment_id,
                     student_id=complete.student_id,
                     paper_version_id=complete.paper_version_id,
-                    rubric_version_id=complete.rubric_version_id,
+                    structured_rubric_set_id=complete.structured_rubric_set_id,
                     total_score=None,
                     max_score=complete.max_score,
                     status="incomplete",

@@ -1,11 +1,17 @@
 """Seed complete synthetic score/release fixtures for capacity reports and analytics."""
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import select
 
+from app.api.assignment_central_review import (
+    _answer_content_payload,
+    _criterion_payload,
+    _rubric_content_payload,
+)
 from app.cli.seed_capacity_demo import MARKER, uid
 from app.db.session import SessionLocal
 from app.models import (
@@ -18,20 +24,31 @@ from app.models import (
     KnowledgePoint,
     PaperVersion,
     Question,
-    RubricVersion,
+    ReferenceAnswerVersion,
+    RubricCriterion,
+    StructuredRubricSet,
+    StructuredRubricSetItem,
+    StructuredRubricVersion,
     Student,
     StudentAnswer,
     Submission,
     SubmissionScoreSnapshot,
     TeacherReview,
     User,
+    VersionStatus,
 )
+from app.question_versions import question_version_token
+from app.semantic_content import semantic_hash
 
 SCALES = (
     ("s1", 1, 50, 20),
     ("s2-t1-c1", 2, 100, 50),
     ("s3-t1", 4, 200, 100),
 )
+
+
+def synthetic_hash(*parts: object) -> str:
+    return hashlib.sha256(":".join(str(part) for part in parts).encode()).hexdigest()
 
 
 def build_scale(
@@ -57,19 +74,129 @@ def build_scale(
         )
         if len(questions) != question_count:
             raise RuntimeError(f"{scale} expected {question_count} questions, got {len(questions)}")
-        rubric = db.get(RubricVersion, uid(f"rubric-{scale}"))
-        if rubric is None:
-            rubric = RubricVersion(
-                id=uid(f"rubric-{scale}"),
+        rubric_set = db.get(StructuredRubricSet, uid(f"structured-set-{scale}"))
+        if rubric_set is None:
+            total_points = Decimal(question_count).quantize(Decimal("0.01"))
+            rubric_set = StructuredRubricSet(
+                id=uid(f"structured-set-{scale}"),
+                owner_id=teacher.id,
                 assignment_id=assignment.id,
+                paper_version_id=paper.id,
                 version=1,
-                status="confirmed",
+                status="active",
+                content_hash=synthetic_hash(MARKER, scale, "structured-set-pending"),
+                source_snapshot_hash=synthetic_hash(MARKER, scale, "source-snapshot"),
+                total_points=total_points,
                 created_by=teacher.id,
+                confirmed_by=teacher.id,
                 confirmed_at=generated_at,
+                activated_at=generated_at,
             )
-            db.add(rubric)
+            db.add(rubric_set)
             db.flush()
-        assignment.active_rubric_version_id = rubric.id
+            set_items: list[StructuredRubricSetItem] = []
+            for question_index, question in enumerate(questions, 1):
+                reference = ReferenceAnswerVersion(
+                    id=uid(f"reference-{scale}-{question_index}"),
+                    question_id=question.id,
+                    source_type="teacher_official",
+                    source_region={},
+                    raw_content=f"Synthetic capacity answer {question_index}",
+                    normalized_content=f"Synthetic capacity answer {question_index}",
+                    structured_content={"synthetic": True},
+                    content_hash="0" * 64,
+                    version=1,
+                    provenance={"fixture": MARKER},
+                    created_by=teacher.id,
+                    status="confirmed",
+                    teacher_confirmed_at=generated_at,
+                )
+                reference.content_hash = semantic_hash(_answer_content_payload(reference))
+                db.add(reference)
+                db.flush()
+                rubric = StructuredRubricVersion(
+                    id=uid(f"structured-rubric-{scale}-{question_index}"),
+                    question_id=question.id,
+                    question_version=question_version_token(question),
+                    reference_answer_version_id=reference.id,
+                    rubric_version=1,
+                    title=f"Synthetic capacity rubric {question_index}",
+                    total_points=Decimal("1.00"),
+                    status="confirmed",
+                    content_hash="0" * 64,
+                    created_by=teacher.id,
+                    confirmed_by=teacher.id,
+                    confirmed_at=generated_at,
+                )
+                db.add(rubric)
+                db.flush()
+                criterion = RubricCriterion(
+                    id=uid(f"criterion-{scale}-{question_index}"),
+                    rubric_version_id=rubric.id,
+                    stable_key="manual-score",
+                    title="Synthetic manually confirmed score",
+                    description="Synthetic capacity fixture criterion",
+                    max_points=Decimal("1.00"),
+                    display_order=1,
+                    criterion_type="manual",
+                    required=True,
+                    dependencies=[],
+                    expected_evidence={"fixture": MARKER},
+                    validation_mode="manual",
+                    validation_rule={},
+                    manual_review_policy={"manual_only": True},
+                    partial_credit_policy={},
+                    metadata_={"synthetic": True},
+                )
+                db.add(criterion)
+                db.flush()
+                rubric.content_hash = semantic_hash(_rubric_content_payload(db, rubric))
+                set_item = StructuredRubricSetItem(
+                    id=uid(f"structured-set-item-{scale}-{question_index}"),
+                    rubric_set_id=rubric_set.id,
+                    question_id=question.id,
+                    question_version=rubric.question_version,
+                    reference_answer_version_id=reference.id,
+                    structured_rubric_version_id=rubric.id,
+                    answer_content_hash=reference.content_hash,
+                    rubric_content_hash=rubric.content_hash,
+                    criteria_hash=semantic_hash([_criterion_payload(criterion)]),
+                    display_order=question_index,
+                    max_points=Decimal("1.00"),
+                )
+                db.add(set_item)
+                set_items.append(set_item)
+            rubric_set.content_hash = semantic_hash(
+                {
+                    "assignment_id": str(assignment.id),
+                    "paper_version_id": str(paper.id),
+                    "source_snapshot_hash": rubric_set.source_snapshot_hash,
+                    "total_points": str(total_points),
+                    "items": [
+                        {
+                            "question_id": str(item.question_id),
+                            "question_version": item.question_version,
+                            "reference_answer_version_id": str(item.reference_answer_version_id),
+                            "structured_rubric_version_id": str(item.structured_rubric_version_id),
+                            "answer_content_hash": item.answer_content_hash,
+                            "rubric_content_hash": item.rubric_content_hash,
+                            "criteria_hash": item.criteria_hash,
+                            "display_order": item.display_order,
+                            "max_points": str(item.max_points),
+                        }
+                        for item in set_items
+                    ],
+                }
+            )
+        elif (
+            rubric_set.assignment_id != assignment.id
+            or rubric_set.paper_version_id != paper.id
+            or rubric_set.status != "active"
+        ):
+            raise RuntimeError(f"capacity Structured Rubric Set is inconsistent for {scale}")
+        paper.status = VersionStatus.confirmed
+        paper.confirmed_at = paper.confirmed_at or generated_at
+        assignment.active_structured_rubric_set_id = rubric_set.id
         assignment.status = AssignmentStatus.completed
         knowledge_points = []
         for index in range(1, 6):
@@ -205,7 +332,7 @@ def build_scale(
                     assignment_id=assignment.id,
                     student_id=student.id,
                     paper_version_id=paper.id,
-                    rubric_version_id=rubric.id,
+                    structured_rubric_set_id=rubric_set.id,
                     total_score=total,
                     max_score=Decimal(question_count),
                     status="complete",

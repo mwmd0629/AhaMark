@@ -10,7 +10,6 @@ from app.models import (
     AIFeedbackDraft,
     AIScoringJob,
     Assignment,
-    AssignmentRubricPublicationBinding,
     AuditLog,
     CodexWorkItem,
     GradeRelease,
@@ -18,15 +17,15 @@ from app.models import (
     GradingEvidence,
     GradingJob,
     GradingResult,
+    PaperVersion,
     ProcessingRun,
     ProcessingStep,
     Question,
     QuestionRecognitionEvidence,
-    QuestionRubric,
     ReferenceAnswerVersion,
     RubricCriterion,
-    RubricItem,
-    RubricVersion,
+    StructuredRubricSet,
+    StructuredRubricSetItem,
     StructuredRubricVersion,
     StudentAnswer,
     StudentAnswerRegion,
@@ -61,9 +60,19 @@ def submitted_item(
     assert answer is not None and submission is not None
     assignment = db.get(Assignment, submission.assignment_id)
     assert assignment is not None
+    paper = PaperVersion(
+        assignment_id=assignment.id,
+        version=1,
+        status=VersionStatus.confirmed,
+        source_type="manual",
+        created_by=run.owner_id,
+        confirmed_at=now_utc(),
+    )
+    db.add(paper)
+    db.flush()
     question = Question(
         id=answer.question_id,
-        paper_version_id=uuid.uuid4(),
+        paper_version_id=paper.id,
         question_number="1",
         display_order=1,
         question_type="short_answer",
@@ -96,13 +105,7 @@ def submitted_item(
         content_hash="2" * 64,
         created_by=run.owner_id,
     )
-    legacy = RubricVersion(
-        assignment_id=assignment.id,
-        version=1,
-        status=VersionStatus.confirmed,
-        created_by=run.owner_id,
-    )
-    db.add_all([rubric, legacy])
+    db.add(rubric)
     db.flush()
     criterion = RubricCriterion(
         rubric_version_id=rubric.id,
@@ -120,45 +123,35 @@ def submitted_item(
         partial_credit_policy={},
         metadata_={},
     )
-    question_rubric = QuestionRubric(
-        rubric_version_id=legacy.id,
-        question_id=question.id,
-        standard_answer="2",
-    )
-    db.add_all([criterion, question_rubric])
+    db.add(criterion)
     db.flush()
-    rubric_item = RubricItem(
-        question_rubric_id=question_rubric.id,
-        display_order=1,
-        title="Correct",
-        points=Decimal("2"),
-    )
-    db.add(rubric_item)
-    db.flush()
-    binding = AssignmentRubricPublicationBinding(
+    rubric_set = StructuredRubricSet(
         owner_id=run.owner_id,
         assignment_id=assignment.id,
-        review_session_id=uuid.uuid4(),
-        paper_version_id=question.paper_version_id,
-        legacy_rubric_version_id=legacy.id,
-        binding_version=1,
-        status="confirmed",
-        source_binding_hash="3" * 64,
-        target_legacy_hash="4" * 64,
-        mapping=[
-            {
-                "question_id": str(question.id),
-                "structured_rubric_version_id": str(rubric.id),
-                "legacy_question_rubric_id": str(question_rubric.id),
-                "criteria": [
-                    {
-                        "criterion_id": str(criterion.id),
-                        "rubric_item_id": str(rubric_item.id),
-                    }
-                ],
-            }
-        ],
+        paper_version_id=paper.id,
+        version=1,
+        status="active",
+        content_hash="3" * 64,
+        source_snapshot_hash="4" * 64,
+        total_points=Decimal("2"),
         created_by=run.owner_id,
+        confirmed_by=run.owner_id,
+        confirmed_at=now_utc(),
+        activated_at=now_utc(),
+    )
+    db.add(rubric_set)
+    db.flush()
+    set_item = StructuredRubricSetItem(
+        rubric_set_id=rubric_set.id,
+        question_id=question.id,
+        question_version=rubric.question_version,
+        reference_answer_version_id=reference.id,
+        structured_rubric_version_id=rubric.id,
+        answer_content_hash=reference.content_hash,
+        rubric_content_hash=rubric.content_hash,
+        criteria_hash="5" * 64,
+        display_order=1,
+        max_points=Decimal("2"),
     )
     region = StudentAnswerRegion(
         student_answer_id=answer.id,
@@ -171,7 +164,7 @@ def submitted_item(
         confirmed_by=run.owner_id,
         confirmed_at=now_utc(),
     )
-    db.add_all([binding, region])
+    db.add_all([set_item, region])
     db.flush()
     evidence = QuestionRecognitionEvidence(
         owner_id=run.owner_id,
@@ -181,14 +174,15 @@ def submitted_item(
         status="confirmed",
         block_sources=[{"region_id": str(region.id)}],
         provider_versions={"synthetic": "1"},
-        input_hash="5" * 64,
-        output_hash="6" * 64,
+        input_hash="6" * 64,
+        output_hash="7" * 64,
         recognition_version=1,
         confirmed_revision=1,
         requires_review=False,
     )
     db.add(evidence)
-    assignment.active_rubric_version_id = legacy.id
+    assignment.active_paper_version_id = paper.id
+    assignment.active_structured_rubric_set_id = rubric_set.id
     answer.recognized_text = "2"
     request = canonicalize(
         {
@@ -199,7 +193,15 @@ def submitted_item(
                         "structured_rubric": {"id": str(rubric.id)},
                         "reference_answer": {"id": str(reference.id)},
                     },
-                    "legacy_projection": {"binding_id": str(binding.id)},
+                    "structured_rubric_set": {
+                        "id": str(rubric_set.id),
+                        "version": rubric_set.version,
+                        "content_hash": rubric_set.content_hash,
+                        "item_id": str(set_item.id),
+                        "answer_content_hash": set_item.answer_content_hash,
+                        "rubric_content_hash": set_item.rubric_content_hash,
+                        "criteria_hash": set_item.criteria_hash,
+                    },
                 }
             },
         }

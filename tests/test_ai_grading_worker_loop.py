@@ -119,6 +119,7 @@ def scoring_job() -> tuple[Any, AIScoringJob]:
         student_answer_id=answer.id,
         recognition_evidence_id=evidence.id,
         reference_answer_version_id=reference.id,
+        structured_rubric_set_id=validation.structured_rubric_set_id,
         rubric_version_id=rubric.id,
         math_validation_job_id=validation.id,
         question_version=answer.question_version_reference,
@@ -170,11 +171,9 @@ def test_migration_head_matches_strict_audit_models() -> None:
     collaboration_revision = script.get_revision("0030_collaborative_grading")
     student_portal_revision = script.get_revision("0031_student_portal")
     joint_exam_revision = script.get_revision("0032_joint_exam_roster")
-    joint_exam_authorization_revision = script.get_revision(
-        "0033_joint_exam_class_authorization"
-    )
-    assert script.get_current_head() == joint_exam_authorization_revision.revision
-    assert joint_exam_authorization_revision.down_revision == joint_exam_revision.revision
+    structured_only_revision = script.get_revision("0034_structured_rubric_authority")
+    assert script.get_current_head() == structured_only_revision.revision
+    assert structured_only_revision.down_revision == "0033_joint_exam_class_authorization"
     assert joint_exam_revision.down_revision == student_portal_revision.revision
     assert student_portal_revision.down_revision == collaboration_revision.revision
     assert collaboration_revision.down_revision == auto_confirmation_revision.revision
@@ -404,7 +403,6 @@ def test_manual_validation_never_creates_a_score(monkeypatch: pytest.MonkeyPatch
         select(RubricCriterion).where(RubricCriterion.rubric_version_id == job.rubric_version_id)
     )
     assert criterion is not None
-    criterion.validation_mode = "manual_only"
     result_row = db.scalar(
         select(CriterionValidationResult).where(
             CriterionValidationResult.validation_job_id == job.math_validation_job_id
@@ -466,7 +464,6 @@ def test_strict_create_and_retry_replay_only_the_same_contract(
     try:
         data = CreateJob(
             student_answer_id=seed.student_answer_id,
-            rubric_version_id=seed.rubric_version_id,
             idempotency_key="strict-create-stable",
         )
         first = create_job(data, db, actor)
@@ -497,8 +494,8 @@ def test_strict_create_and_retry_replay_only_the_same_contract(
             idempotency_key="strict-criterion-retry-stable",
             expected_generation=source.generation,
         )
-        criterion_first = retry_criterion(source.id, "result", criterion_retry, db, actor)
-        criterion_replay = retry_criterion(source.id, "result", criterion_retry, db, actor)
+        criterion_first = retry_criterion(source.id, "answer", criterion_retry, db, actor)
+        criterion_replay = retry_criterion(source.id, "answer", criterion_retry, db, actor)
         assert criterion_replay["id"] == criterion_first["id"]
     finally:
         settings.ai_grading_provider = old_provider
@@ -538,7 +535,6 @@ def test_new_job_generation_fences_inflight_and_preexisting_old_worker(
                 created = create_job(
                     CreateJob(
                         student_answer_id=old_job.student_answer_id,
-                        rubric_version_id=old_job.rubric_version_id,
                         idempotency_key="newer-while-provider-running",
                     ),
                     other,
@@ -580,7 +576,6 @@ def test_new_job_generation_fences_inflight_and_preexisting_old_worker(
         third = create_job(
             CreateJob(
                 student_answer_id=old_job.student_answer_id,
-                rubric_version_id=old_job.rubric_version_id,
                 idempotency_key="preexisting-third-generation",
             ),
             db,
@@ -623,7 +618,6 @@ def test_dispatch_failure_is_retryable_and_same_key_recovers_once(
     actor = CurrentActor(seed.owner_id, "teacher@example.test")
     data = CreateJob(
         student_answer_id=seed.student_answer_id,
-        rubric_version_id=seed.rubric_version_id,
         idempotency_key="dispatch-recovery",
     )
     try:

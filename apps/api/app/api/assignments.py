@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from app.api.actor import Actor
-from app.api.assignment_central_review import PublishInput, digest
+from app.api.assignment_central_review import PublishInput
 from app.api.domain import ApiProblem, audit
 from app.core.config import get_settings
 from app.db.session import get_db
@@ -16,13 +16,12 @@ from app.models import (
     ArchiveStatus,
     Assignment,
     AssignmentClass,
-    AssignmentGenerationJob,
     AssignmentParticipantSnapshot,
+    AssignmentReviewSession,
     AssignmentStatus,
     ClassStudent,
     FileStatus,
     GradingCollaborator,
-    GradingResult,
     KnowledgePoint,
     MembershipStatus,
     PaperPage,
@@ -30,20 +29,20 @@ from app.models import (
     Question,
     QuestionKnowledgePoint,
     QuestionRegion,
-    QuestionRubric,
     QuestionStatus,
-    RubricItem,
-    RubricVersion,
+    ReferenceAnswerVersion,
+    RubricCriterion,
     SchoolClass,
     StoredFile,
+    StructuredRubricSet,
+    StructuredRubricSetItem,
+    StructuredRubricVersion,
     Student,
-    StudentAnswer,
-    Submission,
     User,
-    VersionStatus,
     now_utc,
 )
 from app.security.files import UnsafeFile, inspect_upload, safe_filename
+from app.semantic_content import semantic_hash
 from app.storage.base import ObjectStorage
 from app.storage.dependencies import get_storage
 from fastapi import APIRouter, Depends, File, Query, UploadFile
@@ -111,12 +110,6 @@ class JointExamClassesInput(BaseModel):
     class_ids: list[uuid.UUID] = Field(min_length=1)
 
 
-class ManualPublishInput(BaseModel):
-    state_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    expected_assignment_updated_at: datetime
-    explicit_confirmation: Literal[True]
-
-
 class PagePatch(BaseModel):
     page_number: int | None = Field(None, ge=1)
     rotation: Literal[0, 90, 180, 270] | None = None
@@ -158,17 +151,6 @@ class RegionInput(BaseModel):
         ):
             raise ValueError("区域必须位于 0..1 页面坐标内")
         return self
-
-
-class RubricInput(BaseModel):
-    standard_answer: str | None = None
-    alternative_answers: list[str] = Field(default_factory=list)
-    scoring_notes: str | None = None
-    allow_step_score: bool = True
-    unit_requirement: str | None = None
-    format_requirement: str | None = None
-    precision_requirement: str | None = None
-    items: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def owned(
@@ -291,80 +273,89 @@ def paper(db: Session, item: Assignment) -> PaperVersion | None:
     )
 
 
-def rubric(db: Session, item: Assignment) -> RubricVersion | None:
+def structured_rubric_set(db: Session, item: Assignment) -> StructuredRubricSet | None:
     return (
-        db.get(RubricVersion, item.active_rubric_version_id)
-        if item.active_rubric_version_id
+        db.get(StructuredRubricSet, item.active_structured_rubric_set_id)
+        if item.active_structured_rubric_set_id
         else None
     )
 
 
-def clone_rubric_version(db: Session, source: RubricVersion, actor_id: uuid.UUID) -> RubricVersion:
-    target = RubricVersion(
-        assignment_id=source.assignment_id,
-        version=source.version + 1,
-        created_by=actor_id,
-        notes=f"由 RubricVersion v{source.version} 创建的新草稿",
+def _criterion_json(criterion: RubricCriterion) -> dict[str, Any]:
+    return {
+        "id": str(criterion.id),
+        "stable_key": criterion.stable_key,
+        "title": criterion.title,
+        "description": criterion.description,
+        "max_points": str(criterion.max_points),
+        "display_order": criterion.display_order,
+        "criterion_type": criterion.criterion_type,
+        "required": criterion.required,
+        "dependencies": criterion.dependencies,
+        "expected_evidence": criterion.expected_evidence,
+        "validation_mode": criterion.validation_mode,
+        "validation_rule": criterion.validation_rule,
+        "manual_review_policy": criterion.manual_review_policy,
+        "partial_credit_policy": criterion.partial_credit_policy,
+        "error_category": criterion.error_category,
+        "metadata": criterion.metadata_,
+    }
+
+
+def _structured_set_json(db: Session, rubric_set: StructuredRubricSet) -> dict[str, Any]:
+    rows = list(
+        db.scalars(
+            select(StructuredRubricSetItem)
+            .where(StructuredRubricSetItem.rubric_set_id == rubric_set.id)
+            .order_by(StructuredRubricSetItem.display_order, StructuredRubricSetItem.id)
+        )
     )
-    db.add(target)
-    db.flush()
-    for old_rubric in db.scalars(
-        select(QuestionRubric).where(QuestionRubric.rubric_version_id == source.id)
-    ).all():
-        new_rubric = QuestionRubric(
-            rubric_version_id=target.id,
-            question_id=old_rubric.question_id,
-            standard_answer=old_rubric.standard_answer,
-            alternative_answers=list(old_rubric.alternative_answers or []),
-            scoring_notes=old_rubric.scoring_notes,
-            allow_step_score=old_rubric.allow_step_score,
-            unit_requirement=old_rubric.unit_requirement,
-            format_requirement=old_rubric.format_requirement,
-            precision_requirement=old_rubric.precision_requirement,
-        )
-        db.add(new_rubric)
-        db.flush()
-        for old_item in db.scalars(
-            select(RubricItem)
-            .where(RubricItem.question_rubric_id == old_rubric.id)
-            .order_by(RubricItem.display_order)
-        ).all():
-            db.add(
-                RubricItem(
-                    question_rubric_id=new_rubric.id,
-                    display_order=old_item.display_order,
-                    title=old_item.title,
-                    description=old_item.description,
-                    points=old_item.points,
-                    item_type=old_item.item_type,
-                    required=old_item.required,
-                    deduction_rule=old_item.deduction_rule,
-                )
+    rubric_ids = [row.structured_rubric_version_id for row in rows]
+    criteria_by_rubric: dict[uuid.UUID, list[RubricCriterion]] = {
+        rubric_id: [] for rubric_id in rubric_ids
+    }
+    if rubric_ids:
+        for criterion in db.scalars(
+            select(RubricCriterion)
+            .where(RubricCriterion.rubric_version_id.in_(rubric_ids))
+            .order_by(
+                RubricCriterion.rubric_version_id,
+                RubricCriterion.display_order,
+                RubricCriterion.id,
             )
-    db.flush()
-    return target
-
-
-def invalidate_grading_for_rubric_change(db: Session, assignment_id: uuid.UUID) -> int:
-    results = db.scalars(
-        select(GradingResult)
-        .join(StudentAnswer, StudentAnswer.id == GradingResult.student_answer_id)
-        .join(Submission, Submission.id == StudentAnswer.submission_id)
-        .where(
-            Submission.assignment_id == assignment_id,
-            GradingResult.status.in_(["suggested", "accepted", "modified"]),
-        )
-    ).all()
-    answer_ids: set[uuid.UUID] = set()
-    for result in results:
-        result.status = "stale"
-        answer_ids.add(result.student_answer_id)
-    if answer_ids:
-        for answer in db.scalars(
-            select(StudentAnswer).where(StudentAnswer.id.in_(answer_ids))
-        ).all():
-            answer.status, answer.requires_review = "stale", True
-    return len(results)
+        ):
+            criteria_by_rubric[criterion.rubric_version_id].append(criterion)
+    return {
+        "id": str(rubric_set.id),
+        "version": rubric_set.version,
+        "status": rubric_set.status,
+        "paper_version_id": str(rubric_set.paper_version_id),
+        "content_hash": rubric_set.content_hash,
+        "source_snapshot_hash": rubric_set.source_snapshot_hash,
+        "total_points": str(rubric_set.total_points),
+        "confirmed_by": str(rubric_set.confirmed_by) if rubric_set.confirmed_by else None,
+        "confirmed_at": rubric_set.confirmed_at,
+        "activated_at": rubric_set.activated_at,
+        "items": [
+            {
+                "id": str(row.id),
+                "question_id": str(row.question_id),
+                "question_version": row.question_version,
+                "reference_answer_version_id": str(row.reference_answer_version_id),
+                "structured_rubric_version_id": str(row.structured_rubric_version_id),
+                "answer_content_hash": row.answer_content_hash,
+                "rubric_content_hash": row.rubric_content_hash,
+                "criteria_hash": row.criteria_hash,
+                "display_order": row.display_order,
+                "max_points": str(row.max_points),
+                "criteria": [
+                    _criterion_json(criterion)
+                    for criterion in criteria_by_rubric[row.structured_rubric_version_id]
+                ],
+            }
+            for row in rows
+        ],
+    }
 
 
 def question_json(
@@ -418,7 +409,7 @@ def detail(db: Session, item: Assignment) -> dict[str, Any]:
         .where(AssignmentClass.assignment_id == item.id)
     ).all()
     pv = paper(db, item)
-    rv = rubric(db, item)
+    rubric_set = structured_rubric_set(db, item)
     pages = (
         db.scalars(
             select(PaperPage)
@@ -474,56 +465,7 @@ def detail(db: Session, item: Assignment) -> dict[str, Any]:
             knowledge_points_by_question[question_id].append(
                 {"id": str(knowledge_point_id), "name": knowledge_point_name}
             )
-    rubrics: list[dict[str, Any]] = []
-    question_rubrics: list[QuestionRubric] = []
-    if rv:
-        question_rubrics = list(
-            db.scalars(select(QuestionRubric).where(QuestionRubric.rubric_version_id == rv.id))
-        )
-        rubric_items_by_rubric: dict[uuid.UUID, list[RubricItem]] = {
-            question_rubric.id: [] for question_rubric in question_rubrics
-        }
-        if rubric_items_by_rubric:
-            for rubric_item in db.scalars(
-                select(RubricItem)
-                .where(RubricItem.question_rubric_id.in_(rubric_items_by_rubric))
-                .order_by(RubricItem.question_rubric_id, RubricItem.display_order)
-            ):
-                rubric_items_by_rubric[rubric_item.question_rubric_id].append(rubric_item)
-        for qr in question_rubrics:
-            rubrics.append(
-                {
-                    "id": str(qr.id),
-                    "question_id": str(qr.question_id),
-                    "standard_answer": qr.standard_answer,
-                    "alternative_answers": qr.alternative_answers,
-                    "scoring_notes": qr.scoring_notes,
-                    "allow_step_score": qr.allow_step_score,
-                    "unit_requirement": qr.unit_requirement,
-                    "format_requirement": qr.format_requirement,
-                    "precision_requirement": qr.precision_requirement,
-                    "items": [
-                        {
-                            "id": str(x.id),
-                            "title": x.title,
-                            "description": x.description,
-                            "points": str(x.points),
-                            "item_type": x.item_type,
-                            "required": x.required,
-                            "deduction_rule": x.deduction_rule,
-                        }
-                        for x in rubric_items_by_rubric[qr.id]
-                    ],
-                }
-            )
-    issues = publish_issues(
-        db,
-        item,
-        preloaded_paper=pv,
-        preloaded_rubric=rv,
-        preloaded_questions=qs,
-        preloaded_question_rubrics=question_rubrics,
-    )
+    issues = publish_issues(db, item, preloaded_paper=pv, preloaded_questions=qs)
     participant_rows = db.execute(
         select(
             AssignmentParticipantSnapshot.class_id,
@@ -588,16 +530,7 @@ def detail(db: Session, item: Assignment) -> dict[str, Any]:
             if pv
             else None
         ),
-        "rubric_version": (
-            {
-                "id": str(rv.id),
-                "version": rv.version,
-                "status": rv.status,
-                "question_rubrics": rubrics,
-            }
-            if rv
-            else None
-        ),
+        "structured_rubric_set": _structured_set_json(db, rubric_set) if rubric_set else None,
         "completeness": {
             "ready": not issues,
             "issues": issues,
@@ -611,9 +544,7 @@ def publish_issues(
     item: Assignment,
     *,
     preloaded_paper: PaperVersion | None = None,
-    preloaded_rubric: RubricVersion | None = None,
     preloaded_questions: Sequence[Question] | None = None,
-    preloaded_question_rubrics: list[QuestionRubric] | None = None,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     links = db.scalars(
@@ -738,81 +669,115 @@ def publish_issues(
         out.append(
             {"code": "TOTAL_SCORE_MISMATCH", "message": "题目分值合计必须等于作业总分", "step": 4}
         )
-    rv = preloaded_rubric if preloaded_questions is not None else rubric(db, item)
-    if not rv:
-        out.append({"code": "NO_RUBRIC", "message": "请设置评分标准", "step": 5})
-    else:
-        question_rubric_by_question = (
+    rubric_set = structured_rubric_set(db, item)
+    if rubric_set is None:
+        out.append(
             {
-                question_rubric.question_id: question_rubric
-                for question_rubric in preloaded_question_rubrics
+                "code": "STRUCTURED_RUBRIC_SET_REQUIRED",
+                "message": "请先准备完整的结构化评分标准发布包",
+                "step": 5,
             }
-            if preloaded_question_rubrics is not None
-            else {}
         )
-        rubric_points = (
+        return out
+    if (
+        rubric_set.owner_id != item.owner_id
+        or rubric_set.assignment_id != item.id
+        or pv is None
+        or rubric_set.paper_version_id != pv.id
+    ):
+        out.append(
             {
-                question_rubric_id: Decimal(points or 0)
-                for question_rubric_id, points in db.execute(
-                    select(RubricItem.question_rubric_id, func.sum(RubricItem.points))
-                    .where(
-                        RubricItem.question_rubric_id.in_(
-                            [
-                                question_rubric.id
-                                for question_rubric in preloaded_question_rubrics or []
-                            ]
-                        )
-                    )
-                    .group_by(RubricItem.question_rubric_id)
-                )
+                "code": "STRUCTURED_RUBRIC_SET_STALE",
+                "message": "结构化评分标准发布包与当前作业或试卷不一致",
+                "step": 5,
             }
-            if preloaded_question_rubrics is not None
-            else {}
         )
-        for q in qs:
-            if q.max_score is None:
-                continue
-            qr = (
-                question_rubric_by_question.get(q.id)
-                if preloaded_question_rubrics is not None
-                else db.scalar(
-                    select(QuestionRubric).where(
-                        QuestionRubric.rubric_version_id == rv.id,
-                        QuestionRubric.question_id == q.id,
-                    )
-                )
+        return out
+    session = db.scalar(
+        select(AssignmentReviewSession)
+        .where(
+            AssignmentReviewSession.assignment_id == item.id,
+            AssignmentReviewSession.owner_id == item.owner_id,
+            AssignmentReviewSession.structured_rubric_set_id == rubric_set.id,
+            AssignmentReviewSession.invalidated_at.is_(None),
+        )
+        .order_by(AssignmentReviewSession.review_version.desc(), AssignmentReviewSession.id)
+    )
+    if session is None:
+        out.append(
+            {
+                "code": "STRUCTURED_RUBRIC_SET_REVIEW_REQUIRED",
+                "message": "结构化评分标准发布包缺少当前发布核查记录",
+                "step": 5,
+            }
+        )
+        return out
+    from app.api.assignment_central_review import validate_current_structured_set_under_locks
+
+    validation = validate_current_structured_set_under_locks(
+        db,
+        session,
+        rubric_set_id=rubric_set.id,
+        lock=False,
+        require_confirmed=False,
+    )
+    if not validation.current:
+        out.append(
+            {
+                "code": "STRUCTURED_RUBRIC_SET_STALE",
+                "message": "结构化评分标准发布包内容或指纹已变化",
+                "step": 5,
+                "reason": validation.reason,
+            }
+        )
+        return out
+    set_items = list(
+        db.scalars(
+            select(StructuredRubricSetItem)
+            .where(StructuredRubricSetItem.rubric_set_id == rubric_set.id)
+            .order_by(StructuredRubricSetItem.display_order, StructuredRubricSetItem.id)
+        )
+    )
+    question_by_id = {question.id: question for question in qs}
+    if {set_item.question_id for set_item in set_items} != set(question_by_id):
+        out.append(
+            {
+                "code": "STRUCTURED_RUBRIC_SET_INCOMPLETE",
+                "message": "结构化评分标准发布包未完整覆盖当前题目",
+                "step": 5,
+            }
+        )
+        return out
+    for set_item in set_items:
+        question = question_by_id[set_item.question_id]
+        reference = db.get(ReferenceAnswerVersion, set_item.reference_answer_version_id)
+        rubric = db.get(StructuredRubricVersion, set_item.structured_rubric_version_id)
+        if (
+            question.max_score is None
+            or Decimal(set_item.max_points) != Decimal(question.max_score)
+            or reference is None
+            or rubric is None
+            or reference.question_id != question.id
+            or rubric.question_id != question.id
+            or rubric.reference_answer_version_id != reference.id
+        ):
+            out.append(
+                {
+                    "code": "STRUCTURED_RUBRIC_SET_INCOMPLETE",
+                    "message": f"第 {question.question_number} 题的固定答案或评分标准不完整",
+                    "step": 5,
+                    "question_id": str(question.id),
+                }
             )
-            if not qr or not qr.standard_answer:
-                out.append(
-                    {
-                        "code": "RUBRIC_INCOMPLETE",
-                        "message": f"第 {q.question_number} 题缺少标准答案",
-                        "step": 5,
-                        "question_id": str(q.id),
-                    }
-                )
-                continue
-            pts = (
-                rubric_points.get(qr.id, Decimal(0))
-                if preloaded_question_rubrics is not None
-                else (
-                    db.scalar(
-                        select(func.sum(RubricItem.points)).where(
-                            RubricItem.question_rubric_id == qr.id
-                        )
-                    )
-                    or 0
-                )
+        elif reference.status != "confirmed" or rubric.status != "confirmed":
+            out.append(
+                {
+                    "code": "STRUCTURED_RUBRIC_FORMAL_NOT_CONFIRMED",
+                    "message": f"第 {question.question_number} 题的答案或评分标准尚未由教师确认",
+                    "step": 5,
+                    "question_id": str(question.id),
+                }
             )
-            if Decimal(pts) != Decimal(q.max_score):
-                out.append(
-                    {
-                        "code": "RUBRIC_POINTS_MISMATCH",
-                        "message": f"第 {q.question_number} 题评分项分值不一致",
-                        "step": 5,
-                        "question_id": str(q.id),
-                    }
-                )
     return out
 
 
@@ -1237,42 +1202,182 @@ def copy_assignment(assignment_id: uuid.UUID, db: Db, actor: Actor) -> dict[str,
             db.add(nq)
             db.flush()
             mapping[q.id] = nq.id
-        sr = rubric(db, src)
-        if sr:
-            dr = RubricVersion(assignment_id=dst.id, version=1, created_by=actor.id)
-            db.add(dr)
-            db.flush()
-            dst.active_rubric_version_id = dr.id
-            for qr in db.scalars(
-                select(QuestionRubric).where(QuestionRubric.rubric_version_id == sr.id)
-            ).all():
-                if qr.question_id not in mapping:
-                    continue
-                nqr = QuestionRubric(
-                    rubric_version_id=dr.id,
-                    question_id=mapping[qr.question_id],
-                    standard_answer=qr.standard_answer,
-                    alternative_answers=qr.alternative_answers,
-                    scoring_notes=qr.scoring_notes,
-                    allow_step_score=qr.allow_step_score,
-                )
-                db.add(nqr)
-                db.flush()
-                for ri in db.scalars(
-                    select(RubricItem).where(RubricItem.question_rubric_id == qr.id)
-                ).all():
-                    db.add(
-                        RubricItem(
-                            question_rubric_id=nqr.id,
-                            display_order=ri.display_order,
-                            title=ri.title,
-                            description=ri.description,
-                            points=ri.points,
-                            item_type=ri.item_type,
-                            required=ri.required,
-                            deduction_rule=ri.deduction_rule,
-                        )
+        source_set = structured_rubric_set(db, src)
+        if source_set:
+            source_items = list(
+                db.scalars(
+                    select(StructuredRubricSetItem)
+                    .where(StructuredRubricSetItem.rubric_set_id == source_set.id)
+                    .order_by(
+                        StructuredRubricSetItem.display_order,
+                        StructuredRubricSetItem.id,
                     )
+                )
+            )
+            copied_items: list[dict[str, Any]] = []
+            for source_item in source_items:
+                target_question_id = mapping.get(source_item.question_id)
+                source_answer = db.get(
+                    ReferenceAnswerVersion, source_item.reference_answer_version_id
+                )
+                source_rubric = db.get(
+                    StructuredRubricVersion, source_item.structured_rubric_version_id
+                )
+                target_question = (
+                    db.get(Question, target_question_id) if target_question_id else None
+                )
+                if source_answer is None or source_rubric is None or target_question is None:
+                    raise ApiProblem(
+                        409,
+                        "STRUCTURED_RUBRIC_SET_INCOMPLETE",
+                        "源作业的结构化评分标准发布包不完整，无法复制",
+                    )
+                answer_payload = {
+                    "source_type": "copy",
+                    "source_file": source_answer.source_file,
+                    "source_page": source_answer.source_page,
+                    "source_region": source_answer.source_region,
+                    "raw_content": source_answer.raw_content,
+                    "normalized_content": source_answer.normalized_content,
+                    "structured_content": source_answer.structured_content,
+                    "provenance": {
+                        **(source_answer.provenance or {}),
+                        "copied_from_reference_answer_version_id": str(source_answer.id),
+                    },
+                }
+                copied_answer = ReferenceAnswerVersion(
+                    question_id=target_question.id,
+                    version=1,
+                    created_by=actor.id,
+                    status="draft",
+                    content_hash=semantic_hash(answer_payload),
+                    **answer_payload,
+                )
+                db.add(copied_answer)
+                db.flush()
+                question_version = (
+                    f"{target_question.paper_version_id}:{target_question.updated_at.isoformat()}"
+                )
+                copied_rubric = StructuredRubricVersion(
+                    question_id=target_question.id,
+                    question_version=question_version,
+                    reference_answer_version_id=copied_answer.id,
+                    rubric_version=1,
+                    title=source_rubric.title,
+                    total_points=source_rubric.total_points,
+                    status="draft",
+                    content_hash="0" * 64,
+                    created_by=actor.id,
+                )
+                db.add(copied_rubric)
+                db.flush()
+                copied_criteria: list[RubricCriterion] = []
+                for source_criterion in db.scalars(
+                    select(RubricCriterion)
+                    .where(RubricCriterion.rubric_version_id == source_rubric.id)
+                    .order_by(RubricCriterion.display_order, RubricCriterion.id)
+                ):
+                    copied_criterion = RubricCriterion(
+                        rubric_version_id=copied_rubric.id,
+                        stable_key=source_criterion.stable_key,
+                        title=source_criterion.title,
+                        description=source_criterion.description,
+                        max_points=source_criterion.max_points,
+                        display_order=source_criterion.display_order,
+                        criterion_type=source_criterion.criterion_type,
+                        required=source_criterion.required,
+                        dependencies=list(source_criterion.dependencies or []),
+                        expected_evidence=dict(source_criterion.expected_evidence or {}),
+                        validation_mode=source_criterion.validation_mode,
+                        validation_rule=dict(source_criterion.validation_rule or {}),
+                        manual_review_policy=dict(source_criterion.manual_review_policy or {}),
+                        partial_credit_policy=dict(source_criterion.partial_credit_policy or {}),
+                        error_category=source_criterion.error_category,
+                        metadata_=dict(source_criterion.metadata_ or {}),
+                    )
+                    db.add(copied_criterion)
+                    copied_criteria.append(copied_criterion)
+                db.flush()
+                criteria_payload = [_criterion_json(row) for row in copied_criteria]
+                rubric_payload = {
+                    "question_version": copied_rubric.question_version,
+                    "title": copied_rubric.title,
+                    "total_points": str(copied_rubric.total_points),
+                    "reference_answer_version_id": str(copied_answer.id),
+                    "criteria": [
+                        {
+                            "id": row["id"],
+                            "key": row["stable_key"],
+                            "title": row["title"],
+                            "description": row["description"],
+                            "points": row["max_points"],
+                            "display_order": row["display_order"],
+                            "criterion_type": row["criterion_type"],
+                            "required": row["required"],
+                            "dependencies": row["dependencies"],
+                            "expected_evidence": row["expected_evidence"],
+                            "validation_mode": row["validation_mode"],
+                            "validation_rule": row["validation_rule"],
+                            "manual_review_policy": row["manual_review_policy"],
+                            "partial_credit_policy": row["partial_credit_policy"],
+                            "error_category": row["error_category"],
+                            "metadata": row["metadata"],
+                        }
+                        for row in criteria_payload
+                    ],
+                }
+                copied_rubric.content_hash = semantic_hash(rubric_payload)
+                copied_items.append(
+                    {
+                        "question_id": target_question.id,
+                        "question_version": question_version,
+                        "reference_answer_version_id": copied_answer.id,
+                        "structured_rubric_version_id": copied_rubric.id,
+                        "answer_content_hash": copied_answer.content_hash,
+                        "rubric_content_hash": copied_rubric.content_hash,
+                        "criteria_hash": semantic_hash(rubric_payload["criteria"]),
+                        "display_order": source_item.display_order,
+                        "max_points": source_item.max_points,
+                    }
+                )
+            if copied_items:
+                source_snapshot_hash = semantic_hash(
+                    {
+                        "copied_from_assignment_id": str(src.id),
+                        "copied_from_structured_rubric_set_id": str(source_set.id),
+                        "copied_from_content_hash": source_set.content_hash,
+                    }
+                )
+                set_payload = {
+                    "assignment_id": str(dst.id),
+                    "paper_version_id": str(dp.id),
+                    "source_snapshot_hash": source_snapshot_hash,
+                    "items": [
+                        {
+                            key: str(value) if isinstance(value, uuid.UUID) else value
+                            for key, value in row.items()
+                        }
+                        for row in copied_items
+                    ],
+                }
+                copied_set = StructuredRubricSet(
+                    owner_id=actor.id,
+                    assignment_id=dst.id,
+                    paper_version_id=dp.id,
+                    version=1,
+                    status="draft",
+                    content_hash=semantic_hash(set_payload),
+                    source_snapshot_hash=source_snapshot_hash,
+                    total_points=sum(
+                        (Decimal(row["max_points"]) for row in copied_items), Decimal(0)
+                    ),
+                    created_by=actor.id,
+                )
+                db.add(copied_set)
+                db.flush()
+                for row in copied_items:
+                    db.add(StructuredRubricSetItem(rubric_set_id=copied_set.id, **row))
+                dst.active_structured_rubric_set_id = copied_set.id
     audit(db, actor.id, "assignment.copy", "assignment", dst.id, {"copied_from_id": str(src.id)})
     db.commit()
     return detail(db, dst)
@@ -1720,186 +1825,11 @@ def remove_region(assignment_id: uuid.UUID, region_id: uuid.UUID, db: Db, actor:
     db.commit()
 
 
-@router.put("/{assignment_id}/rubrics/{question_id}")
-def put_rubric(
-    assignment_id: uuid.UUID, question_id: uuid.UUID, data: RubricInput, db: Db, actor: Actor
-) -> dict[str, Any]:
-    item = owned(db, actor.id, assignment_id, lock=True)
-    q = db.scalar(
-        select(Question)
-        .join(PaperVersion)
-        .where(Question.id == question_id, PaperVersion.assignment_id == item.id)
-    )
-    if not q:
-        raise ApiProblem(422, "RUBRIC_QUESTION_INVALID", "题目不属于当前试卷")
-    if q.max_score is None:
-        raise ApiProblem(
-            422,
-            "QUESTION_SCORE_REQUIRED",
-            f"第 {q.question_number} 题分值未设置，不能确认评分标准",
-            {"question_id": str(q.id), "question_number": q.question_number, "step": 4},
-        )
-    rv = rubric(db, item)
-    if rv and rv.status == VersionStatus.confirmed:
-        rv = clone_rubric_version(db, rv, actor.id)
-        item.active_rubric_version_id = rv.id
-    elif not rv:
-        rv = RubricVersion(assignment_id=item.id, version=1, created_by=actor.id)
-        db.add(rv)
-        db.flush()
-        item.active_rubric_version_id = rv.id
-    qr = db.scalar(
-        select(QuestionRubric).where(
-            QuestionRubric.rubric_version_id == rv.id, QuestionRubric.question_id == q.id
-        )
-    )
-    values = data.model_dump(exclude={"items"})
-    if not qr:
-        qr = QuestionRubric(rubric_version_id=rv.id, question_id=q.id, **values)
-        db.add(qr)
-        db.flush()
-    else:
-        for k, v in values.items():
-            setattr(qr, k, v)
-        db.execute(delete(RubricItem).where(RubricItem.question_rubric_id == qr.id))
-    for i, raw in enumerate(data.items, 1):
-        points = Decimal(str(raw.get("points", 0)))
-        if points < 0:
-            raise ApiProblem(422, "NEGATIVE_RUBRIC_POINTS", "评分项分值不能为负")
-        db.add(
-            RubricItem(
-                question_rubric_id=qr.id,
-                display_order=i,
-                title=str(raw.get("title", f"评分点 {i}")),
-                description=raw.get("description"),
-                points=points,
-                item_type=str(raw.get("item_type", "step")),
-                required=bool(raw.get("required", False)),
-                deduction_rule=raw.get("deduction_rule"),
-            )
-        )
-    invalidated = invalidate_grading_for_rubric_change(db, item.id)
-    audit(
-        db,
-        actor.id,
-        "rubric.update",
-        "rubric_version",
-        rv.id,
-        {"invalidated_grading_results": invalidated},
-    )
-    db.commit()
-    return detail(db, item)
-
-
 @router.get("/{assignment_id}/publish-check")
 def check_publish(assignment_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
     item = owned(db, actor.id, assignment_id)
     issues = publish_issues(db, item)
     return {"ready": not issues, "issues": issues}
-
-
-def manual_publish_readiness(db: Session, item: Assignment) -> dict[str, Any]:
-    issues = publish_issues(db, item)
-    class_ids = sorted(
-        str(class_id)
-        for class_id in db.scalars(
-            select(AssignmentClass.class_id).where(AssignmentClass.assignment_id == item.id)
-        )
-    )
-    return {
-        "mode": "manual",
-        "ready": not issues,
-        "issues": issues,
-        "state_hash": digest(detail(db, item)),
-        "expected_assignment_updated_at": item.updated_at,
-        "class_ids": class_ids,
-        "due_at": item.due_at,
-        "total_score": str(item.total_score) if item.total_score is not None else None,
-    }
-
-
-def require_teacher_authored_assignment(db: Session, item: Assignment) -> None:
-    generation_job_id = db.scalar(
-        select(AssignmentGenerationJob.id)
-        .where(AssignmentGenerationJob.assignment_id == item.id)
-        .limit(1)
-    )
-    if generation_job_id is not None:
-        raise ApiProblem(
-            409,
-            "AI_REVIEW_REQUIRED",
-            "该作业使用过 AI 辅助生成，请完成当前结构化审查后发布",
-        )
-
-
-@router.get("/{assignment_id}/manual-publish-readiness")
-def get_manual_publish_readiness(assignment_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
-    item = owned(db, actor.id, assignment_id)
-    if item.status != AssignmentStatus.draft:
-        raise ApiProblem(409, "ASSIGNMENT_NOT_DRAFT", "只有草稿可发布")
-    require_teacher_authored_assignment(db, item)
-    return manual_publish_readiness(db, item)
-
-
-@router.post("/{assignment_id}/manual-publish")
-def publish_manual_assignment(
-    assignment_id: uuid.UUID,
-    data: ManualPublishInput,
-    db: Db,
-    actor: Actor,
-) -> dict[str, Any]:
-    item = db.scalar(
-        select(Assignment)
-        .where(Assignment.id == assignment_id, Assignment.owner_id == actor.id)
-        .execution_options(populate_existing=True)
-        .with_for_update()
-    )
-    if item is None:
-        raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
-    if item.status != AssignmentStatus.draft:
-        raise ApiProblem(409, "ASSIGNMENT_NOT_DRAFT", "只有草稿可发布")
-    require_teacher_authored_assignment(db, item)
-    if item.updated_at != data.expected_assignment_updated_at:
-        raise ApiProblem(409, "PUBLISH_STATE_STALE", "作业内容已变化，请重新检查后发布")
-    readiness = manual_publish_readiness(db, item)
-    if readiness["state_hash"] != data.state_hash:
-        raise ApiProblem(409, "PUBLISH_STATE_STALE", "作业内容已变化，请重新检查后发布")
-    if readiness["issues"]:
-        raise ApiProblem(
-            422,
-            "ASSIGNMENT_INCOMPLETE",
-            "作业尚未满足发布条件",
-            {"issues": readiness["issues"]},
-        )
-    active_paper = paper(db, item)
-    active_rubric = rubric(db, item)
-    if active_paper is None or active_rubric is None:
-        raise ApiProblem(422, "ASSIGNMENT_INCOMPLETE", "试卷或评分标准尚未完成")
-    now = now_utc()
-    active_paper.status = VersionStatus.confirmed
-    active_paper.confirmed_at = active_paper.confirmed_at or now
-    active_rubric.status = VersionStatus.confirmed
-    active_rubric.confirmed_at = active_rubric.confirmed_at or now
-    participant_count = freeze_participant_roster(db, item)
-    item.status = AssignmentStatus.published
-    item.published_at = now
-    audit(
-        db,
-        actor.id,
-        "assignment.publish",
-        "assignment",
-        item.id,
-        {
-            "mode": "manual",
-            "state_hash": data.state_hash,
-            "paper_version_id": str(active_paper.id),
-            "rubric_version_id": str(active_rubric.id),
-            "participant_count": participant_count,
-        },
-    )
-    db.commit()
-    db.refresh(item)
-    return detail(db, item)
 
 
 @router.post("/{assignment_id}/publish")
@@ -1909,8 +1839,8 @@ def publish_assignment(
     db: Db,
     actor: Actor,
 ) -> dict[str, Any]:
-    # Import locally to keep the legacy completeness checker reusable by the
-    # central-review service without introducing an import cycle.
+    # Import locally so the Structured-only publication service can reuse this
+    # module's assignment and roster helpers without an import cycle.
     from app.api.assignment_central_review import teacher_publish
 
     return detail(db, teacher_publish(db, actor.id, assignment_id, data))

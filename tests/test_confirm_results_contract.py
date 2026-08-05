@@ -24,19 +24,16 @@ from app.models import (
     MembershipStatus,
     Question,
     QuestionKnowledgePoint,
-    QuestionRubric,
-    RubricItem,
-    RubricVersion,
     Student,
     StudentAnswer,
     Submission,
     SubmissionScoreSnapshot,
     TeacherReview,
-    VersionStatus,
 )
 from app.storage.dependencies import get_storage
 from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
+from structured_rubric_support import activate_structured_rubric_set
 from test_submission_workflow import client, confirm_answer_regions, png, workflow
 
 
@@ -334,7 +331,8 @@ def test_confirm_results_uses_only_highest_non_voided_attempt_per_student() -> N
                 grading_job_id=current_result.grading_job_id,
                 student_answer_id=superseded_answer.id,
                 question_id=current_result.question_id,
-                rubric_version_id=current_result.rubric_version_id,
+                structured_rubric_set_id=current_result.structured_rubric_set_id,
+                structured_rubric_version_id=(current_result.structured_rubric_version_id),
                 grading_method=current_result.grading_method,
                 provider=current_result.provider,
                 provider_version=current_result.provider_version,
@@ -587,7 +585,7 @@ def test_publish_and_confirm_share_assignment_serialization_lock(
         assert confirm_reached_state_read.is_set()
 
 
-def test_active_rubric_version_change_prevents_snapshot_reuse() -> None:
+def test_active_structured_rubric_set_change_prevents_snapshot_reuse() -> None:
     with _confirmable_case() as case:
         readiness = _readiness(case)
         first = _confirm(
@@ -601,53 +599,22 @@ def test_active_rubric_version_change_prevents_snapshot_reuse() -> None:
         submission = case.db.get(Submission, case.submission_id)
         assert submission is not None
         assignment = case.db.get(Assignment, submission.assignment_id)
-        assert assignment is not None and assignment.active_rubric_version_id is not None
-        old_version = case.db.get(RubricVersion, assignment.active_rubric_version_id)
-        assert old_version is not None
-        old_rubric = case.db.scalar(
-            select(QuestionRubric).where(QuestionRubric.rubric_version_id == old_version.id)
+        assert assignment is not None
+        assert assignment.active_structured_rubric_set_id is not None
+        answer = case.db.get(StudentAnswer, case.answer_id)
+        assert answer is not None
+        question = case.db.get(Question, answer.question_id)
+        assert question is not None
+        activate_structured_rubric_set(
+            case.db,
+            assignment,
+            [question],
+            actor_id=assignment.owner_id,
+            answers={question.id: "synthetic changed reference answer"},
+            set_version=2,
+            answer_version=2,
+            rubric_version=2,
         )
-        assert old_rubric is not None
-        new_version = RubricVersion(
-            assignment_id=assignment.id,
-            version=old_version.version + 1,
-            status=VersionStatus.confirmed,
-            created_by=old_version.created_by,
-            confirmed_at=old_version.confirmed_at,
-            notes="synthetic changed rubric version",
-        )
-        case.db.add(new_version)
-        case.db.flush()
-        new_rubric = QuestionRubric(
-            rubric_version_id=new_version.id,
-            question_id=old_rubric.question_id,
-            standard_answer=old_rubric.standard_answer,
-            alternative_answers=old_rubric.alternative_answers,
-            scoring_notes=old_rubric.scoring_notes,
-            allow_step_score=old_rubric.allow_step_score,
-            unit_requirement=old_rubric.unit_requirement,
-            format_requirement=old_rubric.format_requirement,
-            precision_requirement=old_rubric.precision_requirement,
-        )
-        case.db.add(new_rubric)
-        case.db.flush()
-        for item in case.db.scalars(
-            select(RubricItem).where(RubricItem.question_rubric_id == old_rubric.id)
-        ):
-            case.db.add(
-                RubricItem(
-                    question_rubric_id=new_rubric.id,
-                    display_order=item.display_order,
-                    title=item.title,
-                    description=item.description,
-                    points=item.points,
-                    item_type=item.item_type,
-                    required=item.required,
-                    deduction_rule=item.deduction_rule,
-                )
-            )
-        assignment.active_rubric_version_id = new_version.id
-        case.db.commit()
 
         changed = _readiness(case)
         assert changed["ready"] is False
@@ -811,7 +778,8 @@ def test_review_bound_to_older_result_blocks_when_a_newer_result_exists() -> Non
             grading_job_id=old_result.grading_job_id,
             student_answer_id=old_result.student_answer_id,
             question_id=old_result.question_id,
-            rubric_version_id=old_result.rubric_version_id,
+            structured_rubric_set_id=old_result.structured_rubric_set_id,
+            structured_rubric_version_id=old_result.structured_rubric_version_id,
             grading_method=old_result.grading_method,
             provider=old_result.provider,
             provider_version=old_result.provider_version,

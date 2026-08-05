@@ -787,7 +787,7 @@ def test_generated_suggestions_are_audited_without_mandatory_disposition_writes(
 
 def test_each_confirmation_waits_ready_or_confirmed_and_records_write_after_get() -> None:
     helper = SCRIPT.split("async function ensureReviewConfirmation", 1)[1].split(
-        "async function ensureRubricBinding", 1
+        "function assertCurrentStructuredRubricSet", 1
     )[0]
     assert "confirmation ready-or-confirmed" in helper
     assert "current.session.confirmations.includes(kind)" in helper
@@ -811,71 +811,60 @@ def test_each_confirmation_waits_ready_or_confirmed_and_records_write_after_get(
     assert "if (await button.isEnabled())" not in helper
     assert "button.isDisabled()" not in helper
 
-    loop = SCRIPT.split("for (const kind of [", 1)[1].split("evidence.central_review.binding", 1)[0]
+    loop = SCRIPT.split("for (const kind of [", 1)[1].split(
+        "evidence.central_review.structured_rubric_set", 1
+    )[0]
     assert "ensureReviewConfirmation(reviewSessionId, kind)" in loop
     assert "else" not in loop
 
 
-def test_binding_handles_lossless_auto_confirmation_and_lossy_manual_confirmation() -> None:
-    helper = SCRIPT.split("async function ensureRubricBinding", 1)[1].split(
+def test_structured_set_is_automatically_prepared_and_read_back() -> None:
+    helper = SCRIPT.split("async function ensureStructuredRubricSet", 1)[1].split(
         "async function drainReviewCount", 1
     )[0]
-    assert "binding prepare ready-or-confirmed" in helper
-    assert "binding prepare write-after-GET" in helper
-    assert "binding confirm enabled" in helper
-    assert "binding confirm write-after-GET" in helper
-    assert 'nextBinding.body.status === "confirmed"' in helper
-    assert '"draft", "validated", "confirmed"' in helper
-    assert 'page.getByTestId("rubric-binding-loss-confirm")' in helper
-    assert 'page.getByTestId("confirm-rubric-publication-binding")' not in helper
-    assert "binding and Bundle write-after-GET" in helper
-    assert "assertCurrentRubricBindingProjection" in helper
-    assert 'write.action === "confirm"' in helper
-    assert "lossless projection must not call confirm-binding" in helper
-    assert "if (await prepare.isEnabled())" not in helper
-    assert "if (await confirm.isEnabled())" not in helper
+    assert "/structured-rubric-set" in helper
+    assert "Structured Rubric Set automatic preparation" in helper
+    assert "setResponse.body.current === true" in helper
+    assert "current.session.structured_rubric_set_id === setResponse.body.id" in helper
+    assert "bundle.bundle.structured_rubric_set?.id === setResponse.body.id" in helper
+    assert 'getByTestId("structured-rubric-set-summary")' in helper
+    assert "assertCurrentStructuredRubricSet" in helper
+    assert "writes: []" in helper
+    assert 'method: "POST"' not in helper
 
 
-def test_binding_projection_contract_is_exact_and_fail_closed() -> None:
-    helper = SCRIPT.split("function assertCurrentRubricBindingProjection", 1)[1].split(
-        "async function ensureRubricBinding", 1
+def test_structured_set_contract_is_exact_and_fail_closed() -> None:
+    helper = SCRIPT.split("function assertCurrentStructuredRubricSet", 1)[1].split(
+        "async function ensureStructuredRubricSet", 1
     )[0]
-    assert "bundle.binding.projection_current, true" in helper
-    assert "bundle.binding.projection_reason, null" in helper
-    assert '"structured-to-legacy"' in helper
-    assert '"structured-rubric-projection-v3"' in helper
-    assert "bundle.binding.source_semantic_hash" in helper
-    assert "bundle.binding.source_binding_hash" in helper
-    assert "binding.source_binding_hash" in helper
-    assert "binding.source_semantic_hash" in helper
-    assert "bundle.binding.target_legacy_hash, binding.target_legacy_hash" in helper
-    assert "bundle.binding.loss_report_hash, binding.loss_report_hash" in helper
-    assert "bundle.binding.projection_profile" in helper
-    assert "binding.projection_profile" in helper
-    assert "bundle.binding.projection_version" in helper
-    assert "binding.projection_version" in helper
-    assert "bundle.binding.expected_source_binding_hash" in helper
-    assert "bundle.binding.mapping, binding.mapping" in helper
-    assert "bundle.binding.loss_report, binding.loss_report" in helper
-    assert "bundle.binding.manual_review_required, lossy" in helper
-    assert "binding.manual_review_required, lossy" in helper
-    assert "if (!lossy) assert.deepEqual(binding.loss_report, [])" in helper
-    assert '"legacy_binding"' in helper
-    assert 'lossy ? "origin" : "system_auto"' in helper
-    assert "confirmation.inherited, false" in helper
-    assert "confirmation.binding_id, binding.id" in helper
-    assert "confirmation.source_binding_hash" in helper
+    assert "session.structured_rubric_set_id, rubricSet.id" in helper
+    assert "bundle.structured_rubric_set?.id, rubricSet.id" in helper
+    assert "bundle.structured_rubric_set.current, true" in helper
+    assert "bundle.structured_rubric_set.reason, null" in helper
+    assert "bundle.structured_rubric_set.content_hash" in helper
+    assert "bundle.structured_rubric_set.source_snapshot_hash" in helper
+    assert "rubricSet.items.length > 0" in helper
+    assert "item.answer_content_hash" in helper
+    assert "item.rubric_content_hash" in helper
+    assert "item.criteria_hash" in helper
+    assert "item.reference_answer_version_id" in helper
+    assert "item.structured_rubric_version_id" in helper
 
-    flow = SCRIPT.split("async function ensureRubricBinding", 1)[1].split(
-        "async function drainReviewCount", 1
-    )[0]
-    assert "[200, 404].includes(bindingResponse.status)" in flow
-    assert "binding GET failed:" in flow
-    assert "only a lossy current binding may require manual confirmation" in flow
-    assert "matchingConfirmation" in flow
-    assert 'item.status === "confirmed"' in flow
-    assert "item.binding_id === nextBinding.body?.id" in flow
-    assert "item.source_binding_hash === nextBinding.body?.source_binding_hash" in flow
+
+def test_grading_evidence_uses_structured_ids_only() -> None:
+    assert "structured_rubric_set_id" in SCRIPT
+    assert "structured_rubric_version_id" in SCRIPT
+    assert "criterion.criterion_id" in SCRIPT
+    assert "snapshot.structured_rubric_set_id" in SCRIPT
+    for legacy_token in (
+        "rubric_item_id",
+        "rubricItemId",
+        "legacy_binding",
+        "/rubric-binding",
+        "projection_profile",
+        "target_legacy_hash",
+    ):
+        assert legacy_token not in SCRIPT
 
 
 def test_review_bundle_reads_require_the_current_schema_and_assignment() -> None:
@@ -926,8 +915,9 @@ def test_publication_has_api_and_ui_hard_preconditions() -> None:
         "structured_rubrics",
     ):
         assert f'"{kind}"' in block
-    assert 'confirmations.includes("legacy_binding")' in block
-    assert 'publicationBinding.body.status, "confirmed"' in block
+    assert "publicationStructuredSet.body.current === true" in block
+    assert "publicationSession.session.structured_rubric_set_id" in block
+    assert "publicationStructuredSet.body.id" in block
     assert "publicationSession.session.counts.blocking, 0" in block
     assert "publicationSession.session.counts.warning, 0" in block
     assert '"✓ 已满足发布条件"' in block

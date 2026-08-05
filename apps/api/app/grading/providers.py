@@ -27,7 +27,7 @@ class GradeSuggestion:
 
 
 class ProviderCriterion(BaseModel):
-    rubric_item_id: str
+    criterion_id: str
     score: Decimal = Field(ge=0)
     reason: str | None = Field(None, min_length=1, max_length=1000)
     evidence_refs: list[str] = Field(default_factory=list)
@@ -117,7 +117,7 @@ class OpenAICompatibleGradingProvider:
                     "role": "system",
                     "content": (
                         "你是评分建议系统。只返回 JSON；建议不直接成为正式成绩。"
-                        "逐项依据 rubric_items 评分，每个评分项必须且只能出现一次，不能漏项。"
+                        "逐项依据 rubric_criteria 评分，每个评分项必须且只能出现一次，不能漏项。"
                         "每个评分项用 reason 简要说明得分依据。"
                         "每个评分项只引用 evidence_regions 中存在的 id；"
                         "没有充分证据时必须 abstain。"
@@ -177,9 +177,9 @@ class OpenAICompatibleGradingProvider:
                 )
             criterion_maxima = {
                 str(item["id"]): Decimal(str(item["max_points"]))
-                for item in (context or {}).get("rubric_items", [])
+                for item in (context or {}).get("rubric_criteria", [])
             }
-            criterion_ids = [item.rubric_item_id for item in output.criteria]
+            criterion_ids = [item.criterion_id for item in output.criteria]
             if len(criterion_ids) != len(set(criterion_ids)) or set(criterion_ids) != set(
                 criterion_maxima
             ):
@@ -191,8 +191,8 @@ class OpenAICompatibleGradingProvider:
             }
             for criterion in output.criteria:
                 if (
-                    criterion.rubric_item_id not in criterion_maxima
-                    or criterion.score > criterion_maxima[criterion.rubric_item_id]
+                    criterion.criterion_id not in criterion_maxima
+                    or criterion.score > criterion_maxima[criterion.criterion_id]
                 ):
                     raise ValueError("criterion is unknown or exceeds maximum")
                 if not criterion.evidence_refs or not set(criterion.evidence_refs) <= evidence_ids:
@@ -203,12 +203,12 @@ class OpenAICompatibleGradingProvider:
                 output.reasoning_summary,
                 output.feedback,
                 output.error_type,
-                {item.rubric_item_id: item.score for item in output.criteria},
+                {item.criterion_id: item.score for item in output.criteria},
                 {
-                    item.rubric_item_id: item.reason or output.reasoning_summary
+                    item.criterion_id: item.reason or output.reasoning_summary
                     for item in output.criteria
                 },
-                {item.rubric_item_id: item.evidence_refs for item in output.criteria},
+                {item.criterion_id: item.evidence_refs for item in output.criteria},
                 output.evidence,
             )
         except (TimeoutError, urllib.error.URLError):

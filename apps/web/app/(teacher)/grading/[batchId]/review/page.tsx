@@ -251,7 +251,7 @@ export default function ReviewPage() {
     setCriterionDrafts(
       Object.fromEntries(
         answer.criteria.map((criterion) => [
-          criterion.rubric_item_id,
+          criterion.criterion_id,
           criterion.awarded_points ?? "",
         ]),
       ),
@@ -279,7 +279,7 @@ export default function ReviewPage() {
   );
   const hasInvalidCriterion = Boolean(
     answer?.criteria.some((criterion) => {
-      const value = criterionDrafts[criterion.rubric_item_id] ?? "";
+      const value = criterionDrafts[criterion.criterion_id] ?? "";
       const numeric = Number(value);
       return (
         value.trim() === "" ||
@@ -955,7 +955,7 @@ export default function ReviewPage() {
           data-question-type={answer?.question.type}
           data-provider={answer?.result?.provider ?? "manual"}
           data-result-status={answer?.result?.status}
-          data-rubric-version-id={answer?.result?.rubric_version_id}
+          data-rubric-version-id={answer?.result?.structured_rubric_version_id}
           data-suggested-score={answer?.result?.score}
           data-final-score={answer?.review?.final_score}
           className="space-y-4 overflow-auto rounded-xl border bg-white p-4"
@@ -1107,7 +1107,7 @@ export default function ReviewPage() {
                 <h3 className="font-semibold">评分依据</h3>
                 {answer.criteria.map((item) => (
                   <div
-                    key={item.rubric_item_id}
+                    key={item.criterion_id}
                     className="mt-2 rounded border p-2 text-sm"
                   >
                     <div className="flex items-center justify-between gap-3">
@@ -1185,10 +1185,7 @@ export default function ReviewPage() {
                   {answer.criteria.length > 0 && (
                     <div className="mt-3 grid gap-2 sm:grid-cols-2">
                       {answer.criteria.map((criterion, index) => (
-                        <label
-                          key={criterion.rubric_item_id}
-                          className="text-sm"
-                        >
+                        <label key={criterion.criterion_id} className="text-sm">
                           评分项 {index + 1}（满分 {criterion.max_points}）
                           <input
                             aria-label={`评分项 ${index + 1} 得分`}
@@ -1197,12 +1194,12 @@ export default function ReviewPage() {
                             max={criterion.max_points}
                             step="any"
                             value={
-                              criterionDrafts[criterion.rubric_item_id] ?? ""
+                              criterionDrafts[criterion.criterion_id] ?? ""
                             }
                             onChange={(event) =>
                               setCriterionDrafts((current) => ({
                                 ...current,
-                                [criterion.rubric_item_id]: event.target.value,
+                                [criterion.criterion_id]: event.target.value,
                               }))
                             }
                             className="mt-1 w-full rounded border bg-white px-3 py-2"

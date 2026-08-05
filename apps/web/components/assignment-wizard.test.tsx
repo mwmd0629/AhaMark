@@ -21,8 +21,9 @@ vi.mock("@/lib/api", async () => {
     display_order: Number(number),
     question_type: "proof",
     max_score: "10.00",
+    content_text: `第 ${number} 题内容`,
     difficulty: "medium" as const,
-    knowledge_points: [],
+    knowledge_points: [{ id: `kp-${number}`, name: `知识点 ${number}` }],
     regions: [],
   });
   const assignment = {
@@ -50,25 +51,6 @@ vi.mock("@/lib/api", async () => {
         status: "ready",
       })),
       questions: [question("q1", "1"), question("q2", "2")],
-    },
-    rubric_version: {
-      id: "rubric-1",
-      version: 1,
-      status: "draft",
-      question_rubrics: [
-        {
-          id: "qr1",
-          question_id: "q1",
-          standard_answer: "第一题已保存答案",
-          items: [],
-        },
-        {
-          id: "qr2",
-          question_id: "q2",
-          standard_answer: "第二题已保存答案",
-          items: [],
-        },
-      ],
     },
   };
   return {
@@ -133,6 +115,31 @@ vi.mock("@/lib/api", async () => {
         url: "https://example.test/paper.pdf?signature=1",
       }),
       page: vi.fn().mockResolvedValue({}),
+      question: vi.fn().mockImplementation(async (_assignmentId, data) => ({
+        ...question("created-question", data.question_number),
+        ...data,
+        max_score: Number(data.max_score).toFixed(2),
+        knowledge_points: data.knowledge_points.map(
+          (name: string, index: number) => ({
+            id: `created-kp-${index}`,
+            name,
+          }),
+        ),
+      })),
+      updateQuestion: vi
+        .fn()
+        .mockImplementation(async (_assignmentId, id, data) => ({
+          ...question(id, data.question_number),
+          ...data,
+          max_score: Number(data.max_score).toFixed(2),
+          knowledge_points: data.knowledge_points.map(
+            (name: string, index: number) => ({
+              id: `updated-kp-${index}`,
+              name,
+            }),
+          ),
+        })),
+      region: vi.fn().mockResolvedValue({}),
     },
   };
 });
@@ -140,28 +147,111 @@ vi.mock("@/lib/api", async () => {
 beforeEach(() => vi.clearAllMocks());
 afterEach(cleanup);
 
-it("回填标准答案并在切换题目时同步更新", async () => {
-  render(<AssignmentWizard assignmentId="assignment-1" />);
+it("新建作业可明确从步骤 2 上传试卷开始", async () => {
+  render(<AssignmentWizard assignmentId="assignment-1" initialStep={2} />);
 
   expect(
-    await screen.findByDisplayValue("第一题已保存答案"),
+    await screen.findByRole("button", { name: "上传试卷文件" }),
+  ).toBeInTheDocument();
+  expect(screen.queryByText("添加题目")).not.toBeInTheDocument();
+});
+
+it("第 4 步回填所选题目的题号、分值、知识点和内容并可保存", async () => {
+  render(<AssignmentWizard assignmentId="assignment-1" initialStep={4} />);
+
+  expect(await screen.findByDisplayValue("1")).toBeInTheDocument();
+  expect(screen.getByDisplayValue("10.00")).toBeInTheDocument();
+  expect(screen.getByDisplayValue("知识点 1")).toBeInTheDocument();
+  expect(screen.getByDisplayValue("第 1 题内容")).toBeInTheDocument();
+
+  fireEvent.change(screen.getByLabelText("知识点（逗号分隔）"), {
+    target: { value: "矩阵加法, 矩阵乘法" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "保存题目" }));
+
+  await waitFor(() =>
+    expect(assignmentsApi.updateQuestion).toHaveBeenCalledWith(
+      "assignment-1",
+      "q1",
+      expect.objectContaining({
+        question_number: "1",
+        max_score: 10,
+        knowledge_points: ["矩阵加法", "矩阵乘法"],
+      }),
+    ),
+  );
+});
+
+it("刷新题目数据时保留当前选择和未保存编辑", async () => {
+  render(<AssignmentWizard assignmentId="assignment-1" initialStep={4} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: /第 2 题/ }));
+  await waitFor(() =>
+    expect(screen.getByDisplayValue("第 2 题内容")).toBeInTheDocument(),
+  );
+  fireEvent.change(screen.getByLabelText("题目内容"), {
+    target: { value: "第 2 题未保存修改" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "保存区域" }));
+
+  await waitFor(() => expect(assignmentsApi.region).toHaveBeenCalled());
+  expect(screen.getByDisplayValue("第 2 题未保存修改")).toBeInTheDocument();
+  expect(screen.getByText("编辑第 2 题")).toBeInTheDocument();
+});
+
+it("脏编辑对应题目被后台移除时阻止误写其他题目", async () => {
+  render(<AssignmentWizard assignmentId="assignment-1" initialStep={4} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: /第 2 题/ }));
+  await waitFor(() =>
+    expect(screen.getByDisplayValue("第 2 题内容")).toBeInTheDocument(),
+  );
+  fireEvent.change(screen.getByLabelText("题目内容"), {
+    target: { value: "不能覆盖第 1 题的本地修改" },
+  });
+  const current = await assignmentsApi.get("assignment-1");
+  if (!current.paper_version) throw new Error("paper version missing");
+  vi.mocked(assignmentsApi.get).mockResolvedValueOnce({
+    ...current,
+    paper_version: {
+      ...current.paper_version,
+      questions: current.paper_version.questions.filter(
+        (question) => question.id !== "q2",
+      ),
+    },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "保存区域" }));
+
+  expect(
+    await screen.findByText("当前题目已被后台更新或移除"),
   ).toBeInTheDocument();
   expect(
-    screen.getByText(
-      /由 Codex 一次生成题目、参考答案和评分标准草稿，不会直接发布/,
-    ),
+    screen.getByDisplayValue("不能覆盖第 1 题的本地修改"),
   ).toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText("当前题目"), {
-    target: { value: "q2" },
-  });
-  await waitFor(() =>
-    expect(screen.getByDisplayValue("第二题已保存答案")).toBeInTheDocument(),
+  expect(screen.getByRole("button", { name: "添加题目" })).toBeDisabled();
+  expect(assignmentsApi.updateQuestion).not.toHaveBeenCalled();
+});
+
+it("题目提交期间禁用按钮并阻止重复创建", async () => {
+  vi.mocked(assignmentsApi.question).mockImplementationOnce(
+    () => new Promise(() => undefined),
   );
+  render(<AssignmentWizard assignmentId="assignment-1" initialStep={4} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "新增题目" }));
+  fireEvent.change(screen.getByLabelText("题号"), { target: { value: "3" } });
+  fireEvent.change(screen.getByLabelText("分值"), { target: { value: "10" } });
+  const submit = screen.getByRole("button", { name: "添加题目" });
+  fireEvent.click(submit);
+  fireEvent.click(submit);
+
+  expect(assignmentsApi.question).toHaveBeenCalledTimes(1);
+  expect(submit).toBeDisabled();
 });
 
 it("支持拖拽上传并显示文件、处理状态和成功页数", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" />);
-  await screen.findByDisplayValue("第一题已保存答案");
+  await screen.findByText("尚未创建生成任务。");
   fireEvent.click(screen.getByRole("button", { name: /上传试卷/ }));
   const file = new File(["paper"], "新试卷.pdf", {
     type: "application/pdf",
@@ -186,7 +276,7 @@ it("支持拖拽上传并显示文件、处理状态和成功页数", async () =
 it("确认后删除已上传文件", async () => {
   const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
   render(<AssignmentWizard assignmentId="assignment-1" />);
-  await screen.findByDisplayValue("第一题已保存答案");
+  await screen.findByText("尚未创建生成任务。");
   fireEvent.click(screen.getByRole("button", { name: /上传试卷/ }));
   fireEvent.click(screen.getByRole("button", { name: "删除 原试卷.pdf" }));
   await waitFor(() =>
@@ -203,7 +293,7 @@ it("确认后删除已上传文件", async () => {
 
 it("拒绝非法格式并允许重新选择", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" />);
-  await screen.findByDisplayValue("第一题已保存答案");
+  await screen.findByText("尚未创建生成任务。");
   fireEvent.click(screen.getByRole("button", { name: /上传试卷/ }));
   fireEvent.drop(screen.getByRole("button", { name: "上传试卷文件" }), {
     dataTransfer: {
@@ -220,7 +310,7 @@ it("拒绝非法格式并允许重新选择", async () => {
 
 it("切换缩略图时同步当前页面高亮和大图", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" />);
-  await screen.findByDisplayValue("第一题已保存答案");
+  await screen.findByText("尚未创建生成任务。");
   fireEvent.click(screen.getByRole("button", { name: /整理页面/ }));
   const page2 = await screen.findByRole("button", { name: /第 2 页/ });
   fireEvent.click(page2);
@@ -232,7 +322,7 @@ it("切换缩略图时同步当前页面高亮和大图", async () => {
 
 it("无截止时间保存为 null，回显时保持无截止时间", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" />);
-  await screen.findByDisplayValue("第一题已保存答案");
+  await screen.findByText("尚未创建生成任务。");
   fireEvent.click(screen.getByRole("button", { name: /基本信息/ }));
   expect(screen.getByRole("radio", { name: /无截止时间/ })).toBeChecked();
   fireEvent.click(screen.getByRole("button", { name: "保存并继续" }));
@@ -247,7 +337,7 @@ it("无截止时间保存为 null，回显时保持无截止时间", async () =>
 
 it("发布前可以调整班级，并将本地截止时间转换为带时区的 ISO 时间", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" />);
-  await screen.findByDisplayValue("第一题已保存答案");
+  await screen.findByText("尚未创建生成任务。");
   fireEvent.click(screen.getByRole("button", { name: /基本信息/ }));
   fireEvent.click(screen.getByRole("checkbox", { name: /线代 3 班/ }));
   fireEvent.click(screen.getByRole("radio", { name: /设置截止时间/ }));
@@ -276,7 +366,7 @@ it("发布前可以调整班级，并将本地截止时间转换为带时区的 
 
 it("年级允许大学课程自定义教学层级并回填编辑值", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" />);
-  await screen.findByDisplayValue("第一题已保存答案");
+  await screen.findByText("尚未创建生成任务。");
   fireEvent.click(screen.getByRole("button", { name: /基本信息/ }));
 
   const grade = screen.getByLabelText("年级或教学层级");

@@ -26,20 +26,23 @@ from app.models import (
     AIProviderInvocation,
     AIScoringJob,
     AISuggestionReview,
+    Assignment,
     CriterionValidationResult,
     MathValidationJob,
     Question,
     QuestionRecognitionEvidence,
-    ReferenceAnswerVersion,
     RubricCriterion,
-    StructuredRubricVersion,
     StudentAnswer,
     StudentAnswerRegion,
     Submission,
     now_utc,
 )
+from app.structured_rubric_authority import (
+    StructuredRubricAuthorityError,
+    require_active_structured_rubric,
+)
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -49,8 +52,9 @@ Db = Annotated[Session, Depends(get_db)]
 
 
 class CreateJob(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     student_answer_id: uuid.UUID
-    rubric_version_id: uuid.UUID
     idempotency_key: str = Field(min_length=1, max_length=128)
     criterion_stable_key: str | None = None
 
@@ -204,7 +208,8 @@ def job_json(db: Session, j: AIScoringJob) -> dict[str, Any]:
         "error_code": j.error_code,
         "retryable": j.retryable,
         "scoring_input_version": j.scoring_input_version,
-        "rubric_version_id": str(j.rubric_version_id),
+        "structured_rubric_set_id": str(j.structured_rubric_set_id),
+        "structured_rubric_version_id": str(j.rubric_version_id),
         "reference_answer_version_id": str(j.reference_answer_version_id),
         "evidence": (
             [
@@ -244,7 +249,8 @@ def job_json(db: Session, j: AIScoringJob) -> dict[str, Any]:
             "status": validation_job.status,
             "generation": validation_job.generation,
             "stale": validation_job.stale_at is not None,
-            "rubric_version_id": str(validation_job.rubric_version_id),
+            "structured_rubric_set_id": str(validation_job.structured_rubric_set_id),
+            "structured_rubric_version_id": str(validation_job.rubric_version_id),
             "reference_answer_version_id": str(validation_job.reference_answer_version_id),
             "results": [
                 {
@@ -359,8 +365,7 @@ def create_job(data: CreateJob, db: Db, actor: Actor) -> dict[str, Any]:
         .with_for_update()
         .execution_options(populate_existing=True)
     )
-    rubric = db.get(StructuredRubricVersion, data.rubric_version_id)
-    if not answer or not rubric or rubric.question_id != answer.question_id:
+    if not answer:
         raise ApiProblem(404, "AI_GRADING_INPUT_NOT_FOUND", "Answer or rubric not found")
     if not submission or submission.owner_id != actor.id:
         raise ApiProblem(404, "SUBMISSION_NOT_FOUND", "Submission not found")
@@ -373,8 +378,20 @@ def create_job(data: CreateJob, db: Db, actor: Actor) -> dict[str, Any]:
         require_submission_mutable(submission)
     except GuardViolation as exc:
         raise exc.problem(409) from exc
-    if rubric.status != "confirmed":
-        raise ApiProblem(422, "RUBRIC_NOT_CONFIRMED", "Confirmed rubric required")
+    assignment = db.get(Assignment, submission.assignment_id)
+    if assignment is None:
+        raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "Assignment not found")
+    try:
+        authority = require_active_structured_rubric(
+            db,
+            assignment=assignment,
+            question_id=answer.question_id,
+            owner_id=actor.id,
+            lock=True,
+        )
+    except StructuredRubricAuthorityError as exc:
+        raise ApiProblem(409, exc.code, str(exc)) from exc
+    rubric, reference = authority.rubric, authority.reference
     try:
         evidence = require_current_recognition_evidence(
             db,
@@ -384,18 +401,11 @@ def create_job(data: CreateJob, db: Db, actor: Actor) -> dict[str, Any]:
         )
     except GuardViolation as exc:
         raise exc.problem(422) from exc
-    reference = db.get(ReferenceAnswerVersion, rubric.reference_answer_version_id)
-    if (
-        not reference
-        or reference.status != "confirmed"
-    ):
-        raise ApiProblem(
-            422, "AI_INPUT_NOT_CONFIRMED", "Confirmed recognition and reference answer required"
-        )
     validation = db.scalar(
         select(MathValidationJob)
         .where(
             MathValidationJob.student_answer_id == answer.id,
+            MathValidationJob.structured_rubric_set_id == authority.rubric_set.id,
             MathValidationJob.rubric_version_id == rubric.id,
             MathValidationJob.reference_answer_version_id == reference.id,
             MathValidationJob.status == "completed",
@@ -435,6 +445,7 @@ def create_job(data: CreateJob, db: Db, actor: Actor) -> dict[str, Any]:
             "question_id": answer.question_id,
             "recognition_evidence_id": evidence.id,
             "reference_answer_version_id": reference.id,
+            "structured_rubric_set_id": authority.rubric_set.id,
             "rubric_version_id": rubric.id,
             "math_validation_job_id": validation.id if validation else None,
             "question_version": answer.question_version_reference,
@@ -497,6 +508,7 @@ def create_job(data: CreateJob, db: Db, actor: Actor) -> dict[str, Any]:
         student_answer_id=answer.id,
         recognition_evidence_id=evidence.id,
         reference_answer_version_id=reference.id,
+        structured_rubric_set_id=authority.rubric_set.id,
         rubric_version_id=rubric.id,
         math_validation_job_id=validation.id if validation else None,
         question_version=answer.question_version_reference,
@@ -543,6 +555,7 @@ def create_job(data: CreateJob, db: Db, actor: Actor) -> dict[str, Any]:
                 "submission_id": submission.id,
                 "recognition_evidence_id": evidence.id,
                 "reference_answer_version_id": reference.id,
+                "structured_rubric_set_id": authority.rubric_set.id,
                 "rubric_version_id": rubric.id,
                 "scoring_input_version": input_version,
                 "request_hash": request_hash,
@@ -648,7 +661,6 @@ def retry_job(
     return create_job(
         CreateJob(
             student_answer_id=source.student_answer_id,
-            rubric_version_id=source.rubric_version_id,
             idempotency_key=data.idempotency_key,
         ),
         db,
@@ -687,7 +699,6 @@ def retry_criterion(
     return create_job(
         CreateJob(
             student_answer_id=source.student_answer_id,
-            rubric_version_id=source.rubric_version_id,
             idempotency_key=data.idempotency_key,
             criterion_stable_key=criterion_key,
         ),

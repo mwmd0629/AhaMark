@@ -111,25 +111,15 @@ const copies: Record<string, ReviewCopy> = {
     message: "结构化评分标准已经生成，但还需要确认本次发布使用这些版本。",
     action: "检查评分标准",
   },
-  LEGACY_CONVERSION_REVIEW: {
-    title: "评分标准兼容版需要人工核查",
-    message: "完整评分标准保持不变；具体需要人工核查的影响已列在兼容说明中。",
-    action: "查看兼容说明",
+  STRUCTURED_SET_REQUIRED: {
+    title: "正在固定待发布评分标准",
+    message: "系统正在把当前试卷、答案、评分标准和分值固定为待发布集合。",
+    action: "重新扫描",
   },
-  CONFIRM_LEGACY_BINDING_REQUIRED: {
-    title: "评分标准兼容方式等待确认",
-    message: "请阅读兼容说明，并确认发布后需要人工核查的具体内容。",
-    action: "查看兼容说明",
-  },
-  LEGACY_BINDING_REQUIRED: {
-    title: "尚未生成评分标准兼容版本",
-    message: "请为当前答案和评分标准生成本次发布使用的兼容版本。",
-    action: "生成兼容版本",
-  },
-  LEGACY_BINDING_STALE: {
-    title: "评分标准兼容版本需要重新生成",
-    message: "答案或评分标准已经变化，旧兼容版本不再适用于当前内容。",
-    action: "重新生成兼容版本",
+  STRUCTURED_SET_STALE: {
+    title: "待发布评分标准需要重新准备",
+    message: "题目、答案、评分标准或分值已经变化，系统将按最新内容重新固定。",
+    action: "重新扫描",
   },
   FILE_ROLE_REVIEW_REQUIRED: {
     title: "文件用途需要人工复核",

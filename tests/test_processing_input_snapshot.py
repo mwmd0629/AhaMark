@@ -11,7 +11,6 @@ from app.models import (
     Assignment,
     AssignmentAnswerDraftCandidate,
     AssignmentReviewSession,
-    AssignmentRubricPublicationBinding,
     AssignmentStatus,
     GradingBatch,
     PaperVersion,
@@ -23,6 +22,8 @@ from app.models import (
     RubricCriterion,
     SchoolClass,
     StoredFile,
+    StructuredRubricSet,
+    StructuredRubricSetItem,
     StructuredRubricVersion,
     Student,
     StudentAnswer,
@@ -46,10 +47,10 @@ from app.processing.contracts import (
 )
 from app.processing.input_snapshot import (
     _current_evidence,
-    _current_question_version,
-    _latest_confirmed_formals,
+    _set_formals,
     build_processing_input_snapshot,
 )
+from app.question_versions import question_version_token
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
@@ -110,7 +111,7 @@ def test_run_and_request_hashes_are_order_stable_and_suggestion_only() -> None:
     )
 
 
-def test_formal_selector_never_falls_back_to_newer_draft() -> None:
+def test_set_formals_never_fall_forward_to_newer_versions() -> None:
     with SessionLocal() as db:
         owner = User(
             email=f"processing-{uuid.uuid4()}@example.test",
@@ -170,7 +171,7 @@ def test_formal_selector_never_falls_back_to_newer_draft() -> None:
         db.flush()
         confirmed_rubric = StructuredRubricVersion(
             question_id=question.id,
-            question_version=_current_question_version(question),
+            question_version=question_version_token(question),
             reference_answer_version_id=confirmed_answer.id,
             rubric_version=1,
             title="R",
@@ -181,7 +182,7 @@ def test_formal_selector_never_falls_back_to_newer_draft() -> None:
         )
         draft_rubric = StructuredRubricVersion(
             question_id=question.id,
-            question_version=_current_question_version(question),
+            question_version=question_version_token(question),
             reference_answer_version_id=draft_answer.id,
             rubric_version=2,
             title="draft",
@@ -209,7 +210,7 @@ def test_formal_selector_never_falls_back_to_newer_draft() -> None:
         db.flush()
         retired_rubric = StructuredRubricVersion(
             question_id=question.id,
-            question_version=_current_question_version(question),
+            question_version=question_version_token(question),
             reference_answer_version_id=unrelated_confirmed_answer.id,
             rubric_version=3,
             title="retired",
@@ -220,36 +221,63 @@ def test_formal_selector_never_falls_back_to_newer_draft() -> None:
         )
         db.add(retired_rubric)
         db.flush()
-        db.add(
-            RubricCriterion(
-                rubric_version_id=confirmed_rubric.id,
-                stable_key="result",
-                title="Result",
-                max_points=Decimal("2"),
-                display_order=0,
-                criterion_type="result",
-                required=True,
-                dependencies=[],
-                expected_evidence={},
-                validation_mode="manual",
-                manual_review_policy={},
-                partial_credit_policy={},
-                validation_rule={},
-                metadata_={},
-            )
+        criterion = RubricCriterion(
+            rubric_version_id=confirmed_rubric.id,
+            stable_key="result",
+            title="Result",
+            max_points=Decimal("2"),
+            display_order=0,
+            criterion_type="result",
+            required=True,
+            dependencies=[],
+            expected_evidence={},
+            validation_mode="manual",
+            manual_review_policy={},
+            partial_credit_policy={},
+            validation_rule={},
+            metadata_={},
         )
+        rubric_set = StructuredRubricSet(
+            owner_id=owner.id,
+            assignment_id=assignment.id,
+            paper_version_id=paper.id,
+            version=1,
+            status="active",
+            content_hash="1" * 64,
+            source_snapshot_hash="2" * 64,
+            total_points=Decimal("2"),
+            created_by=owner.id,
+        )
+        db.add_all([criterion, rubric_set])
+        db.flush()
+        set_item = StructuredRubricSetItem(
+            rubric_set_id=rubric_set.id,
+            question_id=question.id,
+            question_version=confirmed_rubric.question_version,
+            reference_answer_version_id=confirmed_answer.id,
+            structured_rubric_version_id=confirmed_rubric.id,
+            answer_content_hash="3" * 64,
+            rubric_content_hash="4" * 64,
+            criteria_hash="5" * 64,
+            display_order=1,
+            max_points=Decimal("2"),
+        )
+        db.add(set_item)
         db.flush()
 
-        answer, rubric, criteria = _latest_confirmed_formals(db, question)
+        answer, rubric, criteria = _set_formals(db, question, set_item)
         assert answer.id == confirmed_answer.id
         assert rubric.id == confirmed_rubric.id
         assert [item.stable_key for item in criteria] == ["result"]
 
 
-def test_snapshot_builder_is_read_only_and_reuses_phase2_projection_validator() -> None:
+def test_snapshot_builder_is_read_only_and_reuses_structured_set_validator() -> None:
     source = inspect.getsource(build_processing_input_snapshot)
-    assert "validate_current_projection_under_locks(" in source
+    assert "validate_current_structured_set_under_locks(" in source
     assert "lock=False" in source
+    assert '"STRUCTURED_SET_REQUIRED"' in source
+    assert '"STRUCTURED_SET_STALE"' in source
+    assert "LEGACY_PROJECTION" not in source
     assert not any(
         marker in source
         for marker in ("db.add(", "db.delete(", "db.commit(", "db.flush(", "db.execute(")
@@ -953,17 +981,19 @@ def test_postgresql_synthetic_snapshot_drift_matrix_rolls_back() -> None:
         flag_modified(evidence, "block_sources")
         db.flush()
 
-        binding = db.scalar(
-            select(AssignmentRubricPublicationBinding).where(
-                AssignmentRubricPublicationBinding.assignment_id == assignment.id,
-                AssignmentRubricPublicationBinding.invalidated_at.is_(None),
+        rubric_set = db.get(StructuredRubricSet, assignment.active_structured_rubric_set_id)
+        assert rubric_set is not None
+        set_item = db.scalar(
+            select(StructuredRubricSetItem).where(
+                StructuredRubricSetItem.rubric_set_id == rubric_set.id,
+                StructuredRubricSetItem.question_id == answer.question_id,
             )
         )
-        assert binding is not None
-        original_profile = binding.projection_profile
-        binding.projection_profile = "legacy-unverified"
+        assert set_item is not None
+        original_hash = set_item.criteria_hash
+        set_item.criteria_hash = "0" * 64
         db.flush()
-        with pytest.raises(ProcessingInputError) as legacy:
+        with pytest.raises(ProcessingInputError) as stale_set:
             build_processing_input_snapshot(
                 db,
                 owner_id=assignment.owner_id,
@@ -971,8 +1001,8 @@ def test_postgresql_synthetic_snapshot_drift_matrix_rolls_back() -> None:
                 submission_id=submission.id,
                 answer_id=answer.id,
             )
-        assert legacy.value.code == "LEGACY_PROJECTION_STALE"
-        binding.projection_profile = original_profile
+        assert stale_set.value.code == "STRUCTURED_SET_STALE"
+        set_item.criteria_hash = original_hash
         db.flush()
     finally:
         db.close()

@@ -27,36 +27,7 @@ const routineConfirmationIssueCodes = new Set(
   confirmations.map(([kind]) => `CONFIRM_${kind.toUpperCase()}_REQUIRED`),
 );
 
-const bindingLossMessages: Record<string, string> = {
-  DEPENDENCY_NOT_LOSSLESS:
-    "兼容版不能自动约束此评分项与前置步骤的关系，批改时需要人工核查先后条件。",
-  ALTERNATIVE_PATH_NOT_LOSSLESS:
-    "多条可选得分路径会在兼容版中合并展示，批改时需要人工判断学生满足了哪条路径。",
-  VALIDATION_RULE_NOT_LOSSLESS:
-    "自动验证规则不会在兼容版中执行，批改时需要人工核查答案条件。",
-  EXPECTED_EVIDENCE_NOT_LOSSLESS:
-    "兼容版不能完整保留该评分项要求查看的证据，批改时需要人工核对学生是否提供了指定依据。",
-  MANUAL_REVIEW_POLICY_NOT_LOSSLESS:
-    "兼容版不能自动执行该评分项的人工复核策略，批改时需要按原评分标准逐项复核。",
-  PARTIAL_CREDIT_POLICY_NOT_LOSSLESS:
-    "兼容版不能完整执行该评分项的部分得分规则，批改时需要人工判断应给的部分分。",
-  ERROR_CATEGORY_NOT_LOSSLESS:
-    "兼容版不能完整保留该评分项的错误分类，批改时需要人工判断学生错误所属类别。",
-  CRITERION_METADATA_NOT_LOSSLESS:
-    "该评分项包含兼容版无法完整表达的扩展要求，批改时需要对照原评分标准人工核查。",
-  DEDUCTION_RULE_NOT_LOSSLESS:
-    "兼容版不能自动执行该评分项的结构化扣分规则，批改时需要人工计算扣分。",
-  COMMON_ERROR_CODES_NOT_LOSSLESS:
-    "兼容版不能完整保留该评分项的多项常见错误标记，批改时需要人工识别对应错误。",
-  FEEDBACK_TEMPLATE_NOT_LOSSLESS:
-    "兼容版不能自动套用该评分项的反馈模板，批改后需要人工补充相应反馈。",
-};
-
 const bundleSchemaVersion = "assignment-review-bundle-v1";
-const projectionProfile = "structured-to-legacy";
-const projectionVersion = "structured-rubric-projection-v3";
-const confirmationFingerprintVersion = "confirmation-fingerprint-v2";
-const sha256Pattern = /^[0-9a-f]{64}$/i;
 export const assignmentPreparationPolling = Object.freeze({
   intervalMs: 3_000,
   timeoutMs: 120_000,
@@ -85,36 +56,9 @@ const isCurrentBundleContract = (
   Array.isArray(value.confirmations) &&
   Array.isArray(value.questions);
 
-const hasFreshProjectionEvidence = (
-  binding: NonNullable<AssignmentReviewBundle["binding"]>,
-) => {
-  const losses = binding.loss_report;
-  return (
-    binding.status !== "stale" &&
-    sha256Pattern.test(binding.source_binding_hash) &&
-    binding.expected_source_binding_hash === binding.source_binding_hash &&
-    typeof binding.source_semantic_hash === "string" &&
-    sha256Pattern.test(binding.source_semantic_hash) &&
-    binding.source_semantic_hash === binding.source_binding_hash &&
-    typeof binding.target_legacy_hash === "string" &&
-    sha256Pattern.test(binding.target_legacy_hash) &&
-    binding.projection_profile === projectionProfile &&
-    binding.projection_version === projectionVersion &&
-    binding.projection_current === true &&
-    binding.projection_reason === null &&
-    Array.isArray(binding.mapping) &&
-    Array.isArray(losses) &&
-    typeof binding.loss_report_hash === "string" &&
-    sha256Pattern.test(binding.loss_report_hash) &&
-    binding.manual_review_required === losses.length > 0
-  );
-};
-
-const bindingIssueCodes = new Set([
-  "LEGACY_CONVERSION_REVIEW",
-  "LEGACY_BINDING_REQUIRED",
-  "CONFIRM_LEGACY_BINDING_REQUIRED",
-  "LEGACY_BINDING_STALE",
+const structuredSetPreparationIssueCodes = new Set([
+  "STRUCTURED_SET_REQUIRED",
+  "STRUCTURED_SET_STALE",
 ]);
 const bundleApprovalIssueCodes = new Set([
   "REFERENCE_ANSWER_UNCONFIRMED",
@@ -202,7 +146,7 @@ export function AssignmentCentralReview({
   const requestGeneration = useRef(0);
   const mutationGeneration = useRef(0);
   const autoConfirmationAttempt = useRef("");
-  const autoBindingAttempt = useRef("");
+  const autoStructuredSetAttempt = useRef("");
   const automationRequest = useRef(0);
   const preparationRequest = useRef(0);
   const preparationAttempt = useRef("");
@@ -376,7 +320,7 @@ export function AssignmentCentralReview({
     setBusy(false);
     setAutomating(false);
     autoConfirmationAttempt.current = "";
-    autoBindingAttempt.current = "";
+    autoStructuredSetAttempt.current = "";
     preparationAttempt.current = "";
     assignmentReviewApi
       .list(assignmentId)
@@ -438,7 +382,7 @@ export function AssignmentCentralReview({
       items.filter(
         (row) =>
           !["stale", "superseded"].includes(row.status) &&
-          row.issue_code !== "LEGACY_CONVERSION_REVIEW" &&
+          !structuredSetPreparationIssueCodes.has(row.issue_code) &&
           !routineConfirmationIssueCodes.has(row.issue_code) &&
           (severity === "all" || row.severity === severity) &&
           (section === "all" || row.section === section),
@@ -467,7 +411,7 @@ export function AssignmentCentralReview({
     answer_sources: "答案文件",
     rubrics: "评分标准",
     file_roles: "文件用途",
-    publication: "发布绑定",
+    publication: "发布版本",
     total_score: "分值",
   };
   const openCodes = new Set(bundle?.blockers.map((row) => row.code) ?? []);
@@ -488,73 +432,23 @@ export function AssignmentCentralReview({
   const requiredConfirmationsComplete = confirmations.every(([kind]) =>
     bundleConfirmations.has(kind),
   );
-  const hasPreBindingBlocker =
+  const hasPreStructuredSetBlocker =
     bundle?.blockers.some(
       (blocker) =>
-        blocker.severity === "blocking" && !bindingIssueCodes.has(blocker.code),
+        blocker.severity === "blocking" &&
+        !structuredSetPreparationIssueCodes.has(blocker.code),
     ) ?? true;
-  const bindingPrerequisitesComplete =
-    requiredConfirmationsComplete && !hasPreBindingBlocker;
-  const legacyBindingConfirmation =
-    bundleConfirmationsByType.get("legacy_binding");
-  const legacyBindingIssueOpen =
-    openCodes.has("LEGACY_BINDING_REQUIRED") ||
-    openCodes.has("CONFIRM_LEGACY_BINDING_REQUIRED") ||
-    openCodes.has("LEGACY_BINDING_STALE");
-  const bindingLosses = bundle?.binding?.loss_report ?? [];
-  const unknownBindingLosses = bindingLosses.filter(
-    (loss) => !bindingLossMessages[loss.code],
-  );
-  const bindingHasUnknownLoss = unknownBindingLosses.length > 0;
-  const bindingIsStale = bundle?.binding?.status === "stale";
-  const bindingProjectionIsFresh =
-    !!bundle?.binding && hasFreshProjectionEvidence(bundle.binding);
-  const bindingIsLossless =
-    bindingProjectionIsFresh &&
-    !bundle!.binding!.manual_review_required &&
-    bindingLosses.length === 0;
-  const legacyBindingConfirmationIsCurrent =
-    legacyBindingConfirmation?.status === "confirmed" &&
-    legacyBindingConfirmation.inherited === false &&
-    legacyBindingConfirmation.fingerprint_schema_version ===
-      confirmationFingerprintVersion &&
-    sha256Pattern.test(legacyBindingConfirmation.source_hash) &&
-    legacyBindingConfirmation.binding_id === bundle?.binding?.id &&
-    legacyBindingConfirmation.source_binding_hash ===
-      bundle?.binding?.source_binding_hash;
-  const bindingIsAutoCompatible =
-    bindingProjectionIsFresh &&
-    !bindingHasUnknownLoss &&
-    bundle?.binding?.status === "confirmed" &&
-    legacyBindingConfirmationIsCurrent &&
-    legacyBindingConfirmation?.origin === "system_auto" &&
-    legacyBindingConfirmation.inherited === false;
-  const bindingHasKnownLosses =
-    bindingProjectionIsFresh &&
-    bindingLosses.length > 0 &&
-    !bindingHasUnknownLoss;
-  const bindingLossesConfirmed =
-    bindingHasKnownLosses &&
-    bundle?.binding?.status === "confirmed" &&
-    legacyBindingConfirmationIsCurrent &&
-    legacyBindingConfirmation?.origin === "origin" &&
-    legacyBindingConfirmation.inherited === false;
-  const bindingCanBeConfirmed =
-    bindingHasKnownLosses &&
-    !bindingLossesConfirmed &&
-    !bindingIsStale &&
-    ["draft", "validated"].includes(bundle?.binding?.status ?? "");
-  const bindingPublicationReady =
-    !legacyBindingIssueOpen &&
-    !bindingIsStale &&
-    !bindingHasUnknownLoss &&
-    (bindingIsAutoCompatible || bindingLossesConfirmed);
+  const structuredSetPrerequisitesComplete =
+    requiredConfirmationsComplete && !hasPreStructuredSetBlocker;
+  const structuredSetIsCurrent =
+    bundle?.structured_rubric_set?.current === true &&
+    bundle.structured_rubric_set.status !== "stale";
   const bundleContractIsCurrent =
     !!bundle && isCurrentBundleContract(bundle, item.id);
   const teacherVisibleBlockers =
     bundle?.blockers.filter(
       (blocker) =>
-        !bindingIssueCodes.has(blocker.code) &&
+        !structuredSetPreparationIssueCodes.has(blocker.code) &&
         !routineConfirmationIssueCodes.has(blocker.code),
     ) ?? [];
   const effectiveBundleBlockers =
@@ -571,7 +465,7 @@ export function AssignmentCentralReview({
     (bundle.status !== "ready_to_publish" && readiness?.status !== "ready") ||
     effectiveBundleBlockers.length > 0 ||
     !requiredConfirmationsComplete ||
-    !bindingPublicationReady;
+    !structuredSetIsCurrent;
   useEffect(() => {
     if (
       !session ||
@@ -631,25 +525,25 @@ export function AssignmentCentralReview({
     if (
       !session ||
       !bundle ||
-      bundle.binding ||
+      structuredSetIsCurrent ||
       bundleError ||
       busy ||
       automating ||
-      !bindingPrerequisitesComplete
+      !structuredSetPrerequisitesComplete
     )
       return;
     const assignmentId = item.id;
     const epoch = assignmentEpoch.current.value;
     const key = `${session.id}:${session.review_version}`;
-    if (autoBindingAttempt.current === key) return;
-    autoBindingAttempt.current = key;
+    if (autoStructuredSetAttempt.current === key) return;
+    autoStructuredSetAttempt.current = key;
     const request = ++automationRequest.current;
     const automationIsCurrent = () =>
       automationRequest.current === request &&
       isCurrentRequest(assignmentId, epoch);
     setAutomating(true);
     assignmentReviewApi
-      .createBinding(session.id, session.review_version)
+      .createStructuredRubricSet(session.id, session.review_version)
       .then(() => {
         if (automationIsCurrent()) return load(session);
       })
@@ -658,7 +552,7 @@ export function AssignmentCentralReview({
           toast(
             error instanceof ApiError
               ? error.message
-              : "评分标准兼容检查暂时失败，请重新扫描。",
+              : "待发布评分标准集合准备失败，请重新扫描。",
             "error",
           );
         }
@@ -674,7 +568,8 @@ export function AssignmentCentralReview({
     isCurrentRequest,
     item.id,
     load,
-    bindingPrerequisitesComplete,
+    structuredSetIsCurrent,
+    structuredSetPrerequisitesComplete,
     session,
     toast,
   ]);
@@ -686,7 +581,7 @@ export function AssignmentCentralReview({
       busy ||
       automating ||
       !requiredConfirmationsComplete ||
-      (!bundle.binding && bindingPrerequisitesComplete) ||
+      (!structuredSetIsCurrent && structuredSetPrerequisitesComplete) ||
       readiness ||
       manualMode ||
       preparationInFlight.current
@@ -717,19 +612,18 @@ export function AssignmentCentralReview({
       const startedAt = Date.now();
       const waitForNextPoll = (delayMs: number) =>
         new Promise<void>((resolve) => {
-          let timer: ReturnType<typeof setTimeout> | undefined;
           let settled = false;
           const finish = () => {
             if (settled) return;
             settled = true;
-            if (timer !== undefined) clearTimeout(timer);
+            clearTimeout(timer);
             if (preparationPollCancel.current === finish) {
               preparationPollCancel.current = () => undefined;
             }
             resolve();
           };
+          const timer = setTimeout(finish, delayMs);
           preparationPollCancel.current = finish;
-          timer = setTimeout(finish, delayMs);
         });
 
       while (preparationIsCurrent()) {
@@ -790,7 +684,8 @@ export function AssignmentCentralReview({
     bundle?.version.bundle_hash,
     bundleError,
     busy,
-    bindingPrerequisitesComplete,
+    structuredSetIsCurrent,
+    structuredSetPrerequisitesComplete,
     requiredConfirmationsComplete,
     publicationBlocked,
     preparationExceptions.length,
@@ -863,21 +758,6 @@ export function AssignmentCentralReview({
             actionLabel: "查看全部页面",
             confirmationKind: "paper_version",
             secondaryActionLabel: "页面无误，完成核对",
-          },
-        ]
-      : []),
-    ...(bindingIsStale ||
-    (bindingHasKnownLosses && !bindingIsAutoCompatible) ||
-    bindingHasUnknownLoss
-      ? [
-          {
-            title: bindingIsStale
-              ? "重新生成评分标准兼容版本"
-              : bindingHasKnownLosses
-                ? "确认评分标准兼容方式"
-                : "生成评分标准兼容版本",
-            detail:
-              "完整评分标准保持不变；系统只为现有批改流程生成本次发布使用的兼容版本。",
           },
         ]
       : []),
@@ -1542,7 +1422,7 @@ export function AssignmentCentralReview({
           disabled={busy || automating}
           onClick={() => {
             autoConfirmationAttempt.current = "";
-            autoBindingAttempt.current = "";
+            autoStructuredSetAttempt.current = "";
             preparationAttempt.current = "";
             preparationPollCancel.current();
             preparationRequest.current += 1;
@@ -1659,191 +1539,19 @@ export function AssignmentCentralReview({
           班级、时间、分值、文件和版本由系统核对；只有内容不完整或存在冲突时才需要处理。
         </p>
       </div>
-      <details
-        className="rounded-xl border"
-        open={bindingIsStale || bindingHasUnknownLoss || bindingHasKnownLosses}
-      >
-        <summary className="cursor-pointer rounded-xl p-4 font-semibold hover:bg-slate-50">
-          评分标准兼容说明
-        </summary>
-        <div className="space-y-2 border-t p-4">
-          <p className="text-sm text-slate-600">
-            完整评分标准始终保留；兼容版本只供现有批改流程读取，不会修改原规则。
+      {bundle?.structured_rubric_set && (
+        <div
+          className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm"
+          data-testid="structured-rubric-set-summary"
+        >
+          <strong>
+            待发布评分标准集合 v{bundle.structured_rubric_set.version}
+          </strong>
+          <p className="mt-1 text-slate-600">
+            系统已固定当前试卷、标准答案、评分标准和分值。最终发布时会在同一事务内重新核对指纹。
           </p>
-          {bindingIsStale ? (
-            <div
-              data-testid="rubric-binding-stale"
-              className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
-            >
-              <strong>需要重新生成兼容版本</strong>
-              <p className="mt-1">
-                答案或评分标准已经变化，已有兼容版本不再适用于当前内容。
-              </p>
-            </div>
-          ) : bindingHasUnknownLoss ? (
-            <div
-              data-testid="rubric-binding-compatibility-summary"
-              className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-900"
-            >
-              <strong>存在尚无法安全说明的兼容差异</strong>
-              <p className="mt-1">
-                当前不能确认或发布此兼容版本。请修改评分标准，或联系支持人员核查。
-              </p>
-            </div>
-          ) : bindingHasKnownLosses ? (
-            <div
-              data-testid="rubric-binding-compatibility-summary"
-              className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950"
-            >
-              <strong>需要教师确认的具体业务损失</strong>
-              <p className="mt-1">
-                完整评分标准仍会保留；以下规则在兼容版本中需要改由教师人工核查。
-              </p>
-              <ul
-                data-testid="rubric-binding-loss-list"
-                className="mt-3 space-y-2"
-              >
-                {bindingLosses.map((loss, index) => {
-                  const question = bundle?.questions.find(
-                    (entry) => entry.id === loss.question_id,
-                  );
-                  const criterion =
-                    question?.rubric.selected?.criteria.find(
-                      (entry) => entry.key === loss.criterion_key,
-                    ) ??
-                    question?.rubric.materialized?.criteria.find(
-                      (entry) => entry.key === loss.criterion_key,
-                    );
-                  return (
-                    <li
-                      key={`${loss.question_id}-${loss.criterion_key}-${index}`}
-                      data-testid="rubric-binding-loss-item"
-                      className="rounded-lg border border-amber-200 bg-white p-3"
-                    >
-                      <strong>
-                        第 {question?.number ?? loss.question_number} 题 ·{" "}
-                        {criterion?.title ?? "评分项"}
-                      </strong>
-                      <p className="mt-1">{bindingLossMessages[loss.code]}</p>
-                    </li>
-                  );
-                })}
-              </ul>
-              {bindingLossesConfirmed ? (
-                <p className="mt-3 font-medium text-emerald-800">
-                  ✓ 已确认按上述人工核查方式使用兼容版
-                </p>
-              ) : (
-                <div data-testid="confirm-rubric-publication-binding">
-                  <Button
-                    className="mt-3"
-                    data-testid="rubric-binding-loss-confirm"
-                    disabled={busy || !bindingCanBeConfirmed}
-                    onClick={() =>
-                      act(
-                        () =>
-                          assignmentReviewApi.confirmBinding(
-                            bundle!.binding!.id,
-                            session.review_version,
-                          ),
-                        "已确认按人工核查方式发布兼容版",
-                      )
-                    }
-                  >
-                    确认按上述人工核查方式发布兼容版
-                  </Button>
-                </div>
-              )}
-            </div>
-          ) : bindingIsAutoCompatible ? (
-            <div
-              data-testid="rubric-binding-automatic"
-              className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900"
-            >
-              <strong>✓ 可自动兼容</strong>
-              <p className="mt-1">
-                当前评分规则可完整用于兼容版本，无需教师再次确认。
-                此兼容版本为本次重新生成，不会沿用旧发布版本的确认。
-              </p>
-            </div>
-          ) : bundle?.binding ? (
-            <div
-              data-testid="rubric-binding-compatibility-summary"
-              className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-900"
-            >
-              <strong>兼容版本状态尚未完成</strong>
-              <p className="mt-1">请重新生成当前评分标准的兼容版本。</p>
-            </div>
-          ) : (
-            <p className="rounded-lg bg-slate-50 p-3 text-sm text-slate-700">
-              尚未生成评分标准兼容版本。
-            </p>
-          )}
-          {(!bundle?.binding ||
-            bindingIsStale ||
-            (!bindingHasUnknownLoss && !bindingProjectionIsFresh) ||
-            (bindingIsLossless && !bindingIsAutoCompatible)) && (
-            <Button
-              data-testid="prepare-rubric-publication-binding"
-              disabled={busy || !bindingPrerequisitesComplete}
-              onClick={() =>
-                act(
-                  () =>
-                    assignmentReviewApi.createBinding(
-                      session.id,
-                      session.review_version,
-                    ),
-                  "评分标准兼容版本已生成",
-                )
-              }
-            >
-              {bundle?.binding ? "重新生成兼容版本" : "生成兼容版本"}
-            </Button>
-          )}
-          {!bindingPrerequisitesComplete && !bundle?.binding && (
-            <p className="text-sm text-amber-700">
-              请先完成上方仍影响发布的参考答案和评分标准；完成后系统会自动生成兼容版本。
-            </p>
-          )}
-          {bundle?.binding && (
-            <details
-              data-testid="rubric-binding-technical-details"
-              className="rounded-lg border p-3 text-sm"
-            >
-              <summary className="cursor-pointer text-slate-600">
-                查看技术详情
-              </summary>
-              <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap rounded bg-slate-950 p-3 text-xs text-slate-100">
-                {JSON.stringify(
-                  {
-                    binding_id: bundle.binding.id,
-                    binding_version: bundle.binding.binding_version,
-                    target_legacy_hash: bundle.binding.target_legacy_hash,
-                    projection_profile: bundle.binding.projection_profile,
-                    projection_version: bundle.binding.projection_version,
-                    projection_current: bundle.binding.projection_current,
-                    projection_reason: bundle.binding.projection_reason,
-                    loss_report_hash: bundle.binding.loss_report_hash,
-                    loss_report: bundle.binding.loss_report,
-                    mapping: bundle.binding.mapping,
-                    legacy_confirmation: legacyBindingConfirmation
-                      ? {
-                          id: legacyBindingConfirmation.id,
-                          origin: legacyBindingConfirmation.origin,
-                          binding_id: legacyBindingConfirmation.binding_id,
-                          fingerprint_schema_version:
-                            legacyBindingConfirmation.fingerprint_schema_version,
-                        }
-                      : null,
-                  },
-                  null,
-                  2,
-                )}
-              </pre>
-            </details>
-          )}
         </div>
-      </details>
+      )}
       <div className="rounded-xl border p-4">
         <h3 className="font-semibold">发布门禁</h3>
         <p>

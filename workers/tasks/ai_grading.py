@@ -32,6 +32,7 @@ from app.models import (
     AIFeedbackDraft,
     AIProviderInvocation,
     AIScoringJob,
+    Assignment,
     CriterionValidationResult,
     MathValidationJob,
     Question,
@@ -45,6 +46,11 @@ from app.models import (
     now_utc,
 )
 from app.storage.dependencies import get_storage
+from app.structured_rubric_authority import (
+    StructuredRubricAuthorityError,
+    require_active_structured_rubric,
+    require_job_authority,
+)
 from PIL import Image
 from sqlalchemy import func, select
 
@@ -73,6 +79,7 @@ TERMINAL_JOB_STATUSES = {
 @dataclass(frozen=True)
 class InputSnapshot:
     recognition_evidence_id: uuid.UUID
+    structured_rubric_set_id: uuid.UUID
     rubric_version_id: uuid.UUID
     reference_answer_version_id: uuid.UUID
     student_answer_id: uuid.UUID
@@ -225,6 +232,29 @@ def run_ai_grading(
             return {"status": "discarded_late"}
         if job.status in TERMINAL_JOB_STATUSES:
             return {"status": "already_processed"}
+        assignment = db.get(Assignment, job.assignment_id)
+        try:
+            if assignment is None:
+                raise StructuredRubricAuthorityError(
+                    "STRUCTURED_SET_STALE", "Assignment is unavailable"
+                )
+            authority = require_active_structured_rubric(
+                db,
+                assignment=assignment,
+                question_id=job.question_id,
+                owner_id=job.owner_id,
+                lock=True,
+            )
+            require_job_authority(
+                authority,
+                structured_rubric_set_id=job.structured_rubric_set_id,
+                rubric_version_id=job.rubric_version_id,
+                reference_answer_version_id=job.reference_answer_version_id,
+            )
+        except StructuredRubricAuthorityError as exc:
+            job.status, job.error_code, job.stale_at = "stale", exc.code, now_utc()
+            db.commit()
+            return {"status": "stale"}
         rubric = db.get(StructuredRubricVersion, job.rubric_version_id)
         reference = db.get(ReferenceAnswerVersion, job.reference_answer_version_id)
         question = db.get(Question, job.question_id)
@@ -320,6 +350,7 @@ def run_ai_grading(
                 validation_job is None
                 or validation_job.stale_at is not None
                 or validation_job.student_answer_id != answer.id
+                or validation_job.structured_rubric_set_id != job.structured_rubric_set_id
                 or validation_job.rubric_version_id != rubric.id
                 or validation_job.reference_answer_version_id != reference.id
             ):
@@ -458,6 +489,7 @@ def run_ai_grading(
             return {"status": "abstained"}
         input_snapshot = InputSnapshot(
             recognition_evidence_id=job.recognition_evidence_id,
+            structured_rubric_set_id=job.structured_rubric_set_id,
             rubric_version_id=job.rubric_version_id,
             reference_answer_version_id=job.reference_answer_version_id,
             student_answer_id=job.student_answer_id,
@@ -573,6 +605,29 @@ def run_ai_grading(
             if input_snapshot.math_validation_job_id
             else None
         )
+        authority_current = False
+        if current is not None:
+            try:
+                current_assignment = db.get(Assignment, current.assignment_id)
+                if current_assignment is None:
+                    raise StructuredRubricAuthorityError(
+                        "STRUCTURED_SET_STALE", "Assignment is unavailable"
+                    )
+                require_job_authority(
+                    require_active_structured_rubric(
+                        db,
+                        assignment=current_assignment,
+                        question_id=current.question_id,
+                        owner_id=current.owner_id,
+                        lock=True,
+                    ),
+                    structured_rubric_set_id=current.structured_rubric_set_id,
+                    rubric_version_id=current.rubric_version_id,
+                    reference_answer_version_id=current.reference_answer_version_id,
+                )
+                authority_current = True
+            except StructuredRubricAuthorityError:
+                authority_current = False
         current_block_refs = (
             {
                 f"recognition:{current_evidence.id}",
@@ -596,9 +651,11 @@ def run_ai_grading(
         )
         late = (
             current is None
+            or not authority_current
             or current.generation != generation
             or generation < current_generation
             or current.recognition_evidence_id != input_snapshot.recognition_evidence_id
+            or current.structured_rubric_set_id != input_snapshot.structured_rubric_set_id
             or current.rubric_version_id != input_snapshot.rubric_version_id
             or current.reference_answer_version_id != input_snapshot.reference_answer_version_id
             or current.student_answer_id != input_snapshot.student_answer_id

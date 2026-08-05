@@ -8,8 +8,9 @@ from sqlalchemy.orm import Session
 
 from app.api.assignment_central_review import (
     _answer_content_payload,
+    _criterion_payload,
     _rubric_content_payload,
-    validate_current_projection_under_locks,
+    validate_current_structured_set_under_locks,
 )
 from app.models import (
     Assignment,
@@ -24,6 +25,7 @@ from app.models import (
     ReferenceAnswerVersion,
     RegionEvidenceImage,
     RubricCriterion,
+    StructuredRubricSetItem,
     StructuredRubricVersion,
     StudentAnswer,
     StudentAnswerRegion,
@@ -39,6 +41,7 @@ from app.processing.contracts import (
     ProcessingInputSnapshot,
     canonical_hash,
 )
+from app.question_versions import question_version_token
 from app.semantic_content import semantic_hash
 
 
@@ -46,39 +49,25 @@ def _fail(code: str, message: str) -> NoReturn:
     raise ProcessingInputError(code, message)
 
 
-def _current_question_version(question: Question) -> str:
-    return f"{question.paper_version_id}:{question.updated_at.isoformat()}"
-
-
-def _latest_confirmed_formals(
-    db: Session, question: Question
+def _set_formals(
+    db: Session, question: Question, item: StructuredRubricSetItem
 ) -> tuple[ReferenceAnswerVersion, StructuredRubricVersion, list[RubricCriterion]]:
-    rubric = db.scalar(
-        select(StructuredRubricVersion)
-        .where(
-            StructuredRubricVersion.question_id == question.id,
-            StructuredRubricVersion.status == VersionStatus.confirmed,
-        )
-        .order_by(
-            StructuredRubricVersion.rubric_version.desc(),
-            StructuredRubricVersion.id,
-        )
-    )
-    answer = (
-        db.get(ReferenceAnswerVersion, rubric.reference_answer_version_id)
-        if rubric is not None
-        else None
-    )
+    rubric = db.get(StructuredRubricVersion, item.structured_rubric_version_id)
+    answer = db.get(ReferenceAnswerVersion, item.reference_answer_version_id)
     if (
         answer is None
         or rubric is None
         or answer.status != VersionStatus.confirmed
         or answer.question_id != question.id
-        or rubric.question_version != _current_question_version(question)
+        or rubric.reference_answer_version_id != answer.id
+        or rubric.question_id != question.id
+        or rubric.question_version != item.question_version
+        or item.question_id != question.id
+        or item.question_version != question_version_token(question)
     ):
         _fail(
-            "ACTIVE_CONFIRMED_FORMAL_REQUIRED",
-            "Current confirmed reference answer and linked structured rubric are required",
+            "STRUCTURED_SET_STALE",
+            "Active Structured Rubric Set formal versions are stale",
         )
     criteria = list(
         db.scalars(
@@ -360,7 +349,6 @@ def build_processing_input_snapshot(
     if answer.question_version_reference != str(paper.id):
         _fail("PROCESSING_INPUT_STALE", "Student answer question version is stale")
 
-    reference, rubric, criteria = _latest_confirmed_formals(db, question)
     evidence, regions = _current_evidence(
         db, owner_id=owner_id, submission=submission, answer=answer
     )
@@ -380,51 +368,45 @@ def build_processing_input_snapshot(
         )
     )
     if session is None:
-        _fail("LEGACY_PROJECTION_REQUIRED", "Current review session is required")
-    projection = validate_current_projection_under_locks(
-        db, session, lock=False, require_confirmed=True
+        _fail("STRUCTURED_SET_REQUIRED", "Published review session is required")
+    set_validation = validate_current_structured_set_under_locks(
+        db,
+        session,
+        lock=False,
+        require_confirmed=True,
+        require_current_selection=False,
     )
-    if not projection.current or projection.binding is None:
-        code = (
-            "LEGACY_PROJECTION_STALE"
-            if projection.binding is not None
-            else "LEGACY_PROJECTION_REQUIRED"
-        )
-        _fail(code, projection.reason or "Current legacy projection is required")
-    binding = projection.binding
+    rubric_set = set_validation.rubric_set
+    if not set_validation.current or rubric_set is None:
+        code = "STRUCTURED_SET_STALE" if rubric_set is not None else "STRUCTURED_SET_REQUIRED"
+        _fail(code, set_validation.reason or "Active Structured Rubric Set is required")
     if (
-        binding.owner_id != owner_id
-        or binding.assignment_id != assignment.id
-        or binding.paper_version_id != paper.id
-        or session.legacy_rubric_version_id != binding.legacy_rubric_version_id
-        or assignment.active_rubric_version_id != binding.legacy_rubric_version_id
+        rubric_set.owner_id != owner_id
+        or rubric_set.assignment_id != assignment.id
+        or rubric_set.paper_version_id != paper.id
+        or session.structured_rubric_set_id != rubric_set.id
+        or assignment.active_structured_rubric_set_id != rubric_set.id
     ):
-        _fail("LEGACY_PROJECTION_STALE", "Legacy projection scope is stale")
+        _fail("STRUCTURED_SET_STALE", "Structured Rubric Set scope is stale")
+    set_item = db.scalar(
+        select(StructuredRubricSetItem).where(
+            StructuredRubricSetItem.rubric_set_id == rubric_set.id,
+            StructuredRubricSetItem.question_id == question.id,
+        )
+    )
+    if set_item is None:
+        _fail("STRUCTURED_SET_STALE", "Question is missing from the active set")
+    reference, rubric, criteria = _set_formals(db, question, set_item)
 
     reference_recomputed_hash = semantic_hash(_answer_content_payload(reference))
     rubric_recomputed_hash = semantic_hash(_rubric_content_payload(db, rubric))
-    criteria_hash = semantic_hash(
-        [
-            {
-                "stable_key": item.stable_key,
-                "display_order": item.display_order,
-                "title": item.title,
-                "description": item.description,
-                "max_points": item.max_points,
-                "criterion_type": item.criterion_type,
-                "required": item.required,
-                "dependencies": item.dependencies,
-                "expected_evidence": item.expected_evidence,
-                "validation_mode": item.validation_mode,
-                "validation_rule": item.validation_rule,
-                "manual_review_policy": item.manual_review_policy,
-                "partial_credit_policy": item.partial_credit_policy,
-                "error_category": item.error_category,
-                "metadata": item.metadata_,
-            }
-            for item in criteria
-        ]
-    )
+    criteria_hash = semantic_hash([_criterion_payload(item) for item in criteria])
+    if (
+        reference_recomputed_hash != set_item.answer_content_hash
+        or rubric_recomputed_hash != set_item.rubric_content_hash
+        or criteria_hash != set_item.criteria_hash
+    ):
+        _fail("STRUCTURED_SET_STALE", "Active set content hashes no longer match")
     effective_answer_hash = semantic_hash(
         {
             "text": answer.corrected_text
@@ -500,12 +482,14 @@ def build_processing_input_snapshot(
                 "reference_answer_id": str(rubric.reference_answer_version_id),
             },
         },
-        "legacy_projection": {
-            "binding_id": str(binding.id),
-            "legacy_rubric_version_id": str(binding.legacy_rubric_version_id),
-            "target_hash": binding.target_legacy_hash,
-            "profile": binding.projection_profile,
-            "version": binding.projection_version,
+        "structured_rubric_set": {
+            "id": str(rubric_set.id),
+            "version": rubric_set.version,
+            "content_hash": rubric_set.content_hash,
+            "item_id": str(set_item.id),
+            "answer_content_hash": set_item.answer_content_hash,
+            "rubric_content_hash": set_item.rubric_content_hash,
+            "criteria_hash": set_item.criteria_hash,
         },
     }
     return ProcessingInputSnapshot(payload=payload, input_version=canonical_hash(payload))

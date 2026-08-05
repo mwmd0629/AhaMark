@@ -12,12 +12,14 @@ from app.core.config import Settings
 from app.grading.providers import (
     FakeGradingProvider,
     OpenAICompatibleGradingProvider,
+    ProviderOutput,
     UnavailableProvider,
     grade_objective,
     normalize_objective,
     provider_from_settings,
 )
 from app.models import GradingResult, StudentAnswer, SubmissionScoreSnapshot
+from pydantic import ValidationError
 
 
 def test_objective_rule_normalizes_case_and_spaces() -> None:
@@ -50,7 +52,7 @@ def test_objective_rule_does_not_guess_ambiguous_choice_text() -> None:
     assert result.score == Decimal("0")
 
 
-def test_objective_rule_keeps_exact_text_fallback_for_legacy_question_types() -> None:
+def test_objective_rule_keeps_exact_text_fallback_for_supported_question_types() -> None:
     result = grade_objective(" 1. 测试题 ", ["1.测试题"], Decimal("5"), "single_choice")
     assert result.score == Decimal("5")
 
@@ -71,12 +73,11 @@ def test_same_answer_score_difference_is_added_to_quality_queue() -> None:
             "question": {"id": "question-1"},
             "result": {
                 "score": score,
-                "rubric_version_id": "rubric-1",
+                "structured_rubric_set_id": "set-1",
+                "structured_rubric_version_id": "rubric-1",
                 "quality_flags": [],
             },
-            "criteria": [
-                {"rubric_item_id": "criterion-1", "awarded_points": score}
-            ],
+            "criteria": [{"criterion_id": "criterion-1", "awarded_points": score}],
         }
 
     first, second = projected("5"), projected("4")
@@ -106,10 +107,17 @@ def test_grading_schema_keeps_raw_correction_suggestion_and_snapshot_separate() 
     assert {"recognized_text", "corrected_text", "requires_review"} <= set(
         StudentAnswer.__table__.columns.keys()
     )
-    assert {"score", "max_score", "grading_method", "rubric_version_id"} <= set(
-        GradingResult.__table__.columns.keys()
+    assert {
+        "score",
+        "max_score",
+        "grading_method",
+        "structured_rubric_set_id",
+        "structured_rubric_version_id",
+    } <= set(GradingResult.__table__.columns.keys())
+    assert {"status", "version", "details", "structured_rubric_set_id"} <= set(
+        SubmissionScoreSnapshot.__table__.columns.keys()
     )
-    assert {"status", "version", "details"} <= set(SubmissionScoreSnapshot.__table__.columns.keys())
+    assert "rubric_version_id" not in GradingResult.__table__.columns
 
 
 class ProviderResponse:
@@ -138,20 +146,32 @@ def configured_provider() -> OpenAICompatibleGradingProvider:
     )
 
 
+def test_provider_schema_rejects_legacy_rubric_item_identifier() -> None:
+    with pytest.raises(ValidationError):
+        ProviderOutput.model_validate(
+            {
+                "criteria": [{"rubric_item_id": "criterion-1", "score": 1}],
+                "total_suggested_score": 1,
+                "reasoning_summary": "旧字段必须被拒绝",
+                "confidence": 1,
+            }
+        )
+
+
 def test_subjective_provider_invalid_json_and_timeout_abstain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         "urllib.request.urlopen", lambda *_args, **_kwargs: ProviderResponse("{invalid")
     )
-    invalid = configured_provider().grade("answer", Decimal("10"), {"rubric_items": []})
+    invalid = configured_provider().grade("answer", Decimal("10"), {"rubric_criteria": []})
     assert invalid.score is None and invalid.abstain_reason == "invalid_response"
 
     def timeout(*_args: object, **_kwargs: object) -> ProviderResponse:
         raise urllib.error.URLError("timeout")
 
     monkeypatch.setattr("urllib.request.urlopen", timeout)
-    unavailable = configured_provider().grade("answer", Decimal("10"), {"rubric_items": []})
+    unavailable = configured_provider().grade("answer", Decimal("10"), {"rubric_criteria": []})
     assert unavailable.score is None and unavailable.abstain_reason == "timeout"
 
 
@@ -159,7 +179,7 @@ def test_subjective_provider_without_evidence_cannot_suggest_score(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     output = {
-        "criteria": [{"rubric_item_id": "criterion-1", "score": 5, "evidence_refs": []}],
+        "criteria": [{"criterion_id": "criterion-1", "score": 5, "evidence_refs": []}],
         "total_suggested_score": 5,
         "evidence": [],
         "reasoning_summary": "结构有效但没有证据",
@@ -176,7 +196,7 @@ def test_subjective_provider_without_evidence_cannot_suggest_score(
         "answer",
         Decimal("10"),
         {
-            "rubric_items": [{"id": "criterion-1", "max_points": "10"}],
+            "rubric_criteria": [{"id": "criterion-1", "max_points": "10"}],
             "evidence_regions": [{"id": "evidence-1"}],
         },
     )
@@ -186,14 +206,14 @@ def test_subjective_provider_without_evidence_cannot_suggest_score(
 @pytest.mark.parametrize(
     "criteria",
     [
-        [{"rubric_item_id": "criterion-1", "score": 5, "evidence_refs": ["evidence-1"]}],
+        [{"criterion_id": "criterion-1", "score": 5, "evidence_refs": ["evidence-1"]}],
         [
-            {"rubric_item_id": "criterion-1", "score": 2, "evidence_refs": ["evidence-1"]},
-            {"rubric_item_id": "criterion-1", "score": 3, "evidence_refs": ["evidence-1"]},
+            {"criterion_id": "criterion-1", "score": 2, "evidence_refs": ["evidence-1"]},
+            {"criterion_id": "criterion-1", "score": 3, "evidence_refs": ["evidence-1"]},
         ],
         [
-            {"rubric_item_id": "criterion-1", "score": 5, "evidence_refs": ["missing"]},
-            {"rubric_item_id": "criterion-2", "score": 5, "evidence_refs": ["evidence-1"]},
+            {"criterion_id": "criterion-1", "score": 5, "evidence_refs": ["missing"]},
+            {"criterion_id": "criterion-2", "score": 5, "evidence_refs": ["evidence-1"]},
         ],
     ],
 )
@@ -218,7 +238,7 @@ def test_subjective_provider_rejects_incomplete_duplicate_or_unknown_evidence_cr
         "answer",
         Decimal("10"),
         {
-            "rubric_items": [
+            "rubric_criteria": [
                 {"id": "criterion-1", "max_points": "5"},
                 {"id": "criterion-2", "max_points": "5"},
             ],
@@ -235,13 +255,13 @@ def test_subjective_provider_accepts_complete_rubric_with_traceable_evidence(
     output = {
         "criteria": [
             {
-                "rubric_item_id": "criterion-1",
+                "criterion_id": "criterion-1",
                 "score": 4,
                 "reason": "方法正确。",
                 "evidence_refs": ["evidence-1"],
             },
             {
-                "rubric_item_id": "criterion-2",
+                "criterion_id": "criterion-2",
                 "score": 3,
                 "evidence_refs": ["evidence-1"],
             },
@@ -262,7 +282,7 @@ def test_subjective_provider_accepts_complete_rubric_with_traceable_evidence(
         "answer",
         Decimal("10"),
         {
-            "rubric_items": [
+            "rubric_criteria": [
                 {"id": "criterion-1", "max_points": "5"},
                 {"id": "criterion-2", "max_points": "5"},
             ],

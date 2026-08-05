@@ -20,10 +20,6 @@ from app.models import (
     AICriterionSuggestion,
     AIScoringJob,
     Assignment,
-    AssignmentDraftRevision,
-    AssignmentGenerationJob,
-    AssignmentReviewSession,
-    AssignmentRubricPublicationBinding,
     AuditLog,
     CodexWorkItem,
     GradeRelease,
@@ -36,13 +32,12 @@ from app.models import (
     ProcessingStep,
     Question,
     QuestionRecognitionEvidence,
-    QuestionRubric,
     ReferenceAnswerVersion,
     RubricCriterion,
-    RubricItem,
-    RubricVersion,
     SchoolClass,
     StoredFile,
+    StructuredRubricSet,
+    StructuredRubricSetItem,
     StructuredRubricVersion,
     StudentAnswer,
     StudentAnswerRegion,
@@ -779,13 +774,7 @@ def _seed_postgresql_submitted_apply(
             created_by=item.owner_id,
             status="confirmed",
         )
-        legacy = RubricVersion(
-            assignment_id=assignment.id,
-            version=1,
-            status=VersionStatus.confirmed,
-            created_by=item.owner_id,
-        )
-        db.add_all([reference, legacy])
+        db.add(reference)
         db.flush()
         rubric = StructuredRubricVersion(
             question_id=question.id,
@@ -798,26 +787,7 @@ def _seed_postgresql_submitted_apply(
             content_hash="2" * 64,
             created_by=item.owner_id,
         )
-        question_rubric = QuestionRubric(
-            rubric_version_id=legacy.id,
-            question_id=question.id,
-            standard_answer="1",
-        )
-        generation_job = AssignmentGenerationJob(
-            owner_id=item.owner_id,
-            assignment_id=assignment.id,
-            generation=1,
-            status="completed",
-            progress=100,
-            idempotency_key=f"pg-apply-generation-{item.id}",
-            request_fingerprint="3" * 64,
-            source_snapshot_hash="4" * 64,
-            provider_mode="unavailable",
-            provider_config_version="test",
-            prompt_version="test",
-            schema_version="test",
-        )
-        db.add_all([rubric, question_rubric, generation_job])
+        db.add(rubric)
         db.flush()
         criterion = RubricCriterion(
             rubric_version_id=rubric.id,
@@ -835,70 +805,35 @@ def _seed_postgresql_submitted_apply(
             partial_credit_policy={},
             metadata_={},
         )
-        rubric_item = RubricItem(
-            question_rubric_id=question_rubric.id,
-            display_order=1,
-            title="Correct",
-            points=Decimal("1"),
-        )
-        revision = AssignmentDraftRevision(
-            owner_id=item.owner_id,
-            assignment_id=assignment.id,
-            generation_job_id=generation_job.id,
-            revision=1,
-            source_snapshot_hash="4" * 64,
-            status="completed",
-            draft_payload={},
-            risk_summary={},
-            created_by_type="worker",
-            created_by=item.owner_id,
-        )
-        db.add_all([criterion, rubric_item, revision])
+        db.add(criterion)
         db.flush()
-        review = AssignmentReviewSession(
+        rubric_set = StructuredRubricSet(
             owner_id=item.owner_id,
             assignment_id=assignment.id,
-            generation_job_id=generation_job.id,
-            draft_revision_id=revision.id,
-            generation=1,
+            paper_version_id=paper.id,
+            version=1,
+            status="active",
+            content_hash="3" * 64,
             source_snapshot_hash="4" * 64,
-            review_version=1,
-            status="completed",
-            risk_ledger_hash="5" * 64,
-            expected_assignment_updated_at=assignment.updated_at,
-            paper_version_id=paper.id,
-            structured_binding_hash="6" * 64,
-            legacy_rubric_version_id=legacy.id,
-            created_by=item.owner_id,
-        )
-        db.add(review)
-        db.flush()
-        binding = AssignmentRubricPublicationBinding(
-            owner_id=item.owner_id,
-            assignment_id=assignment.id,
-            review_session_id=review.id,
-            paper_version_id=paper.id,
-            legacy_rubric_version_id=legacy.id,
-            binding_version=1,
-            status="confirmed",
-            source_binding_hash="7" * 64,
-            target_legacy_hash="8" * 64,
-            mapping=[
-                {
-                    "question_id": str(question.id),
-                    "structured_rubric_version_id": str(rubric.id),
-                    "legacy_question_rubric_id": str(question_rubric.id),
-                    "criteria": [
-                        {
-                            "criterion_id": str(criterion.id),
-                            "rubric_item_id": str(rubric_item.id),
-                        }
-                    ],
-                }
-            ],
+            total_points=Decimal("1"),
             created_by=item.owner_id,
             confirmed_by=item.owner_id,
             confirmed_at=now_utc(),
+            activated_at=now_utc(),
+        )
+        db.add(rubric_set)
+        db.flush()
+        set_item = StructuredRubricSetItem(
+            rubric_set_id=rubric_set.id,
+            question_id=question.id,
+            question_version=rubric.question_version,
+            reference_answer_version_id=reference.id,
+            structured_rubric_version_id=rubric.id,
+            answer_content_hash=reference.content_hash,
+            rubric_content_hash=rubric.content_hash,
+            criteria_hash="5" * 64,
+            display_order=1,
+            max_points=Decimal("1"),
         )
         stored = StoredFile(
             owner_id=item.owner_id,
@@ -921,7 +856,7 @@ def _seed_postgresql_submitted_apply(
             output_hash="b" * 64,
             generation=1,
         )
-        db.add_all([binding, stored, recognition_job])
+        db.add_all([set_item, stored, recognition_job])
         db.flush()
         page = SubmissionPage(
             submission_id=submission.id,
@@ -961,7 +896,8 @@ def _seed_postgresql_submitted_apply(
         db.add(evidence)
         db.flush()
         evidence_id = evidence.id
-        assignment.active_rubric_version_id = legacy.id
+        assignment.active_paper_version_id = paper.id
+        assignment.active_structured_rubric_set_id = rubric_set.id
         run.submission_count = 1
         run.step_count = 1
         request = canonicalize(
@@ -973,7 +909,15 @@ def _seed_postgresql_submitted_apply(
                             "structured_rubric": {"id": str(rubric.id)},
                             "reference_answer": {"id": str(reference.id)},
                         },
-                        "legacy_projection": {"binding_id": str(binding.id)},
+                        "structured_rubric_set": {
+                            "id": str(rubric_set.id),
+                            "version": rubric_set.version,
+                            "content_hash": rubric_set.content_hash,
+                            "item_id": str(set_item.id),
+                            "answer_content_hash": set_item.answer_content_hash,
+                            "rubric_content_hash": set_item.rubric_content_hash,
+                            "criteria_hash": set_item.criteria_hash,
+                        },
                     }
                 },
             }
@@ -1012,7 +956,7 @@ def _seed_postgresql_submitted_apply(
     return item_id, run_id, step_id
 
 
-def test_postgresql_codex_apply_same_item_is_one_strict_and_legacy_child(
+def test_postgresql_codex_apply_same_item_is_one_strict_and_structured_child(
     processing_postgresql: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     engine = processing_postgresql
@@ -1060,23 +1004,25 @@ def test_postgresql_codex_apply_same_item_is_one_strict_and_legacy_child(
         assert item is not None and item.status == "applied"
         assert (
             db.scalar(
-                select(func.count()).select_from(GradingJob).where(
-                    GradingJob.id == item.grading_job_id
-                )
+                select(func.count())
+                .select_from(GradingJob)
+                .where(GradingJob.id == item.grading_job_id)
             )
             == 1
         )
         assert (
             db.scalar(
-                select(func.count()).select_from(GradingResult).where(
-                    GradingResult.id == item.grading_result_id
-                )
+                select(func.count())
+                .select_from(GradingResult)
+                .where(GradingResult.id == item.grading_result_id)
             )
             == 1
         )
         assert (
             db.scalar(
-                select(func.count()).select_from(AIScoringJob).where(
+                select(func.count())
+                .select_from(AIScoringJob)
+                .where(
                     AIScoringJob.student_answer_id == item.student_answer_id,
                     AIScoringJob.provider == "codex_local",
                 )
@@ -1116,7 +1062,7 @@ def test_postgresql_codex_apply_interruption_rolls_back_every_child(
         assert item is not None and item.response_hash is not None
         request_hash, response_hash = item.request_hash, item.response_hash
 
-    def interrupt_legacy_result(
+    def interrupt_structured_result(
         _conn: object,
         _cursor: object,
         statement: str,
@@ -1127,7 +1073,7 @@ def test_postgresql_codex_apply_interruption_rolls_back_every_child(
         if statement.startswith("INSERT INTO grading_results"):
             raise RuntimeError("synthetic apply interruption")
 
-    event.listen(engine, "before_cursor_execute", interrupt_legacy_result)
+    event.listen(engine, "before_cursor_execute", interrupt_structured_result)
     try:
         with pytest.raises(RuntimeError, match="synthetic apply interruption"):
             with Session(engine) as db:
@@ -1139,14 +1085,16 @@ def test_postgresql_codex_apply_interruption_rolls_back_every_child(
                     response_hash=response_hash,
                 )
     finally:
-        event.remove(engine, "before_cursor_execute", interrupt_legacy_result)
+        event.remove(engine, "before_cursor_execute", interrupt_structured_result)
     with Session(engine) as db:
         item = db.get(CodexWorkItem, item_id)
         assert item is not None and item.status == "submitted"
         assert item.grading_job_id is None and item.grading_result_id is None
         assert (
             db.scalar(
-                select(func.count()).select_from(GradingJob).where(
+                select(func.count())
+                .select_from(GradingJob)
+                .where(
                     GradingJob.idempotency_key.like("pcx:%"),
                     GradingJob.submission_id == item.submission_id,
                 )
@@ -1155,7 +1103,9 @@ def test_postgresql_codex_apply_interruption_rolls_back_every_child(
         )
         assert (
             db.scalar(
-                select(func.count()).select_from(AIScoringJob).where(
+                select(func.count())
+                .select_from(AIScoringJob)
+                .where(
                     AIScoringJob.student_answer_id == item.student_answer_id,
                     AIScoringJob.provider == "codex_local",
                 )

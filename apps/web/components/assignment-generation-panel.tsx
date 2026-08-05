@@ -97,6 +97,7 @@ export function AssignmentGenerationPanel({
     Record<string, { role: string; source: string }>
   >({});
   const observedJobStatus = useRef<{ id: string; status: string } | null>(null);
+  const mountedRef = useRef(false);
   const current = jobs[0];
   const activeFileAnalyses = fileAnalyses.filter(
     (row) => row.analysis_status !== "superseded",
@@ -126,6 +127,7 @@ export function AssignmentGenerationPanel({
         assignmentGenerationApi.listJobs(assignmentId),
         assignmentGenerationApi.listRevisions(assignmentId),
       ]);
+      if (!mountedRef.current) return [];
       setCapabilities(nextCapabilities);
       setJobs(nextJobs);
       setRevisions(nextRevisions);
@@ -135,6 +137,7 @@ export function AssignmentGenerationPanel({
           assignmentGenerationApi.listFieldSuggestions(revisionId),
           assignmentGenerationApi.listFileAnalyses(revisionId),
         ]);
+        if (!mountedRef.current) return [];
         setSuggestions(nextSuggestions);
         setFileAnalyses(nextFiles);
         setFileChoices((old) => {
@@ -160,6 +163,7 @@ export function AssignmentGenerationPanel({
               ] as const,
           ),
         );
+        if (!mountedRef.current) return [];
         setPageAnalyses(Object.fromEntries(pages));
       } else {
         setSuggestions([]);
@@ -169,6 +173,7 @@ export function AssignmentGenerationPanel({
       setError("");
       return nextJobs;
     } catch (reason) {
+      if (!mountedRef.current) return [];
       setError(
         reason instanceof ApiError
           ? reason.message
@@ -182,6 +187,13 @@ export function AssignmentGenerationPanel({
     if (onReviewInputsChanged) await onReviewInputsChanged();
     else await onAssignmentChanged?.();
   }, [onAssignmentChanged, onReviewInputsChanged]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     void load();

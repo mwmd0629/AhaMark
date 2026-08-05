@@ -77,7 +77,8 @@ function job(overrides: Record<string, unknown> = {}) {
     schema_version: "criterion-suggestion-v1",
     stale: false,
     scoring_input_version: "input-v2",
-    rubric_version_id: "rubric-1",
+    structured_rubric_set_id: "set-1",
+    structured_rubric_version_id: "rubric-1",
     reference_answer_version_id: "reference-1",
     evidence: [
       {
@@ -105,7 +106,8 @@ function job(overrides: Record<string, unknown> = {}) {
       status: "completed",
       generation: 4,
       stale: false,
-      rubric_version_id: "rubric-1",
+      structured_rubric_set_id: "set-1",
+      structured_rubric_version_id: "rubric-1",
       reference_answer_version_id: "reference-1",
       results: [
         {
@@ -141,7 +143,7 @@ describe("AIGradingReview", () => {
   });
 
   it("accepts only a current scored suggestion after an explicit reason", async () => {
-    render(<AIGradingReview answerId="answer-1" rubricVersionId="rubric-1" />);
+    render(<AIGradingReview answerId="answer-1" />);
 
     const accept = await screen.findByRole("button", {
       name: "采纳 AI 分项建议",
@@ -163,7 +165,7 @@ describe("AIGradingReview", () => {
   });
 
   it("supports teacher-modified points and rejects invalid ranges", async () => {
-    render(<AIGradingReview answerId="answer-1" rubricVersionId="rubric-1" />);
+    render(<AIGradingReview answerId="answer-1" />);
     await screen.findByText("matrix-result");
     fireEvent.change(screen.getByLabelText("matrix-result 教师分值"), {
       target: { value: "4" },
@@ -188,7 +190,7 @@ describe("AIGradingReview", () => {
   });
 
   it("records a rejection reason and keeps manual grading available", async () => {
-    render(<AIGradingReview answerId="answer-1" rubricVersionId="rubric-1" />);
+    render(<AIGradingReview answerId="answer-1" />);
     await screen.findByText("matrix-result");
     fireEvent.change(screen.getByLabelText("matrix-result 修改原因"), {
       target: { value: "步骤证据不足，转人工" },
@@ -206,7 +208,7 @@ describe("AIGradingReview", () => {
 
   it("disables dispositions for stale or finalized jobs", async () => {
     listForAnswer.mockResolvedValue([job({ stale: true, status: "stale" })]);
-    render(<AIGradingReview answerId="answer-1" rubricVersionId="rubric-1" />);
+    render(<AIGradingReview answerId="answer-1" />);
 
     expect(await screen.findByText(/版本或证据已变化/)).toBeInTheDocument();
     expect(
@@ -225,7 +227,7 @@ describe("AIGradingReview", () => {
         },
       }),
     ]);
-    render(<AIGradingReview answerId="answer-1" rubricVersionId="rubric-1" />);
+    render(<AIGradingReview answerId="answer-1" />);
 
     expect(
       await screen.findByText(/版本与数学验证引用不一致/),
@@ -258,7 +260,7 @@ describe("AIGradingReview", () => {
         ],
       }),
     ]);
-    render(<AIGradingReview answerId="answer-1" rubricVersionId="rubric-1" />);
+    render(<AIGradingReview answerId="answer-1" />);
 
     expect(await screen.findByText(/评分服务未配置/)).toBeInTheDocument();
     expect(screen.getByText("与确定性验证冲突")).toBeInTheDocument();
@@ -267,7 +269,7 @@ describe("AIGradingReview", () => {
   });
 
   it("renders locatable evidence and current validation generation", async () => {
-    render(<AIGradingReview answerId="answer-1" rubricVersionId="rubric-1" />);
+    render(<AIGradingReview answerId="answer-1" />);
 
     expect(
       await screen.findByRole("link", { name: /识别证据/ }),
@@ -290,7 +292,7 @@ describe("AIGradingReview", () => {
         request_id: "request-1",
       }),
     );
-    render(<AIGradingReview answerId="answer-1" rubricVersionId="rubric-1" />);
+    render(<AIGradingReview answerId="answer-1" />);
     await screen.findByText("matrix-result");
     fireEvent.change(screen.getByLabelText("matrix-result 修改原因"), {
       target: { value: "重复提交测试" },
@@ -309,7 +311,7 @@ describe("AIGradingReview", () => {
 
     expect(await screen.findByText(/尚无 AI 建议/)).toBeInTheDocument();
     expect(screen.getByText(/不调用外部 API、不上传文件/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "生成新建议" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "生成新建议" })).toBeEnabled();
   });
 });
 

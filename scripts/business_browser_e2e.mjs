@@ -955,245 +955,71 @@ async function ensureReviewConfirmation(sessionId, kind) {
     bundle_confirmation: confirmation,
   };
 }
-function assertCurrentRubricBindingProjection(
-  session,
-  binding,
-  bundle,
-  { lossy },
-) {
+function assertCurrentStructuredRubricSet(session, rubricSet, bundle) {
   assert.equal(bundle.assignment_id, session.assignment_id);
-  assert.equal(bundle.binding?.id, binding.id);
-  assert.equal(bundle.binding.binding_version, binding.binding_version);
-  assert.equal(bundle.binding.status, "confirmed");
-  assert.equal(binding.status, "confirmed");
-  assert.equal(bundle.binding.source_binding_hash, binding.source_binding_hash);
-  assert.equal(binding.projection_profile, "structured-to-legacy");
-  assert.equal(binding.projection_version, "structured-rubric-projection-v3");
-  assert.equal(binding.source_semantic_hash, binding.source_binding_hash);
-  assert.match(binding.source_binding_hash, sha256HexPattern);
-  assert.match(binding.target_legacy_hash, sha256HexPattern);
-  assert.match(binding.loss_report_hash, sha256HexPattern);
-  assert.equal(binding.manual_review_required, lossy);
-  assert.equal(bundle.binding.projection_current, true);
-  assert.equal(bundle.binding.projection_reason, null);
-  assert.equal(bundle.binding.projection_profile, "structured-to-legacy");
+  assert.equal(session.structured_rubric_set_id, rubricSet.id);
+  assert.equal(bundle.structured_rubric_set?.id, rubricSet.id);
+  assert.equal(bundle.structured_rubric_set.current, true);
+  assert.equal(bundle.structured_rubric_set.reason, null);
+  assert.equal(bundle.structured_rubric_set.status, rubricSet.status);
+  assert.equal(bundle.structured_rubric_set.version, rubricSet.version);
+  assert.equal(bundle.structured_rubric_set.content_hash, rubricSet.content_hash);
   assert.equal(
-    bundle.binding.projection_version,
-    "structured-rubric-projection-v3",
+    bundle.structured_rubric_set.source_snapshot_hash,
+    rubricSet.source_snapshot_hash,
   );
-  assert.equal(
-    bundle.binding.source_semantic_hash,
-    bundle.binding.source_binding_hash,
-  );
-  assert.equal(
-    bundle.binding.source_semantic_hash,
-    binding.source_binding_hash,
-  );
-  assert.equal(bundle.binding.target_legacy_hash, binding.target_legacy_hash);
-  assert.equal(bundle.binding.loss_report_hash, binding.loss_report_hash);
-  assert.equal(bundle.binding.projection_profile, binding.projection_profile);
-  assert.equal(bundle.binding.projection_version, binding.projection_version);
-  assert.equal(
-    bundle.binding.expected_source_binding_hash,
-    binding.source_binding_hash,
-  );
-  assert.deepEqual(bundle.binding.mapping, binding.mapping);
-  assert.deepEqual(bundle.binding.loss_report, binding.loss_report);
-  assert.equal(bundle.binding.loss_report.length > 0, lossy);
-  assert.equal(bundle.binding.manual_review_required, lossy);
-  if (!lossy) assert.deepEqual(binding.loss_report, []);
-  const confirmation = requireCurrentBundleConfirmation(
-    bundle,
-    "legacy_binding",
-  );
-  assert.equal(confirmation.inherited, false);
-  assert.equal(confirmation.origin, lossy ? "origin" : "system_auto");
-  assert.equal(confirmation.binding_id, binding.id);
-  assert.equal(confirmation.source_binding_hash, binding.source_binding_hash);
-  return confirmation;
+  assert.match(rubricSet.content_hash, sha256HexPattern);
+  assert.match(rubricSet.source_snapshot_hash, sha256HexPattern);
+  assert.ok(Array.isArray(rubricSet.items) && rubricSet.items.length > 0);
+  for (const item of rubricSet.items) {
+    assert.match(item.answer_content_hash, sha256HexPattern);
+    assert.match(item.rubric_content_hash, sha256HexPattern);
+    assert.match(item.criteria_hash, sha256HexPattern);
+    assert.ok(item.reference_answer_version_id);
+    assert.ok(item.structured_rubric_version_id);
+  }
 }
-async function ensureRubricBinding(sessionId) {
-  const bindingUrl = `/api/assignment-review-sessions/${sessionId}/rubric-binding`;
-  let current = await getReviewSession(sessionId, "binding");
-  let bindingResponse = await apiJson(bindingUrl);
-  assert.ok(
-    [200, 404].includes(bindingResponse.status),
-    `binding GET failed: ${bindingResponse.status}/${bindingResponse.error_code}`,
-  );
-  let binding = bindingResponse.status === 200 ? bindingResponse.body : null;
-  const writes = [];
-  if (!binding) {
-    const prepare = page.getByTestId("prepare-rubric-publication-binding");
-    await pollUntil("binding prepare ready-or-confirmed", 30_000, async () => {
-      current = await getReviewSession(sessionId, "binding prepare");
-      bindingResponse = await apiJson(bindingUrl);
-      binding = bindingResponse.status === 200 ? bindingResponse.body : null;
-      return {
-        done:
-          Boolean(binding) ||
-          ((await prepare.count()) > 0 && (await prepare.isEnabled())),
-        state: `binding=${binding?.status ?? "missing"}/legacy=${current.session.confirmations.includes("legacy_binding")}/prepare-enabled=${
-          (await prepare.count()) > 0 ? await prepare.isEnabled() : false
-        }`,
-      };
-    });
-    if (!binding) {
-      const beforeVersion = current.session.review_version;
-      const [prepareResponse] = await Promise.all([
-        page.waitForResponse(
-          (response) =>
-            response.url().includes("/rubric-binding") &&
-            response.request().method() === "POST",
-        ),
-        prepare.click(),
-      ]);
-      assert.ok(prepareResponse.ok(), "binding prepare write failed");
-      const prepared = await pollUntil(
-        "binding prepare write-after-GET",
-        30_000,
-        async () => {
-          const [nextSession, nextBinding] = await Promise.all([
-            getReviewSession(sessionId, "binding prepared"),
-            apiJson(bindingUrl),
-          ]);
-          return {
-            done:
-              nextBinding.status === 200 &&
-              ["draft", "validated", "confirmed"].includes(
-                nextBinding.body.status,
-              ) &&
-              nextSession.session.review_version > beforeVersion,
-            value: { nextSession, nextBinding },
-            state: `http=${nextBinding.status}/status=${nextBinding.body?.status ?? "missing"}/version=${nextSession.session.review_version}`,
-          };
-        },
-      );
-      current = prepared.nextSession;
-      bindingResponse = prepared.nextBinding;
-      binding = bindingResponse.body;
-      writes.push({
-        action: "prepare",
-        http_status: prepareResponse.status(),
-        request_id: prepareResponse.headers()["x-request-id"] ?? null,
-        error_code: null,
-        read_status: bindingResponse.status,
-        review_version: current.session.review_version,
-        binding_id: binding.id,
-        binding_status: binding.status,
-      });
-    }
-  }
-  if (binding?.status !== "confirmed") {
-    assert.ok(
-      Array.isArray(binding?.loss_report) && binding.loss_report.length > 0,
-      "only a lossy current binding may require manual confirmation",
-    );
-    assert.equal(binding.manual_review_required, true);
-    const confirm = page.getByTestId("rubric-binding-loss-confirm");
-    await pollUntil("binding confirm enabled", 30_000, async () => ({
-      done: (await confirm.count()) > 0 && (await confirm.isEnabled()),
-      state: `present=${await confirm.count()}/enabled=${
-        (await confirm.count()) > 0 ? await confirm.isEnabled() : false
-      }`,
-    }));
-    const beforeVersion = current.session.review_version;
-    const [confirmResponse] = await Promise.all([
-      page.waitForResponse(
-        (response) =>
-          response
-            .url()
-            .includes(
-              `/assignment-rubric-publication-bindings/${binding.id}/confirm`,
-            ) && response.request().method() === "POST",
-      ),
-      confirm.click(),
-    ]);
-    assert.ok(confirmResponse.ok(), "binding confirm write failed");
-    const confirmed = await pollUntil(
-      "binding confirm write-after-GET",
-      30_000,
-      async () => {
-        const [nextSession, nextBinding] = await Promise.all([
-          getReviewSession(sessionId, "binding confirmed"),
-          apiJson(bindingUrl),
-        ]);
-        return {
-          done:
-            nextBinding.status === 200 &&
-            nextBinding.body.status === "confirmed" &&
-            nextSession.session.confirmations.includes("legacy_binding") &&
-            nextSession.session.review_version > beforeVersion,
-          value: { nextSession, nextBinding },
-          state: `binding=${nextBinding.body?.status ?? "missing"}/legacy=${nextSession.session.confirmations.includes("legacy_binding")}/version=${nextSession.session.review_version}`,
-        };
-      },
-    );
-    current = confirmed.nextSession;
-    bindingResponse = confirmed.nextBinding;
-    binding = bindingResponse.body;
-    writes.push({
-      action: "confirm",
-      http_status: confirmResponse.status(),
-      request_id: confirmResponse.headers()["x-request-id"] ?? null,
-      error_code: null,
-      read_status: bindingResponse.status,
-      review_version: current.session.review_version,
-      binding_id: binding.id,
-      binding_status: binding.status,
-      confirmations: current.session.confirmations,
-    });
-  }
-  const lossy = binding.loss_report.length > 0;
+async function ensureStructuredRubricSet(sessionId) {
+  const setUrl = `/api/assignment-review-sessions/${sessionId}/structured-rubric-set`;
   const verified = await pollUntil(
-    "binding and Bundle write-after-GET",
+    "Structured Rubric Set automatic preparation",
     30_000,
     async () => {
-      const [nextSession, nextBinding, nextBundle] = await Promise.all([
-        getReviewSession(sessionId, "binding final"),
-        apiJson(bindingUrl),
-        getReviewBundle(current.session.assignment_id, "binding final"),
+      const current = await getReviewSession(sessionId, "structured set");
+      const [setResponse, bundle] = await Promise.all([
+        apiJson(setUrl),
+        getReviewBundle(current.session.assignment_id, "structured set"),
       ]);
-      const matchingConfirmation = nextBundle.bundle.confirmations.find(
-        (item) =>
-          item.type === "legacy_binding" &&
-          item.status === "confirmed" &&
-          item.binding_id === nextBinding.body?.id &&
-          item.source_binding_hash === nextBinding.body?.source_binding_hash,
-      );
+      const summaryVisible = await page
+        .getByTestId("structured-rubric-set-summary")
+        .isVisible();
       return {
         done:
-          nextBinding.status === 200 &&
-          nextBinding.body.status === "confirmed" &&
-          nextBundle.bundle.binding?.projection_current === true &&
-          nextBundle.bundle.binding.projection_reason === null &&
-          Boolean(matchingConfirmation),
-        value: { nextSession, nextBinding, nextBundle },
-        state: `binding=${nextBinding.body?.status ?? "missing"}/projection=${nextBundle.bundle.binding?.projection_current ?? false}/confirmation=${Boolean(matchingConfirmation)}`,
+          setResponse.status === 200 &&
+          setResponse.body.current === true &&
+          current.session.structured_rubric_set_id === setResponse.body.id &&
+          bundle.bundle.structured_rubric_set?.id === setResponse.body.id &&
+          bundle.bundle.structured_rubric_set.current === true &&
+          summaryVisible,
+        value: { current, setResponse, bundle, summaryVisible },
+        state: `http=${setResponse.status}/current=${setResponse.body?.current ?? false}/session-set=${current.session.structured_rubric_set_id ?? "missing"}/bundle-set=${bundle.bundle.structured_rubric_set?.id ?? "missing"}/ui=${summaryVisible}`,
       };
     },
   );
-  current = verified.nextSession;
-  bindingResponse = verified.nextBinding;
-  binding = bindingResponse.body;
-  const confirmation = assertCurrentRubricBindingProjection(
-    current.session,
-    binding,
-    verified.nextBundle.bundle,
-    { lossy },
+  assertCurrentStructuredRubricSet(
+    verified.current.session,
+    verified.setResponse.body,
+    verified.bundle.bundle,
   );
-  if (!lossy) {
-    assert.equal(
-      writes.some((write) => write.action === "confirm"),
-      false,
-      "lossless projection must not call confirm-binding",
-    );
-  }
   return {
-    binding,
-    session: current.session,
-    bundle: verified.nextBundle.bundle,
-    confirmation,
-    writes,
+    rubric_set: verified.setResponse.body,
+    session: verified.current.session,
+    bundle: verified.bundle.bundle,
+    read_status: verified.setResponse.status,
+    read_request_id: verified.setResponse.request_id,
+    read_error_code: verified.setResponse.error_code,
+    summary_visible: verified.summaryVisible,
+    writes: [],
   };
 }
 async function drainReviewCount(
@@ -1299,7 +1125,7 @@ function boundedCriterionAllocation(criteria, requestedScore) {
   const scores = {};
   criteria.forEach((item, index) => {
     const awarded = Math.min(remaining, maximumUnits[index]);
-    scores[item.rubric_item_id] = String(awarded / scale);
+    scores[item.criterion_id] = String(awarded / scale);
     remaining -= awarded;
   });
   assert.equal(
@@ -2142,7 +1968,7 @@ try {
     review_session_id: reviewSessionId,
     review_version: createdReviewSession.review_version,
     confirmations: [],
-    binding: null,
+    structured_rubric_set: null,
     dispositions: {},
   };
   await page
@@ -2162,7 +1988,8 @@ try {
       await ensureReviewConfirmation(reviewSessionId, kind),
     );
   }
-  evidence.central_review.binding = await ensureRubricBinding(reviewSessionId);
+  evidence.central_review.structured_rubric_set =
+    await ensureStructuredRubricSet(reviewSessionId);
   evidence.central_review.dispositions.blocking = await drainReviewCount(
     reviewSessionId,
     "blocking",
@@ -2199,8 +2026,8 @@ try {
         reviewSessionId,
         "publication precondition",
       );
-      const publicationBinding = await apiJson(
-        `/api/assignment-review-sessions/${reviewSessionId}/rubric-binding`,
+      const publicationStructuredSet = await apiJson(
+        `/api/assignment-review-sessions/${reviewSessionId}/structured-rubric-set`,
       );
       const missing = requiredConfirmations.filter(
         (kind) => !publicationSession.session.confirmations.includes(kind),
@@ -2214,35 +2041,36 @@ try {
       return {
         done:
           missing.length === 0 &&
-          publicationSession.session.confirmations.includes("legacy_binding") &&
-          publicationBinding.status === 200 &&
-          publicationBinding.body.status === "confirmed" &&
+          publicationStructuredSet.status === 200 &&
+          publicationStructuredSet.body.current === true &&
+          publicationSession.session.structured_rubric_set_id ===
+            publicationStructuredSet.body.id &&
           publicationSession.session.counts.blocking === 0 &&
           publicationSession.session.counts.warning === 0 &&
           uiReady &&
           prepareEnabled,
         value: {
           publicationSession,
-          publicationBinding,
+          publicationStructuredSet,
           uiReady,
           prepareEnabled,
         },
-        state: `missing=${missing.join(",") || "none"}/legacy=${publicationSession.session.confirmations.includes("legacy_binding")}/binding=${publicationBinding.body?.status ?? publicationBinding.status}/blocking=${publicationSession.session.counts.blocking}/warning=${publicationSession.session.counts.warning}/ui=${uiReady}/enabled=${prepareEnabled}`,
+        state: `missing=${missing.join(",") || "none"}/set=${publicationStructuredSet.body?.id ?? publicationStructuredSet.status}/current=${publicationStructuredSet.body?.current ?? false}/blocking=${publicationSession.session.counts.blocking}/warning=${publicationSession.session.counts.warning}/ui=${uiReady}/enabled=${prepareEnabled}`,
       };
     },
   );
-  const { publicationSession, publicationBinding } = publicationReady;
+  const { publicationSession, publicationStructuredSet } = publicationReady;
   for (const kind of requiredConfirmations)
     assert.ok(
       publicationSession.session.confirmations.includes(kind),
       `publication missing confirmation ${kind}`,
     );
-  assert.ok(
-    publicationSession.session.confirmations.includes("legacy_binding"),
-    "publication missing legacy_binding confirmation",
+  assert.equal(publicationStructuredSet.status, 200);
+  assert.equal(publicationStructuredSet.body.current, true);
+  assert.equal(
+    publicationSession.session.structured_rubric_set_id,
+    publicationStructuredSet.body.id,
   );
-  assert.equal(publicationBinding.status, 200);
-  assert.equal(publicationBinding.body.status, "confirmed");
   assert.equal(publicationSession.session.counts.blocking, 0);
   assert.equal(publicationSession.session.counts.warning, 0);
   assert.equal(publicationReady.uiReady, true);
@@ -2254,11 +2082,12 @@ try {
     review_version: publicationSession.session.review_version,
     confirmations: publicationSession.session.confirmations,
     counts: publicationSession.session.counts,
-    binding_read_status: publicationBinding.status,
-    binding_read_request_id: publicationBinding.request_id,
-    binding_read_error_code: publicationBinding.error_code,
-    binding_id: publicationBinding.body.id,
-    binding_status: publicationBinding.body.status,
+    structured_set_read_status: publicationStructuredSet.status,
+    structured_set_read_request_id: publicationStructuredSet.request_id,
+    structured_set_read_error_code: publicationStructuredSet.error_code,
+    structured_rubric_set_id: publicationStructuredSet.body.id,
+    structured_rubric_set_status: publicationStructuredSet.body.status,
+    structured_rubric_set_current: publicationStructuredSet.body.current,
     ui_ready_copy: true,
     prepare_publication_enabled: true,
   };
@@ -2267,7 +2096,7 @@ try {
   await page.getByRole("button", { name: "教师确认并发布" }).click();
   await page.waitForURL(`**/assignments/${assignmentId}`);
   stage("D", "objective_and_subjective_questions_with_positive_scores");
-  stage("D", "rubric_items_knowledge_point_publish_check_and_publish");
+  stage("D", "structured_criteria_knowledge_point_publish_check_and_publish");
   evidence.stages.D.status = "passed";
 
   currentStage = "E";
@@ -2911,7 +2740,9 @@ try {
         answer_status: answer.status,
         answer_requires_review: answer.requires_review,
         result_id: answer.result.id,
-        rubric_version_id: answer.result.rubric_version_id,
+        structured_rubric_set_id: answer.result.structured_rubric_set_id,
+        structured_rubric_version_id:
+          answer.result.structured_rubric_version_id,
         provider: answer.result.provider,
         provider_version: answer.result.provider_version,
         status: answer.result.status,
@@ -3038,7 +2869,9 @@ try {
         answer_status: answer.status,
         answer_requires_review: answer.requires_review,
         result_id: answer.result.id,
-        rubric_version_id: answer.result.rubric_version_id,
+        structured_rubric_set_id: answer.result.structured_rubric_set_id,
+        structured_rubric_version_id:
+          answer.result.structured_rubric_version_id,
         provider: answer.result.provider,
         provider_version: answer.result.provider_version,
         status: answer.result.status,
@@ -3390,7 +3223,7 @@ try {
     assert.ok(verified.evidence.length >= 1);
     const criterionScores = Object.fromEntries(
       verified.criteria.map((criterion) => [
-        criterion.rubric_item_id,
+        criterion.criterion_id,
         criterion.awarded_points,
       ]),
     );
@@ -3399,14 +3232,18 @@ try {
       requires_review: verified.result.requires_review,
       criterion_scores: criterionScores,
       criteria: verified.criteria,
-      rubric_version_id: verified.result.rubric_version_id,
+      structured_rubric_set_id: verified.result.structured_rubric_set_id,
+      structured_rubric_version_id:
+        verified.result.structured_rubric_version_id,
       result_id: verified.result.id,
     });
     evidence.codex_suggestions.push({
       answer_id: verified.id,
       answer_status: verified.status,
       result_id: verified.result.id,
-      rubric_version_id: verified.result.rubric_version_id,
+      structured_rubric_set_id: verified.result.structured_rubric_set_id,
+      structured_rubric_version_id:
+        verified.result.structured_rubric_version_id,
       request_status: continueResponse.status,
       request_id: continueResponse.request_id,
       error_code: null,
@@ -3494,12 +3331,12 @@ try {
             criterionIndex < (await criterionInputs.count());
             criterionIndex += 1
           ) {
-            const rubricItemId = Object.keys(override.criterion_scores)[
+            const criterionId = Object.keys(override.criterion_scores)[
               criterionIndex
             ];
             await criterionInputs
               .nth(criterionIndex)
-              .fill(override.criterion_scores[rubricItemId]);
+              .fill(override.criterion_scores[criterionId]);
           }
           await panel
             .getByLabel("教师反馈")
@@ -3571,12 +3408,12 @@ try {
             criterionIndex < (await criterionInputs.count());
             criterionIndex += 1
           ) {
-            const rubricItemId = Object.keys(override.criterion_scores)[
+            const criterionId = Object.keys(override.criterion_scores)[
               criterionIndex
             ];
             await criterionInputs
               .nth(criterionIndex)
-              .fill(override.criterion_scores[rubricItemId]);
+              .fill(override.criterion_scores[criterionId]);
           }
           await panel
             .getByLabel("教师反馈")
@@ -3611,15 +3448,19 @@ try {
         );
         assert.equal(reviewedAnswer.result.id, plan.result_id);
         assert.equal(
-          reviewedAnswer.result.rubric_version_id,
-          plan.rubric_version_id,
+          reviewedAnswer.result.structured_rubric_set_id,
+          plan.structured_rubric_set_id,
+        );
+        assert.equal(
+          reviewedAnswer.result.structured_rubric_version_id,
+          plan.structured_rubric_version_id,
         );
         assert.equal(reviewedAnswer.result.status, expectedDecision);
         assert.equal(reviewedAnswer.requires_review, false);
         for (const criterion of reviewedAnswer.criteria) {
           assertDecimalStringsEqual(
             criterion.awarded_points,
-            expectedCriterionScores[criterion.rubric_item_id],
+            expectedCriterionScores[criterion.criterion_id],
             "review criterion score must match the requested decimal value",
           );
           assert.equal(
@@ -3635,7 +3476,10 @@ try {
           answer_requires_review: reviewedAnswer.requires_review,
           result_id: reviewedAnswer.result.id,
           result_status: reviewedAnswer.result.status,
-          rubric_version_id: reviewedAnswer.result.rubric_version_id,
+          structured_rubric_set_id:
+            reviewedAnswer.result.structured_rubric_set_id,
+          structured_rubric_version_id:
+            reviewedAnswer.result.structured_rubric_version_id,
           review_id: reviewWriteBody.id,
           decision: reviewedAnswer.review.decision,
           final_score: reviewedAnswer.review.final_score,
@@ -3770,7 +3614,7 @@ try {
     snapshots: completeSnapshotsResponse.body.map((snapshot) => ({
       id: snapshot.id,
       submission_id: snapshot.submission_id,
-      rubric_version_id: snapshot.rubric_version_id,
+      structured_rubric_set_id: snapshot.structured_rubric_set_id,
       status: snapshot.status,
       version: snapshot.version,
     })),

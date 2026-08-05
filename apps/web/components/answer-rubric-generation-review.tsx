@@ -60,21 +60,6 @@ type QuestionOption = {
   max_score?: number | string | null;
 };
 
-type SavedRubricOption = {
-  id: string;
-  question_id: string;
-  standard_answer?: string;
-  scoring_notes?: string;
-  items: Array<{
-    id: string;
-    title: string;
-    description?: string | null;
-    points: string;
-    required: boolean;
-    deduction_rule?: string | null;
-  }>;
-};
-
 function safeJson(value: string, label: string): Record<string, unknown> {
   try {
     const parsed = JSON.parse(value) as unknown;
@@ -89,11 +74,9 @@ function safeJson(value: string, label: string): Record<string, unknown> {
 export function AnswerRubricGenerationReview({
   assignmentId,
   questions,
-  savedRubrics = [],
 }: {
   assignmentId: string;
   questions: QuestionOption[];
-  savedRubrics?: SavedRubricOption[];
 }) {
   const toast = useToast();
   const [revision, setRevision] = useState<AssignmentDraftRevision | null>(
@@ -117,6 +100,7 @@ export function AnswerRubricGenerationReview({
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const loadGeneration = useRef(0);
+  const actionInFlight = useRef(false);
 
   const load = useCallback(async () => {
     const generation = ++loadGeneration.current;
@@ -173,10 +157,6 @@ export function AnswerRubricGenerationReview({
   const rubric = useMemo(
     () => rubrics.find((item) => item.question_id === selectedQuestion),
     [rubrics, selectedQuestion],
-  );
-  const savedRubric = useMemo(
-    () => savedRubrics.find((item) => item.question_id === selectedQuestion),
-    [savedRubrics, selectedQuestion],
   );
   const bundleQuestion = bundle?.questions.find(
     (question) => question.id === selectedQuestion,
@@ -272,6 +252,8 @@ export function AnswerRubricGenerationReview({
   };
 
   const perform = async (work: () => Promise<unknown>, success: string) => {
+    if (actionInFlight.current) return;
+    actionInFlight.current = true;
     setBusy(true);
     try {
       await work();
@@ -293,6 +275,7 @@ export function AnswerRubricGenerationReview({
       setMessage(text);
       toast(text, "error");
     } finally {
+      actionInFlight.current = false;
       setBusy(false);
     }
   };
@@ -440,7 +423,7 @@ export function AnswerRubricGenerationReview({
           刷新草稿
         </Button>
       </div>
-      <div className="grid gap-4 xl:grid-cols-[15rem_minmax(0,1fr)_minmax(0,1.2fr)]">
+      <div className="grid gap-4 xl:grid-cols-[24rem_minmax(0,1fr)_minmax(0,1.2fr)]">
         <Card className="space-y-2 p-4">
           <h3 className="font-bold">题目与风险</h3>
           {displayQuestions.map((question) => {
@@ -451,51 +434,112 @@ export function AnswerRubricGenerationReview({
             );
             const savedAnswer = savedQuestion?.answer.selected;
             const savedRubric = savedQuestion?.rubric.selected;
-            const currentRubric = savedRubrics.find(
-              (entry) => entry.question_id === question.id,
-            );
+            const answerToConfirm =
+              savedQuestion?.answer.materialized?.status === "draft"
+                ? savedQuestion.answer.materialized
+                : savedAnswer;
+            const rubricToConfirm =
+              savedQuestion?.rubric.materialized?.status === "draft"
+                ? savedQuestion.rubric.materialized
+                : savedRubric;
             const riskCount =
               bundle?.blockers.filter(
                 (blocker) => blocker.entity_id === question.id,
               ).length ?? 0;
+            const packageMatches =
+              !!answerToConfirm &&
+              !!rubricToConfirm &&
+              rubricToConfirm.reference_answer_version_id ===
+                answerToConfirm.id;
+            const packageConfirmed =
+              packageMatches &&
+              answerToConfirm.status === "confirmed" &&
+              rubricToConfirm.status === "confirmed";
             return (
-              <button
+              <div
                 key={question.id}
-                className={`w-full rounded-lg border p-3 text-left ${selectedQuestion === question.id ? "border-blue-600 bg-blue-50" : ""}`}
-                onClick={() => setSelectedQuestion(question.id)}
-                aria-pressed={selectedQuestion === question.id}
+                className={`flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center ${selectedQuestion === question.id ? "border-blue-600 bg-blue-50" : ""}`}
+                data-testid={`question-review-card-${question.id}`}
               >
-                <span className="font-semibold">第 {questionNumber} 题</span>
-                <span className="block text-xs">
-                  参考答案：
-                  {savedAnswer?.status === "confirmed"
-                    ? "已确认"
-                    : savedAnswer?.status === "draft"
-                      ? "等待确认"
-                      : currentRubric?.standard_answer
-                        ? "已保存"
+                <button
+                  className="min-w-0 flex-1 p-1 text-left"
+                  onClick={() => setSelectedQuestion(question.id)}
+                  aria-pressed={selectedQuestion === question.id}
+                >
+                  <span className="font-semibold">第 {questionNumber} 题</span>
+                  <span className="block text-xs">
+                    参考答案：
+                    {answerToConfirm?.status === "confirmed"
+                      ? "已确认"
+                      : answerToConfirm?.status === "draft"
+                        ? "等待确认"
                         : savedQuestion?.answer.candidate
                           ? "有生成建议"
                           : "尚未生成"}
-                </span>
-                <span className="block text-xs">
-                  评分标准：
-                  {savedRubric?.status === "confirmed"
-                    ? "已确认"
-                    : savedRubric?.status === "draft"
-                      ? "等待确认"
-                      : currentRubric?.items.length
-                        ? "已保存"
+                  </span>
+                  <span className="block text-xs">
+                    评分标准：
+                    {rubricToConfirm?.status === "confirmed"
+                      ? "已确认"
+                      : rubricToConfirm?.status === "draft"
+                        ? "等待确认"
                         : savedQuestion?.rubric.candidate
                           ? "有生成建议"
                           : "尚未生成"}
-                </span>
-                {riskCount > 0 && (
-                  <span className="mt-1 block text-xs text-amber-700">
-                    {riskCount} 项风险待处理
                   </span>
-                )}
-              </button>
+                  {riskCount > 0 && (
+                    <span className="mt-1 block text-xs text-amber-700">
+                      {riskCount} 项风险待处理
+                    </span>
+                  )}
+                </button>
+                <Button
+                  className="w-full shrink-0 whitespace-nowrap sm:w-auto"
+                  variant={packageConfirmed ? "outline" : "primary"}
+                  disabled={
+                    busy ||
+                    hasLocalEdits ||
+                    !bundle ||
+                    !packageMatches ||
+                    packageConfirmed
+                  }
+                  onClick={() => {
+                    setSelectedQuestion(question.id);
+                    if (!bundle || !answerToConfirm || !rubricToConfirm) return;
+                    void perform(
+                      () =>
+                        structuredRubricApi.confirmQuestionPackage(
+                          assignmentId,
+                          question.id,
+                          {
+                            expected_bundle_hash: bundle.version.bundle_hash,
+                            expected_question_content_hash:
+                              savedQuestion?.content_hash ?? "",
+                            reference_answer_version_id: answerToConfirm.id,
+                            expected_reference_answer_content_hash:
+                              answerToConfirm.content_hash,
+                            structured_rubric_version_id: rubricToConfirm.id,
+                            expected_structured_rubric_content_hash:
+                              rubricToConfirm.content_hash,
+                            explicit_confirmation: true,
+                          },
+                        ),
+                      `第 ${questionNumber} 题的题目、答案和评分标准已确认`,
+                    );
+                  }}
+                  title={
+                    hasLocalEdits
+                      ? "请先保存或撤销当前编辑"
+                      : !packageMatches
+                        ? "需先准备相互绑定的完整答案和评分标准"
+                        : undefined
+                  }
+                >
+                  {packageConfirmed
+                    ? "题目、答案和评分标准已确认"
+                    : "确认题目、答案和评分标准"}
+                </Button>
+              </div>
             );
           })}
         </Card>
@@ -513,20 +557,7 @@ export function AnswerRubricGenerationReview({
               <div className="whitespace-pre-wrap rounded-lg border bg-slate-50 p-3 text-sm">
                 {formalAnswer.content}
               </div>
-              {formalAnswer.status === "draft" ? (
-                <Button
-                  disabled={busy}
-                  onClick={() =>
-                    void perform(
-                      () =>
-                        structuredRubricApi.confirmReference(formalAnswer.id),
-                      "参考答案已确认",
-                    )
-                  }
-                >
-                  确认此参考答案
-                </Button>
-              ) : (
+              {formalAnswer.status === "confirmed" && (
                 <p className="text-sm text-emerald-700">
                   ✓ 此参考答案已经教师确认
                 </p>
@@ -537,21 +568,9 @@ export function AnswerRubricGenerationReview({
                   <p className="mt-1 whitespace-pre-wrap">
                     {pendingAnswer.content}
                   </p>
-                  <Button
-                    className="mt-2"
-                    disabled={busy}
-                    onClick={() =>
-                      void perform(
-                        () =>
-                          structuredRubricApi.confirmReference(
-                            pendingAnswer.id,
-                          ),
-                        "参考答案已确认",
-                      )
-                    }
-                  >
-                    确认这份参考答案
-                  </Button>
+                  <p className="mt-2 text-xs text-amber-800">
+                    请在左侧对应题目卡片中与评分标准一并确认。
+                  </p>
                 </div>
               )}
               {bundleQuestion?.answer.history.some(
@@ -618,18 +637,6 @@ export function AnswerRubricGenerationReview({
                     </Button>
                   </div>
                 </details>
-              )}
-            </div>
-          ) : savedRubric?.standard_answer ? (
-            <div className="space-y-3" data-testid="saved-legacy-answer">
-              <p className="text-sm text-emerald-700">✓ 已保存到作业草稿</p>
-              <div className="whitespace-pre-wrap rounded-lg border bg-slate-50 p-3 text-sm">
-                {savedRubric.standard_answer}
-              </div>
-              {savedRubric.scoring_notes && (
-                <p className="text-sm text-slate-600">
-                  {savedRubric.scoring_notes}
-                </p>
               )}
             </div>
           ) : !answer ? (
@@ -818,19 +825,7 @@ export function AnswerRubricGenerationReview({
                   </div>
                 ))}
               </div>
-              {formalRubric.status === "draft" ? (
-                <Button
-                  disabled={busy}
-                  onClick={() =>
-                    void perform(
-                      () => structuredRubricApi.confirm(formalRubric.id),
-                      "Structured Rubric 已确认",
-                    )
-                  }
-                >
-                  确认此评分标准
-                </Button>
-              ) : formalRubric.status === "confirmed" ? (
+              {formalRubric.status === "confirmed" ? (
                 <p className="text-sm text-emerald-700">
                   ✓ 此评分标准已经教师确认
                 </p>
@@ -841,18 +836,9 @@ export function AnswerRubricGenerationReview({
                   <p>
                     {pendingRubric.title} · 总分 {pendingRubric.total_points}
                   </p>
-                  <Button
-                    className="mt-2"
-                    disabled={busy}
-                    onClick={() =>
-                      void perform(
-                        () => structuredRubricApi.confirm(pendingRubric.id),
-                        "评分标准已确认",
-                      )
-                    }
-                  >
-                    确认这份评分标准
-                  </Button>
+                  <p className="mt-2 text-xs text-amber-800">
+                    请在左侧对应题目卡片中与答案一并确认。
+                  </p>
                 </div>
               )}
               {bundleQuestion?.rubric.history.some(
@@ -895,28 +881,6 @@ export function AnswerRubricGenerationReview({
                   </Button>
                 </details>
               )}
-            </div>
-          ) : savedRubric ? (
-            <div className="space-y-3" data-testid="saved-legacy-rubric">
-              <p className="text-sm text-emerald-700">✓ 已保存到作业草稿</p>
-              <div className="space-y-2" aria-label="已保存评分项">
-                {savedRubric.items.map((item) => (
-                  <div key={item.id} className="rounded-lg border p-3 text-sm">
-                    <div className="flex items-center justify-between gap-3">
-                      <strong>{item.title}</strong>
-                      <span>{item.points} 分</span>
-                    </div>
-                    {item.description && (
-                      <p className="mt-1 text-slate-700">{item.description}</p>
-                    )}
-                    {item.deduction_rule && (
-                      <p className="mt-1 text-xs text-slate-500">
-                        {item.deduction_rule}
-                      </p>
-                    )}
-                  </div>
-                ))}
-              </div>
             </div>
           ) : !rubric ? (
             <p>暂无评分标准建议，也没有已生成的 Structured Rubric。</p>

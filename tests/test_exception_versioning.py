@@ -8,16 +8,19 @@ from app.core.config import get_settings
 from app.main import app
 from app.models import (
     AnalyticsSnapshot,
+    Assignment,
     ClassStudent,
     GradeRelease,
     GradeReleaseItem,
     GradingResult,
     MembershipStatus,
     Question,
+    ReferenceAnswerVersion,
     ReportJob,
-    RubricVersion,
     ScoreRevision,
     StoredFile,
+    StructuredRubricSet,
+    StructuredRubricVersion,
     Student,
     StudentAnswer,
     Submission,
@@ -25,12 +28,12 @@ from app.models import (
     SubmissionPage,
     SubmissionScoreSnapshot,
     TeachingInsight,
-    VersionStatus,
     now_utc,
 )
 from app.results.services import FinalScoreService, release_scores
 from app.storage.dependencies import get_storage
 from sqlalchemy import func, select
+from structured_rubric_support import activate_structured_rubric_set
 from test_submission_workflow import client, confirm_answer_regions, png, workflow
 
 
@@ -362,23 +365,48 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
         assert expired_download.status_code == 409
         assert expired_download.json()["code"] == "REPORT_JOB_EXPIRED"
 
-        assignment = client.get(f"/api/assignments/{submission.assignment_id}").json()
-        rubric_change = client.put(
-            f"/api/assignments/{submission.assignment_id}/rubrics/{question_id}",
-            json={
-                "standard_answer": "修订后的合成答案",
-                "items": [{"title": "修订评分点", "points": 10}],
-            },
-        )
-        assert rubric_change.status_code == 200
-        assert (
-            rubric_change.json()["rubric_version"]["version"]
-            == assignment["rubric_version"]["version"] + 1
-        )
-        db.refresh(answer)
-        assert answer.status == "stale" and answer.requires_review is True
+        assignment_model = db.get(Assignment, submission.assignment_id)
+        assert assignment_model is not None
+        assert assignment_model.active_structured_rubric_set_id is not None
+        old_set = db.get(StructuredRubricSet, assignment_model.active_structured_rubric_set_id)
+        assert old_set is not None
         old_result = db.get(GradingResult, uuid.UUID(grade_v1.json()["id"]))
-        assert old_result is not None and old_result.status == "stale"
+        assert old_result is not None
+        old_answer_status = answer.status
+        old_result_status = old_result.status
+        answer_version = (
+            db.scalar(
+                select(func.max(ReferenceAnswerVersion.version)).where(
+                    ReferenceAnswerVersion.question_id == uuid.UUID(question_id)
+                )
+            )
+            or 0
+        ) + 1
+        rubric_version = (
+            db.scalar(
+                select(func.max(StructuredRubricVersion.rubric_version)).where(
+                    StructuredRubricVersion.question_id == uuid.UUID(question_id)
+                )
+            )
+            or 0
+        ) + 1
+        changed_set, _items = activate_structured_rubric_set(
+            db,
+            assignment_model,
+            [question],
+            actor_id=assignment_model.owner_id,
+            answers={question.id: "synthetic revised reference answer"},
+            set_version=old_set.version + 1,
+            answer_version=answer_version,
+            rubric_version=rubric_version,
+        )
+        assert changed_set.id != old_set.id
+        db.refresh(answer)
+        db.refresh(old_result)
+        assert answer.status == old_answer_status
+        assert old_result.status == old_result_status
+        assert stored_snapshot_v1.structured_rubric_set_id == old_set.id
+        assert stored_snapshot_v2.structured_rubric_set_id == old_set.id
         stale_accept = client.put(
             f"/api/student-answers/{answer.id}/review",
             json={"decision": "accepted"},
@@ -394,15 +422,6 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
             client.get(f"/api/assignments/{submission.assignment_id}").json()["status"]
             == "published"
         )
-        # Continue this legacy downstream versioning fixture with an explicitly
-        # confirmed rubric; production confirmation now occurs through review.
-        changed_rubric = db.get(
-            RubricVersion, uuid.UUID(rubric_change.json()["rubric_version"]["id"])
-        )
-        assert changed_rubric is not None
-        changed_rubric.status = VersionStatus.confirmed
-        changed_rubric.confirmed_at = now_utc()
-        db.commit()
         blocked = client.post(f"/api/submissions/{submission_id}/finalize")
         assert blocked.status_code == 409
         assert blocked.json()["code"] == "SUBMISSION_FINALIZED"

@@ -19,9 +19,9 @@ from app.models import (
     PaperVersion,
     Question,
     QuestionRecognitionEvidence,
-    QuestionRubric,
-    RubricItem,
-    RubricVersion,
+    RubricCriterion,
+    StructuredRubricSetItem,
+    StructuredRubricVersion,
     Student,
     StudentAnswer,
     StudentAnswerRegion,
@@ -38,6 +38,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from structured_rubric_support import activate_structured_rubric_set
 from test_assignments import FakeStorage, active_class, actor_and_db, create
 
 client = TestClient(app)
@@ -56,7 +57,9 @@ def four_page_pdf() -> bytes:
     return output.getvalue()
 
 
-def workflow() -> tuple[Session, FakeStorage, str, uuid.UUID, str]:
+def workflow(
+    *, criterion_validation_mode: str = "manual_only"
+) -> tuple[Session, FakeStorage, str, uuid.UUID, str]:
     actor, db = actor_and_db()
     school_class = active_class(db, actor.id)
     student = Student(owner_id=actor.id, student_number="0001", name="合成学生")
@@ -87,22 +90,24 @@ def workflow() -> tuple[Session, FakeStorage, str, uuid.UUID, str]:
             "content_text": "合成选择题",
         },
     ).json()
-    client.put(
-        f"/api/assignments/{assignment_id}/rubrics/{question['id']}",
-        json={"standard_answer": "1. 测试题", "items": [{"title": "答案正确", "points": 10}]},
-    )
     # Downstream workflow fixture: construct the historical published
     # precondition directly. Production HTTP publication now requires a
     # teacher-created central-review readiness snapshot.
     assignment = db.get(Assignment, uuid.UUID(assignment_id))
     assert assignment is not None
     paper = db.get(PaperVersion, assignment.active_paper_version_id)
-    rubric = db.get(RubricVersion, assignment.active_rubric_version_id)
-    assert paper is not None and rubric is not None
+    question_row = db.get(Question, uuid.UUID(question["id"]))
+    assert paper is not None and question_row is not None
     paper.status = VersionStatus.confirmed
     paper.confirmed_at = now_utc()
-    rubric.status = VersionStatus.confirmed
-    rubric.confirmed_at = now_utc()
+    activate_structured_rubric_set(
+        db,
+        assignment,
+        [question_row],
+        actor_id=assignment.owner_id,
+        answers={question_row.id: "1. 测试题"},
+        criterion_validation_mode=criterion_validation_mode,
+    )
     assignment.status = AssignmentStatus.published
     assignment.published_at = now_utc()
     db.commit()
@@ -351,6 +356,95 @@ def test_blank_answer_with_current_evidence_can_receive_objective_zero() -> None
         db.close()
 
 
+def test_grading_uses_active_set_version_not_newest_confirmed_rubric() -> None:
+    db, _storage, _batch_id, submission_id, question_id = workflow()
+    settings = get_settings()
+    previous_recognition = settings.recognition_provider
+    previous_answer = settings.answer_recognition_provider
+    settings.recognition_provider = "fake"
+    settings.answer_recognition_provider = "fake"
+    try:
+        submission = db.get(Submission, submission_id)
+        assert submission is not None
+        assignment = db.get(Assignment, submission.assignment_id)
+        assert assignment is not None and assignment.active_structured_rubric_set_id is not None
+        active_item = db.scalar(
+            select(StructuredRubricSetItem).where(
+                StructuredRubricSetItem.rubric_set_id == assignment.active_structured_rubric_set_id,
+                StructuredRubricSetItem.question_id == uuid.UUID(question_id),
+            )
+        )
+        assert active_item is not None
+        active_rubric = db.get(StructuredRubricVersion, active_item.structured_rubric_version_id)
+        assert active_rubric is not None
+        newer_confirmed = StructuredRubricVersion(
+            question_id=active_rubric.question_id,
+            question_version=active_rubric.question_version,
+            reference_answer_version_id=active_rubric.reference_answer_version_id,
+            rubric_version=active_rubric.rubric_version + 1,
+            title="newer confirmed rubric outside active set",
+            total_points=active_rubric.total_points,
+            status="confirmed",
+            content_hash="newer-confirmed-not-active".ljust(64, "0"),
+            created_by=assignment.owner_id,
+            confirmed_by=assignment.owner_id,
+            confirmed_at=now_utc(),
+        )
+        db.add(newer_confirmed)
+        db.flush()
+        db.add(
+            RubricCriterion(
+                rubric_version_id=newer_confirmed.id,
+                stable_key="newer-answer",
+                title="newer criterion",
+                max_points=active_rubric.total_points,
+                display_order=1,
+                criterion_type="answer",
+                required=True,
+                dependencies=[],
+                expected_evidence={"source": "student_answer"},
+                validation_mode="manual_only",
+                manual_review_policy={},
+                partial_credit_policy={},
+                validation_rule={},
+                metadata_={"fixture": "not-active"},
+            )
+        )
+        db.commit()
+
+        processing = client.post(
+            f"/api/submissions/{submission_id}/processing-jobs?run_now=true",
+            json={"idempotency_key": "active-set-fixed-version-processing"},
+        )
+        assert processing.status_code == 201, processing.text
+        confirm_answer_regions(db, submission_id)
+        recognition = client.post(
+            f"/api/submissions/{submission_id}/recognition-jobs?run_now=true",
+            json={"idempotency_key": "active-set-fixed-version-recognition"},
+        )
+        assert recognition.status_code == 201, recognition.text
+        answer = db.scalar(
+            select(StudentAnswer).where(StudentAnswer.submission_id == submission_id)
+        )
+        assert answer is not None
+        graded = client.post(f"/api/student-answers/{answer.id}/grade")
+        assert graded.status_code == 200, graded.text
+        result = db.scalar(
+            select(GradingResult)
+            .where(GradingResult.student_answer_id == answer.id)
+            .order_by(GradingResult.created_at.desc())
+        )
+        assert result is not None
+        assert result.structured_rubric_set_id == assignment.active_structured_rubric_set_id
+        assert result.structured_rubric_version_id == active_rubric.id
+        assert result.structured_rubric_version_id != newer_confirmed.id
+    finally:
+        settings.recognition_provider = previous_recognition
+        settings.answer_recognition_provider = previous_answer
+        app.dependency_overrides.pop(get_storage, None)
+        db.close()
+
+
 def test_accept_requires_current_grading_evidence_but_manual_score_does_not() -> None:
     db, _storage, _batch_id, submission_id, _question_id = workflow()
     settings = get_settings()
@@ -477,7 +571,7 @@ def test_finalized_workflow_prioritizes_complete_snapshot_over_pending_pages() -
         assignment = db.get(Assignment, submission.assignment_id)
         assert assignment is not None
         assert assignment.active_paper_version_id is not None
-        assert assignment.active_rubric_version_id is not None
+        assert assignment.active_structured_rubric_set_id is not None
         assert db.scalar(
             select(func.count())
             .select_from(SubmissionPage)
@@ -492,7 +586,7 @@ def test_finalized_workflow_prioritizes_complete_snapshot_over_pending_pages() -
                 assignment_id=assignment.id,
                 student_id=submission.student_id,
                 paper_version_id=assignment.active_paper_version_id,
-                rubric_version_id=assignment.active_rubric_version_id,
+                structured_rubric_set_id=assignment.active_structured_rubric_set_id,
                 total_score=Decimal("10"),
                 max_score=Decimal("10"),
                 status="complete",
@@ -795,7 +889,7 @@ def test_subjective_boundary_recheck_disagreement_enters_review_queue(
             del answer
             self.calls += 1
             assert context is not None
-            criterion_id = context["rubric_items"][0]["id"]
+            criterion_id = context["rubric_criteria"][0]["id"]
             evidence_id = context["evidence_regions"][0]["id"]
             score = max_score if self.calls == 1 else max_score - Decimal("1")
             return GradeSuggestion(
@@ -889,26 +983,29 @@ def test_current_result_status_projection_preserves_teacher_review_gate() -> Non
         question = db.get(Question, answer.question_id)
         assert (
             assignment is not None
-            and assignment.active_rubric_version_id is not None
+            and assignment.active_structured_rubric_set_id is not None
             and question is not None
         )
-        question_rubric = db.scalar(
-            select(QuestionRubric).where(
-                QuestionRubric.rubric_version_id == assignment.active_rubric_version_id,
-                QuestionRubric.question_id == question.id,
+        set_item = db.scalar(
+            select(StructuredRubricSetItem).where(
+                StructuredRubricSetItem.rubric_set_id == assignment.active_structured_rubric_set_id,
+                StructuredRubricSetItem.question_id == question.id,
             )
         )
-        assert question_rubric is not None
-        rubric_item = db.scalar(
-            select(RubricItem).where(RubricItem.question_rubric_id == question_rubric.id)
+        assert set_item is not None
+        criterion = db.scalar(
+            select(RubricCriterion).where(
+                RubricCriterion.rubric_version_id == set_item.structured_rubric_version_id
+            )
         )
-        assert rubric_item is not None
+        assert criterion is not None
         job = GradingJob(
             owner_id=submission.owner_id,
             grading_batch_id=submission.grading_batch_id,
             submission_id=submission.id,
             question_id=question.id,
-            rubric_version_id=assignment.active_rubric_version_id,
+            structured_rubric_set_id=assignment.active_structured_rubric_set_id,
+            structured_rubric_version_id=set_item.structured_rubric_version_id,
             status="completed",
             provider="codex_local",
             provider_version="local",
@@ -924,7 +1021,8 @@ def test_current_result_status_projection_preserves_teacher_review_gate() -> Non
             grading_job_id=job.id,
             student_answer_id=answer.id,
             question_id=question.id,
-            rubric_version_id=assignment.active_rubric_version_id,
+            structured_rubric_set_id=assignment.active_structured_rubric_set_id,
+            structured_rubric_version_id=set_item.structured_rubric_version_id,
             grading_method="codex_assisted",
             provider="codex_local",
             provider_version="local",
@@ -942,10 +1040,10 @@ def test_current_result_status_projection_preserves_teacher_review_gate() -> Non
         db.add(
             GradingCriterionResult(
                 grading_result_id=result.id,
-                rubric_item_id=rubric_item.id,
+                criterion_id=criterion.id,
                 status="manual_review",
                 awarded_points=None,
-                max_points=rubric_item.points,
+                max_points=criterion.max_points,
                 reason="缺少足够信息，不能自动给分。",
                 confidence=None,
             )
@@ -1167,7 +1265,7 @@ def test_codex_suggestion_requires_current_recognition_evidence() -> None:
             select(GradingResult).where(GradingResult.student_answer_id == answer.id)
         )
         criterion_id = db.scalar(
-            select(GradingCriterionResult.rubric_item_id).where(
+            select(GradingCriterionResult.criterion_id).where(
                 GradingCriterionResult.grading_result_id == result.id
             )
         )
@@ -1430,7 +1528,7 @@ def test_local_codex_suggestion_is_review_only_and_supersedes_previous_result() 
         )
         assert result is not None
         criterion_id = db.scalar(
-            select(GradingCriterionResult.rubric_item_id).where(
+            select(GradingCriterionResult.criterion_id).where(
                 GradingCriterionResult.grading_result_id == result.id
             )
         )

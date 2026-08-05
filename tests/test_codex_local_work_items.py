@@ -14,16 +14,18 @@ from app.db.session import get_db
 from app.main import app
 from app.models import (
     Assignment,
-    AssignmentRubricPublicationBinding,
     CodexWorkItem,
     GradeRelease,
     GradingBatch,
+    PaperVersion,
     ProcessingRun,
     ProcessingStep,
     Question,
     ReferenceAnswerVersion,
     RubricCriterion,
     SchoolClass,
+    StructuredRubricSet,
+    StructuredRubricSetItem,
     StructuredRubricVersion,
     Student,
     StudentAnswer,
@@ -31,6 +33,7 @@ from app.models import (
     SubmissionScoreSnapshot,
     TeacherReview,
     User,
+    VersionStatus,
     now_utc,
 )
 from app.processing import codex_local
@@ -420,10 +423,23 @@ def test_work_request_contains_real_bundle_content_and_hashes_it(
 ) -> None:
     run, step = _seed_step(db)
     answer = db.get(StudentAnswer, step.student_answer_id)
-    assert answer is not None
+    submission = db.get(Submission, step.submission_id)
+    assert answer is not None and submission is not None
+    assignment = db.get(Assignment, submission.assignment_id)
+    assert assignment is not None
+    paper = PaperVersion(
+        assignment_id=assignment.id,
+        version=1,
+        status=VersionStatus.confirmed,
+        source_type="manual",
+        created_by=run.owner_id,
+        confirmed_at=now_utc(),
+    )
+    db.add(paper)
+    db.flush()
     question = Question(
         id=answer.question_id,
-        paper_version_id=uuid.uuid4(),
+        paper_version_id=paper.id,
         question_number="7",
         display_order=7,
         question_type="short_answer",
@@ -475,20 +491,39 @@ def test_work_request_contains_real_bundle_content_and_hashes_it(
         partial_credit_policy={},
         metadata_={},
     )
-    binding = AssignmentRubricPublicationBinding(
+    db.add(criterion)
+    db.flush()
+    rubric_set = StructuredRubricSet(
         owner_id=run.owner_id,
-        assignment_id=uuid.uuid4(),
-        review_session_id=uuid.uuid4(),
-        paper_version_id=question.paper_version_id,
-        legacy_rubric_version_id=uuid.uuid4(),
-        binding_version=1,
-        status="confirmed",
-        source_binding_hash="3" * 64,
-        target_legacy_hash="4" * 64,
-        mapping=[{"criterion_stable_key": "criterion-1", "legacy": "q7"}],
+        assignment_id=assignment.id,
+        paper_version_id=paper.id,
+        version=1,
+        status="active",
+        content_hash="3" * 64,
+        source_snapshot_hash="4" * 64,
+        total_points=Decimal("2"),
         created_by=run.owner_id,
+        confirmed_by=run.owner_id,
+        confirmed_at=now_utc(),
+        activated_at=now_utc(),
     )
-    db.add_all([criterion, binding])
+    db.add(rubric_set)
+    db.flush()
+    set_item = StructuredRubricSetItem(
+        rubric_set_id=rubric_set.id,
+        question_id=question.id,
+        question_version=rubric.question_version,
+        reference_answer_version_id=reference.id,
+        structured_rubric_version_id=rubric.id,
+        answer_content_hash=reference.content_hash,
+        rubric_content_hash=rubric.content_hash,
+        criteria_hash="5" * 64,
+        display_order=1,
+        max_points=Decimal("2"),
+    )
+    db.add(set_item)
+    assignment.active_paper_version_id = paper.id
+    assignment.active_structured_rubric_set_id = rubric_set.id
     answer.recognized_text = "2"
     db.commit()
     snapshot_payload = {
@@ -497,7 +532,15 @@ def test_work_request_contains_real_bundle_content_and_hashes_it(
             "reference_answer": {"id": str(reference.id)},
             "structured_rubric": {"id": str(rubric.id)},
         },
-        "legacy_projection": {"binding_id": str(binding.id)},
+        "structured_rubric_set": {
+            "id": str(rubric_set.id),
+            "version": rubric_set.version,
+            "content_hash": rubric_set.content_hash,
+            "item_id": str(set_item.id),
+            "answer_content_hash": set_item.answer_content_hash,
+            "rubric_content_hash": set_item.rubric_content_hash,
+            "criteria_hash": set_item.criteria_hash,
+        },
         "recognition_evidence": {"regions": [{"id": "evidence-1"}]},
     }
     monkeypatch.setattr(
@@ -524,7 +567,7 @@ def test_work_request_contains_real_bundle_content_and_hashes_it(
     assert bundle["structured_rubric"]["criteria"][0]["validation_rule"] == {
         "equals": "2"
     }
-    assert bundle["legacy_binding"]["criterion_to_legacy_mapping"] == binding.mapping
+    assert bundle["structured_rubric_set"] == snapshot_payload["structured_rubric_set"]
     assert version == "9" * 64
     answer.recognized_text = "two"
     db.flush()

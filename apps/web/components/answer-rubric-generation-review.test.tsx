@@ -22,8 +22,7 @@ const generationApi = vi.hoisted(() => ({
 }));
 const reviewApi = vi.hoisted(() => ({ bundle: vi.fn() }));
 const formalApi = vi.hoisted(() => ({
-  confirmReference: vi.fn(),
-  confirm: vi.fn(),
+  confirmQuestionPackage: vi.fn(),
 }));
 
 vi.mock("@/lib/api", async (load) => ({
@@ -58,7 +57,7 @@ const answerVersion = (
   },
   visibility: "teacher",
 });
-const rubricVersion = (
+const structuredRubricVersion = (
   id: string,
   status: "draft" | "confirmed" | "retired",
   version: number,
@@ -182,45 +181,11 @@ beforeEach(() => {
   generationApi.listRubricCandidates.mockResolvedValue([]);
   generationApi.rubricCandidateValidation.mockResolvedValue([]);
   reviewApi.bundle.mockResolvedValue(bundle());
-  formalApi.confirmReference.mockResolvedValue({});
-  formalApi.confirm.mockResolvedValue({});
+  formalApi.confirmQuestionPackage.mockResolvedValue({});
 });
 afterEach(cleanup);
 
 describe("AnswerRubricGenerationReview Bundle lifecycle", () => {
-  it("shows saved assignment answers and rubrics without prominent source labels", async () => {
-    render(
-      <AnswerRubricGenerationReview
-        {...props}
-        savedRubrics={[
-          {
-            id: "legacy-rubric-1",
-            question_id: "question-1",
-            standard_answer: "教师已保存答案",
-            scoring_notes: "按步骤给分",
-            items: [
-              {
-                id: "legacy-item-1",
-                title: "计算结果",
-                description: "结果正确",
-                points: "20.00",
-                required: true,
-                deduction_rule: "过程错误酌情扣分",
-              },
-            ],
-          },
-        ]}
-      />,
-    );
-
-    expect(await screen.findByText("教师已保存答案")).toBeInTheDocument();
-    expect(screen.getByText("计算结果")).toBeInTheDocument();
-    expect(screen.getAllByText("✓ 已保存到作业草稿")).toHaveLength(2);
-    expect(screen.getByText("参考答案：已保存")).toBeInTheDocument();
-    expect(screen.getByText("评分标准：已保存")).toBeInTheDocument();
-    expect(screen.queryByText(/来源：/)).not.toBeInTheDocument();
-  });
-
   it("shows a formal draft even when no review session exists", async () => {
     generationApi.listRevisions.mockResolvedValue([]);
     const draftAnswer = answerVersion("answer-draft", "draft", 1, "答案 2");
@@ -235,8 +200,8 @@ describe("AnswerRubricGenerationReview Bundle lifecycle", () => {
     render(<AnswerRubricGenerationReview {...props} />);
     expect(await screen.findByText("答案 2")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "确认此参考答案" }),
-    ).toBeEnabled();
+      screen.getByRole("button", { name: "确认题目、答案和评分标准" }),
+    ).toBeDisabled();
   });
 
   it("does not let an accepted suggestion hide its saved formal draft", async () => {
@@ -262,12 +227,12 @@ describe("AnswerRubricGenerationReview Bundle lifecycle", () => {
     render(<AnswerRubricGenerationReview {...props} />);
     expect(await screen.findByText("已保存答案")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "确认此参考答案" }),
-    ).toBeEnabled();
+      screen.getByRole("button", { name: "确认题目、答案和评分标准" }),
+    ).toBeDisabled();
     expect(screen.getByText("查看生成建议并处理")).toBeInTheDocument();
   });
 
-  it("keeps selected confirmed content primary and exposes a newer draft for confirmation", async () => {
+  it("keeps newer unpaired answer visible but prevents independent confirmation", async () => {
     const confirmed = answerVersion(
       "answer-confirmed",
       "confirmed",
@@ -290,15 +255,26 @@ describe("AnswerRubricGenerationReview Bundle lifecycle", () => {
     expect(
       screen.getByText("查看历史参考答案").closest("details"),
     ).not.toHaveAttribute("open");
-    fireEvent.click(screen.getByRole("button", { name: "确认这份参考答案" }));
-    await waitFor(() =>
-      expect(formalApi.confirmReference).toHaveBeenCalledWith("answer-draft"),
-    );
+    expect(
+      screen.queryByRole("button", { name: "确认这份参考答案" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "确认题目、答案和评分标准" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText("请在左侧对应题目卡片中与评分标准一并确认。"),
+    ).toBeInTheDocument();
   });
 
-  it("confirms the exact rubric draft id and keeps retired versions folded", async () => {
-    const draft = rubricVersion("rubric-draft", "draft", 2, "待确认评分标准");
-    const retired = rubricVersion(
+  it("confirms the exact question answer and rubric package from its question card", async () => {
+    const answer = answerVersion("answer-1", "draft", 1, "待确认答案");
+    const draft = structuredRubricVersion(
+      "rubric-draft",
+      "draft",
+      2,
+      "待确认评分标准",
+    );
+    const retired = structuredRubricVersion(
       "rubric-retired",
       "retired",
       1,
@@ -306,17 +282,31 @@ describe("AnswerRubricGenerationReview Bundle lifecycle", () => {
     );
     reviewApi.bundle.mockResolvedValue(
       bundle({
+        selectedAnswer: answer,
         selectedRubric: draft,
+        answerHistory: [answer],
         rubricHistory: [draft, retired],
       }),
     );
 
     render(<AnswerRubricGenerationReview {...props} />);
     fireEvent.click(
-      await screen.findByRole("button", { name: "确认此评分标准" }),
+      await screen.findByRole("button", {
+        name: "确认题目、答案和评分标准",
+      }),
     );
     await waitFor(() =>
-      expect(formalApi.confirm).toHaveBeenCalledWith("rubric-draft"),
+      expect(formalApi.confirmQuestionPackage).toHaveBeenCalledWith(
+        "assignment-1",
+        "question-1",
+        expect.objectContaining({
+          expected_bundle_hash: "b".repeat(64),
+          expected_question_content_hash: "c".repeat(64),
+          reference_answer_version_id: "answer-1",
+          structured_rubric_version_id: "rubric-draft",
+          explicit_confirmation: true,
+        }),
+      ),
     );
     expect(
       screen.getByText("查看历史评分标准").closest("details"),
@@ -357,7 +347,7 @@ describe("AnswerRubricGenerationReview Bundle lifecycle", () => {
     expect(screen.queryByText("旧正式答案")).not.toBeInTheDocument();
     expect(screen.queryByText("查看生成建议并处理")).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "确认此参考答案" }),
+      screen.queryByRole("button", { name: "确认题目、答案和评分标准" }),
     ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "批量接受可用答案" }),

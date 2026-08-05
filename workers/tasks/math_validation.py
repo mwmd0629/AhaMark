@@ -8,13 +8,20 @@ from typing import Any
 from app.db.session import SessionLocal
 from app.math_validation.engine import ENGINE_VERSION, Limits, validate
 from app.models import (
+    Assignment,
     CriterionValidationResult,
     MathValidationJob,
     QuestionRecognitionEvidence,
     ReferenceAnswerVersion,
     RubricCriterion,
     StructuredRubricVersion,
+    Submission,
     now_utc,
+)
+from app.structured_rubric_authority import (
+    StructuredRubricAuthorityError,
+    require_active_structured_rubric,
+    require_job_authority,
 )
 from sqlalchemy import select
 
@@ -45,6 +52,33 @@ def run_math_validation(
         )
         if job is None or job.generation != generation or job.stale_at is not None:
             return {"status": "discarded_late"}
+        assignment = db.scalar(
+            select(Assignment)
+            .join_from(Assignment, Submission, Submission.assignment_id == Assignment.id)
+            .where(Submission.id == job.submission_id)
+        )
+        try:
+            if assignment is None:
+                raise StructuredRubricAuthorityError(
+                    "STRUCTURED_SET_STALE", "Assignment is unavailable"
+                )
+            authority = require_active_structured_rubric(
+                db,
+                assignment=assignment,
+                question_id=job.question_id,
+                owner_id=job.owner_id,
+                lock=True,
+            )
+            require_job_authority(
+                authority,
+                structured_rubric_set_id=job.structured_rubric_set_id,
+                rubric_version_id=job.rubric_version_id,
+                reference_answer_version_id=job.reference_answer_version_id,
+            )
+        except StructuredRubricAuthorityError as exc:
+            job.status, job.stale_at, job.error_code = "stale", now_utc(), exc.code
+            db.commit()
+            return {"status": "stale"}
         evidence = db.get(QuestionRecognitionEvidence, job.recognition_evidence_id)
         rubric = db.get(StructuredRubricVersion, job.rubric_version_id)
         reference = db.get(ReferenceAnswerVersion, job.reference_answer_version_id)
@@ -143,6 +177,26 @@ def run_math_validation(
         if current is None or current.generation != generation or current.stale_at is not None:
             db.rollback()
             return {"status": "discarded_late"}
+        try:
+            require_job_authority(
+                require_active_structured_rubric(
+                    db,
+                    assignment=assignment,
+                    question_id=current.question_id,
+                    owner_id=current.owner_id,
+                    lock=True,
+                ),
+                structured_rubric_set_id=current.structured_rubric_set_id,
+                rubric_version_id=current.rubric_version_id,
+                reference_answer_version_id=current.reference_answer_version_id,
+            )
+        except StructuredRubricAuthorityError as exc:
+            db.rollback()
+            current = db.get(MathValidationJob, job.id)
+            if current is not None:
+                current.status, current.stale_at, current.error_code = "stale", now_utc(), exc.code
+                db.commit()
+            return {"status": "stale"}
         current.status, current.completed_at = "completed", now_utc()
         db.commit()
         return {"status": "completed", "job_id": job_id, "generation": generation}

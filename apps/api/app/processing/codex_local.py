@@ -25,7 +25,6 @@ from app.models import (
     AIFeedbackDraft,
     AIScoringJob,
     Assignment,
-    AssignmentRubricPublicationBinding,
     AuditLog,
     CodexWorkItem,
     GradingBatch,
@@ -37,10 +36,10 @@ from app.models import (
     ProcessingStep,
     Question,
     QuestionRecognitionEvidence,
-    QuestionRubric,
     ReferenceAnswerVersion,
     RubricCriterion,
-    RubricItem,
+    StructuredRubricSet,
+    StructuredRubricSetItem,
     StructuredRubricVersion,
     StudentAnswer,
     StudentAnswerRegion,
@@ -70,7 +69,8 @@ class ApplyContract:
     evidence: QuestionRecognitionEvidence
     reference: ReferenceAnswerVersion
     rubric: StructuredRubricVersion
-    binding: AssignmentRubricPublicationBinding
+    rubric_set: StructuredRubricSet
+    set_item: StructuredRubricSetItem
     criteria: list[RubricCriterion]
     output: AIGradingOutput
     strict_request_hash: str
@@ -147,11 +147,24 @@ def _request_components(
         StructuredRubricVersion,
         uuid.UUID(formal["structured_rubric"]["id"]),
     )
-    binding = db.get(
-        AssignmentRubricPublicationBinding,
-        uuid.UUID(snapshot.payload["legacy_projection"]["binding_id"]),
+    set_payload = snapshot.payload["structured_rubric_set"]
+    rubric_set = db.get(
+        StructuredRubricSet,
+        uuid.UUID(set_payload["id"]),
     )
-    if question is None or reference is None or rubric is None or binding is None:
+    set_item = db.get(StructuredRubricSetItem, uuid.UUID(set_payload["item_id"]))
+    if (
+        question is None
+        or reference is None
+        or rubric is None
+        or rubric_set is None
+        or set_item is None
+        or rubric_set.owner_id != owner_id
+        or set_item.rubric_set_id != rubric_set.id
+        or set_item.question_id != question.id
+        or set_item.reference_answer_version_id != reference.id
+        or set_item.structured_rubric_version_id != rubric.id
+    ):
         _fail(409, "CODEX_WORK_INPUT_STALE", "Scoring inputs are no longer available")
     criteria = list(
         db.scalars(
@@ -245,12 +258,14 @@ def _request_components(
                     "criteria": criterion_payload,
                 },
                 "evidence_refs": evidence_refs,
-                "legacy_binding": {
-                    "id": str(binding.id),
-                    "legacy_rubric_version_id": str(binding.legacy_rubric_version_id),
-                    "mapping": binding.mapping,
-                    "criterion_to_legacy_mapping": binding.mapping,
-                    "target_hash": binding.target_legacy_hash,
+                "structured_rubric_set": {
+                    "id": str(rubric_set.id),
+                    "version": rubric_set.version,
+                    "content_hash": rubric_set.content_hash,
+                    "item_id": str(set_item.id),
+                    "answer_content_hash": set_item.answer_content_hash,
+                    "rubric_content_hash": set_item.rubric_content_hash,
+                    "criteria_hash": set_item.criteria_hash,
                 },
             },
         }
@@ -447,9 +462,7 @@ def _lock_item_scope(db: Session, item_id: uuid.UUID) -> CodexWorkItem | None:
     # Frozen parent-to-child order. No provider call is made while these locks are held.
     db.scalar(select(GradingBatch.id).where(GradingBatch.id == batch_id).with_for_update())
     db.scalar(select(Submission.id).where(Submission.id == submission_id).with_for_update())
-    answer = db.scalar(
-        select(StudentAnswer).where(StudentAnswer.id == answer_id).with_for_update()
-    )
+    answer = db.scalar(select(StudentAnswer).where(StudentAnswer.id == answer_id).with_for_update())
     if answer is not None:
         db.scalars(
             select(QuestionRecognitionEvidence.id)
@@ -494,9 +507,7 @@ def _lock_item_scope(db: Session, item_id: uuid.UUID) -> CodexWorkItem | None:
     db.scalar(select(ProcessingRun.id).where(ProcessingRun.id == run_id).with_for_update())
     db.scalar(select(ProcessingStep.id).where(ProcessingStep.id == step_id).with_for_update())
     return db.scalar(
-        select(CodexWorkItem)
-        .where(CodexWorkItem.id == item_id)
-        .with_for_update(skip_locked=True)
+        select(CodexWorkItem).where(CodexWorkItem.id == item_id).with_for_update(skip_locked=True)
     )
 
 
@@ -732,60 +743,57 @@ def _apply_item_scope(db: Session, item_id: uuid.UUID) -> CodexWorkItem | None:
         request_hash,
         response_hash,
     ) = preflight
-    question_id = db.scalar(
-        select(StudentAnswer.question_id).where(StudentAnswer.id == answer_id)
-    )
-    binding_id: uuid.UUID | None
+    rubric_set_id: uuid.UUID | None
+    set_item_id: uuid.UUID | None
     rubric_id: uuid.UUID | None
     reference_id: uuid.UUID | None
     try:
         payload = request_payload["processing_input"]["payload"]
-        binding_id = uuid.UUID(payload["legacy_projection"]["binding_id"])
+        set_payload = payload["structured_rubric_set"]
+        rubric_set_id = uuid.UUID(set_payload["id"])
+        set_item_id = uuid.UUID(set_payload["item_id"])
         rubric_id = uuid.UUID(payload["formal"]["structured_rubric"]["id"])
         reference_id = uuid.UUID(payload["formal"]["reference_answer"]["id"])
     except (KeyError, TypeError, ValueError):
-        binding_id = None
+        rubric_set_id = None
+        set_item_id = None
         rubric_id = None
         reference_id = None
-    binding_preflight = (
-        db.execute(
-            select(
-                AssignmentRubricPublicationBinding.legacy_rubric_version_id,
-                AssignmentRubricPublicationBinding.mapping,
-            ).where(AssignmentRubricPublicationBinding.id == binding_id)
-        ).one_or_none()
-        if binding_id is not None
-        else None
-    )
-    question_rubric_ids: set[uuid.UUID] = set()
-    rubric_item_ids: set[uuid.UUID] = set()
-    if binding_preflight is not None and question_id is not None:
-        _, binding_mapping = binding_preflight
-        for row in binding_mapping:
-            if not isinstance(row, dict) or row.get("question_id") != str(question_id):
-                continue
-            try:
-                question_rubric_ids.add(uuid.UUID(str(row["legacy_question_rubric_id"])))
-                rubric_item_ids.update(
-                    uuid.UUID(str(entry["rubric_item_id"]))
-                    for entry in row.get("criteria", [])
-                    if isinstance(entry, dict)
-                )
-            except (KeyError, TypeError, ValueError):
-                question_rubric_ids.clear()
-                rubric_item_ids.clear()
-                break
 
-    # Frozen order: parents and every scoring input before run/step/work, then children.
+    # Frozen order: scope parents, then Set -> SetItem -> answer/rubric -> criteria.
     db.scalar(select(GradingBatch.id).where(GradingBatch.id == batch_id).with_for_update())
     db.scalar(select(Submission.id).where(Submission.id == submission_id).with_for_update())
     db.scalar(select(StudentAnswer.id).where(StudentAnswer.id == answer_id).with_for_update())
-    if binding_id is not None:
+    if rubric_set_id is not None:
         db.scalar(
-            select(AssignmentRubricPublicationBinding.id)
-            .where(AssignmentRubricPublicationBinding.id == binding_id)
+            select(StructuredRubricSet.id)
+            .where(StructuredRubricSet.id == rubric_set_id)
             .with_for_update()
         )
+    if set_item_id is not None:
+        db.scalar(
+            select(StructuredRubricSetItem.id)
+            .where(StructuredRubricSetItem.id == set_item_id)
+            .with_for_update()
+        )
+    if reference_id is not None:
+        db.scalar(
+            select(ReferenceAnswerVersion.id)
+            .where(ReferenceAnswerVersion.id == reference_id)
+            .with_for_update()
+        )
+    if rubric_id is not None:
+        db.scalar(
+            select(StructuredRubricVersion.id)
+            .where(StructuredRubricVersion.id == rubric_id)
+            .with_for_update()
+        )
+        db.scalars(
+            select(RubricCriterion.id)
+            .where(RubricCriterion.rubric_version_id == rubric_id)
+            .order_by(RubricCriterion.id)
+            .with_for_update()
+        ).all()
     db.scalars(
         select(QuestionRecognitionEvidence.id)
         .where(
@@ -799,49 +807,14 @@ def _apply_item_scope(db: Session, item_id: uuid.UUID) -> CodexWorkItem | None:
         )
         .with_for_update()
     ).all()
-    if rubric_id is not None:
-        db.scalar(
-            select(StructuredRubricVersion.id)
-            .where(StructuredRubricVersion.id == rubric_id)
-            .with_for_update()
-        )
-    if reference_id is not None:
-        db.scalar(
-            select(ReferenceAnswerVersion.id)
-            .where(ReferenceAnswerVersion.id == reference_id)
-            .with_for_update()
-        )
-    if rubric_id is not None:
-        db.scalars(
-            select(RubricCriterion.id)
-            .where(RubricCriterion.rubric_version_id == rubric_id)
-            .order_by(RubricCriterion.id)
-            .with_for_update()
-        ).all()
-    if question_rubric_ids:
-        db.scalars(
-            select(QuestionRubric.id)
-            .where(QuestionRubric.id.in_(question_rubric_ids))
-            .order_by(QuestionRubric.id)
-            .with_for_update()
-        ).all()
-    if rubric_item_ids:
-        db.scalars(
-            select(RubricItem.id)
-            .where(RubricItem.id.in_(rubric_item_ids))
-            .order_by(RubricItem.id)
-            .with_for_update()
-        ).all()
     db.scalar(select(ProcessingRun.id).where(ProcessingRun.id == run_id).with_for_update())
     db.scalar(select(ProcessingStep.id).where(ProcessingStep.id == step_id).with_for_update())
-    item = db.scalar(
-        select(CodexWorkItem).where(CodexWorkItem.id == item_id).with_for_update()
-    )
+    item = db.scalar(select(CodexWorkItem).where(CodexWorkItem.id == item_id).with_for_update())
     if item is None:
         return None
     if response_hash is not None:
         job_key = "pcx:" + _sha256(f"{item_id}:{request_hash}:{response_hash}")
-        legacy_jobs = list(
+        grading_jobs = list(
             db.scalars(
                 select(GradingJob)
                 .where(
@@ -851,7 +824,7 @@ def _apply_item_scope(db: Session, item_id: uuid.UUID) -> CodexWorkItem | None:
                 .with_for_update()
             )
         )
-        for job in legacy_jobs:
+        for job in grading_jobs:
             results = list(
                 db.scalars(
                     select(GradingResult)
@@ -898,63 +871,68 @@ def _apply_contract_conflict(message: str) -> NoReturn:
     _fail(409, "CODEX_APPLY_CONTRACT_CONFLICT", message)
 
 
-def _binding_item_map(
+def _set_contract_from_request(
     db: Session,
     *,
-    item: CodexWorkItem,
-    answer: StudentAnswer,
-    binding: AssignmentRubricPublicationBinding,
-    criteria: list[RubricCriterion],
-) -> tuple[QuestionRubric, dict[str, tuple[RubricCriterion, RubricItem]]]:
+    request: dict[str, Any],
+    assignment: Assignment,
+    question: Question,
+    owner_id: uuid.UUID,
+) -> tuple[
+    StructuredRubricSet,
+    StructuredRubricSetItem,
+    ReferenceAnswerVersion,
+    StructuredRubricVersion,
+    list[RubricCriterion],
+]:
+    try:
+        payload = request["processing_input"]["payload"]
+        formal = payload["formal"]
+        set_payload = payload["structured_rubric_set"]
+        rubric_set = db.get(StructuredRubricSet, uuid.UUID(set_payload["id"]))
+        set_item = db.get(StructuredRubricSetItem, uuid.UUID(set_payload["item_id"]))
+        reference = db.get(
+            ReferenceAnswerVersion,
+            uuid.UUID(formal["reference_answer"]["id"]),
+        )
+        rubric = db.get(
+            StructuredRubricVersion,
+            uuid.UUID(formal["structured_rubric"]["id"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        _apply_contract_conflict("Structured Set identity is malformed")
+    if (
+        rubric_set is None
+        or set_item is None
+        or reference is None
+        or rubric is None
+        or rubric_set.owner_id != owner_id
+        or rubric_set.assignment_id != assignment.id
+        or rubric_set.paper_version_id != assignment.active_paper_version_id
+        or rubric_set.status != "active"
+        or assignment.active_structured_rubric_set_id != rubric_set.id
+        or set_item.rubric_set_id != rubric_set.id
+        or set_item.question_id != question.id
+        or set_item.reference_answer_version_id != reference.id
+        or set_item.structured_rubric_version_id != rubric.id
+        or reference.question_id != question.id
+        or rubric.question_id != question.id
+        or rubric.reference_answer_version_id != reference.id
+        or set_payload["answer_content_hash"] != set_item.answer_content_hash
+        or set_payload["rubric_content_hash"] != set_item.rubric_content_hash
+        or set_payload["criteria_hash"] != set_item.criteria_hash
+    ):
+        _apply_contract_conflict("Structured Set contract has drifted")
+    criteria = list(
+        db.scalars(
+            select(RubricCriterion)
+            .where(RubricCriterion.rubric_version_id == rubric.id)
+            .order_by(RubricCriterion.display_order, RubricCriterion.id)
+        )
+    )
     if not criteria:
         _apply_contract_conflict("Structured rubric has no criteria")
-    question_mapping = [
-        row
-        for row in binding.mapping
-        if isinstance(row, dict) and row.get("question_id") == str(answer.question_id)
-    ]
-    if len(question_mapping) != 1:
-        _apply_contract_conflict("Legacy binding has no unique mapping for the question")
-    row = question_mapping[0]
-    if row.get("structured_rubric_version_id") != str(criteria[0].rubric_version_id):
-        _apply_contract_conflict("Legacy binding points to a different structured rubric")
-    try:
-        question_rubric_id = uuid.UUID(str(row["legacy_question_rubric_id"]))
-    except (KeyError, TypeError, ValueError):
-        _apply_contract_conflict("Legacy question rubric mapping is malformed")
-    question_rubric = db.get(QuestionRubric, question_rubric_id)
-    if (
-        question_rubric is None
-        or question_rubric.question_id != answer.question_id
-        or question_rubric.rubric_version_id != binding.legacy_rubric_version_id
-    ):
-        _apply_contract_conflict("Legacy question rubric is not current")
-    mapped: dict[str, tuple[RubricCriterion, RubricItem]] = {}
-    by_id = {str(criterion.id): criterion for criterion in criteria}
-    raw_criteria = row.get("criteria")
-    if not isinstance(raw_criteria, list):
-        _apply_contract_conflict("Legacy criterion mapping is malformed")
-    for entry in raw_criteria:
-        if not isinstance(entry, dict):
-            _apply_contract_conflict("Legacy criterion mapping is malformed")
-        criterion = by_id.get(str(entry.get("criterion_id")))
-        try:
-            rubric_item_id = uuid.UUID(str(entry.get("rubric_item_id")))
-        except (TypeError, ValueError):
-            _apply_contract_conflict("Legacy rubric item identity is malformed")
-        rubric_item = db.get(RubricItem, rubric_item_id)
-        if (
-            criterion is None
-            or rubric_item is None
-            or rubric_item.question_rubric_id != question_rubric.id
-            or Decimal(str(rubric_item.points)) != Decimal(str(criterion.max_points))
-            or criterion.stable_key in mapped
-        ):
-            _apply_contract_conflict("Legacy criterion mapping is incomplete or inconsistent")
-        mapped[criterion.stable_key] = (criterion, rubric_item)
-    if set(mapped) != {criterion.stable_key for criterion in criteria}:
-        _apply_contract_conflict("Every structured criterion must map to one legacy rubric item")
-    return question_rubric, mapped
+    return rubric_set, set_item, reference, rubric, criteria
 
 
 def _validate_existing_apply(
@@ -962,7 +940,6 @@ def _validate_existing_apply(
     *,
     item: CodexWorkItem,
     contract: ApplyContract,
-    mapped: dict[str, tuple[RubricCriterion, RubricItem]],
     lock: bool,
 ) -> tuple[GradingJob, GradingResult] | None:
     job_query = select(GradingJob).where(
@@ -988,7 +965,8 @@ def _validate_existing_apply(
         or job.grading_batch_id != item.grading_batch_id
         or job.submission_id != item.submission_id
         or job.question_id != contract.question.id
-        or job.rubric_version_id != contract.binding.legacy_rubric_version_id
+        or job.structured_rubric_set_id != contract.rubric_set.id
+        or job.structured_rubric_version_id != contract.rubric.id
         or job.status != "completed"
         or job.provider != "codex_local"
         or job.provider_version != "local"
@@ -997,61 +975,50 @@ def _validate_existing_apply(
         or result.student_answer_id != item.student_answer_id
         or result.grading_job_id != job.id
         or result.question_id != contract.question.id
-        or result.rubric_version_id != contract.binding.legacy_rubric_version_id
+        or result.structured_rubric_set_id != contract.rubric_set.id
+        or result.structured_rubric_version_id != contract.rubric.id
         or result.provider != "codex_local"
         or result.provider_version != "local"
         or result.grading_method != "codex_assisted"
         or result.status != "suggested"
         or not result.requires_review
         or Decimal(str(result.max_score)) != Decimal(str(contract.question.max_score))
-        or (
-            Decimal(str(result.score))
-            if result.score is not None
-            else None
-        )
+        or (Decimal(str(result.score)) if result.score is not None else None)
         != contract.output.total_suggested_points
     ):
         _apply_contract_conflict("Existing grading child does not match the work contract")
     criterion_query = (
         select(GradingCriterionResult)
         .where(GradingCriterionResult.grading_result_id == result.id)
-        .order_by(GradingCriterionResult.rubric_item_id)
+        .order_by(GradingCriterionResult.criterion_id)
     )
     criterion_rows = list(
         db.scalars(criterion_query.with_for_update() if lock else criterion_query)
     )
-    by_item = {row.rubric_item_id: row for row in criterion_rows}
+    by_criterion = {row.criterion_id: row for row in criterion_rows}
     suggestions = {row.criterion_stable_key: row for row in contract.output.criteria}
-    if len(by_item) != len(mapped):
-        _apply_contract_conflict("Legacy criterion children are incomplete")
-    for key, (_, rubric_item) in mapped.items():
-        row = by_item.get(rubric_item.id)
-        suggestion = suggestions[key]
+    if len(by_criterion) != len(contract.criteria):
+        _apply_contract_conflict("Criterion children are incomplete")
+    for criterion in contract.criteria:
+        row = by_criterion.get(criterion.id)
+        suggestion = suggestions[criterion.stable_key]
         if (
             row is None
             or row.status != suggestion.public_status()
-            or (
-                Decimal(str(row.awarded_points))
-                if row.awarded_points is not None
-                else None
-            )
+            or (Decimal(str(row.awarded_points)) if row.awarded_points is not None else None)
             != suggestion.suggested_points
             or Decimal(str(row.max_points)) != suggestion.max_points
             or row.reason != suggestion.reasoning_summary
-            or (
-                Decimal(str(row.confidence)) if row.confidence is not None else None
-            )
+            or (Decimal(str(row.confidence)) if row.confidence is not None else None)
             != suggestion.confidence
         ):
-            _apply_contract_conflict("Legacy criterion child does not match response")
+            _apply_contract_conflict("Criterion child does not match response")
     evidence_query = (
         select(GradingEvidence)
         .where(GradingEvidence.grading_result_id == result.id)
         .order_by(GradingEvidence.id)
     )
-    evidence_rows = list(
-        db.scalars(evidence_query.with_for_update() if lock else evidence_query)
-    )
+    evidence_rows = list(db.scalars(evidence_query.with_for_update() if lock else evidence_query))
     expected_evidence = {
         ref for suggestion in contract.output.criteria for ref in suggestion.evidence_refs
     }
@@ -1070,7 +1037,7 @@ def _validate_existing_apply(
         )
     }
     if actual_evidence != expected_evidence or len(evidence_rows) != len(expected_evidence):
-        _apply_contract_conflict("Legacy evidence children do not match response")
+        _apply_contract_conflict("Evidence children do not match response")
     return job, result
 
 
@@ -1147,16 +1114,10 @@ def _validate_strict_child(
             row.criterion_id != criteria_by_key[key].id
             or row.status != suggestion.status
             or row.decision != suggestion.decision
-            or (
-                Decimal(str(row.suggested_points))
-                if row.suggested_points is not None
-                else None
-            )
+            or (Decimal(str(row.suggested_points)) if row.suggested_points is not None else None)
             != suggestion.suggested_points
             or Decimal(str(row.max_points)) != suggestion.max_points
-            or (
-                Decimal(str(row.confidence)) if row.confidence is not None else None
-            )
+            or (Decimal(str(row.confidence)) if row.confidence is not None else None)
             != suggestion.confidence
             or row.evidence_refs != suggestion.evidence_refs
             or row.validation_refs != suggestion.validation_refs
@@ -1169,10 +1130,8 @@ def _validate_strict_child(
             or row.manual_review_reason != suggestion.manual_review_reason
             or row.student_feedback != suggestion.student_feedback
             or row.teacher_note != suggestion.teacher_note
-            or row.abstained
-            != (suggestion.abstained or suggestion.suggested_points is None)
-            or row.deterministic_conflict
-            != (suggestion.status == "deterministic_conflict")
+            or row.abstained != (suggestion.abstained or suggestion.suggested_points is None)
+            or row.deterministic_conflict != (suggestion.status == "deterministic_conflict")
             or row.input_hash != contract.strict_request_hash
             or row.output_hash != canonical_hash(raw)
         ):
@@ -1187,9 +1146,7 @@ def _validate_strict_child(
         or feedback.strengths != contract.output.strengths
         or feedback.improvements != contract.output.improvements
         or feedback.error_categories
-        != sorted(
-            {error for row in contract.output.criteria for error in row.detected_errors}
-        )
+        != sorted({error for row in contract.output.criteria for error in row.detected_errors})
         or feedback.risk_flags != contract.output.risk_flags
         or sorted(feedback.suggestion_ids) != sorted(expected_ids)
         or feedback.teacher_disposition != "pending"
@@ -1241,9 +1198,7 @@ def validate_applied_work_item_current(db: Session, item: CodexWorkItem) -> None
         or step.kind != "codex_suggestion"
         or latest_generation != item.generation
         or db.scalar(
-            select(TeacherReview.id)
-            .where(TeacherReview.student_answer_id == answer.id)
-            .limit(1)
+            select(TeacherReview.id).where(TeacherReview.student_answer_id == answer.id).limit(1)
         )
         is not None
         or db.scalar(
@@ -1280,51 +1235,16 @@ def validate_applied_work_item_current(db: Session, item: CodexWorkItem) -> None
         or request != item.request_payload
     ):
         _apply_contract_conflict("Applied scoring input has drifted")
-    try:
-        formal = request["processing_input"]["payload"]["formal"]
-        rubric = db.get(
-            StructuredRubricVersion,
-            uuid.UUID(formal["structured_rubric"]["id"]),
-        )
-        reference = db.get(
-            ReferenceAnswerVersion,
-            uuid.UUID(formal["reference_answer"]["id"]),
-        )
-        binding = db.get(
-            AssignmentRubricPublicationBinding,
-            uuid.UUID(
-                request["processing_input"]["payload"]["legacy_projection"]["binding_id"]
-            ),
-        )
-    except (KeyError, TypeError, ValueError):
-        _apply_contract_conflict("Applied formal identity is malformed")
     assignment = db.get(Assignment, submission.assignment_id)
     question = db.get(Question, answer.question_id)
-    if (
-        rubric is None
-        or reference is None
-        or binding is None
-        or assignment is None
-        or question is None
-        or binding.owner_id != item.owner_id
-        or binding.assignment_id != assignment.id
-        or binding.status != "confirmed"
-        or assignment.active_rubric_version_id != binding.legacy_rubric_version_id
-    ):
-        _apply_contract_conflict("Applied formal binding has drifted")
-    criteria = list(
-        db.scalars(
-            select(RubricCriterion)
-            .where(RubricCriterion.rubric_version_id == rubric.id)
-            .order_by(RubricCriterion.display_order, RubricCriterion.id)
-        )
-    )
-    _, mapped = _binding_item_map(
+    if assignment is None or question is None:
+        _apply_contract_conflict("Applied assignment or question is unavailable")
+    rubric_set, set_item, reference, rubric, criteria = _set_contract_from_request(
         db,
-        item=item,
-        answer=answer,
-        binding=binding,
-        criteria=criteria,
+        request=request,
+        assignment=assignment,
+        question=question,
+        owner_id=item.owner_id,
     )
     job_key = "pcx:" + _sha256(f"{item.id}:{item.request_hash}:{item.response_hash}")
     strict_hash = strict_request_hash(
@@ -1354,7 +1274,8 @@ def validate_applied_work_item_current(db: Session, item: CodexWorkItem) -> None
         evidence=evidence,
         reference=reference,
         rubric=rubric,
-        binding=binding,
+        rubric_set=rubric_set,
+        set_item=set_item,
         criteria=criteria,
         output=output,
         strict_request_hash=strict_hash,
@@ -1364,7 +1285,6 @@ def validate_applied_work_item_current(db: Session, item: CodexWorkItem) -> None
         db,
         item=item,
         contract=contract,
-        mapped=mapped,
         lock=False,
     )
     if (
@@ -1372,7 +1292,7 @@ def validate_applied_work_item_current(db: Session, item: CodexWorkItem) -> None
         or existing[0].id != item.grading_job_id
         or existing[1].id != item.grading_result_id
     ):
-        _apply_contract_conflict("Applied work references a different legacy child")
+        _apply_contract_conflict("Applied work references a different grading child")
     _validate_strict_child(db, item=item, contract=contract, lock=False)
 
 
@@ -1480,47 +1400,20 @@ def apply_work_item(
     ):
         stale_or_conflict("Current scoring input has drifted")
 
-    formal = request["processing_input"]["payload"]["formal"]
-    rubric = db.get(
-        StructuredRubricVersion,
-        uuid.UUID(formal["structured_rubric"]["id"]),
-    )
-    reference = db.get(
-        ReferenceAnswerVersion,
-        uuid.UUID(formal["reference_answer"]["id"]),
-    )
-    binding = db.get(
-        AssignmentRubricPublicationBinding,
-        uuid.UUID(request["processing_input"]["payload"]["legacy_projection"]["binding_id"]),
-    )
     assignment = db.get(Assignment, submission.assignment_id)
     question = db.get(Question, answer.question_id)
-    if (
-        rubric is None
-        or reference is None
-        or binding is None
-        or assignment is None
-        or question is None
-        or binding.owner_id != item.owner_id
-        or binding.assignment_id != assignment.id
-        or binding.status != "confirmed"
-        or assignment.active_rubric_version_id != binding.legacy_rubric_version_id
-    ):
-        stale_or_conflict("Current formal binding has drifted")
-    criteria = list(
-        db.scalars(
-            select(RubricCriterion)
-            .where(RubricCriterion.rubric_version_id == rubric.id)
-            .order_by(RubricCriterion.display_order, RubricCriterion.id)
+    if assignment is None or question is None:
+        stale_or_conflict("Current assignment or question is unavailable")
+    try:
+        rubric_set, set_item, reference, rubric, criteria = _set_contract_from_request(
+            db,
+            request=request,
+            assignment=assignment,
+            question=question,
+            owner_id=item.owner_id,
         )
-    )
-    _, mapped = _binding_item_map(
-        db,
-        item=item,
-        answer=answer,
-        binding=binding,
-        criteria=criteria,
-    )
+    except CodexLocalProblem:
+        stale_or_conflict("Current Structured Set contract has drifted")
     job_key = "pcx:" + _sha256(f"{item.id}:{request_hash}:{response_hash}")
     strict_hash = strict_request_hash(
         answer=answer,
@@ -1549,7 +1442,8 @@ def apply_work_item(
         evidence=evidence,
         reference=reference,
         rubric=rubric,
-        binding=binding,
+        rubric_set=rubric_set,
+        set_item=set_item,
         criteria=criteria,
         output=output,
         strict_request_hash=strict_hash,
@@ -1559,20 +1453,14 @@ def apply_work_item(
         db,
         item=item,
         contract=contract,
-        mapped=mapped,
         lock=True,
     )
     if existing is not None:
         _validate_strict_child(db, item=item, contract=contract, lock=True)
         job, result = existing
         if replaying:
-            if (
-                item.grading_job_id != job.id
-                or item.grading_result_id != result.id
-            ):
-                _apply_contract_conflict(
-                    "Applied work references a different grading child"
-                )
+            if item.grading_job_id != job.id or item.grading_result_id != result.id:
+                _apply_contract_conflict("Applied work references a different grading child")
             return item
     else:
         existing_strict = db.scalar(
@@ -1584,7 +1472,7 @@ def apply_work_item(
             .with_for_update()
         )
         if existing_strict is not None:
-            _apply_contract_conflict("Strict grading child already exists without legacy child")
+            _apply_contract_conflict("Strict grading child already exists without public child")
         strict_generation = (
             db.scalar(
                 select(func.max(AIScoringJob.generation)).where(
@@ -1601,6 +1489,7 @@ def apply_work_item(
             student_answer_id=answer.id,
             recognition_evidence_id=evidence.id,
             reference_answer_version_id=reference.id,
+            structured_rubric_set_id=rubric_set.id,
             rubric_version_id=rubric.id,
             question_version=answer.question_version_reference,
             scoring_input_version=scoring_input_version(evidence),
@@ -1682,7 +1571,8 @@ def apply_work_item(
             grading_batch_id=item.grading_batch_id,
             submission_id=item.submission_id,
             question_id=answer.question_id,
-            rubric_version_id=binding.legacy_rubric_version_id,
+            structured_rubric_set_id=rubric_set.id,
+            structured_rubric_version_id=rubric.id,
             status="completed",
             provider="codex_local",
             provider_version="local",
@@ -1708,7 +1598,8 @@ def apply_work_item(
             grading_job_id=job.id,
             student_answer_id=answer.id,
             question_id=answer.question_id,
-            rubric_version_id=binding.legacy_rubric_version_id,
+            structured_rubric_set_id=rubric_set.id,
+            structured_rubric_version_id=rubric.id,
             grading_method="codex_assisted",
             provider="codex_local",
             provider_version="local",
@@ -1729,22 +1620,20 @@ def apply_work_item(
         db.add(result)
         db.flush()
         suggestions = {row.criterion_stable_key: row for row in output.criteria}
-        for key, (_, rubric_item) in mapped.items():
-            suggestion = suggestions[key]
+        for criterion in criteria:
+            suggestion = suggestions[criterion.stable_key]
             db.add(
                 GradingCriterionResult(
                     grading_result_id=result.id,
-                    rubric_item_id=rubric_item.id,
+                    criterion_id=criterion.id,
                     status=suggestion.public_status(),
                     awarded_points=suggestion.suggested_points,
-                    max_points=rubric_item.points,
+                    max_points=criterion.max_points,
                     reason=suggestion.reasoning_summary,
                     confidence=suggestion.confidence,
                 )
             )
-        evidence_ids = sorted(
-            {ref for row in output.criteria for ref in row.evidence_refs}
-        )
+        evidence_ids = sorted({ref for row in output.criteria for ref in row.evidence_refs})
         evidence_regions = {
             str(region.id): region
             for region in db.scalars(
@@ -1755,9 +1644,7 @@ def apply_work_item(
             )
         }
         effective_text = (
-            answer.corrected_text
-            if answer.corrected_text is not None
-            else answer.recognized_text
+            answer.corrected_text if answer.corrected_text is not None else answer.recognized_text
         )
         for evidence_id in evidence_ids:
             region = evidence_regions.get(evidence_id)

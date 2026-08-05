@@ -12,6 +12,7 @@ from app.models import (
     GradingCollaborator,
     GradingQuestionAssignment,
     MembershipStatus,
+    Question,
     Role,
     Student,
     User,
@@ -22,6 +23,7 @@ from app.storage.dependencies import get_storage
 from fastapi.testclient import TestClient
 from PIL import Image
 from sqlalchemy import delete, select
+from structured_rubric_support import activate_structured_rubric_set
 from test_assignments import FakeStorage, active_class
 
 client = TestClient(app)
@@ -287,20 +289,21 @@ def test_joint_exam_freezes_roster_and_ensures_one_batch_per_class():
             },
         )
         assert question.status_code == 201, question.text
-        rubric = client.put(
-            f"/api/assignments/{assignment_id}/rubrics/{question.json()['id']}",
-            json={"standard_answer": "答案", "items": [{"title": "正确", "points": 10}]},
+        assignment = db.get(Assignment, uuid.UUID(assignment_id))
+        question_row = db.get(Question, uuid.UUID(question.json()["id"]))
+        assert assignment is not None and question_row is not None
+        activate_structured_rubric_set(
+            db,
+            assignment,
+            [question_row],
+            actor_id=actor.id,
+            answers={question_row.id: "答案"},
         )
-        assert rubric.status_code == 200, rubric.text
-        readiness = client.get(f"/api/assignments/{assignment_id}/manual-publish-readiness").json()
-        published = client.post(
-            f"/api/assignments/{assignment_id}/manual-publish",
-            json={
-                "state_hash": readiness["state_hash"],
-                "expected_assignment_updated_at": readiness["expected_assignment_updated_at"],
-                "explicit_confirmation": True,
-            },
-        )
+        assignment.status = "published"
+        assignment.published_at = now_utc()
+        assert freeze_participant_roster(db, assignment) == 2
+        db.commit()
+        published = client.get(f"/api/assignments/{assignment_id}")
         assert published.status_code == 200, published.text
         assert published.json()["participant_snapshot"]["total"] == 2
         snapshots = list(

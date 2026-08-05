@@ -12,7 +12,7 @@ export type AssignmentReviewSessionRecord = {
   generation: number;
   draft_revision_id: string;
   paper_version_id: string;
-  legacy_rubric_version_id: string | null;
+  structured_rubric_set_id: string | null;
   review_version: number;
   status: string;
   counts: { blocking: number; warning: number; info: number };
@@ -48,7 +48,7 @@ export type AssignmentReadinessRecord = {
   due_at: string | null;
   total_score: string;
   paper_version_id: string;
-  legacy_rubric_version_id: string;
+  structured_rubric_set_id: string;
 };
 
 export type AssignmentPreparationRecord =
@@ -78,19 +78,34 @@ export type AssignmentPreparationRecord =
       }>;
     };
 
-export type AssignmentRubricBindingRecord = {
+export type StructuredRubricSetRecord = {
   id: string;
-  status: "draft" | "validated" | "confirmed";
-  source_binding_hash: string;
-  source_semantic_hash: string | null;
-  target_legacy_hash: string | null;
-  projection_profile: string | null;
-  projection_version: string | null;
-  loss_report: AssignmentReviewBundleBindingLoss[] | null;
-  loss_report_hash: string | null;
-  mapping: unknown[];
-  conversion_warnings: string[];
-  manual_review_required: boolean;
+  assignment_id: string;
+  paper_version_id: string;
+  version: number;
+  status: "draft" | "active" | "retired" | "stale" | string;
+  content_hash: string;
+  source_snapshot_hash: string;
+  total_points: string;
+  current?: boolean;
+  reason?: string | null;
+  created?: boolean;
+  review_version?: number;
+  confirmed_by?: string | null;
+  confirmed_at?: string | null;
+  activated_at?: string | null;
+  items?: Array<{
+    id: string;
+    question_id: string;
+    question_version: string;
+    reference_answer_version_id: string;
+    structured_rubric_version_id: string;
+    answer_content_hash: string;
+    rubric_content_hash: string;
+    criteria_hash: string;
+    display_order: number;
+    max_points: string;
+  }>;
 };
 
 /** Read-only, teacher-facing review contract returned by review-bundle v1. */
@@ -240,37 +255,19 @@ export type AssignmentReviewBundleConfirmation = {
   origin: "origin" | "inherited" | "system_auto" | string;
   inherited: boolean;
   fingerprint_schema_version: string | null;
-  binding_id: string | null;
-  source_binding_hash: string | null;
   confirmed_at: string;
   visibility: "teacher";
 };
 
-export type AssignmentReviewBundleBindingLoss = {
-  code: string;
-  question_id: string;
-  question_number: string;
-  criterion_key: string;
-  teacher_message: string;
-  technical: Record<string, unknown>;
-};
-
-export type AssignmentReviewBundleBinding = {
+export type AssignmentReviewBundleStructuredRubricSet = {
   id: string;
-  status: "draft" | "validated" | "confirmed" | "stale";
-  binding_version: number;
-  source_binding_hash: string;
-  source_semantic_hash: string | null;
-  target_legacy_hash: string | null;
-  projection_profile: string | null;
-  projection_version: string | null;
-  mapping: unknown[];
-  loss_report: AssignmentReviewBundleBindingLoss[] | null;
-  loss_report_hash: string | null;
-  manual_review_required: boolean;
-  projection_current: boolean;
-  projection_reason: string | null;
-  expected_source_binding_hash: string | null;
+  status: "draft" | "active" | "retired" | "stale" | string;
+  version: number;
+  content_hash: string;
+  source_snapshot_hash: string;
+  total_points: string;
+  current: boolean;
+  reason: string | null;
   visibility: "teacher";
 };
 
@@ -282,7 +279,7 @@ export type AssignmentReviewBundle = {
   questions: AssignmentReviewBundleQuestion[];
   blockers: AssignmentReviewBundleBlocker[];
   confirmations: AssignmentReviewBundleConfirmation[];
-  binding: AssignmentReviewBundleBinding | null;
+  structured_rubric_set: AssignmentReviewBundleStructuredRubricSet | null;
 };
 
 const reviewAction = (reviewVersion: number) => ({
@@ -346,19 +343,14 @@ export const assignmentReviewApi = {
         }),
       },
     ),
-  createBinding: (sessionId: string, reviewVersion: number) =>
-    request<AssignmentRubricBindingRecord>(
-      `/api/assignment-review-sessions/${sessionId}/rubric-binding`,
+  createStructuredRubricSet: (sessionId: string, reviewVersion: number) =>
+    request<StructuredRubricSetRecord>(
+      `/api/assignment-review-sessions/${sessionId}/structured-rubric-set`,
       { method: "POST", body: JSON.stringify(reviewAction(reviewVersion)) },
     ),
-  getBinding: (sessionId: string) =>
-    request<AssignmentRubricBindingRecord>(
-      `/api/assignment-review-sessions/${sessionId}/rubric-binding`,
-    ),
-  confirmBinding: (bindingId: string, reviewVersion: number) =>
-    request<{ review_version: number }>(
-      `/api/assignment-rubric-publication-bindings/${bindingId}/confirm`,
-      { method: "POST", body: JSON.stringify(reviewAction(reviewVersion)) },
+  getStructuredRubricSet: (sessionId: string) =>
+    request<StructuredRubricSetRecord>(
+      `/api/assignment-review-sessions/${sessionId}/structured-rubric-set`,
     ),
   prepare: (sessionId: string, reviewVersion: number) =>
     request<AssignmentReadinessRecord>(
@@ -630,6 +622,7 @@ export type AssignmentRecord = {
   total_score?: string;
   due_at?: string | null;
   published_at?: string;
+  active_structured_rubric_set_id?: string | null;
   updated_at: string;
   classes: Pick<ClassRecord, "id" | "name" | "status">[];
   participant_snapshot?: {
@@ -655,26 +648,6 @@ export type AssignmentRecord = {
       status: string;
     }[];
     questions: QuestionRecord[];
-  };
-  rubric_version?: {
-    id: string;
-    version: number;
-    status: string;
-    question_rubrics: {
-      id: string;
-      question_id: string;
-      standard_answer?: string;
-      scoring_notes?: string;
-      items: {
-        id: string;
-        title: string;
-        description?: string | null;
-        points: string;
-        item_type: string;
-        required: boolean;
-        deduction_rule?: string | null;
-      }[];
-    }[];
   };
   completeness: {
     ready: boolean;
@@ -1460,7 +1433,8 @@ export type ReviewWorkspace = {
       result?: {
         id: string;
         status: string;
-        rubric_version_id: string;
+        structured_rubric_set_id: string;
+        structured_rubric_version_id: string;
         score?: string;
         provider: string;
         provider_version: string;
@@ -1478,7 +1452,7 @@ export type ReviewWorkspace = {
         review_version: number;
       };
       criteria: Array<{
-        rubric_item_id: string;
+        criterion_id: string;
         title?: string;
         description?: string;
         status: string;
@@ -2009,6 +1983,30 @@ export const structuredRubricApi = {
       `/api/reference-answers/${referenceId}/confirm`,
       { method: "POST" },
     ),
+  confirmQuestionPackage: (
+    assignmentId: string,
+    questionId: string,
+    data: {
+      expected_bundle_hash: string;
+      expected_question_content_hash: string;
+      reference_answer_version_id: string;
+      expected_reference_answer_content_hash: string;
+      structured_rubric_version_id: string;
+      expected_structured_rubric_content_hash: string;
+      explicit_confirmation: true;
+    },
+  ) =>
+    request<{
+      answer: ReferenceAnswerVersion;
+      rubric: StructuredRubric;
+      already_confirmed: boolean;
+    }>(
+      `/api/assignments/${assignmentId}/questions/${questionId}/confirm-answer-rubric`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    ),
   list: (questionId: string) =>
     request<StructuredRubric[]>(
       `/api/questions/${questionId}/structured-rubrics`,
@@ -2061,7 +2059,8 @@ export type MathValidationJob = {
   status: string;
   stale: boolean;
   scoring_input_version: string;
-  rubric_version_id: string;
+  structured_rubric_set_id: string;
+  structured_rubric_version_id: string;
   reference_answer_version_id: string;
   suggested_total: string;
   results: Array<{
@@ -2137,7 +2136,8 @@ export type AIScoringJob = {
   stale: boolean;
   error_code?: string;
   scoring_input_version: string;
-  rubric_version_id: string;
+  structured_rubric_set_id: string;
+  structured_rubric_version_id: string;
   reference_answer_version_id: string;
   evidence: Array<{
     id: string;
@@ -2160,7 +2160,8 @@ export type AIScoringJob = {
     status: string;
     generation: number;
     stale: boolean;
-    rubric_version_id: string;
+    structured_rubric_set_id: string;
+    structured_rubric_version_id: string;
     reference_answer_version_id: string;
     results: Array<{
       id: string;
@@ -2212,12 +2213,11 @@ export type AIRetryInput = {
 export const aiGradingApi = {
   listForAnswer: (answerId: string) =>
     request<AIScoringJob[]>(`/api/ai-grading/student-answers/${answerId}/jobs`),
-  create: (answerId: string, rubricVersionId: string) =>
+  create: (answerId: string) =>
     request<AIScoringJob>("/api/ai-grading/jobs", {
       method: "POST",
       body: JSON.stringify({
         student_answer_id: answerId,
-        rubric_version_id: rubricVersionId,
         idempotency_key: `web:${answerId}:${crypto.randomUUID()}`,
       }),
     }),

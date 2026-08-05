@@ -33,7 +33,8 @@ from app.models import (
     KnowledgePoint,
     PaperVersion,
     Question,
-    RubricVersion,
+    StructuredRubricSet,
+    StructuredRubricSetItem,
     StudentAnswer,
     Submission,
     SubmissionScoreSnapshot,
@@ -94,7 +95,7 @@ class SnapshotPayload(BaseModel):
     assignment_id: uuid.UUID
     student_id: uuid.UUID
     paper_version_id: uuid.UUID
-    rubric_version_id: uuid.UUID
+    structured_rubric_set_id: uuid.UUID
     total_score: Decimal
     max_score: Decimal
     question_count: int
@@ -194,7 +195,7 @@ class FinalScoreService:
             "assignment_id": snapshot.assignment_id,
             "student_id": snapshot.student_id,
             "paper_version_id": snapshot.paper_version_id,
-            "rubric_version_id": snapshot.rubric_version_id,
+            "structured_rubric_set_id": snapshot.structured_rubric_set_id,
             "total_score": snapshot.total_score,
             "max_score": snapshot.max_score,
             "question_count": len(snapshot.details),
@@ -211,12 +212,14 @@ class FinalScoreService:
         ):
             raise ValueError("SNAPSHOT_RELATION_MISMATCH")
         paper = self.db.get(PaperVersion, payload.paper_version_id)
-        rubric = self.db.get(RubricVersion, payload.rubric_version_id)
+        rubric_set = self.db.get(StructuredRubricSet, payload.structured_rubric_set_id)
         if (
             paper is None
             or paper.assignment_id != payload.assignment_id
-            or rubric is None
-            or rubric.assignment_id != payload.assignment_id
+            or rubric_set is None
+            or rubric_set.assignment_id != payload.assignment_id
+            or rubric_set.paper_version_id != payload.paper_version_id
+            or rubric_set.status != "active"
         ):
             raise ValueError("SNAPSHOT_VERSION_RELATION_MISMATCH")
         questions = {
@@ -230,6 +233,15 @@ class FinalScoreService:
         }
         if set(questions) != {x.question_id for x in payload.details}:
             raise ValueError("SNAPSHOT_QUESTION_MISSING")
+        manifest_questions = set(
+            self.db.scalars(
+                select(StructuredRubricSetItem.question_id).where(
+                    StructuredRubricSetItem.rubric_set_id == rubric_set.id
+                )
+            )
+        )
+        if manifest_questions != {x.question_id for x in payload.details}:
+            raise ValueError("SNAPSHOT_STRUCTURED_SET_MISMATCH")
         reviews = {
             review.id: review
             for review in self.db.scalars(
@@ -297,7 +309,7 @@ class FinalScoreService:
             "assignment_id": snapshot.assignment_id,
             "student_id": snapshot.student_id,
             "paper_version_id": snapshot.paper_version_id,
-            "rubric_version_id": snapshot.rubric_version_id,
+            "structured_rubric_set_id": snapshot.structured_rubric_set_id,
             "total_score": snapshot.total_score,
             "max_score": snapshot.max_score,
             "question_count": len(snapshot.details),
@@ -314,12 +326,13 @@ class FinalScoreService:
         ):
             raise ValueError("SNAPSHOT_RELATION_MISMATCH")
         paper = self.db.get(PaperVersion, payload.paper_version_id)
-        rubric = self.db.get(RubricVersion, payload.rubric_version_id)
+        rubric_set = self.db.get(StructuredRubricSet, payload.structured_rubric_set_id)
         if (
             paper is None
             or paper.assignment_id != payload.assignment_id
-            or rubric is None
-            or rubric.assignment_id != payload.assignment_id
+            or rubric_set is None
+            or rubric_set.assignment_id != payload.assignment_id
+            or rubric_set.paper_version_id != payload.paper_version_id
         ):
             raise ValueError("SNAPSHOT_VERSION_RELATION_MISMATCH")
         question_ids = {detail.question_id for detail in payload.details}
@@ -333,6 +346,15 @@ class FinalScoreService:
         )
         if questions != question_ids:
             raise ValueError("SNAPSHOT_QUESTION_MISSING")
+        manifest_questions = set(
+            self.db.scalars(
+                select(StructuredRubricSetItem.question_id).where(
+                    StructuredRubricSetItem.rubric_set_id == rubric_set.id
+                )
+            )
+        )
+        if manifest_questions != question_ids:
+            raise ValueError("SNAPSHOT_STRUCTURED_SET_MISMATCH")
         reviews = {
             review.id: review
             for review in self.db.scalars(

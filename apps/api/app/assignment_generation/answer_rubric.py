@@ -27,6 +27,7 @@ from app.models import (
     StructuredRubricVersion,
     now_utc,
 )
+from app.question_versions import question_version_token
 from app.semantic_content import (
     reference_answer_semantic_payload,
     semantic_hash,
@@ -907,7 +908,7 @@ def materialize_rubric(
         question_id=candidate.question_id,
         # Candidate versions also include the question UUID and can exceed the
         # 100-character storage contract for formal rubric versions.
-        question_version=f"{question.paper_version_id}:{question.updated_at.isoformat()}",
+        question_version=question_version_token(question),
         reference_answer_version_id=answer.materialized_reference_answer_id,
         rubric_version=version,
         title=candidate.title,

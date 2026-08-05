@@ -187,56 +187,14 @@ def test_file_pages_question_region_rubric_and_publish():
     assert bad.status_code == 422
     before = client.get(f"/api/assignments/{aid}/publish-check").json()
     assert not before["ready"]
-    rubric = client.put(
+    retired_rubric = client.put(
         f"/api/assignments/{aid}/rubrics/{question['id']}",
         json={"standard_answer": "答案", "items": [{"title": "正确", "points": 10}]},
     )
-    assert rubric.status_code == 200
-    readiness = client.get(f"/api/assignments/{aid}/manual-publish-readiness")
-    assert readiness.status_code == 200
-    ready = readiness.json()
-    assert ready["ready"] is True
-    assert ready["class_ids"] == [str(cls.id)]
-    assert len(ready["state_hash"]) == 64
-
-    missing_confirmation = client.post(
-        f"/api/assignments/{aid}/manual-publish",
-        json={
-            "state_hash": ready["state_hash"],
-            "expected_assignment_updated_at": ready["expected_assignment_updated_at"],
-        },
-    )
-    assert missing_confirmation.status_code == 422
-
-    current = client.get(f"/api/assignments/{aid}").json()
-    changed = client.patch(
-        f"/api/assignments/{aid}",
-        json={"title": "发布前改名", "updated_at": current["updated_at"]},
-    )
-    assert changed.status_code == 200
-    stale = client.post(
-        f"/api/assignments/{aid}/manual-publish",
-        json={
-            "state_hash": ready["state_hash"],
-            "expected_assignment_updated_at": ready["expected_assignment_updated_at"],
-            "explicit_confirmation": True,
-        },
-    )
-    assert stale.status_code == 409
-    assert stale.json()["code"] == "PUBLISH_STATE_STALE"
-
-    ready = client.get(f"/api/assignments/{aid}/manual-publish-readiness").json()
-    published = client.post(
-        f"/api/assignments/{aid}/manual-publish",
-        json={
-            "state_hash": ready["state_hash"],
-            "expected_assignment_updated_at": ready["expected_assignment_updated_at"],
-            "explicit_confirmation": True,
-        },
-    )
-    assert published.status_code == 200
-    assert published.json()["status"] == "published"
-    # The structured/AI review endpoint remains protected by its own readiness contract.
+    assert retired_rubric.status_code == 404
+    assert client.get(f"/api/assignments/{aid}/manual-publish-readiness").status_code == 404
+    assert client.post(f"/api/assignments/{aid}/manual-publish").status_code == 404
+    # The only publication endpoint requires a server-created Structured Set readiness snapshot.
     assert client.post(f"/api/assignments/{aid}/publish").status_code == 422
     app.dependency_overrides.pop(get_storage, None)
 
@@ -418,7 +376,7 @@ def test_delete_file_object_success_then_finalize_commit_failure_can_retry():
         app.dependency_overrides.pop(get_storage, None)
 
 
-def test_manual_publish_cannot_bypass_an_ai_generation_job():
+def test_manual_publish_bypass_routes_are_removed():
     actor, db = actor_and_db()
     item = create(client, active_class(db, actor.id, "AI 作业班").id)
     db.add(
@@ -441,8 +399,8 @@ def test_manual_publish_cannot_bypass_an_ai_generation_job():
     db.commit()
 
     response = client.get(f"/api/assignments/{item['id']}/manual-publish-readiness")
-    assert response.status_code == 409
-    assert response.json()["code"] == "AI_REVIEW_REQUIRED"
+    assert response.status_code == 404
+    assert client.post(f"/api/assignments/{item['id']}/manual-publish").status_code == 404
 
 
 def test_upload_rejections():

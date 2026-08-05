@@ -95,7 +95,7 @@ export default function NewAssignmentPage() {
                 grade: sharedValue("grade"),
                 class_ids: selected,
               });
-              router.push(`/assignments/${item.id}/edit`);
+              router.push(`/assignments/${item.id}/edit?step=2`);
             } finally {
               setBusy(false);
             }

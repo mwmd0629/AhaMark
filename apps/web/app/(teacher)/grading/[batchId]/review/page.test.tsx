@@ -113,13 +113,14 @@ function workspace({
               provider: "objective-rule",
               provider_version: "1",
               status: stale ? "stale" : "suggested",
-              rubric_version_id: stale ? "rubric-2" : "rubric-1",
+              structured_rubric_set_id: "set-1",
+              structured_rubric_version_id: stale ? "rubric-2" : "rubric-1",
               requires_review: false,
               quality_flags: [] as string[],
             },
             review: stale ? undefined : { final_score: "10", feedback: "" },
             criteria: [] as Array<{
-              rubric_item_id: string;
+              criterion_id: string;
               status: string;
               awarded_points?: string;
               max_points: string;
@@ -320,7 +321,7 @@ it.each(reviewBlockCases)(
     if (condition.incompleteCriterion) {
       answer.criteria = [
         {
-          rubric_item_id: "criterion-incomplete",
+          criterion_id: "criterion-incomplete",
           status: "incomplete",
           awarded_points: undefined,
           max_points: "10",
@@ -395,14 +396,14 @@ it("uses an inline teacher scoring form and validates criterion totals", async (
   const data = workspace({ stale: true, reviewed: 0 });
   data.items[0].answers[0].criteria = [
     {
-      rubric_item_id: "criterion-1",
+      criterion_id: "criterion-1",
       status: "manual",
       awarded_points: undefined,
       max_points: "4",
       reason: "计算过程",
     },
     {
-      rubric_item_id: "criterion-2",
+      criterion_id: "criterion-2",
       status: "manual",
       awarded_points: undefined,
       max_points: "6",
@@ -864,7 +865,7 @@ it("shows concise rubric evidence for each scoring item", async () => {
   const data = workspace();
   data.items[0].answers[0].criteria = [
     {
-      rubric_item_id: "criterion-1",
+      criterion_id: "criterion-1",
       title: "方法正确",
       status: "evaluated",
       awarded_points: "4",

@@ -65,7 +65,13 @@ function pagePreviewUrl(url: string, pageNumber: number) {
     : url;
 }
 
-export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
+export function AssignmentWizard({
+  assignmentId,
+  initialStep,
+}: {
+  assignmentId: string;
+  initialStep?: number;
+}) {
   const router = useRouter();
   const toast = useToast();
   const [item, setItem] = useState<AssignmentRecord>();
@@ -109,7 +115,10 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
     knowledge: "",
   });
   const [selectedQuestion, setSelectedQuestion] = useState("");
-  const [answer, setAnswer] = useState("");
+  const [questionDirty, setQuestionDirty] = useState(false);
+  const [questionSubmitting, setQuestionSubmitting] = useState(false);
+  const [questionConflict, setQuestionConflict] = useState(false);
+  const questionDirtyRef = useRef(false);
   const [region, setRegion] = useState({
     page: "",
     x: "0.1",
@@ -117,27 +126,51 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
     width: "0.8",
     height: "0.2",
   });
-  const load = useCallback(async () => {
-    try {
-      const [assignment, active] = await Promise.all([
-        assignmentsApi.get(assignmentId),
-        classesApi.list("status=active&page_size=100"),
-      ]);
-      setItem(assignment);
-      setClasses(active.items);
-      if (!initializedRef.current) {
-        setStep(assignment.completeness.next_step || 1);
-        initializedRef.current = true;
+  const load = useCallback(
+    async (preferredQuestionId?: string) => {
+      try {
+        const [assignment, active] = await Promise.all([
+          assignmentsApi.get(assignmentId),
+          classesApi.list("status=active&page_size=100"),
+        ]);
+        setItem(assignment);
+        setClasses(active.items);
+        const initializing = !initializedRef.current;
+        if (initializing) {
+          setStep(initialStep ?? assignment.completeness.next_step ?? 1);
+          initializedRef.current = true;
+        }
+        setSelectedQuestion((current) => {
+          const questions = assignment.paper_version?.questions ?? [];
+          if (
+            preferredQuestionId &&
+            questions.some((entry) => entry.id === preferredQuestionId)
+          ) {
+            setQuestionConflict(false);
+            return preferredQuestionId;
+          }
+          if (!initializing && current === "") return current;
+          if (questions.some((entry) => entry.id === current)) {
+            setQuestionConflict(false);
+            return current;
+          }
+          if (current && questionDirtyRef.current) {
+            setQuestionConflict(true);
+            return current;
+          }
+          setQuestionConflict(false);
+          return questions[0]?.id ?? "";
+        });
+        setRegion((old) => ({
+          ...old,
+          page: assignment.paper_version?.pages[0]?.id ?? "",
+        }));
+      } catch (e) {
+        setError(e instanceof ApiError ? e.message : "无法加载草稿");
       }
-      setSelectedQuestion(assignment.paper_version?.questions[0]?.id ?? "");
-      setRegion((old) => ({
-        ...old,
-        page: assignment.paper_version?.pages[0]?.id ?? "",
-      }));
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : "无法加载草稿");
-    }
-  }, [assignmentId]);
+    },
+    [assignmentId, initialStep],
+  );
   const refreshReviewInputs = useCallback(async () => {
     setReviewInputsRevision((current) => current + 1);
     await load();
@@ -169,16 +202,30 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
     }
   }, [item?.paper_version?.pages, selectedPageId]);
   useEffect(() => {
+    questionDirtyRef.current = questionDirty;
+  }, [questionDirty]);
+  useEffect(() => {
     const warn = (e: BeforeUnloadEvent) => {
-      if (busy) e.preventDefault();
+      if (busy || questionDirty || questionSubmitting) e.preventDefault();
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [busy]);
+  }, [busy, questionDirty, questionSubmitting]);
   const selected = useMemo(
     () => item?.paper_version?.questions.find((x) => x.id === selectedQuestion),
     [item, selectedQuestion],
   );
+  useEffect(() => {
+    if (!selected || questionDirty) return;
+    setQuestion({
+      number: selected.question_number,
+      type: selected.question_type,
+      score: selected.max_score ?? "",
+      text: selected.content_text ?? "",
+      difficulty: selected.difficulty ?? "medium",
+      knowledge: selected.knowledge_points.map((point) => point.name).join(","),
+    });
+  }, [questionDirty, selected]);
   const uploadedFiles = useMemo(() => {
     const files = new Map<
       string,
@@ -198,12 +245,6 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
     }
     return [...files.values()];
   }, [item?.paper_version?.pages]);
-  useEffect(() => {
-    const saved = item?.rubric_version?.question_rubrics.find(
-      (rubric) => rubric.question_id === selectedQuestion,
-    );
-    setAnswer(saved?.standard_answer ?? "");
-  }, [item, selectedQuestion]);
   const loadPreview = useCallback(
     async (fileId: string) => {
       try {
@@ -941,7 +982,16 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
             <div className="mt-3 grid gap-2">
               {item.paper_version?.questions.map((q) => (
                 <button
-                  onClick={() => setSelectedQuestion(q.id)}
+                  disabled={questionSubmitting}
+                  onClick={() => {
+                    if (
+                      questionDirty &&
+                      !confirm("当前题目有未保存修改，确认放弃并切换吗？")
+                    )
+                      return;
+                    setQuestionDirty(false);
+                    setSelectedQuestion(q.id);
+                  }}
                   className={`rounded-xl border p-3 text-left ${selectedQuestion === q.id ? "border-[var(--brand-600)] bg-[var(--brand-50)]" : ""}`}
                   key={q.id}
                 >
@@ -953,21 +1003,76 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
             </div>
           </Card>
           <Card className="space-y-4 p-5">
-            <h2 className="font-bold">添加题目</h2>
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="font-bold">
+                {selected
+                  ? `编辑第 ${selected.question_number} 题`
+                  : "添加题目"}
+              </h2>
+              {selected && (
+                <Button
+                  variant="outline"
+                  disabled={questionSubmitting}
+                  onClick={() => {
+                    if (
+                      questionDirty &&
+                      !confirm("当前题目有未保存修改，确认放弃并新增吗？")
+                    )
+                      return;
+                    setQuestionDirty(false);
+                    setSelectedQuestion("");
+                    setQuestion({
+                      number: "",
+                      type: "calculation",
+                      score: "",
+                      text: "",
+                      difficulty: "medium",
+                      knowledge: "",
+                    });
+                  }}
+                >
+                  新增题目
+                </Button>
+              )}
+            </div>
             <div className="grid gap-3 sm:grid-cols-2">
+              {questionConflict && (
+                <div className="sm:col-span-2 rounded border border-amber-300 bg-amber-50 p-3 text-sm">
+                  <p className="font-medium">当前题目已被后台更新或移除</p>
+                  <p className="mt-1">
+                    本地未保存内容已保留，但不能写入其他题目。请放弃本地修改后重新加载。
+                  </p>
+                  <Button
+                    className="mt-2"
+                    variant="outline"
+                    onClick={() => {
+                      questionDirtyRef.current = false;
+                      setQuestionDirty(false);
+                      setQuestionConflict(false);
+                      setSelectedQuestion(
+                        item.paper_version?.questions[0]?.id ?? "",
+                      );
+                    }}
+                  >
+                    放弃本地修改并重新加载
+                  </Button>
+                </div>
+              )}
               <Input
                 label="题号"
                 value={question.number}
-                onChange={(e) =>
-                  setQuestion({ ...question, number: e.target.value })
-                }
+                onChange={(e) => {
+                  setQuestion({ ...question, number: e.target.value });
+                  setQuestionDirty(true);
+                }}
               />
               <Select
                 label="题型"
                 value={question.type}
-                onChange={(e) =>
-                  setQuestion({ ...question, type: e.target.value })
-                }
+                onChange={(e) => {
+                  setQuestion({ ...question, type: e.target.value });
+                  setQuestionDirty(true);
+                }}
               >
                 <option value="calculation">计算题</option>
                 <option value="short_answer">简答题</option>
@@ -979,30 +1084,37 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
                 label="分值"
                 type="number"
                 value={question.score}
-                onChange={(e) =>
-                  setQuestion({ ...question, score: e.target.value })
-                }
+                onChange={(e) => {
+                  setQuestion({ ...question, score: e.target.value });
+                  setQuestionDirty(true);
+                }}
               />
               <Input
                 label="知识点（逗号分隔）"
                 value={question.knowledge}
-                onChange={(e) =>
-                  setQuestion({ ...question, knowledge: e.target.value })
-                }
+                onChange={(e) => {
+                  setQuestion({ ...question, knowledge: e.target.value });
+                  setQuestionDirty(true);
+                }}
               />
               <Input
                 className="sm:col-span-2"
                 label="题目内容"
                 value={question.text}
-                onChange={(e) =>
-                  setQuestion({ ...question, text: e.target.value })
-                }
+                onChange={(e) => {
+                  setQuestion({ ...question, text: e.target.value });
+                  setQuestionDirty(true);
+                }}
               />
             </div>
             <Button
+              loading={questionSubmitting}
+              disabled={questionSubmitting || questionConflict}
               onClick={async () => {
+                if (questionSubmitting || questionConflict) return;
+                setQuestionSubmitting(true);
                 try {
-                  const q = await assignmentsApi.question(item.id, {
+                  const payload = {
                     question_number: question.number,
                     question_type: question.type,
                     max_score: Number(question.score),
@@ -1010,20 +1122,30 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
                     difficulty: question.difficulty,
                     knowledge_points: question.knowledge
                       .split(",")
+                      .map((point) => point.trim())
                       .filter(Boolean),
-                  });
-                  await load();
-                  setSelectedQuestion(q.id);
-                  toast("题目已创建");
+                  };
+                  const q = selected
+                    ? await assignmentsApi.updateQuestion(
+                        item.id,
+                        selected.id,
+                        payload,
+                      )
+                    : await assignmentsApi.question(item.id, payload);
+                  setQuestionDirty(false);
+                  await load(q.id);
+                  toast(selected ? "题目已保存" : "题目已创建");
                 } catch (e) {
                   toast(
-                    e instanceof ApiError ? e.message : "创建失败",
+                    e instanceof ApiError ? e.message : "保存失败",
                     "error",
                   );
+                } finally {
+                  setQuestionSubmitting(false);
                 }
               }}
             >
-              添加题目
+              {selected ? "保存题目" : "添加题目"}
             </Button>
             {selected && (
               <div className="border-t pt-4">
@@ -1151,132 +1273,7 @@ export function AssignmentWizard({ assignmentId }: { assignmentId: string }) {
           <AnswerRubricGenerationReview
             assignmentId={item.id}
             questions={item.paper_version?.questions ?? []}
-            savedRubrics={item.rubric_version?.question_rubrics ?? []}
           />
-          <h3 className="border-t pt-4 font-bold">
-            手动 legacy Rubric 快捷录入
-          </h3>
-          <Select
-            label="当前题目"
-            value={selectedQuestion}
-            onChange={(e) => setSelectedQuestion(e.target.value)}
-          >
-            {item.paper_version?.questions.map((q) => (
-              <option key={q.id} value={q.id}>
-                第 {q.question_number} 题（
-                {formatQuestionScore(q.max_score)}）
-              </option>
-            ))}
-          </Select>
-          {selected && (
-            <>
-              {selected.max_score == null && (
-                <div
-                  className="rounded border border-amber-300 bg-amber-50 p-3"
-                  data-testid="missing-question-score"
-                >
-                  <p className="text-sm">
-                    当前题目分值未知，Rubric 保存和发布会被阻止。
-                  </p>
-                  <Button
-                    className="mt-2"
-                    variant="outline"
-                    onClick={async () => {
-                      const value = window.prompt(
-                        `请输入第 ${selected.question_number} 题的正数分值`,
-                        "",
-                      );
-                      if (value === null) return;
-                      const score = Number(value);
-                      if (!Number.isFinite(score) || score <= 0) {
-                        toast("分值必须为正数", "error");
-                        return;
-                      }
-                      try {
-                        await assignmentsApi.updateQuestion(
-                          item.id,
-                          selected.id,
-                          {
-                            question_number: selected.question_number,
-                            question_type: selected.question_type,
-                            max_score: score,
-                            content_text: selected.content_text,
-                            difficulty: selected.difficulty,
-                            knowledge_points: selected.knowledge_points.map(
-                              (point) => point.name,
-                            ),
-                          },
-                        );
-                        await load();
-                        toast("题目分值已补齐，可以继续设置 Rubric");
-                      } catch (e) {
-                        toast(
-                          e instanceof ApiError ? e.message : "保存分值失败",
-                          "error",
-                        );
-                      }
-                    }}
-                  >
-                    补齐所选题目分值
-                  </Button>
-                </div>
-              )}
-              <label className="grid gap-1 text-sm font-medium">
-                标准答案
-                <textarea
-                  className="min-h-28 rounded-xl border p-3"
-                  data-question-id={selected.id}
-                  value={answer}
-                  onChange={(e) => setAnswer(e.target.value)}
-                />
-              </label>
-              <p className="text-sm text-slate-600">
-                第一版快捷录入会创建一个与题目满分相等的评分项；可接受解法、单位、格式、精度等字段由
-                API 完整保留。
-              </p>
-              <Button
-                key={`save-rubric-${selected.id}`}
-                data-question-id={selected.id}
-                onClick={async (event) => {
-                  try {
-                    const questionId = event.currentTarget.dataset.questionId;
-                    const currentQuestion = item.paper_version?.questions.find(
-                      (candidate) => candidate.id === questionId,
-                    );
-                    if (!questionId || !currentQuestion)
-                      throw new Error("当前题目状态已变化，请重试");
-                    const next = await assignmentsApi.rubric(
-                      item.id,
-                      questionId,
-                      {
-                        standard_answer: answer,
-                        alternative_answers: [],
-                        scoring_notes: "",
-                        allow_step_score: true,
-                        items: [
-                          {
-                            title: "答案与过程正确",
-                            points: Number(currentQuestion.max_score),
-                            item_type: "step",
-                            required: true,
-                          },
-                        ],
-                      },
-                    );
-                    setItem(next);
-                    toast("评分标准已保存");
-                  } catch (e) {
-                    toast(
-                      e instanceof ApiError ? e.message : "保存失败",
-                      "error",
-                    );
-                  }
-                }}
-              >
-                保存本题评分标准
-              </Button>
-            </>
-          )}
           <Button variant="secondary" onClick={() => setStep(6)}>
             进入发布检查
           </Button>

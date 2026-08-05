@@ -152,7 +152,7 @@ def test_mixed_manifest_is_stable_complete_and_never_writes_formal_grades(
 ) -> None:
     db = isolated_session
     owner_id, batch, answer_modes = _seed_mixed_batch(db)
-    blocker = {"code": "ACTIVE_CONFIRMED_FORMAL_REQUIRED"}
+    blocker = {"code": "STRUCTURED_SET_REQUIRED"}
 
     def snapshot(
         _db: Session,
@@ -183,7 +183,7 @@ def test_mixed_manifest_is_stable_complete_and_never_writes_formal_grades(
         str(_id(12)),
     ]
     assert first["included"][0]["blockers"] == ["STUDENT_ANSWERS_REQUIRED"]
-    assert first["included"][1]["blockers"] == ["ACTIVE_CONFIRMED_FORMAL_REQUIRED"]
+    assert first["included"][1]["blockers"] == ["STRUCTURED_SET_REQUIRED"]
     assert first["included"][2]["blockers"] == []
     assert first["excluded"] == [
         {
@@ -193,10 +193,10 @@ def test_mixed_manifest_is_stable_complete_and_never_writes_formal_grades(
         }
     ]
 
-    blocker["code"] = "LEGACY_PROJECTION_REQUIRED"
+    blocker["code"] = "STRUCTURED_SET_STALE"
     changed = orchestrator._manifest(db, owner_id, batch)
     assert changed["input_version"] != first["input_version"]
-    blocker["code"] = "ACTIVE_CONFIRMED_FORMAL_REQUIRED"
+    blocker["code"] = "STRUCTURED_SET_REQUIRED"
 
     monkeypatch.setattr(orchestrator, "materialize_work_items", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(

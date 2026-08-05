@@ -10,17 +10,21 @@ from app.db.session import get_db
 from app.math_validation.engine import ENGINE_VERSION
 from app.math_validation.stale import stale_for_engine_versions
 from app.models import (
+    Assignment,
     CriterionValidationResult,
     MathValidationJob,
     QuestionRecognitionEvidence,
-    ReferenceAnswerVersion,
     RubricCriterion,
-    StructuredRubricVersion,
     StudentAnswer,
     Submission,
 )
+from app.structured_rubric_authority import (
+    StructuredRubricAuthorityError,
+    require_active_structured_rubric,
+    require_job_authority,
+)
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -30,8 +34,9 @@ CONFIG_VERSION = "safe-math-limits-v2"
 
 
 class ValidationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     student_answer_id: uuid.UUID
-    rubric_version_id: uuid.UUID
     idempotency_key: str = Field(min_length=1, max_length=128)
 
 
@@ -50,7 +55,8 @@ def _job_json(db: Session, job: MathValidationJob) -> dict[str, Any]:
         "question_id": str(job.question_id),
         "student_answer_id": str(job.student_answer_id),
         "scoring_input_version": job.scoring_input_version,
-        "rubric_version_id": str(job.rubric_version_id),
+        "structured_rubric_set_id": str(job.structured_rubric_set_id),
+        "structured_rubric_version_id": str(job.rubric_version_id),
         "reference_answer_version_id": str(job.reference_answer_version_id),
         "engine": job.engine,
         "engine_version": job.engine_version,
@@ -96,6 +102,28 @@ def _job_json(db: Session, job: MathValidationJob) -> dict[str, Any]:
 @router.post("/math-validation/jobs", status_code=202)
 def create_validation_job(payload: ValidationInput, db: Db, actor: Actor) -> dict[str, Any]:
     stale_for_engine_versions(db, ENGINE_VERSION, CONFIG_VERSION)
+    answer = db.get(StudentAnswer, payload.student_answer_id)
+    if answer is None:
+        raise ApiProblem(404, "VALIDATION_INPUT_NOT_FOUND", "学生答案或 Rubric 不存在")
+    submission = db.get(Submission, answer.submission_id)
+    if submission is None or submission.owner_id != actor.id:
+        raise ApiProblem(404, "SUBMISSION_NOT_FOUND", "提交不存在")
+    if submission.finalized_at is not None:
+        raise ApiProblem(409, "FINALIZED_READ_ONLY", "已定稿提交只读")
+    assignment = db.get(Assignment, submission.assignment_id)
+    if assignment is None:
+        raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    try:
+        authority = require_active_structured_rubric(
+            db,
+            assignment=assignment,
+            question_id=answer.question_id,
+            owner_id=actor.id,
+            lock=True,
+        )
+    except StructuredRubricAuthorityError as exc:
+        raise ApiProblem(409, exc.code, str(exc)) from exc
+    rubric, reference = authority.rubric, authority.reference
     existing = db.scalar(
         select(MathValidationJob).where(
             MathValidationJob.owner_id == actor.id,
@@ -103,18 +131,16 @@ def create_validation_job(payload: ValidationInput, db: Db, actor: Actor) -> dic
         )
     )
     if existing is not None:
+        try:
+            require_job_authority(
+                authority,
+                structured_rubric_set_id=existing.structured_rubric_set_id,
+                rubric_version_id=existing.rubric_version_id,
+                reference_answer_version_id=existing.reference_answer_version_id,
+            )
+        except StructuredRubricAuthorityError as exc:
+            raise ApiProblem(409, "IDEMPOTENCY_KEY_CONFLICT", str(exc)) from exc
         return _job_json(db, existing)
-    answer = db.get(StudentAnswer, payload.student_answer_id)
-    rubric = db.get(StructuredRubricVersion, payload.rubric_version_id)
-    if answer is None or rubric is None or rubric.question_id != answer.question_id:
-        raise ApiProblem(404, "VALIDATION_INPUT_NOT_FOUND", "学生答案或 Rubric 不存在")
-    submission = db.get(Submission, answer.submission_id)
-    if submission is None or submission.owner_id != actor.id:
-        raise ApiProblem(404, "SUBMISSION_NOT_FOUND", "提交不存在")
-    if submission.finalized_at is not None:
-        raise ApiProblem(409, "FINALIZED_READ_ONLY", "已定稿提交只读")
-    if rubric.status != "confirmed":
-        raise ApiProblem(422, "RUBRIC_NOT_CONFIRMED", "只能使用已确认 Rubric")
     evidence = db.scalar(
         select(QuestionRecognitionEvidence)
         .where(
@@ -126,9 +152,6 @@ def create_validation_job(payload: ValidationInput, db: Db, actor: Actor) -> dic
     )
     if evidence is None:
         raise ApiProblem(422, "RECOGNITION_NOT_CONFIRMED", "缺少当前已确认识别证据")
-    reference = db.get(ReferenceAnswerVersion, rubric.reference_answer_version_id)
-    if reference is None or reference.status != "confirmed":
-        raise ApiProblem(422, "REFERENCE_NOT_CONFIRMED", "标准答案未确认")
     scoring_version = (
         f"{evidence.input_hash}:{evidence.recognition_version}:{evidence.confirmed_revision or 0}"
     )
@@ -151,6 +174,7 @@ def create_validation_job(payload: ValidationInput, db: Db, actor: Actor) -> dic
         recognition_evidence_id=evidence.id,
         scoring_input_version=scoring_version,
         reference_answer_version_id=reference.id,
+        structured_rubric_set_id=authority.rubric_set.id,
         rubric_version_id=rubric.id,
         engine_version=ENGINE_VERSION,
         config_version=CONFIG_VERSION,
@@ -211,6 +235,26 @@ def retry_criterion(
         raise ApiProblem(404, "VALIDATION_CRITERION_NOT_FOUND", "验证任务或评分项不存在")
     if job.stale_at is not None:
         raise ApiProblem(409, "VALIDATION_STALE", "过期验证不可重试")
+    submission = db.get(Submission, job.submission_id)
+    assignment = db.get(Assignment, submission.assignment_id) if submission else None
+    if assignment is None:
+        raise ApiProblem(409, "STRUCTURED_SET_STALE", "作业不可用")
+    try:
+        authority = require_active_structured_rubric(
+            db,
+            assignment=assignment,
+            question_id=job.question_id,
+            owner_id=actor.id,
+            lock=True,
+        )
+        require_job_authority(
+            authority,
+            structured_rubric_set_id=job.structured_rubric_set_id,
+            rubric_version_id=job.rubric_version_id,
+            reference_answer_version_id=job.reference_answer_version_id,
+        )
+    except StructuredRubricAuthorityError as exc:
+        raise ApiProblem(409, exc.code, str(exc)) from exc
     job.generation += 1
     job.status = "queued"
     db.commit()

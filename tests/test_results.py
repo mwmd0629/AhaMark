@@ -33,7 +33,7 @@ def payload(
             "assignment_id": uuid.uuid4(),
             "student_id": uuid.uuid4(),
             "paper_version_id": uuid.uuid4(),
-            "rubric_version_id": uuid.uuid4(),
+            "structured_rubric_set_id": uuid.uuid4(),
             "total_score": score,
             "max_score": maximum,
             "question_count": 1,

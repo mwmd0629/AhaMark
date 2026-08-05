@@ -31,8 +31,7 @@ const reviewApi = vi.hoisted(() => ({
   autoConfirm: vi.fn(),
   refresh: vi.fn(),
   disposition: vi.fn(),
-  createBinding: vi.fn(),
-  confirmBinding: vi.fn(),
+  createStructuredRubricSet: vi.fn(),
   prepare: vi.fn(),
   prepareAssignment: vi.fn(),
   publish: vi.fn(),
@@ -71,7 +70,7 @@ const session = (id = "review-1", overrides = {}) => ({
   generation: 1,
   draft_revision_id: "revision-1",
   paper_version_id: "paper-1",
-  legacy_rubric_version_id: null,
+  structured_rubric_set_id: "set-1",
   review_version: 1,
   status: "ready",
   counts: { blocking: 0, warning: 0, info: 0 },
@@ -89,8 +88,6 @@ const confirmation = (
   origin: "origin",
   inherited: false,
   fingerprint_schema_version: "confirmation-fingerprint-v2",
-  binding_id: type === "legacy_binding" ? "binding-1" : null,
-  source_binding_hash: type === "legacy_binding" ? "a".repeat(64) : null,
   confirmed_at: "2026-07-27T12:00:00Z",
   visibility: "teacher",
   ...overrides,
@@ -195,51 +192,28 @@ const questionWithCriterion: AssignmentReviewBundle["questions"][number] = {
     },
   },
 };
-const bindingLoss = (
-  code: string,
-  overrides: Partial<
-    NonNullable<
-      NonNullable<AssignmentReviewBundle["binding"]>["loss_report"]
-    >[number]
-  > = {},
-): NonNullable<
-  NonNullable<AssignmentReviewBundle["binding"]>["loss_report"]
->[number] => ({
-  code,
-  question_id: "question-1",
-  question_number: "1",
-  criterion_key: "result",
-  teacher_message: "后端教师说明",
-  technical: { projection_profile: "structured-to-legacy" },
-  ...overrides,
-});
 type BundleOptions = {
   assignmentId?: string;
   hash?: string;
   status?: AssignmentReviewBundle["status"];
   blockers?: AssignmentReviewBundle["blockers"];
   confirmations?: AssignmentReviewBundle["confirmations"];
-  binding?: AssignmentReviewBundle["binding"];
+  structuredRubricSet?: AssignmentReviewBundle["structured_rubric_set"];
   questions?: AssignmentReviewBundle["questions"];
 };
-const reviewBinding = (
-  overrides: Partial<NonNullable<AssignmentReviewBundle["binding"]>> = {},
-): NonNullable<AssignmentReviewBundle["binding"]> => ({
-  id: "binding-1",
-  status: "confirmed",
-  binding_version: 1,
-  source_binding_hash: "a".repeat(64),
-  source_semantic_hash: "a".repeat(64),
-  target_legacy_hash: "c".repeat(64),
-  projection_profile: "structured-to-legacy",
-  projection_version: "structured-rubric-projection-v3",
-  mapping: [],
-  loss_report: [],
-  loss_report_hash: "d".repeat(64),
-  manual_review_required: false,
-  projection_current: true,
-  projection_reason: null,
-  expected_source_binding_hash: "a".repeat(64),
+const reviewStructuredRubricSet = (
+  overrides: Partial<
+    NonNullable<AssignmentReviewBundle["structured_rubric_set"]>
+  > = {},
+): NonNullable<AssignmentReviewBundle["structured_rubric_set"]> => ({
+  id: "set-1",
+  status: "draft",
+  version: 1,
+  content_hash: "a".repeat(64),
+  source_snapshot_hash: "b".repeat(64),
+  total_points: "10.00",
+  current: true,
+  reason: null,
   visibility: "teacher",
   ...overrides,
 });
@@ -248,11 +222,8 @@ const reviewBundle = ({
   hash = "bundle-a",
   status = "ready_to_publish",
   blockers = [],
-  confirmations = [
-    ...confirmationKinds.map((kind) => confirmation(kind)),
-    confirmation("legacy_binding", { origin: "system_auto" }),
-  ],
-  binding = reviewBinding(),
+  confirmations = confirmationKinds.map((kind) => confirmation(kind)),
+  structuredRubricSet = reviewStructuredRubricSet(),
   questions = [question],
 }: BundleOptions = {}): AssignmentReviewBundle => ({
   schema_version: "assignment-review-bundle-v1",
@@ -268,7 +239,7 @@ const reviewBundle = ({
   questions,
   blockers,
   confirmations,
-  binding,
+  structured_rubric_set: structuredRubricSet,
 });
 const reviewItem = ({
   id = "risk-1",
@@ -347,7 +318,7 @@ const readyPreparation = (
   due_at: null,
   total_score: "10.00",
   paper_version_id: "paper-1",
-  legacy_rubric_version_id: "legacy-1",
+  structured_rubric_set_id: "set-1",
 });
 
 beforeEach(() => {
@@ -365,14 +336,17 @@ beforeEach(() => {
   });
   reviewApi.refresh.mockResolvedValue(session());
   reviewApi.disposition.mockResolvedValue({ review_version: 2 });
-  reviewApi.createBinding.mockResolvedValue({
-    id: "binding-1",
+  reviewApi.createStructuredRubricSet.mockResolvedValue({
+    id: "set-1",
+    assignment_id: "assignment-1",
+    paper_version_id: "paper-1",
+    version: 1,
     status: "draft",
-    mapping: [],
-    conversion_warnings: [],
-    manual_review_required: false,
+    content_hash: "a".repeat(64),
+    source_snapshot_hash: "b".repeat(64),
+    total_points: "10.00",
+    current: true,
   });
-  reviewApi.confirmBinding.mockResolvedValue({ review_version: 2 });
   reviewApi.prepare.mockResolvedValue({
     id: "readiness-1",
     readiness_hash: "r".repeat(64),
@@ -382,7 +356,7 @@ beforeEach(() => {
     due_at: null,
     total_score: "10.00",
     paper_version_id: "paper-1",
-    legacy_rubric_version_id: "legacy-1",
+    structured_rubric_set_id: "set-1",
   });
   reviewApi.prepareAssignment.mockResolvedValue({
     preparation_status: "exception_required",
@@ -563,7 +537,7 @@ describe("AssignmentCentralReview preserved behavior", () => {
         status: "missing_review",
         blockers: [blocker("REVIEW_SESSION_REQUIRED")],
         confirmations: [],
-        binding: null,
+        structuredRubricSet: null,
       }),
     );
     renderReview();
@@ -759,7 +733,7 @@ describe("AssignmentCentralReview preserved behavior", () => {
       due_at: null,
       total_score: "10.00",
       paper_version_id: "paper-1",
-      legacy_rubric_version_id: "legacy-1",
+      structured_rubric_set_id: "set-1",
     });
     reviewApi.publish
       .mockRejectedValueOnce(
@@ -797,7 +771,7 @@ describe("AssignmentCentralReview preserved behavior", () => {
         due_at: null,
         total_score: "10.00",
         paper_version_id: "paper-1",
-        legacy_rubric_version_id: "rubric-1",
+        structured_rubric_set_id: "set-1",
       });
       await pending.promise;
     });
@@ -909,11 +883,11 @@ describe("AssignmentCentralReview preserved behavior", () => {
       bundle_hash: "bundle-a",
       exceptions: [
         {
-          code: "LEGACY_BINDING_STALE",
+          code: "STRUCTURED_SET_STALE",
           severity: "blocking",
-          message: "兼容 binding 已过期，请重新生成",
-          entity_type: "binding",
-          entity_id: "binding-1",
+          message: "待发布评分标准已过期，请重新准备",
+          entity_type: "structured_rubric_set",
+          entity_id: "set-1",
         },
       ],
     });
@@ -922,7 +896,7 @@ describe("AssignmentCentralReview preserved behavior", () => {
 
     expect(
       await screen.findByRole("region", { name: "统一准备异常" }),
-    ).toHaveTextContent("兼容 binding 已过期，请重新生成");
+    ).toHaveTextContent("待发布评分标准已过期，请重新准备");
     expect(screen.getByRole("button", { name: "确认并发布" })).toBeDisabled();
     expect(reviewApi.prepareAssignment).toHaveBeenCalledOnce();
   });
@@ -1012,129 +986,6 @@ describe("AssignmentCentralReview preserved behavior", () => {
     expect(
       await screen.findByRole("button", { name: "确认并发布" }),
     ).toBeDisabled();
-  });
-
-  it("does not attempt a compatibility binding while rubric content is incomplete", async () => {
-    reviewApi.bundle.mockResolvedValue(
-      reviewBundle({
-        status: "action_required",
-        binding: null,
-        confirmations: confirmationKinds.map((kind) => confirmation(kind)),
-        blockers: [
-          blocker("STRUCTURED_RUBRIC_UNCONFIRMED", "第 1 题缺少已确认评分标准"),
-        ],
-      }),
-    );
-
-    renderReview();
-
-    expect(
-      await screen.findByRole("button", { name: "生成兼容版本" }),
-    ).toBeDisabled();
-    expect(
-      screen.getByText(/请先完成上方仍影响发布的参考答案和评分标准/),
-    ).toBeInTheDocument();
-    await waitFor(() => expect(reviewApi.createBinding).not.toHaveBeenCalled());
-  });
-
-  it("offers to rebuild a stale binding", async () => {
-    reviewApi.bundle.mockResolvedValue(
-      reviewBundle({
-        status: "action_required",
-        binding: reviewBinding({
-          id: "binding-old",
-          status: "stale",
-          source_binding_hash: "x".repeat(64),
-          expected_source_binding_hash: "y".repeat(64),
-        }),
-      }),
-    );
-    renderReview();
-    expect(await screen.findByText("需要重新生成兼容版本")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "重新生成兼容版本" }));
-    await waitFor(() => expect(reviewApi.createBinding).toHaveBeenCalledOnce());
-  });
-
-  it("continues from a refreshed draft binding and allows confirmation", async () => {
-    reviewApi.bundle.mockResolvedValue(
-      reviewBundle({
-        status: "action_required",
-        binding: reviewBinding({
-          id: "binding-draft",
-          status: "draft",
-          binding_version: 2,
-          loss_report: [
-            {
-              code: "DEPENDENCY_NOT_LOSSLESS",
-              question_id: "question-1",
-              question_number: "1",
-              criterion_key: "result",
-              teacher_message: "依赖关系无法完整表达",
-              technical: {},
-            },
-          ],
-          manual_review_required: true,
-        }),
-      }),
-    );
-    renderReview();
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: "确认按上述人工核查方式发布兼容版",
-      }),
-    );
-    await waitFor(() =>
-      expect(reviewApi.confirmBinding).toHaveBeenCalledWith("binding-draft", 1),
-    );
-  });
-
-  it("reloads Bundle after preparing a binding that requires manual review", async () => {
-    reviewApi.createBinding.mockResolvedValue({
-      id: "binding-manual",
-      status: "draft",
-      mapping: [],
-      conversion_warnings: ["DEPENDENCY_NOT_LOSSLESS"],
-      manual_review_required: true,
-    });
-    reviewApi.bundle
-      .mockResolvedValueOnce(
-        reviewBundle({
-          status: "action_required",
-          binding: null,
-        }),
-      )
-      .mockResolvedValue(
-        reviewBundle({
-          status: "action_required",
-          binding: reviewBinding({
-            id: "binding-manual",
-            status: "draft",
-            loss_report: [
-              {
-                code: "DEPENDENCY_NOT_LOSSLESS",
-                question_id: "question-1",
-                question_number: "1",
-                criterion_key: "result",
-                teacher_message: "依赖关系无法完整表达",
-                technical: {},
-              },
-            ],
-            manual_review_required: true,
-          }),
-        }),
-      );
-    renderReview();
-    fireEvent.click(
-      await screen.findByRole("button", { name: "生成兼容版本" }),
-    );
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", {
-          name: "确认按上述人工核查方式发布兼容版",
-        }),
-      ).toBeEnabled(),
-    );
-    expect(reviewApi.bundle.mock.calls.length).toBeGreaterThan(1);
   });
 });
 
@@ -1272,12 +1123,12 @@ describe("AssignmentCentralReview Bundle authority and races", () => {
   });
 });
 
-describe("AssignmentCentralReview semantic confirmations and compatibility", () => {
+describe("AssignmentCentralReview semantic confirmations and structured set", () => {
   it("automatically processes routine confirmations without individual actions", async () => {
     reviewApi.bundle.mockResolvedValue(
       reviewBundle({
         status: "action_required",
-        binding: null,
+        structuredRubricSet: null,
         confirmations: [
           confirmation("classes", { origin: "inherited", inherited: true }),
         ],
@@ -1295,12 +1146,12 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
     ).not.toBeInTheDocument();
   });
 
-  it("continues to automatic binding after routine confirmation reloads the bundle", async () => {
+  it("continues to automatic structured set preparation after routine confirmation reloads the bundle", async () => {
     reviewApi.bundle
       .mockResolvedValueOnce(
         reviewBundle({
           status: "action_required",
-          binding: null,
+          structuredRubricSet: null,
           confirmations: confirmationKinds
             .filter((kind) => kind !== "due_at")
             .map((kind) => confirmation(kind)),
@@ -1309,7 +1160,7 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
       .mockResolvedValue(
         reviewBundle({
           status: "action_required",
-          binding: null,
+          structuredRubricSet: null,
           confirmations: confirmationKinds.map((kind) => confirmation(kind)),
         }),
       );
@@ -1317,7 +1168,9 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
     renderReview();
 
     await waitFor(() => expect(reviewApi.autoConfirm).toHaveBeenCalledOnce());
-    await waitFor(() => expect(reviewApi.createBinding).toHaveBeenCalledOnce());
+    await waitFor(() =>
+      expect(reviewApi.createStructuredRubricSet).toHaveBeenCalledOnce(),
+    );
     await waitFor(() => expect(reviewApi.bundle).toHaveBeenCalledTimes(3));
   });
 
@@ -1366,29 +1219,32 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
     expect(reviewApi.autoConfirm).toHaveBeenCalledTimes(2);
   });
 
-  it("reports a lossless binding failure and allows a teacher-triggered retry", async () => {
+  it("reports a structured set preparation failure and allows a teacher-triggered retry", async () => {
     reviewApi.bundle.mockResolvedValue(
       reviewBundle({
         status: "action_required",
-        binding: null,
+        structuredRubricSet: null,
         confirmations: confirmationKinds.map((kind) => confirmation(kind)),
       }),
     );
-    reviewApi.createBinding
-      .mockRejectedValueOnce(new Error("temporary binding outage"))
+    reviewApi.createStructuredRubricSet
+      .mockRejectedValueOnce(new Error("temporary set outage"))
       .mockResolvedValueOnce({
-        id: "binding-1",
+        id: "set-1",
+        assignment_id: "assignment-1",
+        paper_version_id: "paper-1",
+        version: 1,
         status: "draft",
-        mapping: [],
-        conversion_warnings: [],
-        manual_review_required: false,
+        content_hash: "a".repeat(64),
+        source_snapshot_hash: "b".repeat(64),
+        total_points: "10.00",
       });
 
     renderReview();
 
     await waitFor(() =>
       expect(toast).toHaveBeenCalledWith(
-        "评分标准兼容检查暂时失败，请重新扫描。",
+        "待发布评分标准集合准备失败，请重新扫描。",
         "error",
       ),
     );
@@ -1396,17 +1252,17 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
       name: "重新扫描最新状态",
     });
     expect(rescan).toBeEnabled();
-    expect(reviewApi.createBinding).toHaveBeenCalledOnce();
+    expect(reviewApi.createStructuredRubricSet).toHaveBeenCalledOnce();
 
     fireEvent.click(rescan);
     await waitFor(() =>
-      expect(reviewApi.createBinding).toHaveBeenCalledTimes(2),
+      expect(reviewApi.createStructuredRubricSet).toHaveBeenCalledTimes(2),
     );
     await testingAct(async () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(reviewApi.createBinding).toHaveBeenCalledTimes(2);
+    expect(reviewApi.createStructuredRubricSet).toHaveBeenCalledTimes(2);
   });
 
   it("ignores a late automatic confirmation failure from the previous assignment", async () => {
@@ -1437,14 +1293,12 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
           assignmentId === "assignment-2"
             ? "ready_to_publish"
             : "action_required",
-        confirmations: [
-          ...(assignmentId === "assignment-2"
+        confirmations:
+          assignmentId === "assignment-2"
             ? confirmationKinds.map((kind) => confirmation(kind))
             : confirmationKinds
                 .filter((kind) => kind !== "due_at")
-                .map((kind) => confirmation(kind))),
-          confirmation("legacy_binding", { origin: "system_auto" }),
-        ],
+                .map((kind) => confirmation(kind)),
       }),
     );
 
@@ -1458,7 +1312,9 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
         onPublished={vi.fn()}
       />,
     );
-    expect(await screen.findByText("✓ 可自动兼容")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("structured-rubric-set-summary"),
+    ).toHaveTextContent("待发布评分标准集合 v1");
 
     await testingAct(async () => {
       oldConfirmation.reject(new Error("late assignment A failure"));
@@ -1521,27 +1377,32 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
   );
 
   it.each(["resolve", "reject"] as const)(
-    "ignores a lossless binding that settles after unmount (%s)",
+    "ignores a structured set preparation that settles after unmount (%s)",
     async (outcome) => {
-      const pendingBinding = deferred<{
+      const pendingStructuredSet = deferred<{
         id: string;
+        assignment_id: string;
+        paper_version_id: string;
+        version: number;
         status: string;
-        mapping: never[];
-        conversion_warnings: never[];
-        manual_review_required: boolean;
+        content_hash: string;
+        source_snapshot_hash: string;
+        total_points: string;
       }>();
-      reviewApi.createBinding.mockReturnValueOnce(pendingBinding.promise);
+      reviewApi.createStructuredRubricSet.mockReturnValueOnce(
+        pendingStructuredSet.promise,
+      );
       reviewApi.bundle.mockResolvedValue(
         reviewBundle({
           status: "action_required",
-          binding: null,
+          structuredRubricSet: null,
           confirmations: confirmationKinds.map((kind) => confirmation(kind)),
         }),
       );
 
       const view = renderReview();
       await waitFor(() =>
-        expect(reviewApi.createBinding).toHaveBeenCalledOnce(),
+        expect(reviewApi.createStructuredRubricSet).toHaveBeenCalledOnce(),
       );
       const callsBeforeUnmount = {
         bundle: reviewApi.bundle.mock.calls.length,
@@ -1552,15 +1413,18 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
       view.unmount();
       await testingAct(async () => {
         if (outcome === "resolve") {
-          pendingBinding.resolve({
-            id: "binding-1",
+          pendingStructuredSet.resolve({
+            id: "set-1",
+            assignment_id: "assignment-1",
+            paper_version_id: "paper-1",
+            version: 1,
             status: "draft",
-            mapping: [],
-            conversion_warnings: [],
-            manual_review_required: false,
+            content_hash: "a".repeat(64),
+            source_snapshot_hash: "b".repeat(64),
+            total_points: "10.00",
           });
         } else {
-          pendingBinding.reject(new Error("late unmounted binding"));
+          pendingStructuredSet.reject(new Error("late unmounted set"));
         }
         await Promise.resolve();
         await Promise.resolve();
@@ -1573,273 +1437,41 @@ describe("AssignmentCentralReview semantic confirmations and compatibility", () 
     },
   );
 
-  it("shows a fresh lossless binding as automatically compatible without a confirmation action", async () => {
+  it("shows the current structured set without any compatibility action", async () => {
     renderReview();
 
-    expect(await screen.findByText("✓ 可自动兼容")).toBeInTheDocument();
     expect(
-      screen.queryByTestId("rubric-binding-loss-confirm"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByText("内容未变，已沿用确认", { exact: false }),
-    ).not.toBeInTheDocument();
+      await screen.findByTestId("structured-rubric-set-summary"),
+    ).toHaveTextContent("待发布评分标准集合 v1");
+    expect(screen.queryByText(/兼容版本/)).not.toBeInTheDocument();
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "确认并发布" })).toBeEnabled(),
     );
-  });
-
-  it.each([
-    [
-      "DEPENDENCY_NOT_LOSSLESS",
-      "兼容版不能自动约束此评分项与前置步骤的关系，批改时需要人工核查先后条件。",
-    ],
-    [
-      "ALTERNATIVE_PATH_NOT_LOSSLESS",
-      "多条可选得分路径会在兼容版中合并展示，批改时需要人工判断学生满足了哪条路径。",
-    ],
-    [
-      "VALIDATION_RULE_NOT_LOSSLESS",
-      "自动验证规则不会在兼容版中执行，批改时需要人工核查答案条件。",
-    ],
-    [
-      "EXPECTED_EVIDENCE_NOT_LOSSLESS",
-      "兼容版不能完整保留该评分项要求查看的证据，批改时需要人工核对学生是否提供了指定依据。",
-    ],
-    [
-      "MANUAL_REVIEW_POLICY_NOT_LOSSLESS",
-      "兼容版不能自动执行该评分项的人工复核策略，批改时需要按原评分标准逐项复核。",
-    ],
-    [
-      "PARTIAL_CREDIT_POLICY_NOT_LOSSLESS",
-      "兼容版不能完整执行该评分项的部分得分规则，批改时需要人工判断应给的部分分。",
-    ],
-    [
-      "ERROR_CATEGORY_NOT_LOSSLESS",
-      "兼容版不能完整保留该评分项的错误分类，批改时需要人工判断学生错误所属类别。",
-    ],
-    [
-      "CRITERION_METADATA_NOT_LOSSLESS",
-      "该评分项包含兼容版无法完整表达的扩展要求，批改时需要对照原评分标准人工核查。",
-    ],
-    [
-      "DEDUCTION_RULE_NOT_LOSSLESS",
-      "兼容版不能自动执行该评分项的结构化扣分规则，批改时需要人工计算扣分。",
-    ],
-    [
-      "COMMON_ERROR_CODES_NOT_LOSSLESS",
-      "兼容版不能完整保留该评分项的多项常见错误标记，批改时需要人工识别对应错误。",
-    ],
-    [
-      "FEEDBACK_TEMPLATE_NOT_LOSSLESS",
-      "兼容版不能自动套用该评分项的反馈模板，批改后需要人工补充相应反馈。",
-    ],
-  ])(
-    "explains the known %s loss in teacher language",
-    async (code, message) => {
-      reviewApi.bundle.mockResolvedValue(
-        reviewBundle({
-          status: "action_required",
-          questions: [questionWithCriterion],
-          confirmations: confirmationKinds.map((kind) => confirmation(kind)),
-          binding: reviewBinding({
-            status: "draft",
-            loss_report: [bindingLoss(code)],
-            manual_review_required: true,
-          }),
-        }),
-      );
-
-      renderReview();
-
-      expect(
-        await screen.findByText("需要教师确认的具体业务损失"),
-      ).toBeInTheDocument();
-      expect(screen.getByText("第 1 题 · 最终答案")).toBeInTheDocument();
-      expect(screen.getByText(message)).toBeInTheDocument();
-      expect(screen.getByTestId("rubric-binding-loss-confirm")).toBeEnabled();
-      expect(
-        screen.getByTestId("rubric-binding-compatibility-summary"),
-      ).not.toHaveTextContent(code);
-      expect(
-        screen.getByTestId("rubric-binding-compatibility-summary"),
-      ).not.toHaveTextContent("structured-to-legacy");
-    },
-  );
-
-  it("renders combined known losses as separate business impacts", async () => {
-    reviewApi.bundle.mockResolvedValue(
-      reviewBundle({
-        status: "action_required",
-        questions: [questionWithCriterion],
-        confirmations: confirmationKinds.map((kind) => confirmation(kind)),
-        binding: reviewBinding({
-          status: "draft",
-          loss_report: [
-            bindingLoss("DEPENDENCY_NOT_LOSSLESS"),
-            bindingLoss("ALTERNATIVE_PATH_NOT_LOSSLESS"),
-            bindingLoss("VALIDATION_RULE_NOT_LOSSLESS"),
-          ],
-          manual_review_required: true,
-        }),
-      }),
-    );
-
-    renderReview();
-
-    expect(
-      await screen.findAllByTestId("rubric-binding-loss-item"),
-    ).toHaveLength(3);
-    expect(
-      screen.getByText(/不能自动约束此评分项与前置步骤/),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/多条可选得分路径/)).toBeInTheDocument();
-    expect(screen.getByText(/自动验证规则不会/)).toBeInTheDocument();
-  });
-
-  it("shows a completed state after the teacher confirms known lossy compatibility", async () => {
-    reviewApi.bundle.mockResolvedValue(
-      reviewBundle({
-        questions: [questionWithCriterion],
-        confirmations: [
-          ...confirmationKinds.map((kind) => confirmation(kind)),
-          confirmation("legacy_binding"),
-        ],
-        binding: reviewBinding({
-          status: "confirmed",
-          loss_report: [bindingLoss("VALIDATION_RULE_NOT_LOSSLESS")],
-          manual_review_required: true,
-        }),
-      }),
-    );
-
-    renderReview();
-
-    expect(
-      await screen.findByText("✓ 已确认按上述人工核查方式使用兼容版"),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByTestId("rubric-binding-loss-confirm"),
-    ).not.toBeInTheDocument();
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "确认并发布" })).toBeEnabled(),
-    );
-  });
-
-  it("fails closed for an unknown loss and exposes it only in closed technical details", async () => {
-    reviewApi.bundle.mockResolvedValue(
-      reviewBundle({
-        status: "action_required",
-        questions: [questionWithCriterion],
-        confirmations: confirmationKinds.map((kind) => confirmation(kind)),
-        binding: reviewBinding({
-          status: "draft",
-          loss_report: [bindingLoss("UNKNOWN_LOSS")],
-          manual_review_required: true,
-        }),
-      }),
-    );
-
-    renderReview();
-
-    const summary = await screen.findByTestId(
-      "rubric-binding-compatibility-summary",
-    );
-    expect(summary).toHaveTextContent("存在尚无法安全说明的兼容差异");
-    expect(summary).not.toHaveTextContent("UNKNOWN_LOSS");
-    expect(
-      screen.queryByTestId("rubric-binding-loss-confirm"),
-    ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "确认并发布" })).toBeDisabled();
-    const details = screen.getByTestId("rubric-binding-technical-details");
-    expect(details).not.toHaveAttribute("open");
-    expect(details).toHaveTextContent("UNKNOWN_LOSS");
-  });
-
-  it("keeps legacy binding fresh for the new review instead of presenting it as inherited", async () => {
-    reviewApi.bundle.mockResolvedValue(
-      reviewBundle({
-        confirmations: [
-          ...confirmationKinds.map((kind) =>
-            confirmation(kind, { origin: "inherited", inherited: true }),
-          ),
-          confirmation("legacy_binding", { origin: "system_auto" }),
-        ],
-      }),
-    );
-
-    renderReview();
-
-    expect(await screen.findByText("常规内容已自动核对")).toBeInTheDocument();
-    expect(screen.getByText("✓ 可自动兼容")).toBeInTheDocument();
-    expect(screen.getByTestId("rubric-binding-automatic")).toHaveTextContent(
-      "本次重新生成",
-    );
-    expect(
-      screen.getByTestId("rubric-binding-automatic"),
-    ).not.toHaveTextContent("内容未变，已沿用确认");
-    const details = screen.getByTestId("rubric-binding-technical-details");
-    expect(details).not.toHaveAttribute("open");
-    expect(details).toHaveTextContent("system_auto");
   });
 });
 
 describe("AssignmentCentralReview fail-closed publication contract", () => {
   it.each([
+    ["missing set", null],
     [
-      "mismatched source binding hash",
-      { expected_source_binding_hash: "e".repeat(64) },
-      {},
+      "stale set",
+      reviewStructuredRubricSet({ status: "stale", current: false }),
     ],
     [
-      "mismatched semantic and source hashes",
-      { source_semantic_hash: "e".repeat(64) },
-      {},
+      "server-declared drift",
+      reviewStructuredRubricSet({
+        current: false,
+        reason: "STRUCTURED_SET_CONTENT_HASH_MISMATCH",
+      }),
     ],
-    ["mismatched confirmation binding id", {}, { binding_id: "binding-other" }],
-    [
-      "mismatched confirmation source hash",
-      {},
-      { source_binding_hash: "e".repeat(64) },
-    ],
-    ["nullable migrated projection profile", { projection_profile: null }, {}],
-    ["nullable migrated semantic hash", { source_semantic_hash: null }, {}],
-    ["nullable migrated loss report", { loss_report: null }, {}],
-    [
-      "missing server projection evidence",
-      { projection_current: undefined, projection_reason: undefined },
-      {},
-    ],
-    [
-      "missing server confirmation association",
-      {},
-      { binding_id: undefined, source_binding_hash: undefined },
-    ],
-    ["lossless human confirmation", {}, { origin: "origin", inherited: false }],
-    [
-      "missing inherited flag",
-      {},
-      { origin: "system_auto", inherited: undefined },
-    ],
-    ["stale binding", { status: "stale" }, {}],
-    [
-      "unknown loss code",
-      {
-        loss_report: [bindingLoss("FUTURE_UNKNOWN_LOSS")],
-        manual_review_required: true,
-      },
-      { origin: "origin", inherited: false },
-    ],
-  ])(
-    "blocks a malicious ready Bundle with %s",
-    async (_label, bindingOverrides, confirmationOverrides) => {
+  ] as const)(
+    "blocks a ready Bundle with %s",
+    async (_label, structuredRubricSet) => {
       reviewApi.bundle.mockResolvedValue(
         reviewBundle({
           status: "ready_to_publish",
-          confirmations: [
-            ...confirmationKinds.map((kind) => confirmation(kind)),
-            confirmation("legacy_binding", confirmationOverrides as never),
-          ],
-          binding: reviewBinding(bindingOverrides as never),
+          confirmations: confirmationKinds.map((kind) => confirmation(kind)),
+          structuredRubricSet,
         }),
       );
 
@@ -1884,7 +1516,7 @@ describe("AssignmentCentralReview fail-closed publication contract", () => {
       items: [
         reviewItem({
           issue_code: "FUTURE_PRIVATE_BLOCKER",
-          message: "internal table assignment_projection failed",
+          message: "internal table future_runtime failed",
         }),
       ],
     });
@@ -1896,15 +1528,13 @@ describe("AssignmentCentralReview fail-closed publication contract", () => {
       screen.getByText("系统发现一项需要确认的问题，请查看说明并完成处理。"),
     ).toBeInTheDocument();
     expect(
-      screen.queryByText("internal table assignment_projection failed"),
+      screen.queryByText("internal table future_runtime failed"),
     ).not.toBeInTheDocument();
     const details = screen
       .getByText("错误码：FUTURE_PRIVATE_BLOCKER")
       .closest("details");
     expect(details).not.toHaveAttribute("open");
-    expect(details).toHaveTextContent(
-      "internal table assignment_projection failed",
-    );
+    expect(details).toHaveTextContent("internal table future_runtime failed");
   });
 
   it("clears an assignment-mismatched session and exposes no confirmation action", async () => {
@@ -1941,7 +1571,7 @@ describe("AssignmentCentralReview assignment epoch", () => {
           status: "missing_review",
           blockers: [blocker("REVIEW_SESSION_REQUIRED")],
           confirmations: [],
-          binding: null,
+          structuredRubricSet: null,
         }),
       );
     const view = render(
@@ -1979,7 +1609,7 @@ describe("AssignmentCentralReview assignment epoch", () => {
           status: "missing_review",
           blockers: [blocker("REVIEW_SESSION_REQUIRED")],
           confirmations: [],
-          binding: null,
+          structuredRubricSet: null,
         }),
       );
     const view = render(
