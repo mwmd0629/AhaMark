@@ -36,6 +36,13 @@ from app.models import (
     VersionStatus,
     now_utc,
 )
+from app.recognition.pipeline import (
+    DefaultDocumentConverter,
+    PillowPreprocessor,
+    RecognitionError,
+    read_all,
+    store_artifact,
+)
 from app.security.files import UnsafeFile, inspect_upload, safe_filename
 from app.storage.base import ObjectStorage
 from app.storage.dependencies import get_storage
@@ -136,6 +143,11 @@ class RegionInput(BaseModel):
         ):
             raise ValueError("区域必须位于 0..1 页面坐标内")
         return self
+
+
+class QuestionCutInput(BaseModel):
+    question: QuestionInput
+    region: RegionInput
 
 
 class RubricInput(BaseModel):
@@ -316,9 +328,7 @@ def detail(db: Session, item: Assignment) -> dict[str, Any]:
         stored_file.id: stored_file.original_name
         for stored_file in (
             db.scalars(
-                select(StoredFile).where(
-                    StoredFile.id.in_({page.stored_file_id for page in pages})
-                )
+                select(StoredFile).where(StoredFile.id.in_({page.stored_file_id for page in pages}))
             ).all()
             if pages
             else []
@@ -989,6 +999,82 @@ def preview(
     return {"url": storage.presigned_get(sf.storage_key, 900)}
 
 
+@router.post("/{assignment_id}/pages/{page_id}/preview")
+def page_preview(
+    assignment_id: uuid.UUID,
+    page_id: uuid.UUID,
+    db: Db,
+    actor: Actor,
+    storage: Storage,
+) -> dict[str, Any]:
+    item = owned(db, actor.id, assignment_id)
+    page = db.scalar(
+        select(PaperPage)
+        .join(PaperVersion)
+        .where(PaperPage.id == page_id, PaperVersion.assignment_id == item.id)
+    )
+    if page is None:
+        raise ApiProblem(404, "PAGE_NOT_FOUND", "页面不存在")
+    if page.status == "pending_conversion":
+        raise ApiProblem(409, "PAGE_NOT_READY", "页面仍在转换，暂时不能切题")
+    source = db.get(StoredFile, page.stored_file_id)
+    if source is None:
+        raise ApiProblem(404, "FILE_NOT_FOUND", "页面原文件不存在")
+
+    preview_prefix = f"assignments/{actor.id}/{item.id}/{page.paper_version_id}/page-previews/"
+    key = f"{preview_prefix}{page.id}-r{page.rotation}.png"
+    cached = False
+    try:
+        storage.stat(key)
+        cached = page.width is not None and page.height is not None
+    except Exception:
+        cached = False
+
+    if not cached:
+        try:
+            original = DefaultDocumentConverter(get_settings()).convert(
+                read_all(storage.get(source.storage_key)),
+                source.content_type,
+                page.source_page_number or 1,
+            )
+            rendered = PillowPreprocessor().process(
+                original,
+                {
+                    "rotation": page.rotation,
+                    "denoise": False,
+                    "contrast": False,
+                },
+            )
+            store_artifact(storage, key, rendered)
+        except RecognitionError as exc:
+            raise ApiProblem(422, exc.code, str(exc)) from exc
+        except Exception as exc:
+            raise ApiProblem(503, "PAGE_PREVIEW_FAILED", "页面预览生成失败") from exc
+        page.width = original.width
+        page.height = original.height
+
+    previous_preview_key = page.preview_storage_key
+    page.preview_storage_key = key
+    if not cached or previous_preview_key != key:
+        db.commit()
+    if previous_preview_key != key:
+        if previous_preview_key and previous_preview_key.startswith(preview_prefix):
+            try:
+                storage.delete(previous_preview_key)
+            except Exception:
+                pass
+
+    assert page.width is not None and page.height is not None
+    width, height = page.width, page.height
+    if page.rotation in {90, 270}:
+        width, height = height, width
+    return {
+        "url": storage.presigned_get(key, 900),
+        "width": width,
+        "height": height,
+    }
+
+
 @router.patch("/{assignment_id}/pages/{page_id}")
 def patch_page(
     assignment_id: uuid.UUID, page_id: uuid.UUID, data: PagePatch, db: Db, actor: Actor
@@ -1049,6 +1135,19 @@ def create_question(
         db.add(pv)
         db.flush()
         item.active_paper_version_id = pv.id
+    q = insert_question(db, actor.id, item, pv, data)
+    audit(db, actor.id, "question.create", "question", q.id)
+    db.commit()
+    return question_json(db, q)
+
+
+def insert_question(
+    db: Session,
+    actor_id: uuid.UUID,
+    item: Assignment,
+    pv: PaperVersion,
+    data: QuestionInput,
+) -> Question:
     if data.question_type not in QUESTION_TYPES:
         raise ApiProblem(422, "QUESTION_TYPE_INVALID", "题型无效")
     order = (
@@ -1065,10 +1164,8 @@ def create_question(
     )
     db.add(q)
     db.flush()
-    set_kps(db, actor.id, item, q, data.knowledge_points)
-    audit(db, actor.id, "question.create", "question", q.id)
-    db.commit()
-    return question_json(db, q)
+    set_kps(db, actor_id, item, q, data.knowledge_points)
+    return q
 
 
 def set_kps(
@@ -1152,6 +1249,46 @@ def reorder_questions(
     audit(db, actor.id, "questions.reorder", "assignment", item.id)
     db.commit()
     return detail(db, item)
+
+
+@router.post("/{assignment_id}/pages/{page_id}/question-cuts", status_code=201)
+def create_question_cut(
+    assignment_id: uuid.UUID,
+    page_id: uuid.UUID,
+    data: QuestionCutInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    item = owned(db, actor.id, assignment_id)
+    if item.status != AssignmentStatus.draft:
+        raise ApiProblem(409, "ASSIGNMENT_LOCKED", "只能为草稿切分题目")
+    pv = paper(db, item)
+    page = db.scalar(
+        select(PaperPage)
+        .join(PaperVersion)
+        .where(PaperPage.id == page_id, PaperVersion.assignment_id == item.id)
+    )
+    if pv is None or page is None or page.paper_version_id != pv.id:
+        raise ApiProblem(422, "REGION_TARGET_INVALID", "页面不属于当前试卷版本")
+    if page.status != "ready":
+        raise ApiProblem(409, "PAGE_NOT_READY", "页面当前不能用于切题")
+    if data.region.paper_page_id != page.id:
+        raise ApiProblem(422, "REGION_TARGET_INVALID", "框选区域与当前页面不一致")
+
+    question = insert_question(db, actor.id, item, pv, data.question)
+    region = QuestionRegion(question_id=question.id, source="manual", **data.region.model_dump())
+    db.add(region)
+    db.flush()
+    audit(
+        db,
+        actor.id,
+        "question.cut.create",
+        "question",
+        question.id,
+        {"paper_page_id": str(page.id), "question_region_id": str(region.id)},
+    )
+    db.commit()
+    return question_json(db, question, [region])
 
 
 @router.post("/{assignment_id}/questions/{question_id}/regions", status_code=201)

@@ -438,6 +438,11 @@ export const assignmentsApi = {
     request<{ url: string }>(`/api/assignments/${id}/files/${fileId}/preview`, {
       method: "POST",
     }),
+  pagePreview: (id: string, pageId: string) =>
+    request<{ url: string; width: number; height: number }>(
+      `/api/assignments/${id}/pages/${pageId}/preview`,
+      { method: "POST" },
+    ),
   page: (id: string, pageId: string, data: Record<string, unknown>) =>
     request(`/api/assignments/${id}/pages/${pageId}`, {
       method: "PATCH",
@@ -462,6 +467,15 @@ export const assignmentsApi = {
       `/api/assignments/${id}/questions/${questionId}/regions`,
       { method: "POST", body: JSON.stringify(data) },
     ),
+  cutQuestion: (id: string, pageId: string, data: Record<string, unknown>) =>
+    request<QuestionRecord>(
+      `/api/assignments/${id}/pages/${pageId}/question-cuts`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+  removeQuestion: (id: string, questionId: string) =>
+    request<void>(`/api/assignments/${id}/questions/${questionId}`, {
+      method: "DELETE",
+    }),
   rubric: (id: string, questionId: string, data: Record<string, unknown>) =>
     request<AssignmentRecord>(`/api/assignments/${id}/rubrics/${questionId}`, {
       method: "PUT",

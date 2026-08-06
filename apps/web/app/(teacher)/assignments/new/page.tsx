@@ -37,7 +37,7 @@ export default function NewAssignmentPage() {
     <div className="space-y-6">
       <PageHeader
         title="创建作业"
-        description="填写最少信息即可保存后端草稿，随后进入六步向导。"
+        description="填写最少信息即可保存后端草稿，随后进入三步向导。"
       />
       <Card className="p-6">
         <form

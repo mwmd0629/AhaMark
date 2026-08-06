@@ -9,10 +9,6 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AssignmentWizard } from "./assignment-wizard";
 import { assignmentsApi } from "@/lib/api";
 
-vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn() }),
-}));
-
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
   const question = (id: string, number: string) => ({
@@ -49,7 +45,23 @@ vi.mock("@/lib/api", async () => {
         rotation: 0 as const,
         status: "ready",
       })),
-      questions: [question("q1", "1"), question("q2", "2")],
+      questions: [
+        {
+          ...question("q1", "1"),
+          regions: [
+            {
+              id: "region-1",
+              paper_page_id: "page-1",
+              x: "0.1",
+              y: "0.15",
+              width: "0.8",
+              height: "0.2",
+              source: "manual" as const,
+            },
+          ],
+        },
+        question("q2", "2"),
+      ],
     },
     rubric_version: {
       id: "rubric-1",
@@ -77,11 +89,6 @@ vi.mock("@/lib/api", async () => {
       ...actual.classesApi,
       list: vi.fn().mockResolvedValue({ items: [] }),
     },
-    assignmentGenerationApi: {
-      ...actual.assignmentGenerationApi,
-      listJobs: vi.fn().mockResolvedValue([]),
-      listRevisions: vi.fn().mockResolvedValue([]),
-    },
     assignmentsApi: {
       ...actual.assignmentsApi,
       get: vi.fn().mockResolvedValue(assignment),
@@ -98,7 +105,29 @@ vi.mock("@/lib/api", async () => {
       preview: vi.fn().mockResolvedValue({
         url: "https://example.test/paper.pdf?signature=1",
       }),
+      pagePreview: vi.fn().mockResolvedValue({
+        url: "https://example.test/page.png?signature=1",
+        width: 100,
+        height: 200,
+      }),
       page: vi.fn().mockResolvedValue({}),
+      removeQuestion: vi.fn().mockResolvedValue(undefined),
+      cutQuestion: vi.fn().mockResolvedValue({
+        ...question("q3", "3"),
+        max_score: "5.00",
+        content_text: "新切分题目",
+        regions: [
+          {
+            id: "region-3",
+            paper_page_id: "page-1",
+            x: "0.1",
+            y: "0.1",
+            width: "0.7",
+            height: "0.4",
+            source: "manual",
+          },
+        ],
+      }),
     },
   };
 });
@@ -112,9 +141,7 @@ it("回填标准答案并在切换题目时同步更新", async () => {
   expect(
     await screen.findByDisplayValue("第一题已保存答案"),
   ).toBeInTheDocument();
-  expect(
-    screen.getByText(/由 Codex 生成可编辑草稿，不能直接发布作业/),
-  ).toBeInTheDocument();
+  expect(screen.queryByText(/Codex 草稿生成/)).not.toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("当前题目"), {
     target: { value: "q2" },
   });
@@ -126,7 +153,7 @@ it("回填标准答案并在切换题目时同步更新", async () => {
 it("支持拖拽上传并显示文件、处理状态和成功页数", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" />);
   await screen.findByDisplayValue("第一题已保存答案");
-  fireEvent.click(screen.getByRole("button", { name: /上传试卷/ }));
+  fireEvent.click(screen.getByRole("button", { name: /上传与整理页面/ }));
   const file = new File(["paper"], "新试卷.pdf", {
     type: "application/pdf",
   });
@@ -151,7 +178,7 @@ it("支持拖拽上传并显示文件、处理状态和成功页数", async () =
 it("拒绝非法格式并允许重新选择", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" />);
   await screen.findByDisplayValue("第一题已保存答案");
-  fireEvent.click(screen.getByRole("button", { name: /上传试卷/ }));
+  fireEvent.click(screen.getByRole("button", { name: /上传与整理页面/ }));
   fireEvent.drop(screen.getByRole("button", { name: "上传试卷文件" }), {
     dataTransfer: {
       files: [
@@ -168,13 +195,123 @@ it("拒绝非法格式并允许重新选择", async () => {
 it("切换缩略图时同步当前页面高亮和大图", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" />);
   await screen.findByDisplayValue("第一题已保存答案");
-  fireEvent.click(screen.getByRole("button", { name: /整理页面/ }));
+  fireEvent.click(screen.getByRole("button", { name: /上传与整理页面/ }));
   const page2 = await screen.findByRole("button", { name: /第 2 页/ });
   fireEvent.click(page2);
   expect(page2).toHaveAttribute("aria-current", "page");
-  const preview = screen.getByTitle("第 2 页大图预览");
+  const preview = await screen.findByAltText("第 2 页切题预览");
   expect(preview).toBeInTheDocument();
-  expect(preview).toHaveAttribute("src", expect.stringContaining("#page=2"));
+  expect(preview).toHaveAttribute("src", expect.stringContaining("page.png"));
+});
+
+it("支持在逐页预览上拖拽框选并保存为新题目", async () => {
+  render(<AssignmentWizard assignmentId="assignment-1" />);
+  await screen.findByDisplayValue("第一题已保存答案");
+  fireEvent.click(screen.getByRole("button", { name: /上传与整理页面/ }));
+
+  const canvas = await screen.findByRole("application", {
+    name: "题目切割画布",
+  });
+  fireEvent.load(screen.getByAltText("第 1 页切题预览"));
+  expect(canvas).toHaveAttribute("aria-disabled", "false");
+  vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({
+    x: 0,
+    y: 0,
+    left: 0,
+    top: 0,
+    right: 200,
+    bottom: 400,
+    width: 200,
+    height: 400,
+    toJSON: () => ({}),
+  });
+
+  fireEvent.pointerDown(canvas, {
+    pointerId: 1,
+    button: 0,
+    isPrimary: true,
+    clientX: 20,
+    clientY: 40,
+  });
+  fireEvent.pointerMove(canvas, {
+    pointerId: 1,
+    clientX: 160,
+    clientY: 200,
+  });
+  fireEvent.pointerUp(canvas, {
+    pointerId: 1,
+    clientX: 160,
+    clientY: 200,
+  });
+  expect(screen.getByTestId("draft-question-region")).toBeInTheDocument();
+
+  fireEvent.change(screen.getByLabelText("分值"), {
+    target: { value: "5" },
+  });
+  fireEvent.change(screen.getByLabelText("题目内容（可选）"), {
+    target: { value: "新切分题目" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "保存为新题目" }));
+
+  await waitFor(() =>
+    expect(assignmentsApi.cutQuestion).toHaveBeenCalledWith(
+      "assignment-1",
+      "page-1",
+      expect.objectContaining({
+        question: expect.objectContaining({
+          question_number: "3",
+          max_score: 5,
+        }),
+        region: expect.objectContaining({
+          paper_page_id: "page-1",
+          x: 0.1,
+          y: 0.1,
+          width: 0.7,
+          height: 0.4,
+        }),
+      }),
+    ),
+  );
+});
+
+it("页面图片未加载时禁止框选，并可删除误切题目", async () => {
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<AssignmentWizard assignmentId="assignment-1" />);
+  await screen.findByDisplayValue("第一题已保存答案");
+  fireEvent.click(screen.getByRole("button", { name: /上传与整理页面/ }));
+
+  const canvas = await screen.findByRole("application", {
+    name: "题目切割画布",
+  });
+  expect(canvas).toHaveAttribute("aria-disabled", "true");
+  fireEvent.pointerDown(canvas, {
+    pointerId: 2,
+    button: 0,
+    clientX: 20,
+    clientY: 40,
+  });
+  expect(screen.queryByTestId("draft-question-region")).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "删除该题" }));
+  await waitFor(() =>
+    expect(assignmentsApi.removeQuestion).toHaveBeenCalledWith(
+      "assignment-1",
+      "q1",
+    ),
+  );
+});
+
+it("只显示精简后的三步向导", async () => {
+  render(<AssignmentWizard assignmentId="assignment-1" />);
+  await screen.findByDisplayValue("第一题已保存答案");
+
+  const navigation = screen.getByRole("list", { name: "创建步骤" });
+  expect(navigation).toHaveTextContent("基本信息");
+  expect(navigation).toHaveTextContent("上传与整理页面");
+  expect(navigation).toHaveTextContent("评分标准");
+  expect(navigation).not.toHaveTextContent("编辑题目");
+  expect(navigation).not.toHaveTextContent("集中审查与发布");
+  expect(screen.queryByText("Codex 草稿生成")).not.toBeInTheDocument();
 });
 
 it("无截止时间保存为 null，回显时保持无截止时间", async () => {

@@ -16,6 +16,12 @@ import {
 } from "@/components/ui";
 import { ApiError, assignmentsApi, type AssignmentRecord } from "@/lib/api";
 
+function displayedWizardStep(nextStep: number) {
+  if (nextStep <= 1) return 1;
+  if (nextStep <= 3) return 2;
+  return 3;
+}
+
 export default function AssignmentsPage() {
   const [items, setItems] = useState<AssignmentRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -128,7 +134,7 @@ export default function AssignmentsPage() {
                   <td className="px-4 py-4">
                     {item.completeness.ready
                       ? "可发布"
-                      : `待完成步骤 ${item.completeness.next_step}`}
+                      : `待完成步骤 ${displayedWizardStep(item.completeness.next_step)}`}
                   </td>
                   <td className="px-4 py-4">
                     <Badge status={item.status} />

@@ -11,7 +11,7 @@ const guides = [
   },
   {
     title: "创建作业",
-    description: "上传试卷、确认题目、设置 Rubric 并完成发布检查。",
+    description: "填写基本信息、上传并整理试卷、设置已有题目的评分标准。",
     href: "/assignments",
     icon: "assignments",
   },

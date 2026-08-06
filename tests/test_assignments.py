@@ -193,6 +193,77 @@ def test_file_pages_question_region_rubric_and_publish():
     app.dependency_overrides.pop(get_storage, None)
 
 
+def test_page_preview_and_atomic_question_cut():
+    actor, db = actor_and_db()
+    from app.storage.dependencies import get_storage
+
+    fake = FakeStorage()
+    app.dependency_overrides[get_storage] = lambda: fake
+    cls = active_class(db, actor.id, "切题测试班")
+    item = create(client, cls.id)
+    aid = item["id"]
+    png = io.BytesIO()
+    Image.new("RGB", (100, 200), "white").save(png, "PNG")
+    upload = client.post(
+        f"/api/assignments/{aid}/files",
+        files={"file": ("cut-paper.png", png.getvalue(), "image/png")},
+    )
+    assert upload.status_code == 201
+    page = client.get(f"/api/assignments/{aid}").json()["paper_version"]["pages"][0]
+
+    preview = client.post(f"/api/assignments/{aid}/pages/{page['id']}/preview")
+    assert preview.status_code == 200
+    assert preview.json()["width"] == 100 and preview.json()["height"] == 200
+    assert preview.json()["url"].endswith(f"{page['id']}-r0.png")
+
+    rotated = client.patch(f"/api/assignments/{aid}/pages/{page['id']}", json={"rotation": 90})
+    assert rotated.status_code == 200
+    rotated_preview = client.post(f"/api/assignments/{aid}/pages/{page['id']}/preview")
+    assert rotated_preview.status_code == 200
+    assert rotated_preview.json()["width"] == 200
+    assert rotated_preview.json()["height"] == 100
+    assert rotated_preview.json()["url"].endswith(f"{page['id']}-r90.png")
+    assert not any(key.endswith(f"{page['id']}-r0.png") for key in fake.objects)
+    assert any(key.endswith(f"{page['id']}-r90.png") for key in fake.objects)
+
+    cut_payload = {
+        "question": {
+            "question_number": "1",
+            "question_type": "calculation",
+            "max_score": 5,
+            "content_text": "计算函数值",
+            "difficulty": "medium",
+            "knowledge_points": ["一次函数"],
+        },
+        "region": {
+            "paper_page_id": page["id"],
+            "x": 0.1,
+            "y": 0.2,
+            "width": 0.7,
+            "height": 0.3,
+            "region_type": "question",
+        },
+    }
+    cut = client.post(
+        f"/api/assignments/{aid}/pages/{page['id']}/question-cuts",
+        json=cut_payload,
+    )
+    assert cut.status_code == 201, cut.text
+    assert cut.json()["question_number"] == "1"
+    assert cut.json()["regions"][0]["paper_page_id"] == page["id"]
+    assert cut.json()["regions"][0]["source"] == "manual"
+
+    before = db.query(Question).count()
+    bad_payload = {**cut_payload, "question": {**cut_payload["question"], "question_type": "bad"}}
+    bad = client.post(
+        f"/api/assignments/{aid}/pages/{page['id']}/question-cuts",
+        json=bad_payload,
+    )
+    assert bad.status_code == 422
+    assert db.query(Question).count() == before
+    app.dependency_overrides.pop(get_storage, None)
+
+
 def test_upload_rejections():
     actor, db = actor_and_db()
     from app.storage.dependencies import get_storage
