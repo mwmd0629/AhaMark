@@ -5,18 +5,13 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
+import { requireSyntheticMutationGuard } from "./synthetic_browser_guard.mjs";
 
-const base = process.env.BUSINESS_E2E_WEB_URL ?? "http://localhost:3300";
-const apiBase = (
-  process.env.BUSINESS_E2E_API_URL ?? "http://localhost:8800"
-).replace(/\/+$/, "");
-const parsedApiBase = new URL(apiBase);
-assert.ok(
-  ["http:", "https:"].includes(parsedApiBase.protocol),
-  "BUSINESS_E2E_API_URL must use http: or https:",
-);
-const apiOrigin = parsedApiBase.origin;
-const email =
+const configuredWebUrl =
+  process.env.BUSINESS_E2E_WEB_URL ?? "http://localhost:3300";
+const configuredApiUrl =
+  process.env.BUSINESS_E2E_API_URL ?? "http://localhost:8800";
+const configuredEmail =
   process.env.BUSINESS_E2E_TEACHER_EMAIL ??
   "teacher@business-e2e.synthetic.invalid";
 const password =
@@ -24,15 +19,42 @@ const password =
 const codexLocalInternalToken =
   process.env.BUSINESS_E2E_CODEX_LOCAL_INTERNAL_TOKEN ??
   "phase3-business-e2e-codex-local-token-2026-only";
-assert.ok(
-  codexLocalInternalToken.length >= 32,
-  "BUSINESS_E2E_CODEX_LOCAL_INTERNAL_TOKEN must be at least 32 characters",
-);
 const runPrefix = process.env.BUSINESS_E2E_RUN_PREFIX ?? "business-e2e";
 const markerSuffix =
   process.env.BUSINESS_E2E_MARKER_SUFFIX ?? "business-e2e.synthetic.invalid";
 const composeProject =
   process.env.BUSINESS_E2E_COMPOSE_PROJECT ?? "ahamark-business-e2e";
+const composeFile =
+  process.env.BUSINESS_E2E_COMPOSE_FILE ?? "docker-compose.business-e2e.yml";
+const dockerContext =
+  process.env.BUSINESS_E2E_DOCKER_CONTEXT ?? "desktop-linux";
+const syntheticGuard = requireSyntheticMutationGuard({
+  allowSyntheticMutations: process.env.ALLOW_SYNTHETIC_MUTATIONS,
+  teacherEmail: configuredEmail,
+  targets: [
+    {
+      name: "BUSINESS_E2E_WEB_URL",
+      value: configuredWebUrl,
+      policy: "business_web",
+    },
+    {
+      name: "BUSINESS_E2E_API_URL",
+      value: configuredApiUrl,
+      policy: "business_api",
+    },
+  ],
+  composeProject,
+  runPrefix,
+  markerSuffix,
+});
+const base = syntheticGuard.origins.BUSINESS_E2E_WEB_URL;
+const apiBase = syntheticGuard.origins.BUSINESS_E2E_API_URL;
+const apiOrigin = apiBase;
+const email = syntheticGuard.teacherEmail;
+assert.ok(
+  codexLocalInternalToken.length >= 32,
+  "BUSINESS_E2E_CODEX_LOCAL_INTERNAL_TOKEN must be at least 32 characters",
+);
 const exceptionBootstrap = process.env.BUSINESS_E2E_EXCEPTION_BOOTSTRAP === "1";
 const skipDbProvenance = process.env.BUSINESS_E2E_SKIP_DB_PROVENANCE === "1";
 const singleContinueProof = true;
@@ -67,27 +89,38 @@ const worktreeStatus = execFileSync(
 const trackedDiff = execFileSync("git", ["diff", "--binary", "HEAD", "--"], {
   encoding: "buffer",
 });
+function composeArgs(...args) {
+  return [
+    "--context",
+    dockerContext,
+    "compose",
+    "-p",
+    composeProject,
+    "-f",
+    composeFile,
+    ...args,
+  ];
+}
 function composeImageId(service) {
   try {
     const containerId = execFileSync(
       "docker",
-      [
-        "compose",
-        "-p",
-        composeProject,
-        "-f",
-        "docker-compose.business-e2e.yml",
-        "ps",
-        "-q",
-        service,
-      ],
+      composeArgs("ps", "-q", service),
       { encoding: "utf8" },
     ).trim();
     if (!containerId) return null;
     return (
-      execFileSync("docker", ["inspect", "--format={{.Image}}", containerId], {
-        encoding: "utf8",
-      }).trim() || null
+      execFileSync(
+        "docker",
+        [
+          "--context",
+          dockerContext,
+          "inspect",
+          "--format={{.Image}}",
+          containerId,
+        ],
+        { encoding: "utf8" },
+      ).trim() || null
     );
   } catch {
     return null;
@@ -117,7 +150,10 @@ const evidence = {
   },
   environment: {
     kind: "isolated_compose",
+    synthetic_guard: syntheticGuard.evidence,
     compose_project: composeProject,
+    compose_file: composeFile,
+    docker_context: dockerContext,
     web_origin: base,
     api_origin: apiOrigin,
     data_policy: "synthetic_only",
@@ -649,21 +685,18 @@ async function confirmFileAnalyses(revisionId) {
             teacher_confirmed_role: item.teacher_confirmed_role,
             teacher_confirmed_answer_source:
               item.teacher_confirmed_answer_source,
-            effective_role:
-              item.teacher_confirmed_role ?? item.suggested_role,
+            effective_role: item.teacher_confirmed_role ?? item.suggested_role,
             effective_answer_source:
               item.teacher_confirmed_answer_source ??
               item.suggested_answer_source,
             adoption:
-              item.analysis_status === "confirmed"
-                ? "teacher"
-                : "system_auto",
+              item.analysis_status === "confirmed" ? "teacher" : "system_auto",
             teacher_edit_version: item.teacher_edit_version,
           })),
           writes,
         },
-          state: `checked=${files.length}/manual-pending=0`,
-        };
+        state: `checked=${files.length}/manual-pending=0`,
+      };
     }
     const fileAnalysisRegion = page.locator("details#generation-file-analysis");
     await pollUntil("file analysis details expanded", 20_000, async () => {
@@ -783,7 +816,7 @@ async function getReviewBundle(assignmentId, label) {
     `/api/assignments/${assignmentId}/review-bundle`,
   );
   const bundle = assertApiOk(response, `${label} bundle GET`);
-  assert.equal(bundle.schema_version, "assignment-review-bundle-v1");
+  assert.equal(bundle.schema_version, "assignment-review-bundle-v2");
   assert.equal(bundle.assignment_id, assignmentId);
   assert.ok(Array.isArray(bundle.confirmations));
   return {
@@ -963,7 +996,10 @@ function assertCurrentStructuredRubricSet(session, rubricSet, bundle) {
   assert.equal(bundle.structured_rubric_set.reason, null);
   assert.equal(bundle.structured_rubric_set.status, rubricSet.status);
   assert.equal(bundle.structured_rubric_set.version, rubricSet.version);
-  assert.equal(bundle.structured_rubric_set.content_hash, rubricSet.content_hash);
+  assert.equal(
+    bundle.structured_rubric_set.content_hash,
+    rubricSet.content_hash,
+  );
   assert.equal(
     bundle.structured_rubric_set.source_snapshot_hash,
     rubricSet.source_snapshot_hash,
@@ -1167,31 +1203,6 @@ function assertDecimalStringsEqual(actual, expected, message) {
   );
 }
 
-async function selectQuestion(number) {
-  const select = page.getByLabel("当前题目");
-  const options = await select.locator("option").evaluateAll((nodes) =>
-    nodes.map((node) => ({
-      value: node.getAttribute("value"),
-      text: node.textContent,
-    })),
-  );
-  const option = options.find((item) =>
-    item.text?.replace(/\s+/g, " ").includes(`第 ${number} 题`),
-  );
-  if (!option?.value) throw new Error(`QUESTION_OPTION_${number}_NOT_FOUND`);
-  await select.selectOption(option.value);
-  if ((await select.inputValue()) !== option.value)
-    throw new Error(`QUESTION_OPTION_${number}_NOT_SELECTED`);
-  await page.locator(`textarea[data-question-id="${option.value}"]`).waitFor();
-  const saveTarget = await page
-    .getByRole("button", { name: "保存本题评分标准" })
-    .getAttribute("data-question-id");
-  if (saveTarget !== option.value)
-    throw new Error(
-      `QUESTION_${number}_SAVE_TARGET_MISMATCH:${option.value}:${saveTarget}`,
-    );
-  return option.value;
-}
 function responseMetadata(response, body = null) {
   return {
     status: response.status(),
@@ -1203,12 +1214,7 @@ function responseMetadata(response, body = null) {
 function syntheticDatabaseJson(sql) {
   const output = execFileSync(
     "docker",
-    [
-      "compose",
-      "-p",
-      composeProject,
-      "-f",
-      "docker-compose.business-e2e.yml",
+    composeArgs(
       "exec",
       "-T",
       "postgres",
@@ -1220,7 +1226,7 @@ function syntheticDatabaseJson(sql) {
       "-tA",
       "-c",
       sql,
-    ],
+    ),
     { encoding: "utf8" },
   ).trim();
   assert.ok(output, "synthetic database verification returned no rows");
@@ -1773,7 +1779,8 @@ try {
   await page.getByLabel("作业名称").fill(assignmentName);
   await page.getByText(className, { exact: true }).click();
   await page.getByRole("button", { name: "保存草稿并继续" }).click();
-  await page.waitForURL("**/assignments/*/edit");
+  await page.waitForURL(/\/assignments\/[^/]+\/edit(?:\?.*)?$/);
+  await page.getByRole("heading", { name: "上传试卷" }).waitFor();
   const assignmentId = page.url().split("/").at(-2);
   evidence.objects.assignment_id = assignmentId;
   evidence.objects.assignment_name = assignmentName;
@@ -1792,31 +1799,33 @@ try {
   evidence.stages.C.status = "passed";
 
   currentStage = "D";
-  await page.goto(`${base}/assignments/${assignmentId}`);
-  await page
-    .locator('[data-testid="recognition-workspace"][data-provider="fake"]')
-    .waitFor();
-  await page.getByRole("button", { name: "开始识别" }).click();
-  await page.getByTestId("recognition-job").waitFor();
-  await page
-    .locator('[data-testid="recognition-job"][data-status="completed"]')
-    .waitFor({ timeout: 90_000 });
-  evidence.objects.paper_recognition_job_id = await page
-    .getByTestId("recognition-job")
-    .getAttribute("data-job-id");
-  await page.getByTestId("recognition-candidate").waitFor();
-  await page.getByLabel("OCR 文字").fill("合成主观题：说明计算过程");
-  await page.getByLabel("分值").fill(exceptionBootstrap ? "" : "5");
-  await clickAndWait(
-    page.getByRole("button", { name: "保存修正" }),
-    "/candidates/",
-  );
-  await clickAndWait(
-    page.getByRole("button", { name: "确认生成题目" }),
-    "/confirm",
-  );
-  stage("D", "paper_ocr_job_and_candidate_visible");
-  stage("D", "candidate_manually_corrected_and_confirmed");
+  if (!singleContinueProof) {
+    await page.goto(`${base}/assignments/${assignmentId}`);
+    await page
+      .locator('[data-testid="recognition-workspace"][data-provider="fake"]')
+      .waitFor();
+    await page.getByRole("button", { name: "开始识别" }).click();
+    await page.getByTestId("recognition-job").waitFor();
+    await page
+      .locator('[data-testid="recognition-job"][data-status="completed"]')
+      .waitFor({ timeout: 90_000 });
+    evidence.objects.paper_recognition_job_id = await page
+      .getByTestId("recognition-job")
+      .getAttribute("data-job-id");
+    await page.getByTestId("recognition-candidate").waitFor();
+    await page.getByLabel("OCR 文字").fill("合成主观题：说明计算过程");
+    await page.getByLabel("分值").fill(exceptionBootstrap ? "" : "5");
+    await clickAndWait(
+      page.getByRole("button", { name: "保存修正" }),
+      "/candidates/",
+    );
+    await clickAndWait(
+      page.getByRole("button", { name: "确认生成题目" }),
+      "/confirm",
+    );
+    stage("D", "paper_ocr_job_and_candidate_visible");
+    stage("D", "candidate_manually_corrected_and_confirmed");
+  }
   if (exceptionBootstrap && !singleContinueProof) {
     await page.goto(`${base}/assignments/${assignmentId}/edit`);
     await page.getByRole("button", { name: /步骤 5/ }).click();
@@ -1835,6 +1844,8 @@ try {
 
   await page.goto(`${base}/assignments/${assignmentId}/edit`);
   await page.getByRole("button", { name: /步骤 4/ }).click();
+  const newQuestionButton = page.getByRole("button", { name: "新增题目" });
+  if (await newQuestionButton.isVisible()) await newQuestionButton.click();
   await page.getByLabel("题号").fill("2");
   await page.getByLabel("题型").selectOption("single_choice");
   await page.getByLabel("分值").fill("5");
@@ -1844,24 +1855,75 @@ try {
   await page.getByText("题目已创建").waitFor();
   await page.getByRole("button", { name: /步骤 4/ }).click();
   await page.getByRole("heading", { name: "为第 2 题添加页面区域" }).waitFor();
+  assert.equal(await page.getByLabel("题号").inputValue(), "2");
+  assert.equal(Number(await page.getByLabel("分值").inputValue()), 5);
+  assert.equal(
+    await page.getByLabel("知识点（逗号分隔）").inputValue(),
+    "合成知识点",
+  );
+  assert.equal(
+    await page.getByLabel("题目内容").inputValue(),
+    "合成客观题：选择正确答案",
+  );
   await page.getByRole("button", { name: "保存区域" }).click();
   await page.getByText("区域已保存").waitFor();
-  const continueRubric = page.getByRole("button", {
-    name: "继续设置评分标准",
-  });
-  if (await continueRubric.isVisible()) await continueRubric.click();
-  else await page.getByRole("heading", { name: "评分标准" }).waitFor();
-  const objectiveQuestionId = await selectQuestion(2);
   if (singleContinueProof) {
-    const assignmentRead = await apiJson(`/api/assignments/${assignmentId}`);
-    const assignmentDetail = assertApiOk(
-      assignmentRead,
-      "assignment detail before deterministic question region",
+    await page.goto(`${base}/assignments/${assignmentId}/edit?step=6`);
+    await page.getByRole("button", { name: "生成完整草稿" }).click();
+    await page.getByText("Generation", { exact: true }).waitFor();
+    await page
+      .getByLabel("生成状态")
+      .getByText(/(?:部分完成|需要教师复核|已完成)/)
+      .waitFor({ timeout: 120_000 });
+    await generationReviewInputs(assignmentId, []);
+    stage("D", "uploaded_file_generation_materialized_question");
+  }
+  const assignmentRead = await apiJson(`/api/assignments/${assignmentId}`);
+  const assignmentDetail = assertApiOk(
+    assignmentRead,
+    "assignment detail after both question regions",
+  );
+  const questionsByNumber = new Map(
+    assignmentDetail.paper_version.questions.map((question) => [
+      Number(question.question_number),
+      question,
+    ]),
+  );
+  const subjectiveQuestion = questionsByNumber.get(1);
+  const objectiveQuestion = questionsByNumber.get(2);
+  assert.ok(subjectiveQuestion?.id, "subjective question must exist");
+  assert.ok(objectiveQuestion?.id, "objective question must exist");
+  if (subjectiveQuestion.max_score === null) {
+    const syntheticScore = await apiJson(
+      `/api/assignments/${assignmentId}/questions/${subjectiveQuestion.id}`,
+      {
+        method: "PATCH",
+        body: {
+          question_number: subjectiveQuestion.question_number,
+          question_type: subjectiveQuestion.question_type,
+          max_score: 5,
+          content_text: subjectiveQuestion.content_text,
+          content_latex: subjectiveQuestion.content_latex,
+          difficulty: subjectiveQuestion.difficulty,
+          parent_question_id: subjectiveQuestion.parent_question_id,
+          knowledge_points: (subjectiveQuestion.knowledge_points ?? []).map(
+            (point) => point.name,
+          ),
+        },
+      },
     );
-    const paperPageId = assignmentDetail.paper_version?.pages?.[0]?.id;
-    assert.ok(paperPageId, "single-continue proof requires a paper page");
-    const deterministicRegion = await apiJson(
-      `/api/assignments/${assignmentId}/questions/${objectiveQuestionId}/regions`,
+    assert.equal(
+      syntheticScore.status,
+      200,
+      `synthetic question score failed: ${syntheticScore.error_code}`,
+    );
+    assert.equal(Number(syntheticScore.body.max_score), 5);
+  }
+  if (subjectiveQuestion.regions.length === 0) {
+    const paperPageId = assignmentDetail.paper_version.pages[0]?.id;
+    assert.ok(paperPageId, "synthetic question region requires a paper page");
+    const syntheticRegion = await apiJson(
+      `/api/assignments/${assignmentId}/questions/${subjectiveQuestion.id}/regions`,
       {
         method: "POST",
         body: {
@@ -1874,24 +1936,14 @@ try {
       },
     );
     assert.equal(
-      deterministicRegion.status,
+      syntheticRegion.status,
       201,
-      `deterministic question region failed: ${deterministicRegion.error_code}`,
+      `synthetic question region failed: ${syntheticRegion.error_code}`,
     );
   }
-  await page.waitForTimeout(250);
-  await page.getByLabel("标准答案").fill("1. 测试题");
-  await clickAndWait(
-    page.getByRole("button", { name: "保存本题评分标准" }),
-    "/rubrics/",
-  );
-  const subjectiveQuestionId = await selectQuestion(1);
-  await page.waitForTimeout(250);
-  await page.getByLabel("标准答案").fill("教师人工判断");
-  await clickAndWait(
-    page.getByRole("button", { name: "保存本题评分标准" }),
-    "/rubrics/",
-  );
+  assert.ok(objectiveQuestion.regions.length > 0, "question 2 needs a region");
+  const subjectiveQuestionId = subjectiveQuestion.id;
+  const objectiveQuestionId = objectiveQuestion.id;
   for (const [questionId, answer] of [
     [subjectiveQuestionId, "教师人工判断"],
     [objectiveQuestionId, "1. 测试题"],
@@ -1908,15 +1960,15 @@ try {
     await page.getByRole("button", { name: "校验并确认" }).click();
     await page.getByText("confirmed", { exact: true }).waitFor();
   }
-  await page.goto(`${base}/assignments/${assignmentId}/edit`);
-  await page.getByRole("button", { name: /步骤 5/ }).click();
-  await page.getByRole("button", { name: "进入发布检查" }).click();
-  await page.getByRole("button", { name: "生成完整草稿" }).click();
-  await page.getByText("Generation", { exact: true }).waitFor();
-  await page
-    .getByLabel("生成状态")
-    .getByText(/(?:部分完成|需要教师复核|已完成)/)
-    .waitFor({ timeout: 120_000 });
+  if (!singleContinueProof) {
+    await page.goto(`${base}/assignments/${assignmentId}/edit?step=6`);
+    await page.getByRole("button", { name: "生成完整草稿" }).click();
+    await page.getByText("Generation", { exact: true }).waitFor();
+    await page
+      .getByLabel("生成状态")
+      .getByText(/(?:部分完成|需要教师复核|已完成)/)
+      .waitFor({ timeout: 120_000 });
+  }
   const generationInputs = await generationReviewInputs(assignmentId, [
     subjectiveQuestionId,
     objectiveQuestionId,
@@ -1934,6 +1986,23 @@ try {
   evidence.generated_suggestion_dispositions = await settleGeneratedSuggestions(
     generationInputs.revisionId,
   );
+  await page.goto(`${base}/assignments/${assignmentId}/edit?step=5`);
+  const questionReviewCards = page
+    .locator('[data-testid^="question-review-card-"]')
+    .filter({ hasText: "题目、答案和评分标准已确认" });
+  await questionReviewCards.nth(1).waitFor();
+  assert.equal(await questionReviewCards.count(), 2);
+  for (const card of await questionReviewCards.all()) {
+    const cardText = await card.innerText();
+    assert.match(cardText, /第 \d+ 题/);
+    assert.ok(cardText.includes("参考答案：已确认"));
+    assert.ok(cardText.includes("评分标准：已确认"));
+  }
+  evidence.question_review_ui = {
+    question_count: await questionReviewCards.count(),
+    fields: ["题号", "分值", "知识点", "题目内容", "参考答案", "评分标准"],
+  };
+  await page.getByRole("button", { name: "进入发布检查" }).click();
   const startCentralReview = page.getByRole("button", {
     name: "开始集中审查",
   });
@@ -1971,23 +2040,46 @@ try {
     structured_rubric_set: null,
     dispositions: {},
   };
-  await page
-    .getByTestId("review-confirmation-classes")
-    .waitFor({ state: "visible" });
-  for (const kind of [
+  const requiredConfirmations = [
     "classes",
     "due_at",
     "total_score",
-    "file_roles",
-    "answer_sources",
-    "paper_version",
     "reference_answers",
     "structured_rubrics",
-  ]) {
-    evidence.central_review.confirmations.push(
-      await ensureReviewConfirmation(reviewSessionId, kind),
-    );
-  }
+  ];
+  const automaticallyConfirmed = await pollUntil(
+    "automatic routine confirmations",
+    30_000,
+    async () => {
+      const current = await getReviewSession(
+        reviewSessionId,
+        "automatic confirmations",
+      );
+      const currentBundle = await getReviewBundle(
+        assignmentId,
+        "automatic confirmations",
+      );
+      const missing = requiredConfirmations.filter(
+        (kind) => !current.session.confirmations.includes(kind),
+      );
+      return {
+        done: missing.length === 0,
+        value: { current, currentBundle },
+        state: `missing=${missing.join(",") || "none"}`,
+      };
+    },
+  );
+  evidence.central_review.confirmations = requiredConfirmations.map((kind) => ({
+    kind,
+    origin: requireCurrentBundleConfirmation(
+      automaticallyConfirmed.currentBundle.bundle,
+      kind,
+    ).origin,
+    reused: true,
+    write_status: null,
+    read_status: automaticallyConfirmed.current.response.status,
+    bundle_read_status: automaticallyConfirmed.currentBundle.response.status,
+  }));
   evidence.central_review.structured_rubric_set =
     await ensureStructuredRubricSet(reviewSessionId);
   evidence.central_review.dispositions.blocking = await drainReviewCount(
@@ -2004,18 +2096,8 @@ try {
     "warning acknowledgement",
     20,
   );
-  const requiredConfirmations = [
-    "classes",
-    "due_at",
-    "total_score",
-    "file_roles",
-    "answer_sources",
-    "paper_version",
-    "reference_answers",
-    "structured_rubrics",
-  ];
-  const preparePublication = page.getByRole("button", {
-    name: "准备发布",
+  const publishButton = page.getByRole("button", {
+    name: "确认并发布",
     exact: true,
   });
   const publicationReady = await pollUntil(
@@ -2035,9 +2117,9 @@ try {
       const uiReady = await page
         .getByText("✓ 已满足发布条件", { exact: true })
         .isVisible();
-      const prepareEnabled =
-        (await preparePublication.count()) > 0 &&
-        (await preparePublication.isEnabled());
+      const publishEnabled =
+        (await publishButton.count()) === 1 &&
+        (await publishButton.isEnabled());
       return {
         done:
           missing.length === 0 &&
@@ -2048,14 +2130,14 @@ try {
           publicationSession.session.counts.blocking === 0 &&
           publicationSession.session.counts.warning === 0 &&
           uiReady &&
-          prepareEnabled,
+          publishEnabled,
         value: {
           publicationSession,
           publicationStructuredSet,
           uiReady,
-          prepareEnabled,
+          publishEnabled,
         },
-        state: `missing=${missing.join(",") || "none"}/set=${publicationStructuredSet.body?.id ?? publicationStructuredSet.status}/current=${publicationStructuredSet.body?.current ?? false}/blocking=${publicationSession.session.counts.blocking}/warning=${publicationSession.session.counts.warning}/ui=${uiReady}/enabled=${prepareEnabled}`,
+        state: `missing=${missing.join(",") || "none"}/set=${publicationStructuredSet.body?.id ?? publicationStructuredSet.status}/current=${publicationStructuredSet.body?.current ?? false}/blocking=${publicationSession.session.counts.blocking}/warning=${publicationSession.session.counts.warning}/ui=${uiReady}/enabled=${publishEnabled}`,
       };
     },
   );
@@ -2074,7 +2156,7 @@ try {
   assert.equal(publicationSession.session.counts.blocking, 0);
   assert.equal(publicationSession.session.counts.warning, 0);
   assert.equal(publicationReady.uiReady, true);
-  assert.equal(publicationReady.prepareEnabled, true);
+  assert.equal(publicationReady.publishEnabled, true);
   evidence.central_review.publication_precondition = {
     session_read_status: publicationSession.response.status,
     session_read_request_id: publicationSession.response.request_id,
@@ -2089,14 +2171,32 @@ try {
     structured_rubric_set_status: publicationStructuredSet.body.status,
     structured_rubric_set_current: publicationStructuredSet.body.current,
     ui_ready_copy: true,
-    prepare_publication_enabled: true,
+    confirm_and_publish_enabled: true,
   };
-  await preparePublication.click();
-  page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "教师确认并发布" }).click();
+  const publicationText = await page.locator("body").innerText();
+  for (const forbidden of [
+    "Legacy binding",
+    "生成兼容版本",
+    "发布兼容版本",
+    "CONFIRM_LEGACY_BINDING_REQUIRED",
+    "LEGACY_BINDING_REQUIRED",
+  ])
+    assert.ok(
+      !publicationText.includes(forbidden),
+      `${forbidden} remains visible`,
+    );
+  const publishResponsePromise = page.waitForResponse(
+    (response) =>
+      response.url().endsWith(`/api/assignments/${assignmentId}/publish`) &&
+      response.request().method() === "POST",
+  );
+  await publishButton.click();
+  const publishResponse = await publishResponsePromise;
+  assert.equal(publishResponse.status(), 200);
   await page.waitForURL(`**/assignments/${assignmentId}`);
   stage("D", "objective_and_subjective_questions_with_positive_scores");
   stage("D", "structured_criteria_knowledge_point_publish_check_and_publish");
+  stage("D", "single_confirm_and_publish_with_no_legacy_publication_ui");
   evidence.stages.D.status = "passed";
 
   currentStage = "E";
@@ -2109,7 +2209,7 @@ try {
   await batchCard.waitFor();
   evidence.objects.grading_batch_id =
     await batchCard.getAttribute("data-batch-id");
-  await batchCard.getByRole("link", { name: "进入批次工作台" }).click();
+  await batchCard.getByRole("link", { name: "打开批次" }).click();
   await page.getByLabel("选择学生作业").setInputFiles(submissionFiles);
   await page.getByRole("button", { name: "上传并自动匹配" }).click();
   await page.getByText(/学生作业已上传/).waitFor();
@@ -2735,6 +2835,11 @@ try {
       assert.equal(answer.result.provider_version, "local");
       assert.equal(answer.result.status, "suggested");
       assert.equal(answer.result.requires_review, true);
+      assert.equal(
+        answer.result.structured_rubric_set_id,
+        publicationStructuredSet.body.id,
+        "grading must stay pinned to the published active Structured Set",
+      );
       initialResults.set(answer.id, {
         answer_id: answer.id,
         answer_status: answer.status,
@@ -3260,29 +3365,66 @@ try {
       initial_result: initialResults.get(verified.id),
     });
   }
-  await page.reload();
-  await page.waitForURL("**/review");
-  const submissionButtons = page
-    .getByRole("navigation", { name: "复核导航" })
-    .locator("button")
-    .filter({ hasText: /^提交/ });
+  async function submitTeacherReview(answerId, button) {
+    const [request] = await Promise.all([
+      page.waitForRequest(
+        (candidate) =>
+          candidate.url().includes(`/student-answers/${answerId}/review`) &&
+          candidate.method() === "PUT",
+      ),
+      button.click(),
+    ]);
+    const response = await request.response();
+    assert.ok(response, "teacher review request must receive a response");
+    assert.equal(response.status(), 200, "teacher review write must succeed");
+    return response;
+  }
   for (let submissionIndex = 0; submissionIndex < 2; submissionIndex++) {
-    await submissionButtons.nth(submissionIndex).click();
-    await page.waitForFunction(
-      (index) =>
-        document
-          .querySelectorAll('nav[aria-label="复核导航"] button')
-          [index]?.className.includes("bg-indigo-50"),
-      submissionIndex,
-    );
-    const answerButtons = page
-      .getByRole("navigation", { name: "复核导航" })
-      .locator("button");
     for (const questionNumber of [1, 2]) {
+      await page.reload();
+      await page.waitForURL("**/review");
+      await page
+        .getByLabel("答案筛选")
+        .getByRole("button", { name: "全部", exact: true })
+        .click();
+      const reviewNavigation = page.getByRole("navigation", {
+        name: "复核导航",
+      });
+      const submissionButtons = reviewNavigation
+        .locator("button")
+        .filter({ hasText: /^学生 \d+$/ });
+      await pollUntil(
+        "stable all-answer review navigation",
+        30_000,
+        async () => ({
+          done: (await submissionButtons.count()) === 2,
+          state: `submission-buttons=${await submissionButtons.count()}`,
+        }),
+      );
+      await submissionButtons
+        .filter({ hasText: new RegExp(`^学生 ${submissionIndex + 1}$`) })
+        .click();
+      const answerButtons = reviewNavigation.locator("button");
+      const expectedAnswer = readAfterWrite.body.items[
+        submissionIndex
+      ].answers.find(
+        (candidate) => Number(candidate.question.number) === questionNumber,
+      );
+      assert.ok(
+        expectedAnswer,
+        `missing workspace answer for submission ${submissionIndex + 1}, question ${questionNumber}`,
+      );
       await answerButtons
         .filter({ hasText: new RegExp(`^第 ${questionNumber} 题`) })
         .click();
       const panel = page.getByTestId("review-answer");
+      await page.waitForFunction(
+        (answerId) =>
+          document
+            .querySelector('[data-testid="review-answer"]')
+            ?.getAttribute("data-answer-id") === answerId,
+        expectedAnswer.id,
+      );
       await panel
         .getByRole("heading", { name: new RegExp(`第 ${questionNumber} 题`) })
         .waitFor();
@@ -3304,17 +3446,10 @@ try {
           "objective answer must have a verified Codex suggestion",
         );
         if (plan.score !== null && plan.requires_review === false) {
-          await Promise.all([
-            page.waitForResponse(
-              (response) =>
-                response
-                  .url()
-                  .includes(`/student-answers/${answerId}/review`) &&
-                response.request().method() === "PUT" &&
-                response.ok(),
-            ),
-            page.getByRole("button", { name: "接受", exact: true }).click(),
-          ]);
+          await submitTeacherReview(
+            answerId,
+            page.getByRole("button", { name: "接受", exact: true }),
+          );
         } else {
           const target = plan.criteria.reduce(
             (sum, criterion) => sum + Number(criterion.max_points),
@@ -3341,19 +3476,10 @@ try {
           await panel
             .getByLabel("教师反馈")
             .fill(`合成教师复核 Codex 建议 ${runId}`);
-          await Promise.all([
-            page.waitForResponse(
-              (response) =>
-                response
-                  .url()
-                  .includes(`/student-answers/${answerId}/review`) &&
-                response.request().method() === "PUT" &&
-                response.ok(),
-            ),
-            panel
-              .getByRole("button", { name: "保存最终评分", exact: true })
-              .click(),
-          ]);
+          await submitTeacherReview(
+            answerId,
+            panel.getByRole("button", { name: "保存最终评分", exact: true }),
+          );
         }
       } else {
         if ((await panel.getAttribute("data-provider")) !== "codex_local")
@@ -3376,17 +3502,10 @@ try {
           expectedDecision = "accepted";
           expectedScore = plan.score;
           expectedCriterionScores = plan.criterion_scores;
-          [reviewWriteResponse] = await Promise.all([
-            page.waitForResponse(
-              (response) =>
-                response
-                  .url()
-                  .includes(`/student-answers/${answerId}/review`) &&
-                response.request().method() === "PUT" &&
-                response.ok(),
-            ),
-            panel.getByRole("button", { name: "接受", exact: true }).click(),
-          ]);
+          reviewWriteResponse = await submitTeacherReview(
+            answerId,
+            panel.getByRole("button", { name: "接受", exact: true }),
+          );
         } else {
           const override = boundedCriterionAllocation(
             plan.criteria,
@@ -3418,19 +3537,10 @@ try {
           await panel
             .getByLabel("教师反馈")
             .fill(`合成教师修改 Codex 建议 ${runId}`);
-          [reviewWriteResponse] = await Promise.all([
-            page.waitForResponse(
-              (response) =>
-                response
-                  .url()
-                  .includes(`/student-answers/${answerId}/review`) &&
-                response.request().method() === "PUT" &&
-                response.ok(),
-            ),
-            panel
-              .getByRole("button", { name: "保存最终评分", exact: true })
-              .click(),
-          ]);
+          reviewWriteResponse = await submitTeacherReview(
+            answerId,
+            panel.getByRole("button", { name: "保存最终评分", exact: true }),
+          );
         }
         const reviewWriteBody = await reviewWriteResponse.json();
         const reviewRead = await apiJson(reviewWorkspaceUrl);
@@ -3493,10 +3603,9 @@ try {
           read_request_id: reviewRead.request_id,
         };
       }
-      await page.getByText("复核结果已保存").waitFor();
     }
   }
-  await page.getByText(/^\s*已复核\s+4\/4\s*$/).waitFor();
+  await page.getByText(/^\s*已检查\s+4\/4\s*$/).waitFor();
   const confirmResultsButton = page.getByRole("button", {
     name: "确认结果",
     exact: true,

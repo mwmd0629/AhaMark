@@ -115,7 +115,7 @@ const bundle = ({
   answerHistory = [],
   rubricHistory = [],
 }: Record<string, unknown> = {}) => ({
-  schema_version: "assignment-review-bundle-v1",
+  schema_version: "assignment-review-bundle-v2",
   assignment_id: "assignment-1",
   version: {
     generation: 1,

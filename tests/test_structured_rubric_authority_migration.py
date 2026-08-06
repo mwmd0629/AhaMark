@@ -239,8 +239,7 @@ def test_0034_sqlite_upgrade_downgrade_upgrade_boundary(tmp_path: Path) -> None:
         assert STRUCTURED_TABLES.isdisjoint(tables)
         for job_table in ("math_validation_jobs", "ai_scoring_jobs"):
             assert "structured_rubric_set_id" not in {
-                column["name"]
-                for column in sa.inspect(connection).get_columns(job_table)
+                column["name"] for column in sa.inspect(connection).get_columns(job_table)
             }
         status = next(
             column
@@ -367,3 +366,12 @@ def test_0034_reuses_the_exact_0003_versionstatus_contract() -> None:
     source = MIGRATION_PATH.read_text(encoding="utf-8")
     assert "create_type=False" in source
     assert '"retired"' not in source
+
+
+def test_0034_downgrade_uses_postgresql_safe_original_readiness_fk_name() -> None:
+    source = MIGRATION_PATH.read_text(encoding="utf-8")
+    constraint_name = "assignment_publish_readiness_snap_legacy_rubric_version_id_fkey"
+
+    assert len(constraint_name.encode("utf-8")) <= 63
+    assert f'"{constraint_name}"' in source
+    assert '"assignment_publish_readiness_snapshots_legacy_rubric_version_id_fkey"' not in source

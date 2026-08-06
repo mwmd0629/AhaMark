@@ -226,7 +226,7 @@ const reviewBundle = ({
   structuredRubricSet = reviewStructuredRubricSet(),
   questions = [question],
 }: BundleOptions = {}): AssignmentReviewBundle => ({
-  schema_version: "assignment-review-bundle-v1",
+  schema_version: "assignment-review-bundle-v2",
   assignment_id: assignmentId,
   version: {
     generation: 1,
@@ -1490,7 +1490,7 @@ describe("AssignmentCentralReview fail-closed publication contract", () => {
       assignment_id: "assignment-1",
     },
     {
-      schema_version: "assignment-review-bundle-v1",
+      schema_version: "assignment-review-bundle-v2",
       assignment_id: "assignment-other",
     },
   ])(

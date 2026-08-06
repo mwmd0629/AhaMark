@@ -272,7 +272,7 @@ export type AssignmentReviewBundleStructuredRubricSet = {
 };
 
 export type AssignmentReviewBundle = {
-  schema_version: "assignment-review-bundle-v1";
+  schema_version: "assignment-review-bundle-v2";
   assignment_id: string;
   version: AssignmentReviewBundleVersion;
   status: "missing_review" | "action_required" | "ready_to_publish";

@@ -1,9 +1,16 @@
+import json
+import os
 import re
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = (ROOT / "scripts" / "business_browser_e2e.mjs").read_text(encoding="utf-8")
+ASSIGNMENT_GENERATION_SCRIPT = (
+    ROOT / "scripts" / "assignment_generation_browser_e2e.mjs"
+).read_text(encoding="utf-8")
+SYNTHETIC_GUARD_PATH = ROOT / "scripts" / "synthetic_browser_guard.mjs"
+SYNTHETIC_GUARD_SCRIPT = SYNTHETIC_GUARD_PATH.read_text(encoding="utf-8")
 COMPOSE = (ROOT / "docker-compose.business-e2e.yml").read_text(encoding="utf-8")
 WEB_API = (ROOT / "apps" / "web" / "lib" / "api.ts").read_text(encoding="utf-8")
 REVIEW_PAGE = (
@@ -294,7 +301,12 @@ def test_evidence_fingerprints_dirty_source_and_compose_images_without_diff_cont
     assert "tracked_diff_sha256:" in SCRIPT
     assert "untracked_file_count:" in SCRIPT
     assert '["api", "worker", "web"].map' in SCRIPT
-    assert 'execFileSync("docker", ["inspect", "--format={{.Image}}", containerId]' in SCRIPT
+    image_helper = SCRIPT.split("function composeImageId", 1)[1].split("const evidence", 1)[0]
+    assert '"--context"' in image_helper
+    assert "dockerContext" in image_helper
+    assert '"inspect"' in image_helper
+    assert '"--format={{.Image}}"' in image_helper
+    assert "containerId" in image_helper
     provenance = SCRIPT.split("source_provenance:", 1)[1].split("environment:", 1)[0]
     assert "trackedDiff.toString" not in provenance
     assert "worktreeStatus," not in provenance
@@ -331,7 +343,7 @@ def test_frontend_and_safe_e2e_never_post_the_legacy_grade_release_endpoint() ->
 
 def test_api_requests_use_explicit_absolute_api_origin_and_auditable_response_metadata() -> None:
     assert 'process.env.BUSINESS_E2E_API_URL ?? "http://localhost:8800"' in SCRIPT
-    assert ').replace(/\\/+$/, "");' in SCRIPT
+    assert "const apiBase = syntheticGuard.origins.BUSINESS_E2E_API_URL" in SCRIPT
     assert "function absoluteApiUrl(requestPath)" in SCRIPT
     assert 'requestPath.startsWith("/api/")' in SCRIPT
     assert "new URL(requestPath, `${apiBase}/`)" in SCRIPT
@@ -352,10 +364,10 @@ def test_api_requests_use_explicit_absolute_api_origin_and_auditable_response_me
     assert "request_origin: result.request_origin" in helper
 
 
-def test_api_url_guard_rejects_normalized_path_escape_and_non_http_protocols() -> None:
-    assert "const parsedApiBase = new URL(apiBase);" in SCRIPT
-    assert '["http:", "https:"].includes(parsedApiBase.protocol)' in SCRIPT
-    assert '"BUSINESS_E2E_API_URL must use http: or https:"' in SCRIPT
+def test_api_url_guard_rejects_normalized_path_escape_and_cross_origin_requests() -> None:
+    assert "requireSyntheticMutationGuard" in SCRIPT
+    assert 'policy: "business_api"' in SCRIPT
+    assert "allowedOrigins" not in SCRIPT
 
     guard = SCRIPT.split("function absoluteApiUrl(requestPath)", 1)[1].split(
         "async function apiJson", 1
@@ -371,6 +383,665 @@ def test_api_url_guard_rejects_normalized_path_escape_and_non_http_protocols() -
     assert 'requestPath.startsWith("/api/")' in guard
     assert guard.index("new URL(requestPath") < guard.index("resolved.pathname")
     assert '"http://localhost:8800"' in SCRIPT
+
+
+def _run_synthetic_guard(config: dict[str, object]) -> subprocess.CompletedProcess[str]:
+    source = f"""
+import {{ requireSyntheticMutationGuard }} from {json.dumps(SYNTHETIC_GUARD_PATH.as_uri())};
+const config = JSON.parse(process.env.SYNTHETIC_GUARD_CONFIG);
+try {{
+  const result = requireSyntheticMutationGuard(config);
+  process.stdout.write(JSON.stringify(result.evidence));
+}} catch (error) {{
+  process.stderr.write(error instanceof Error ? error.message : String(error));
+  process.exit(17);
+}}
+"""
+    env = {
+        **os.environ,
+        "SYNTHETIC_GUARD_CONFIG": json.dumps(config, separators=(",", ":")),
+    }
+    return subprocess.run(
+        ["node", "--input-type=module", "--eval", source],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def _run_synthetic_guard_javascript(config_source: str) -> subprocess.CompletedProcess[str]:
+    source = f"""
+import {{ requireSyntheticMutationGuard }} from {json.dumps(SYNTHETIC_GUARD_PATH.as_uri())};
+globalThis.guardSideEffect = false;
+{config_source}
+try {{
+  const result = requireSyntheticMutationGuard(config);
+  process.stdout.write(JSON.stringify({{
+    ok: true,
+    evidence: result.evidence,
+    side_effect: globalThis.guardSideEffect,
+  }}));
+}} catch (error) {{
+  process.stdout.write(JSON.stringify({{
+    ok: false,
+    reason: error instanceof Error ? error.message : String(error),
+    side_effect: globalThis.guardSideEffect,
+  }}));
+  process.exit(17);
+}}
+"""
+    return subprocess.run(
+        ["node", "--input-type=module", "--eval", source],
+        cwd=ROOT,
+        env=os.environ,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def _valid_business_guard_config() -> dict[str, object]:
+    return {
+        "allowSyntheticMutations": "1",
+        "teacherEmail": "teacher@business-e2e.synthetic.invalid",
+        "targets": [
+            {
+                "name": "BUSINESS_E2E_WEB_URL",
+                "value": "http://localhost:3300",
+                "policy": "business_web",
+            },
+            {
+                "name": "BUSINESS_E2E_API_URL",
+                "value": "http://127.0.0.1:8800",
+                "policy": "business_api",
+            },
+        ],
+        "composeProject": "ahamark-business-e2e",
+        "runPrefix": "business-e2e",
+        "markerSuffix": "business-e2e.synthetic.invalid",
+    }
+
+
+def _single_target_guard_config(policy: str, url: str) -> dict[str, object]:
+    return {
+        "allowSyntheticMutations": "1",
+        "teacherEmail": "teacher@policy-matrix.synthetic.invalid",
+        "targets": [{"name": "TEST_TARGET_URL", "value": url, "policy": policy}],
+    }
+
+
+def test_synthetic_mutation_guard_requires_exact_allow_before_any_mutation() -> None:
+    for value in (None, "", "0", "true", "01"):
+        config = _valid_business_guard_config()
+        if value is None:
+            config.pop("allowSyntheticMutations")
+        else:
+            config["allowSyntheticMutations"] = value
+        result = _run_synthetic_guard(config)
+        assert result.returncode == 17
+        if value is None:
+            assert "SYNTHETIC_GUARD_PROPERTY_REQUIRED" in result.stderr
+        else:
+            assert "SYNTHETIC_MUTATIONS_NOT_ALLOWED" in result.stderr
+            assert 'ALLOW_SYNTHETIC_MUTATIONS must be exactly "1"' in result.stderr
+
+
+def test_synthetic_mutation_guard_rejects_non_synthetic_teacher_email() -> None:
+    for email in (
+        "teacher@example.com",
+        "teacher@synthetic.invalid",
+        "teacher@business-e2e.synthetic.invalid.example.com",
+    ):
+        config = _valid_business_guard_config()
+        config["teacherEmail"] = email
+        result = _run_synthetic_guard(config)
+        assert result.returncode == 17
+        assert "synthetic teacher email" in result.stderr
+
+
+def test_synthetic_mutation_guard_rejects_remote_or_unsafe_urls() -> None:
+    for url in (
+        "http://2130706433:3300",
+        "http://0x7f000001:3300",
+        "http://017700000001:3300",
+        "http://127.1:3300",
+        "http://local\thost:3300",
+        "http://ℓocalhost:3300",
+        "http://ⓛⓞⓒⓐⓛⓗⓞⓢⓣ:3300",
+        "http://%6cocalhost:3300",
+        "http://127.0.0.1.:3300",
+        "http://localhost:3300?",
+        "http://localhost:3300#",
+        "HTTP://localhost:3300",
+        "http://LOCALHOST:3300",
+        " http://localhost:3300",
+        "http://localhost:3300 ",
+        "http:\\localhost:3300",
+        "http://localhost\\:3300",
+        "http://user@localhost:3300",
+        "http://[::ffff:127.0.0.1]:3300",
+        "http://example.com:3300",
+        "ftp://localhost:3300",
+        "http://localhost:3000",
+        "http://localhost:3300/api",
+    ):
+        config = _valid_business_guard_config()
+        targets = list(config["targets"])
+        targets[0] = {**targets[0], "value": url}
+        config["targets"] = targets
+        result = _run_synthetic_guard(config)
+        assert result.returncode == 17
+        assert "BUSINESS_E2E_WEB_URL" in result.stderr
+        assert url not in result.stderr
+
+
+def test_synthetic_mutation_guard_rejects_legacy_or_expansive_target_options() -> None:
+    config = _valid_business_guard_config()
+    targets = list(config["targets"])
+    targets[0] = {
+        **targets[0],
+        "value": "http://localhost:22",
+        "allowedOrigins": ["http://localhost:22"],
+    }
+    config["targets"] = targets
+    result = _run_synthetic_guard(config)
+    assert result.returncode == 17
+    assert "SYNTHETIC_TARGET_OPTIONS_UNSUPPORTED" in result.stderr
+    assert "localhost:22" not in result.stderr
+
+    config = _valid_business_guard_config()
+    config["allowedPorts"] = [22]
+    result = _run_synthetic_guard(config)
+    assert result.returncode == 17
+    assert "SYNTHETIC_GUARD_OPTIONS_UNSUPPORTED" in result.stderr
+
+
+def test_synthetic_mutation_guard_private_policy_matrix() -> None:
+    hosts = ("localhost", "127.0.0.1", "[::1]")
+    policies = {
+        "assignment_preprod": ("https", ("8443", "9443", "9543")),
+        "business_web": ("http", ("3300", "43387")),
+        "business_api": ("http", ("8800", "48887")),
+    }
+    for policy, (protocol, ports) in policies.items():
+        for host in hosts:
+            for port in ports:
+                url = f"{protocol}://{host}:{port}"
+                result = _run_synthetic_guard(_single_target_guard_config(policy, url))
+                assert result.returncode == 0, (policy, url, result.stderr)
+                assert json.loads(result.stdout)["local_origins"] == {"TEST_TARGET_URL": url}
+
+
+def test_synthetic_mutation_guard_rejects_unknown_and_cross_policy_targets() -> None:
+    cases = (
+        ("unknown_policy", "http://localhost:3300", "SYNTHETIC_TARGET_POLICY_UNKNOWN"),
+        ("business_web", "http://localhost:22", "SYNTHETIC_TARGET_NOT_ALLOWED"),
+        ("business_web", "https://localhost:3300", "SYNTHETIC_TARGET_NOT_ALLOWED"),
+        ("business_web", "http://localhost:8800", "SYNTHETIC_TARGET_NOT_ALLOWED"),
+        ("business_api", "http://localhost:3300", "SYNTHETIC_TARGET_NOT_ALLOWED"),
+        ("business_api", "https://localhost:8800", "SYNTHETIC_TARGET_NOT_ALLOWED"),
+        ("assignment_preprod", "http://localhost:8443", "SYNTHETIC_TARGET_NOT_ALLOWED"),
+        ("assignment_preprod", "https://localhost:3300", "SYNTHETIC_TARGET_NOT_ALLOWED"),
+    )
+    for policy, url, reason_code in cases:
+        result = _run_synthetic_guard(_single_target_guard_config(policy, url))
+        assert result.returncode == 17
+        assert reason_code in result.stderr
+        assert url not in result.stderr
+
+
+def test_browser_entrypoints_select_authoritative_named_policies() -> None:
+    assignment_guard = ASSIGNMENT_GENERATION_SCRIPT.split(
+        "const syntheticGuard = requireSyntheticMutationGuard(", 1
+    )[1].split("const base =", 1)[0]
+    business_guard = SCRIPT.split("const syntheticGuard = requireSyntheticMutationGuard(", 1)[
+        1
+    ].split("const base =", 1)[0]
+
+    assert 'policy: "assignment_preprod"' in assignment_guard
+    assert 'policy: "business_web"' in business_guard
+    assert 'policy: "business_api"' in business_guard
+    for legacy_option in ("allowedOrigins", "allowedPorts", "protocols"):
+        assert legacy_option not in assignment_guard
+        assert legacy_option not in business_guard
+
+
+def test_synthetic_guard_rejects_inherited_and_non_plain_records() -> None:
+    cases = (
+        (
+            """
+const config = Object.create({ teacherEmail: "teacher@boundary.synthetic.invalid" });
+Object.assign(config, {
+  allowSyntheticMutations: "1",
+  targets: [{ name: "TEST_TARGET_URL", value: "http://localhost:3300", policy: "business_web" }],
+});
+""",
+            "SYNTHETIC_GUARD_RECORD_INVALID",
+        ),
+        (
+            """
+const target = Object.create({ policy: "business_web" });
+Object.assign(target, { name: "TEST_TARGET_URL", value: "http://localhost:3300" });
+const config = {
+  allowSyntheticMutations: "1",
+  teacherEmail: "teacher@boundary.synthetic.invalid",
+  targets: [target],
+};
+""",
+            "SYNTHETIC_TARGET_RECORD_INVALID",
+        ),
+        (
+            """
+const config = {
+  __proto__: { inherited: true },
+  allowSyntheticMutations: "1",
+  teacherEmail: "teacher@boundary.synthetic.invalid",
+  targets: [{ name: "TEST_TARGET_URL", value: "http://localhost:3300", policy: "business_web" }],
+};
+""",
+            "SYNTHETIC_GUARD_RECORD_INVALID",
+        ),
+        ("const config = new Date();", "SYNTHETIC_GUARD_RECORD_INVALID"),
+        ("const config = new Map();", "SYNTHETIC_GUARD_RECORD_INVALID"),
+        (
+            "class GuardOptions {}; const config = new GuardOptions();",
+            "SYNTHETIC_GUARD_RECORD_INVALID",
+        ),
+    )
+    for source, reason_code in cases:
+        result = _run_synthetic_guard_javascript(source)
+        payload = json.loads(result.stdout)
+        assert result.returncode == 17
+        assert reason_code in payload["reason"]
+        assert payload["side_effect"] is False
+
+
+def test_synthetic_guard_accepts_plain_null_prototype_and_frozen_records() -> None:
+    result = _run_synthetic_guard_javascript(
+        """
+const target = Object.assign(Object.create(null), {
+  name: "TEST_TARGET_URL",
+  value: "http://localhost:3300",
+  policy: "business_web",
+});
+Object.freeze(target);
+const targets = Object.freeze([target]);
+const config = Object.assign(Object.create(null), {
+  allowSyntheticMutations: "1",
+  teacherEmail: "teacher@boundary.synthetic.invalid",
+  targets,
+});
+Object.freeze(config);
+"""
+    )
+    payload = json.loads(result.stdout)
+    assert result.returncode == 0, payload
+    assert payload["ok"] is True
+    assert payload["side_effect"] is False
+    assert payload["evidence"]["local_origins"] == {"TEST_TARGET_URL": "http://localhost:3300"}
+
+
+def test_synthetic_guard_audits_all_own_keys_without_triggering_accessors() -> None:
+    cases = (
+        (
+            """
+const config = {
+  allowSyntheticMutations: "1",
+  teacherEmail: "teacher@boundary.synthetic.invalid",
+  targets: [{ name: "TEST_TARGET_URL", value: "http://localhost:3300", policy: "business_web" }],
+};
+Object.defineProperty(config, "__proto__", { value: null, enumerable: true });
+""",
+            "SYNTHETIC_GUARD_OPTIONS_UNSUPPORTED",
+        ),
+        (
+            """
+const config = {
+  allowSyntheticMutations: "1",
+  teacherEmail: "teacher@boundary.synthetic.invalid",
+  targets: [{ name: "TEST_TARGET_URL", value: "http://localhost:3300", policy: "business_web" }],
+};
+config[Symbol("hidden")] = true;
+""",
+            "SYNTHETIC_GUARD_OPTIONS_UNSUPPORTED",
+        ),
+        (
+            """
+const target = { name: "TEST_TARGET_URL", value: "http://localhost:3300", policy: "business_web" };
+target[Symbol("hidden")] = true;
+const config = {
+  allowSyntheticMutations: "1",
+  teacherEmail: "teacher@boundary.synthetic.invalid",
+  targets: [target],
+};
+""",
+            "SYNTHETIC_TARGET_OPTIONS_UNSUPPORTED",
+        ),
+        (
+            """
+const config = {
+  allowSyntheticMutations: "1",
+  teacherEmail: "teacher@boundary.synthetic.invalid",
+  targets: [{ name: "TEST_TARGET_URL", value: "http://localhost:3300", policy: "business_web" }],
+};
+Object.defineProperty(config, "hidden", { value: true, enumerable: false });
+""",
+            "SYNTHETIC_GUARD_OPTIONS_UNSUPPORTED",
+        ),
+        (
+            """
+const config = {
+  allowSyntheticMutations: "1",
+  targets: [{ name: "TEST_TARGET_URL", value: "http://localhost:3300", policy: "business_web" }],
+};
+Object.defineProperty(config, "teacherEmail", {
+  enumerable: true,
+  get() { globalThis.guardSideEffect = true; throw new Error("getter ran"); },
+});
+""",
+            "SYNTHETIC_GUARD_PROPERTY_INVALID",
+        ),
+        (
+            """
+const config = {
+  allowSyntheticMutations: "1",
+  teacherEmail: "teacher@boundary.synthetic.invalid",
+  targets: [{ name: "TEST_TARGET_URL", value: "http://localhost:3300", policy: "business_web" }],
+};
+Object.defineProperty(config, "unknownGetter", {
+  enumerable: true,
+  get() { globalThis.guardSideEffect = true; throw new Error("getter ran"); },
+});
+""",
+            "SYNTHETIC_GUARD_OPTIONS_UNSUPPORTED",
+        ),
+    )
+    for source, reason_code in cases:
+        result = _run_synthetic_guard_javascript(source)
+        payload = json.loads(result.stdout)
+        assert result.returncode == 17
+        assert reason_code in payload["reason"]
+        assert payload["side_effect"] is False
+        assert "getter ran" not in payload["reason"]
+
+
+def test_synthetic_guard_rejects_duplicate_target_names_before_result_construction() -> None:
+    result = _run_synthetic_guard_javascript(
+        """
+const config = {
+  allowSyntheticMutations: "1",
+  teacherEmail: "teacher@boundary.synthetic.invalid",
+  targets: [
+    { name: "DUPLICATE_TARGET", value: "http://localhost:3300", policy: "business_web" },
+    { name: "DUPLICATE_TARGET", value: "http://localhost:8800", policy: "business_api" },
+  ],
+};
+"""
+    )
+    payload = json.loads(result.stdout)
+    assert result.returncode == 17
+    assert "SYNTHETIC_TARGET_NAME_DUPLICATE" in payload["reason"]
+
+
+def test_synthetic_guard_requires_standard_dense_targets_array() -> None:
+    cases = (
+        ("const targets = [];", "SYNTHETIC_TARGETS_COUNT_INVALID"),
+        (
+            "const targets = Array.from({ length: 9 }, () => target);",
+            "SYNTHETIC_TARGETS_COUNT_INVALID",
+        ),
+        (
+            "const targets = new Array(2); targets[0] = target;",
+            "SYNTHETIC_TARGETS_SHAPE_INVALID",
+        ),
+        (
+            "const targets = [target]; targets.extra = true;",
+            "SYNTHETIC_TARGETS_SHAPE_INVALID",
+        ),
+        (
+            'const targets = [target]; targets[Symbol("extra")] = true;',
+            "SYNTHETIC_TARGETS_SHAPE_INVALID",
+        ),
+        (
+            """const targets = [target];
+Object.defineProperty(targets, "0", {
+  enumerable: true,
+  configurable: true,
+  get() { globalThis.guardSideEffect = true; throw new Error("array getter ran"); },
+});""",
+            "SYNTHETIC_TARGETS_ELEMENT_INVALID",
+        ),
+        (
+            """const targets = [target];
+Object.setPrototypeOf(targets, Object.create(Array.prototype));""",
+            "SYNTHETIC_TARGETS_ARRAY_INVALID",
+        ),
+    )
+    for targets_source, reason_code in cases:
+        result = _run_synthetic_guard_javascript(
+            f"""
+const target = {{
+  name: "TEST_TARGET_URL",
+  value: "http://localhost:3300",
+  policy: "business_web",
+}};
+{targets_source}
+const config = {{
+  allowSyntheticMutations: "1",
+  teacherEmail: "teacher@boundary.synthetic.invalid",
+  targets,
+}};
+"""
+        )
+        payload = json.loads(result.stdout)
+        assert result.returncode == 17
+        assert reason_code in payload["reason"]
+        assert payload["side_effect"] is False
+        assert "array getter ran" not in payload["reason"]
+
+
+def test_synthetic_guard_rejects_proxies_without_running_reflection_traps() -> None:
+    cases = (
+        (
+            """
+const base = {
+  allowSyntheticMutations: "1",
+  teacherEmail: "teacher@boundary.synthetic.invalid",
+  targets: [{ name: "TEST_TARGET_URL", value: "http://localhost:3300", policy: "business_web" }],
+};
+const config = new Proxy(base, {
+  ownKeys() { globalThis.guardSideEffect = true; throw new Error("ownKeys trap ran"); },
+});
+""",
+            "SYNTHETIC_GUARD_PROXY_UNSUPPORTED",
+        ),
+        (
+            """
+const target = new Proxy(
+  { name: "TEST_TARGET_URL", value: "http://localhost:3300", policy: "business_web" },
+  {
+    getOwnPropertyDescriptor() {
+      globalThis.guardSideEffect = true;
+      throw new Error("descriptor trap ran");
+    },
+  },
+);
+const config = {
+  allowSyntheticMutations: "1",
+  teacherEmail: "teacher@boundary.synthetic.invalid",
+  targets: [target],
+};
+""",
+            "SYNTHETIC_TARGET_PROXY_UNSUPPORTED",
+        ),
+        (
+            """
+const targets = new Proxy(
+  [{ name: "TEST_TARGET_URL", value: "http://localhost:3300", policy: "business_web" }],
+  { ownKeys() { globalThis.guardSideEffect = true; throw new Error("array ownKeys trap ran"); } },
+);
+const config = {
+  allowSyntheticMutations: "1",
+  teacherEmail: "teacher@boundary.synthetic.invalid",
+  targets,
+};
+""",
+            "SYNTHETIC_TARGETS_PROXY_UNSUPPORTED",
+        ),
+    )
+    for source, reason_code in cases:
+        result = _run_synthetic_guard_javascript(source)
+        payload = json.loads(result.stdout)
+        assert result.returncode == 17
+        assert reason_code in payload["reason"]
+        assert payload["side_effect"] is False
+        assert "trap ran" not in payload["reason"]
+
+
+def test_synthetic_mutation_guard_rejects_illegal_project_and_run_ids() -> None:
+    invalid_values = (
+        ("composeProject", "ahamark-user-test-ac7ceb6"),
+        ("composeProject", "production"),
+        ("runPrefix", "user-test"),
+        ("runPrefix", "../business-e2e"),
+        ("markerSuffix", "business-e2e.example.com"),
+    )
+    for field, value in invalid_values:
+        config = _valid_business_guard_config()
+        config[field] = value
+        result = _run_synthetic_guard(config)
+        assert result.returncode == 17
+        assert "BUSINESS_E2E_" in result.stderr
+
+
+def test_synthetic_mutation_guard_accepts_only_valid_local_synthetic_config() -> None:
+    business = _run_synthetic_guard(_valid_business_guard_config())
+    assert business.returncode == 0, business.stderr
+    business_evidence = json.loads(business.stdout)
+    assert business_evidence == {
+        "policy": "synthetic-browser-mutation-v1",
+        "local_origins": {
+            "BUSINESS_E2E_WEB_URL": "http://localhost:3300",
+            "BUSINESS_E2E_API_URL": "http://127.0.0.1:8800",
+        },
+        "compose_project": "ahamark-business-e2e",
+        "run_prefix": "business-e2e",
+        "marker_suffix": "business-e2e.synthetic.invalid",
+    }
+
+    assignment = _run_synthetic_guard(
+        {
+            "allowSyntheticMutations": "1",
+            "teacherEmail": "teacher@assignment-generation.synthetic.invalid",
+            "targets": [
+                {
+                    "name": "PREPROD_BASE_URL",
+                    "value": "https://[::1]:9543",
+                    "policy": "assignment_preprod",
+                }
+            ],
+        }
+    )
+    assert assignment.returncode == 0, assignment.stderr
+    assignment_evidence = json.loads(assignment.stdout)
+    assert assignment_evidence["local_origins"] == {"PREPROD_BASE_URL": "https://[::1]:9543"}
+    assert assignment_evidence["compose_project"] is None
+
+
+def test_browser_mutation_guards_precede_every_first_sink_and_do_not_record_secrets() -> None:
+    assignment_guard = ASSIGNMENT_GENERATION_SCRIPT.index(
+        "const syntheticGuard = requireSyntheticMutationGuard("
+    )
+    for sink in (
+        "fs.mkdirSync(",
+        "chromium.launch(",
+        "page.goto(",
+        "page.locator(",
+        "fetch(",
+    ):
+        assert assignment_guard < ASSIGNMENT_GENERATION_SCRIPT.index(sink), sink
+    for absent_sink in ("execFileSync(", "function composeImageId", "async function apiJson("):
+        assert absent_sink not in ASSIGNMENT_GENERATION_SCRIPT
+    assert (
+        "ALLOW_SYNTHETIC_MUTATIONS"
+        in ASSIGNMENT_GENERATION_SCRIPT[
+            assignment_guard : ASSIGNMENT_GENERATION_SCRIPT.index("fs.mkdirSync(")
+        ]
+    )
+
+    business_guard = SCRIPT.index("const syntheticGuard = requireSyntheticMutationGuard(")
+    for sink in (
+        "fs.mkdirSync(",
+        "execFileSync(",
+        "function composeArgs(",
+        "function composeImageId(",
+        "chromium.launch(",
+        "async function apiJson(",
+        "fetch(",
+        "page.goto(",
+        "apiJson(",
+    ):
+        assert business_guard < SCRIPT.index(sink), sink
+    assert "ALLOW_SYNTHETIC_MUTATIONS" in SCRIPT[business_guard : SCRIPT.index("fs.mkdirSync(")]
+
+    assignment_results = ASSIGNMENT_GENERATION_SCRIPT.split("const results =", 1)[1].split(
+        "const browser =", 1
+    )[0]
+    business_evidence = SCRIPT.split("const evidence =", 1)[1].split("function crc32", 1)[0]
+    assert "password" not in assignment_results
+    assert "password" not in business_evidence
+    assert "codexLocalInternalToken" not in business_evidence
+    assert "synthetic_guard: syntheticGuard.evidence" in assignment_results
+    assert "synthetic_guard: syntheticGuard.evidence" in business_evidence
+
+
+def test_browser_entrypoints_without_allow_fail_before_creating_artifacts(tmp_path: Path) -> None:
+    assignment_artifacts = tmp_path / "assignment-artifacts"
+    assignment_env = {
+        **os.environ,
+        "PREPROD_BASE_URL": "https://localhost:9543",
+        "PREPROD_TEACHER_EMAIL": "teacher@assignment-generation.synthetic.invalid",
+        "PREPROD_TEACHER_PASSWORD": "not-recorded-test-placeholder",
+        "PREPROD_ASSIGNMENT_ID": "00000000-0000-0000-0000-000000000001",
+        "PREPROD_EVIDENCE_DIR": str(assignment_artifacts),
+    }
+    assignment_env.pop("ALLOW_SYNTHETIC_MUTATIONS", None)
+    assignment = subprocess.run(
+        ["node", "scripts/assignment_generation_browser_e2e.mjs"],
+        cwd=ROOT,
+        env=assignment_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert assignment.returncode == 1
+    assert "SYNTHETIC_MUTATIONS_NOT_ALLOWED" in assignment.stderr
+    assert 'ALLOW_SYNTHETIC_MUTATIONS must be exactly "1"' in assignment.stderr
+    assert not assignment_artifacts.exists()
+
+    business_artifacts = tmp_path / "business-artifacts"
+    business_evidence = tmp_path / "business-evidence.json"
+    business_env = {
+        **os.environ,
+        "BUSINESS_E2E_ARTIFACT_ROOT": str(business_artifacts),
+        "BUSINESS_E2E_EVIDENCE_PATH": str(business_evidence),
+    }
+    business_env.pop("ALLOW_SYNTHETIC_MUTATIONS", None)
+    business = subprocess.run(
+        ["node", "scripts/business_browser_e2e.mjs"],
+        cwd=ROOT,
+        env=business_env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert business.returncode == 1
+    assert "SYNTHETIC_MUTATIONS_NOT_ALLOWED" in business.stderr
+    assert 'ALLOW_SYNTHETIC_MUTATIONS must be exactly "1"' in business.stderr
+    assert not business_artifacts.exists()
+    assert not business_evidence.exists()
 
 
 def test_codex_processing_write_read_and_teacher_review_order() -> None:
@@ -511,9 +1182,11 @@ def test_f_uses_stable_controls_and_a_single_prepare_click_before_review() -> No
         "evidence.codex_suggestions = [];", 1
     )[0]
     if "single_continue_from_uploaded_unconfirmed_submission" in SCRIPT:
-        single_branch = SCRIPT.split("if (singleContinueProof) {", 2)[2].split(
-            "\n  } else {\n    const beforePreparationResponse", 1
-        )[0]
+        single_branch = (
+            SCRIPT.split('currentStage = "F";', 1)[1]
+            .split("if (singleContinueProof) {", 1)[1]
+            .split("\n  } else {\n    const beforePreparationResponse", 1)[0]
+        )
         assert 'method: "POST"' in single_branch
         assert "/processing-runs" in single_branch
         assert "const waitingCodex" in single_branch
@@ -541,13 +1214,24 @@ def test_f_uses_stable_controls_and_a_single_prepare_click_before_review() -> No
 def test_f_uses_safe_compatibility_finalize_without_confirming_results() -> None:
     f_stage = SCRIPT.split('currentStage = "F";', 1)[1]
 
-    progress_wait = "page.getByText(/^\\s*已复核\\s+4\\/4\\s*$/).waitFor()"
+    progress_wait = "page.getByText(/^\\s*已检查\\s+4\\/4\\s*$/).waitFor()"
     confirm_button = 'name: "确认结果"'
     finalize = "`/api/submissions/${submissionId}/finalize`"
     final_snapshot_get = "const completeSnapshotsResponse = await apiJson("
     grade_release_check = "`/api/grade-releases?assignment_id=${assignmentId}`"
 
     assert progress_wait in f_stage
+    assert 'getByLabel("答案筛选")' in f_stage
+    assert 'getByRole("button", { name: "全部", exact: true })' in f_stage
+    assert '"stable all-answer review navigation"' in f_stage
+    assert "for (const questionNumber of [1, 2]) {\n      await page.reload()" in f_stage
+    assert "new RegExp(`^学生 ${submissionIndex + 1}$`)" in f_stage
+    assert "expectedAnswer = readAfterWrite.body.items[" in f_stage
+    assert 'getAttribute("data-answer-id") === answerId' in f_stage
+    assert "async function submitTeacherReview(answerId, button)" in f_stage
+    assert "page.waitForRequest(" in f_stage
+    assert "const response = await request.response()" in f_stage
+    assert 'response.status(), 200, "teacher review write must succeed"' in f_stage
     assert "进度 4/4" not in f_stage
     assert confirm_button in f_stage
     assert '"review UI must expose exactly one confirm-results authorization"' in f_stage
@@ -606,9 +1290,11 @@ def test_f_workspace_readiness_requires_all_provider_and_evidence_branches() -> 
     assert "answer.regions.length >= 1" in helper
     assert "answer.evidence.length >= 1" in helper
     if "single_continue_from_uploaded_unconfirmed_submission" in SCRIPT:
-        single_branch = SCRIPT.split("if (singleContinueProof) {", 2)[2].split(
-            "\n  } else {\n    const beforePreparationResponse", 1
-        )[0]
+        single_branch = (
+            SCRIPT.split('currentStage = "F";', 1)[1]
+            .split("if (singleContinueProof) {", 1)[1]
+            .split("\n  } else {\n    const beforePreparationResponse", 1)[0]
+        )
         assert 'answer.result.provider, "codex_local"' in single_branch
         assert 'answer.result.provider_version, "local"' in single_branch
         assert 'answer.result.status, "suggested"' in single_branch
@@ -811,11 +1497,12 @@ def test_each_confirmation_waits_ready_or_confirmed_and_records_write_after_get(
     assert "if (await button.isEnabled())" not in helper
     assert "button.isDisabled()" not in helper
 
-    loop = SCRIPT.split("for (const kind of [", 1)[1].split(
+    automatic_projection = SCRIPT.split("const requiredConfirmations", 1)[1].split(
         "evidence.central_review.structured_rubric_set", 1
     )[0]
-    assert "ensureReviewConfirmation(reviewSessionId, kind)" in loop
-    assert "else" not in loop
+    assert "requiredConfirmations.map((kind)" in automatic_projection
+    assert "requireCurrentBundleConfirmation(" in automatic_projection
+    assert "ensureReviewConfirmation(reviewSessionId, kind)" not in automatic_projection
 
 
 def test_structured_set_is_automatically_prepared_and_read_back() -> None:
@@ -867,11 +1554,37 @@ def test_grading_evidence_uses_structured_ids_only() -> None:
         assert legacy_token not in SCRIPT
 
 
+def test_assignment_generation_browser_e2e_uses_structured_publication_only() -> None:
+    assert '"structured-rubric-set-summary"' in ASSIGNMENT_GENERATION_SCRIPT
+    assert 'name: "确认并发布", exact: true' in ASSIGNMENT_GENERATION_SCRIPT
+    assert "active_structured_rubric_set_id" in ASSIGNMENT_GENERATION_SCRIPT
+    for legacy_token in (
+        "prepare-rubric-publication-binding",
+        "confirm-rubric-publication-binding",
+        "legacy_binding",
+        'name: "准备发布"',
+        'name: "教师确认并发布"',
+    ):
+        assert legacy_token not in ASSIGNMENT_GENERATION_SCRIPT
+
+
+def test_business_browser_e2e_uses_explicit_context_and_one_click_publication() -> None:
+    assert '"--context"' in SCRIPT
+    assert "dockerContext" in SCRIPT
+    assert "BUSINESS_E2E_COMPOSE_FILE" in SCRIPT
+    assert 'name: "确认并发布"' in SCRIPT
+    assert "confirm_and_publish_enabled" in SCRIPT
+    assert "single_confirm_and_publish_with_no_legacy_publication_ui" in SCRIPT
+    assert 'name: "准备发布"' not in SCRIPT
+    assert 'name: "教师确认并发布"' not in SCRIPT
+    assert 'page.once("dialog"' not in SCRIPT
+
+
 def test_review_bundle_reads_require_the_current_schema_and_assignment() -> None:
     helper = SCRIPT.split("async function getReviewBundle", 1)[1].split(
         "function requireCurrentBundleConfirmation", 1
     )[0]
-    assert '"assignment-review-bundle-v1"' in helper
+    assert '"assignment-review-bundle-v2"' in helper
     assert "bundle.assignment_id, assignmentId" in helper
     assert "Array.isArray(bundle.confirmations)" in helper
 
@@ -901,27 +1614,27 @@ def test_review_item_drain_reopens_and_scopes_the_pending_details_each_iteration
 
 
 def test_publication_has_api_and_ui_hard_preconditions() -> None:
-    block = SCRIPT.split("const requiredConfirmations", 1)[1].split(
-        "await preparePublication.click()", 1
-    )[0]
-    for kind in (
+    block = SCRIPT.split("const requiredConfirmations", 1)[1].split("const publicationText", 1)[0]
+    routine_confirmations = (
         "classes",
         "due_at",
         "total_score",
-        "file_roles",
-        "answer_sources",
-        "paper_version",
         "reference_answers",
         "structured_rubrics",
-    ):
+    )
+    for kind in routine_confirmations:
         assert f'"{kind}"' in block
+    for bundle_guard in ("file_roles", "answer_sources", "paper_version"):
+        assert f'"{bundle_guard}"' not in block
     assert "publicationStructuredSet.body.current === true" in block
     assert "publicationSession.session.structured_rubric_set_id" in block
     assert "publicationStructuredSet.body.id" in block
     assert "publicationSession.session.counts.blocking, 0" in block
     assert "publicationSession.session.counts.warning, 0" in block
+    assert "missing.length === 0" in block
     assert '"✓ 已满足发布条件"' in block
-    assert "preparePublication.isEnabled()" in block
+    assert "publishButton.isEnabled()" in block
+    assert "publicationReady.publishEnabled, true" in block
 
 
 def test_stage_e_processes_and_teacher_segments_before_recognition() -> None:
@@ -1109,9 +1822,11 @@ def test_stage_e_records_processing_regions_and_current_evidence_metadata() -> N
     assert 'assert.equal(block.provider, "fake")' in stage_e
     assert "assert.equal(block.stale, false)" in stage_e
     if "single_continue_from_uploaded_unconfirmed_submission" in SCRIPT:
-        single_branch = SCRIPT.split("if (singleContinueProof) {", 2)[2].split(
-            "\n  } else {\n    const beforePreparationResponse", 1
-        )[0]
+        single_branch = (
+            SCRIPT.split('currentStage = "F";', 1)[1]
+            .split("if (singleContinueProof) {", 1)[1]
+            .split("\n  } else {\n    const beforePreparationResponse", 1)[0]
+        )
         assert "automaticConfirmations" in single_branch
         assert "automaticConfirmationOrigins" in single_branch
         assert "manual_region_confirmation_count: 0" in single_branch

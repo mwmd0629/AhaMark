@@ -1,24 +1,40 @@
 import fs from "node:fs";
 import path from "node:path";
 import { chromium } from "file:///C:/Users/Lenovo/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright/index.mjs";
+import { requireSyntheticMutationGuard } from "./synthetic_browser_guard.mjs";
 
-const base = process.env.PREPROD_BASE_URL;
-const email = process.env.PREPROD_TEACHER_EMAIL;
+const configuredBase = process.env.PREPROD_BASE_URL;
+const configuredEmail = process.env.PREPROD_TEACHER_EMAIL;
 const password = process.env.PREPROD_TEACHER_PASSWORD;
 const assignmentId = process.env.PREPROD_ASSIGNMENT_ID;
 const evidenceDir = process.env.PREPROD_EVIDENCE_DIR;
-if (!base || !email || !password || !assignmentId || !evidenceDir)
+const syntheticGuard = requireSyntheticMutationGuard({
+  allowSyntheticMutations: process.env.ALLOW_SYNTHETIC_MUTATIONS,
+  teacherEmail: configuredEmail,
+  targets: [
+    {
+      name: "PREPROD_BASE_URL",
+      value: configuredBase,
+      policy: "assignment_preprod",
+    },
+  ],
+});
+const base = syntheticGuard.origins.PREPROD_BASE_URL;
+const email = syntheticGuard.teacherEmail;
+if (!password || !assignmentId || !evidenceDir)
   throw new Error("Stage 6 browser environment is incomplete");
 
 fs.mkdirSync(path.join(evidenceDir, "screenshots"), { recursive: true });
 const results = {
   browser: "Microsoft Edge via Playwright",
-  synthetic: email.endsWith(".synthetic.invalid"),
+  synthetic: true,
+  synthetic_guard: syntheticGuard.evidence,
   assignment_id: assignmentId,
   steps: {},
 };
 const browser = await chromium.launch({
-  executablePath: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+  executablePath:
+    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
   headless: true,
 });
 try {
@@ -36,7 +52,9 @@ try {
   await page.waitForURL("**/dashboard");
   results.steps.https_login = true;
 
-  await page.goto(`${base}/assignments/${assignmentId}/edit`, { waitUntil: "networkidle" });
+  await page.goto(`${base}/assignments/${assignmentId}/edit`, {
+    waitUntil: "networkidle",
+  });
   const body = page.locator("body");
   await body.getByText("六步创建向导", { exact: false }).waitFor();
   results.steps.provider_unavailable_visible = await body
@@ -45,9 +63,19 @@ try {
     .isVisible()
     .catch(() => false);
 
-  const stepLabels = ["基本信息", "上传试卷", "整理页面", "编辑题目", "评分标准", "集中审查与发布"];
+  const stepLabels = [
+    "基本信息",
+    "上传试卷",
+    "整理页面",
+    "编辑题目",
+    "评分标准",
+    "集中审查与发布",
+  ];
   for (let index = 0; index < stepLabels.length; index += 1) {
-    await page.getByRole("button", { name: new RegExp(stepLabels[index]) }).first().click();
+    await page
+      .getByRole("button", { name: new RegExp(stepLabels[index]) })
+      .first()
+      .click();
     await page.screenshot({
       path: path.join(evidenceDir, "screenshots", `step-${index + 1}.png`),
       fullPage: true,
@@ -60,7 +88,9 @@ try {
     await start.click();
     await page.getByText(/generation \d+/).waitFor();
   }
-  results.steps.central_review = await body.getByText("集中审查中心").isVisible();
+  results.steps.central_review = await body
+    .getByText("集中审查中心")
+    .isVisible();
   results.steps.zero_red_issues = false;
 
   const confirmationKinds = [
@@ -90,58 +120,71 @@ try {
   }
   results.steps.teacher_confirmations = true;
 
-  const prepareBinding = page.getByTestId("prepare-rubric-publication-binding");
-  if (await prepareBinding.isEnabled()) await prepareBinding.click();
-  const confirmBinding = page.getByTestId("confirm-rubric-publication-binding");
-  await confirmBinding.waitFor({ state: "visible" });
-  if (await confirmBinding.isEnabled()) await confirmBinding.click();
-  await page.waitForFunction(() => {
-    const candidate = [...document.querySelectorAll("button")].find(
-      (element) => element.textContent?.trim() === "准备发布",
-    );
-    return candidate && !candidate.disabled;
-  });
-  results.steps.legacy_binding = true;
+  const structuredSetSummary = page.getByTestId(
+    "structured-rubric-set-summary",
+  );
+  await structuredSetSummary.waitFor({ state: "visible" });
+  results.steps.structured_set_ready = true;
+  const reviewText = await body.innerText();
+  const forbiddenLegacyUi = [
+    "Legacy binding",
+    "生成兼容版本",
+    "发布兼容版本",
+    "CONFIRM_LEGACY_BINDING_REQUIRED",
+    "LEGACY_BINDING_REQUIRED",
+  ];
+  results.steps.no_legacy_publication_ui = forbiddenLegacyUi.every(
+    (value) => !reviewText.includes(value),
+  );
+  if (!results.steps.no_legacy_publication_ui)
+    throw new Error("Legacy publication UI unexpectedly remains visible");
 
-  await page.getByRole("button", { name: "准备发布", exact: true }).click();
-  const publish = page.getByRole("button", { name: "教师确认并发布" });
   await page.waitForFunction(() => {
     const candidate = [...document.querySelectorAll("button")].find(
-      (element) => element.textContent?.trim() === "教师确认并发布",
+      (element) => element.textContent?.trim() === "确认并发布",
     );
     return candidate && !candidate.disabled;
   });
-  page.once("dialog", (dialog) => dialog.accept());
+  const publish = page.getByRole("button", { name: "确认并发布", exact: true });
   await publish.click();
   await page.waitForURL(new RegExp(`/assignments/${assignmentId}$`));
-  results.steps.readiness_and_explicit_publish = true;
+  results.steps.single_teacher_publish = true;
 
   const assignment = await page.evaluate(async (id) => {
     const response = await fetch(`/api/assignments/${id}`);
     return response.json();
   }, assignmentId);
-  results.steps.published = assignment.status === "published";
+  results.steps.published_with_structured_set =
+    assignment.status === "published" &&
+    Boolean(assignment.active_structured_rubric_set_id);
   const finalReviewCounts = await page.evaluate(async (id) => {
-    const listed = await fetch(`/api/assignments/${id}/review-sessions`).then((response) =>
-      response.json(),
+    const listed = await fetch(`/api/assignments/${id}/review-sessions`).then(
+      (response) => response.json(),
     );
     const active = listed.items?.[0];
     if (!active) return null;
-    const review = await fetch(`/api/assignment-review-sessions/${active.id}`).then(
-      (response) => response.json(),
-    );
+    const review = await fetch(
+      `/api/assignment-review-sessions/${active.id}`,
+    ).then((response) => response.json());
     return review.counts;
   }, assignmentId);
   results.review_counts = finalReviewCounts;
   results.steps.zero_red_issues =
     finalReviewCounts?.blocking === 0 && finalReviewCounts?.warning === 0;
   await page.reload({ waitUntil: "networkidle" });
-  results.steps.refresh_persisted = (await page.locator("body").innerText()).includes("已发布");
+  results.steps.refresh_persisted = (
+    await page.locator("body").innerText()
+  ).includes("已发布");
   const cookies = await context.cookies(base);
   const session = cookies.find((cookie) => cookie.name === "ahamark_session");
-  results.secure_cookie = Boolean(session?.secure && session?.httpOnly && session?.sameSite === "Lax");
+  results.secure_cookie = Boolean(
+    session?.secure && session?.httpOnly && session?.sameSite === "Lax",
+  );
   results.request_id_count = requestIds.size;
-  results.status = Object.values(results.steps).every(Boolean) && results.secure_cookie ? "passed" : "failed";
+  results.status =
+    Object.values(results.steps).every(Boolean) && results.secure_cookie
+      ? "passed"
+      : "failed";
   fs.writeFileSync(
     path.join(evidenceDir, "browser-results.json"),
     `${JSON.stringify(results, null, 2)}\n`,

@@ -438,7 +438,7 @@ def downgrade() -> None:
         batch.drop_column("structured_rubric_set_id")
         batch.add_column(sa.Column("legacy_rubric_version_id", UUID, nullable=False))
         batch.create_foreign_key(
-            "assignment_publish_readiness_snapshots_legacy_rubric_version_id_fkey",
+            "assignment_publish_readiness_snap_legacy_rubric_version_id_fkey",
             "rubric_versions",
             ["legacy_rubric_version_id"],
             ["id"],
@@ -481,9 +481,7 @@ def downgrade() -> None:
     for table_name in ("ai_scoring_jobs", "math_validation_jobs"):
         with op.batch_alter_table(table_name) as batch:
             batch.drop_index(f"ix_{table_name}_structured_rubric_set_id")
-            batch.drop_constraint(
-                f"fk_{table_name}_structured_rubric_set", type_="foreignkey"
-            )
+            batch.drop_constraint(f"fk_{table_name}_structured_rubric_set", type_="foreignkey")
             batch.drop_column("structured_rubric_set_id")
     with op.batch_alter_table("submission_score_snapshots") as batch:
         batch.drop_index("ix_submission_score_snapshots_structured_rubric_set_id")

@@ -27,7 +27,7 @@ const routineConfirmationIssueCodes = new Set(
   confirmations.map(([kind]) => `CONFIRM_${kind.toUpperCase()}_REQUIRED`),
 );
 
-const bundleSchemaVersion = "assignment-review-bundle-v1";
+const bundleSchemaVersion = "assignment-review-bundle-v2";
 export const assignmentPreparationPolling = Object.freeze({
   intervalMs: 3_000,
   timeoutMs: 120_000,
