@@ -10,6 +10,7 @@ from app.models import (
     Assignment,
     AssignmentClass,
     AssignmentGenerationJob,
+    AssignmentStatus,
     AuditLog,
     FileStatus,
     PaperPage,
@@ -130,6 +131,153 @@ def test_class_ownership_active_and_duplicates():
         ).status_code
         == 403
     )
+
+
+def test_rotation_preview_atomic_question_cut_and_duplicate_guards():
+    actor, db = actor_and_db()
+    from app.storage.dependencies import get_storage
+
+    fake = FakeStorage()
+    app.dependency_overrides[get_storage] = lambda: fake
+    try:
+        cls = active_class(db, actor.id)
+        assignment = create(client, cls.id)
+        assignment_id = assignment["id"]
+        for name, color in (("first.png", "white"), ("second.png", "gray")):
+            image = io.BytesIO()
+            Image.new("RGB", (100, 200), color).save(image, "PNG")
+            response = client.post(
+                f"/api/assignments/{assignment_id}/files",
+                files={"file": (name, image.getvalue(), "image/png")},
+            )
+            assert response.status_code == 201, response.text
+
+        pages = client.get(f"/api/assignments/{assignment_id}").json()["paper_version"][
+            "pages"
+        ]
+        first_page, second_page = pages
+        rotated = client.patch(
+            f"/api/assignments/{assignment_id}/pages/{first_page['id']}",
+            json={"rotation": 90},
+        )
+        assert rotated.status_code == 200, rotated.text
+        preview = client.post(
+            f"/api/assignments/{assignment_id}/pages/{first_page['id']}/preview"
+        )
+        assert preview.status_code == 200, preview.text
+        assert preview.json()["rotation"] == 90
+        assert (preview.json()["width"], preview.json()["height"]) == (200, 100)
+        preview_keys = [key for key in fake.objects if "assignment-page-previews" in key]
+        assert len(preview_keys) == 1
+        assert (
+            client.post(
+                f"/api/assignments/{assignment_id}/pages/{first_page['id']}/preview"
+            ).status_code
+            == 200
+        )
+        assert [key for key in fake.objects if "assignment-page-previews" in key] == preview_keys
+
+        region = {
+            "paper_page_id": first_page["id"],
+            "x": 0.1,
+            "y": 0.2,
+            "width": 0.6,
+            "height": 0.25,
+            "region_type": "question",
+        }
+        created = client.post(
+            f"/api/assignments/{assignment_id}/pages/{first_page['id']}/question-cuts",
+            json={
+                "question": {
+                    "question_number": " 1 ",
+                    "question_type": "calculation",
+                    "max_score": 10,
+                    "content_text": "计算",
+                    "difficulty": "medium",
+                    "knowledge_points": ["一次函数"],
+                },
+                "region": region,
+            },
+        )
+        assert created.status_code == 201, created.text
+        question = created.json()
+        assert question["question_number"] == "1"
+        assert len(question["regions"]) == 1
+
+        duplicate_number = client.post(
+            f"/api/assignments/{assignment_id}/pages/{first_page['id']}/question-cuts",
+            json={
+                "question": {
+                    "question_number": "1",
+                    "question_type": "calculation",
+                    "max_score": 5,
+                    "knowledge_points": [],
+                },
+                "region": {**region, "x": 0.75, "width": 0.2},
+            },
+        )
+        assert duplicate_number.status_code == 409
+        assert duplicate_number.json()["code"] == "QUESTION_NUMBER_CONFLICT"
+
+        overlap = client.post(
+            f"/api/assignments/{assignment_id}/pages/{first_page['id']}/question-cuts",
+            json={"question_id": question["id"], "region": region},
+        )
+        assert overlap.status_code == 409
+        assert overlap.json()["code"] == "QUESTION_REGION_OVERLAP"
+
+        attached = client.post(
+            f"/api/assignments/{assignment_id}/pages/{second_page['id']}/question-cuts",
+            json={
+                "question_id": question["id"],
+                "region": {**region, "paper_page_id": second_page["id"]},
+            },
+        )
+        assert attached.status_code == 201, attached.text
+        assert len(attached.json()["regions"]) == 2
+
+        mismatch = client.post(
+            f"/api/assignments/{assignment_id}/pages/{first_page['id']}/question-cuts",
+            json={
+                "question_id": question["id"],
+                "region": {**region, "paper_page_id": second_page["id"], "x": 0.3},
+            },
+        )
+        assert mismatch.status_code == 422
+        assert mismatch.json()["code"] == "REGION_PAGE_MISMATCH"
+        ambiguous_target = client.post(
+            f"/api/assignments/{assignment_id}/pages/{first_page['id']}/question-cuts",
+            json={
+                "question_id": question["id"],
+                "question": {
+                    "question_number": "2",
+                    "question_type": "calculation",
+                    "max_score": 5,
+                    "knowledge_points": [],
+                },
+                "region": {**region, "x": 0.75, "width": 0.2},
+            },
+        )
+        assert ambiguous_target.status_code == 422
+        assert len(db.scalars(select(Question)).all()) == 1
+
+        persisted_assignment = db.get(Assignment, uuid.UUID(assignment_id))
+        assert persisted_assignment is not None
+        persisted_assignment.status = AssignmentStatus.published
+        db.commit()
+        locked_preview = client.post(
+            f"/api/assignments/{assignment_id}/pages/{first_page['id']}/preview"
+        )
+        assert locked_preview.status_code == 409
+        assert locked_preview.json()["code"] == "ASSIGNMENT_LOCKED"
+        locked_cut = client.post(
+            f"/api/assignments/{assignment_id}/pages/{first_page['id']}/question-cuts",
+            json={"question_id": question["id"], "region": {**region, "x": 0.3}},
+        )
+        assert locked_cut.status_code == 409
+        assert locked_cut.json()["code"] == "ASSIGNMENT_LOCKED"
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
 
 
 def test_file_pages_question_region_rubric_and_publish():

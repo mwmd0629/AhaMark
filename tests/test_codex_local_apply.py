@@ -317,6 +317,54 @@ def test_apply_is_atomic_suggestion_only_and_replays_once(
     assert item.step.status == "succeeded"
 
 
+def test_reconcile_ignores_superseded_region_with_matching_geometry(
+    sqlite_db: Session,
+    submitted_item: tuple[CodexWorkItem, ProcessingRun, ProcessingStep],
+) -> None:
+    db = sqlite_db
+    item, _, _ = submitted_item
+    current_region = db.scalar(
+        select(StudentAnswerRegion).where(
+            StudentAnswerRegion.student_answer_id == item.student_answer_id,
+            StudentAnswerRegion.status == "confirmed",
+        )
+    )
+    assert current_region is not None
+    db.add(
+        StudentAnswerRegion(
+            student_answer_id=current_region.student_answer_id,
+            submission_page_id=current_region.submission_page_id,
+            x=current_region.x,
+            y=current_region.y,
+            width=current_region.width,
+            height=current_region.height,
+            status="superseded",
+        )
+    )
+    db.commit()
+
+    apply_work_item(
+        db,
+        item_id=item.id,
+        worker_id="worker",
+        request_hash=item.request_hash,
+        response_hash=item.response_hash or "",
+    )
+    reconciled = reconcile_processing(
+        db,
+        owner_id=item.owner_id,
+        batch_id=item.grading_batch_id,
+        run_id=item.step.processing_run_id,
+        idempotency_key=f"reconcile-superseded-{item.id}",
+        expected_generation=item.generation,
+    )
+
+    assert reconciled.status == "awaiting_teacher_review"
+    assert reconciled.completed_step_count == 1
+    db.refresh(item.step)
+    assert item.step.status == "succeeded"
+
+
 def test_apply_hash_conflict_writes_no_children(
     sqlite_db: Session,
     submitted_item: tuple[CodexWorkItem, ProcessingRun, ProcessingStep],

@@ -222,11 +222,10 @@ def test_processing_orchestrator_metadata_contract() -> None:
     assert "lease_token_hash" in CodexWorkItem.__table__.c
 
 
-def test_repository_migrations_have_a_single_joint_exam_authorization_head() -> None:
+def test_repository_migrations_have_a_single_question_anchor_segmentation_head() -> None:
     config = Config(str(Path(__file__).parents[1] / "alembic.ini"))
-    assert ScriptDirectory.from_config(config).get_heads() == [
-        "0034_structured_rubric_authority"
-    ]
+    expected_head = "0035_question_anchor_segmentation"
+    assert ScriptDirectory.from_config(config).get_heads() == [expected_head]
 
 
 def test_processing_orchestrator_defaults_relationships_and_sqlite_constraints() -> None:

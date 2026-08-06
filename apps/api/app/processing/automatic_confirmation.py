@@ -14,19 +14,21 @@ from app.models import (
     Question,
     QuestionRecognitionEvidence,
     QuestionRegion,
+    QuestionStatus,
     RecognitionRevision,
     StudentAnswer,
     StudentAnswerRegion,
     Submission,
     SubmissionPage,
     SubmissionProcessingJob,
+    SubmissionQuestionAnchor,
     SubmissionRecognitionBlock,
     SubmissionRecognitionJob,
     now_utc,
 )
 from app.recognition.answer_evidence import next_revision
 
-AUTOMATIC_CONFIRMATION_VERSION = "strict-auto-confirm-v1"
+AUTOMATIC_CONFIRMATION_VERSION = "strict-auto-confirm-v2"
 REGION_MIN_CONFIDENCE = Decimal("0.95")
 
 
@@ -48,7 +50,7 @@ def auto_confirm_deterministic_regions(
     owner_id: uuid.UUID,
     submission_id: uuid.UUID,
     processing_job_id: uuid.UUID,
-    processing_run_id: uuid.UUID,
+    processing_run_id: uuid.UUID | None,
 ) -> AutomaticConfirmationDecision:
     """Confirm only a complete, uniquely mapped template segmentation.
 
@@ -102,6 +104,7 @@ def auto_confirm_deterministic_regions(
             .where(
                 StudentAnswer.submission_id == submission.id,
                 Question.paper_version_id == assignment.active_paper_version_id,
+                Question.status == "active",
             )
             .order_by(StudentAnswer.id)
             .with_for_update()
@@ -127,6 +130,54 @@ def auto_confirm_deterministic_regions(
             )
         if region.status not in {"rejected", "stale", "superseded"}:
             by_answer.setdefault(region.student_answer_id, []).append(region)
+    teacher_precedence: list[dict[str, object]] = []
+    teacher_superseded_count = 0
+    for answer in answers:
+        current = by_answer.get(answer.id, [])
+        teacher_regions = [
+            region
+            for region in current
+            if region.status == "confirmed"
+            and region.confirmation_origin == "teacher_explicit"
+        ]
+        if len(current) <= 1 or not teacher_regions:
+            continue
+        winner = max(teacher_regions, key=lambda item: (item.created_at, item.id))
+        superseded_ids: list[str] = []
+        for region in current:
+            if region.id == winner.id:
+                continue
+            region.status = "superseded"
+            region.region_version += 1
+            superseded_ids.append(str(region.id))
+            teacher_superseded_count += 1
+        by_answer[answer.id] = [winner]
+        teacher_precedence.append(
+            {
+                "answer_id": str(answer.id),
+                "winner_region_id": str(winner.id),
+                "superseded_region_ids": superseded_ids,
+            }
+        )
+    if teacher_precedence:
+        audit_resource_type = (
+            "processing_run" if processing_run_id is not None else "submission_processing_job"
+        )
+        db.add(
+            AuditLog(
+                actor_id=owner_id,
+                action="processing.segmentation.teacher_region_precedence",
+                resource_type=audit_resource_type,
+                resource_id=str(processing_run_id or processing_job_id),
+                metadata_={
+                    "version": AUTOMATIC_CONFIRMATION_VERSION,
+                    "submission_id": str(submission_id),
+                    "processing_job_id": str(processing_job_id),
+                    "reconciled_answers": teacher_precedence,
+                },
+            )
+        )
+        db.flush()
     if any(len(by_answer.get(answer.id, [])) != 1 for answer in answers):
         return _blocked(
             "SEGMENTATION_AMBIGUOUS",
@@ -134,25 +185,63 @@ def auto_confirm_deterministic_regions(
         )
 
     candidates: list[tuple[StudentAnswer, StudentAnswerRegion]] = []
+    anchored_candidates: list[
+        tuple[StudentAnswer, StudentAnswerRegion, SubmissionQuestionAnchor, SubmissionPage]
+    ] = []
     for answer in answers:
         region = by_answer[answer.id][0]
         if region.status == "confirmed":
             continue
-        if (
-            region.source not in {"alignment", "template"}
-            or region.reason != "ALIGNED_STANDARD_REGION"
-            or region.confidence is None
-            or Decimal(region.confidence) < REGION_MIN_CONFIDENCE
-        ):
+        if region.confidence is None or Decimal(region.confidence) < REGION_MIN_CONFIDENCE:
             return _blocked(
                 "SEGMENTATION_NOT_DETERMINISTIC",
                 "The answer region is not a high-confidence template mapping",
             )
         page = db.get(SubmissionPage, region.submission_page_id)
+        if page is None or page.submission_id != submission.id:
+            return _blocked(
+                "SEGMENTATION_PAGE_AMBIGUOUS",
+                "The source page is not deterministically aligned",
+            )
+        if region.source == "ocr" and region.reason == "QUESTION_ANCHOR":
+            anchor = (
+                db.get(SubmissionQuestionAnchor, region.source_question_anchor_id)
+                if region.source_question_anchor_id is not None
+                else None
+            )
+            if (
+                anchor is None
+                or anchor.submission_processing_job_id != job.id
+                or anchor.submission_page_id != page.id
+                or anchor.candidate_question_id != answer.question_id
+                or anchor.rejection_reason is not None
+                or anchor.source_kind not in {"pdf_text", "ocr"}
+                or anchor.page_version != page.page_version
+                or Decimal(anchor.confidence) != Decimal(region.confidence)
+                or region.region_version != 1
+                or not (region.x <= anchor.x < region.x + region.width)
+                or not (region.y <= anchor.y < region.y + region.height)
+                or page.processing_error_code is not None
+                or bool(page.quality_warnings)
+                or page.processing_status != "completed"
+                or page.preprocessing_version != job.config_version
+            ):
+                return _blocked(
+                    "SEGMENTATION_ANCHOR_STALE",
+                    "The question anchor is missing, ambiguous, or stale",
+                )
+            anchored_candidates.append((answer, region, anchor, page))
+            candidates.append((answer, region))
+            continue
+        if region.source not in {"alignment", "template"} or region.reason != (
+            "ALIGNED_STANDARD_REGION"
+        ):
+            return _blocked(
+                "SEGMENTATION_NOT_DETERMINISTIC",
+                "The answer region is not a high-confidence deterministic mapping",
+            )
         if (
-            page is None
-            or page.submission_id != submission.id
-            or page.processing_error_code is not None
+            page.processing_error_code is not None
             or bool(page.quality_warnings)
             or page.aligned_paper_page_id is None
             or page.alignment_failure_reason is not None
@@ -182,6 +271,41 @@ def auto_confirm_deterministic_regions(
             )
         candidates.append((answer, region))
 
+    if anchored_candidates:
+        if len(anchored_candidates) != len(answers):
+            return _blocked(
+                "SEGMENTATION_ANCHOR_INCOMPLETE",
+                "Anchor confirmation requires one current anchor for every active answer",
+            )
+        anchor_ids = {anchor.id for _, _, anchor, _ in anchored_candidates}
+        if len(anchor_ids) != len(anchored_candidates):
+            return _blocked(
+                "SEGMENTATION_ANCHOR_AMBIGUOUS",
+                "Question anchors must map one-to-one to active answers",
+            )
+        actual_order = [
+            answer.question_id
+            for answer, _, _, _ in sorted(
+                anchored_candidates,
+                key=lambda item: (item[3].page_number, item[2].y, item[2].x),
+            )
+        ]
+        expected_order = list(
+            db.scalars(
+                select(Question.id)
+                .where(
+                    Question.paper_version_id == assignment.active_paper_version_id,
+                    Question.status == "active",
+                )
+                .order_by(Question.display_order, Question.question_number, Question.id)
+            )
+        )
+        if actual_order != expected_order:
+            return _blocked(
+                "SEGMENTATION_ANCHOR_ORDER_AMBIGUOUS",
+                "Question anchors do not form the complete active-question order",
+            )
+
     timestamp = now_utc()
     for answer, region in candidates:
         region.status = "confirmed"
@@ -191,23 +315,33 @@ def auto_confirm_deterministic_regions(
         answer.status = "segmented"
         answer.requires_review = False
     if candidates:
+        audit_resource_type = (
+            "processing_run" if processing_run_id is not None else "submission_processing_job"
+        )
+        audit_resource_id = processing_run_id or processing_job_id
         db.add(
             AuditLog(
                 actor_id=owner_id,
                 action="processing.segmentation.auto_confirm",
-                resource_type="processing_run",
-                resource_id=str(processing_run_id),
+                resource_type=audit_resource_type,
+                resource_id=str(audit_resource_id),
                 metadata_={
                     "version": AUTOMATIC_CONFIRMATION_VERSION,
                     "submission_id": str(submission_id),
                     "processing_job_id": str(processing_job_id),
+                    "processing_run_id": (
+                        str(processing_run_id) if processing_run_id is not None else None
+                    ),
                     "region_ids": [str(region.id) for _, region in candidates],
                     "confirmation_origin": "system_auto",
                 },
             )
         )
         db.flush()
-    return AutomaticConfirmationDecision(True, changed_count=len(candidates))
+    return AutomaticConfirmationDecision(
+        True,
+        changed_count=len(candidates) + teacher_superseded_count,
+    )
 
 
 def auto_confirm_deterministic_recognition(
@@ -253,10 +387,18 @@ def auto_confirm_deterministic_recognition(
     )
     if latest_job_id != job.id:
         return _blocked("RECOGNITION_INPUT_STALE", "A newer recognition generation exists")
+    assignment = db.get(Assignment, submission.assignment_id)
+    if assignment is None or assignment.active_paper_version_id is None:
+        return _blocked("ACTIVE_PAPER_REQUIRED", "The active paper is unavailable")
     answers = list(
         db.scalars(
             select(StudentAnswer)
-            .where(StudentAnswer.submission_id == submission_id)
+            .join(Question, Question.id == StudentAnswer.question_id)
+            .where(
+                StudentAnswer.submission_id == submission_id,
+                Question.paper_version_id == assignment.active_paper_version_id,
+                Question.status == QuestionStatus.active,
+            )
             .order_by(StudentAnswer.id)
             .with_for_update()
         )

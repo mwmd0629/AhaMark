@@ -14,12 +14,15 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.request_id import celery_request_headers
 from app.models import (
+    Assignment,
     AuditLog,
     CodexWorkItem,
     GradingBatch,
     ProcessingRun,
     ProcessingRunCommand,
     ProcessingStep,
+    Question,
+    QuestionStatus,
     StudentAnswer,
     StudentAnswerRegion,
     Submission,
@@ -353,13 +356,7 @@ def _recognition_input(
     )
     if processing_job is None or processing_job.status != "completed":
         return None
-    answers = list(
-        db.scalars(
-            select(StudentAnswer)
-            .where(StudentAnswer.submission_id == submission_id)
-            .order_by(StudentAnswer.id)
-        )
-    )
+    answers = _active_paper_answers(db, submission_id=submission_id)
     if not answers:
         return None
     regions = list(
@@ -369,6 +366,7 @@ def _recognition_input(
             .join(SubmissionPage, SubmissionPage.id == StudentAnswerRegion.submission_page_id)
             .where(
                 StudentAnswer.submission_id == submission_id,
+                StudentAnswer.id.in_([answer.id for answer in answers]),
                 StudentAnswerRegion.status == "confirmed",
             )
             .order_by(
@@ -383,6 +381,32 @@ def _recognition_input(
     if any(answer.id not in answer_ids_with_regions for answer in answers):
         return None
     return answers, regions
+
+
+def _active_paper_answers(
+    db: Session, *, submission_id: uuid.UUID, lock: bool = False
+) -> list[StudentAnswer]:
+    active_paper_version_id = db.scalar(
+        select(Assignment.active_paper_version_id)
+        .join(GradingBatch, GradingBatch.assignment_id == Assignment.id)
+        .join(Submission, Submission.grading_batch_id == GradingBatch.id)
+        .where(Submission.id == submission_id)
+    )
+    if active_paper_version_id is None:
+        return []
+    statement = (
+        select(StudentAnswer)
+        .join(Question, Question.id == StudentAnswer.question_id)
+        .where(
+            StudentAnswer.submission_id == submission_id,
+            Question.paper_version_id == active_paper_version_id,
+            Question.status == QuestionStatus.active,
+        )
+        .order_by(StudentAnswer.id)
+    )
+    if lock:
+        statement = statement.with_for_update(of=StudentAnswer)
+    return list(db.scalars(statement))
 
 
 def _materialize_submission_processing_jobs(
@@ -738,13 +762,7 @@ def _materialize_codex_steps_after_recognition(
     }
     created: list[ProcessingStep] = []
     for submission_id in sorted(ready_submission_ids, key=str):
-        answers = list(
-            db.scalars(
-                select(StudentAnswer)
-                .where(StudentAnswer.submission_id == submission_id)
-                .order_by(StudentAnswer.id)
-            )
-        )
+        answers = _active_paper_answers(db, submission_id=submission_id)
         for answer in answers:
             if answer.id in existing_answer_ids:
                 continue
@@ -822,13 +840,8 @@ def _manifest(db: Session, owner_id: uuid.UUID, batch: GradingBatch) -> dict[str
                 }
             )
             continue
-        answers = list(
-            db.scalars(
-                select(StudentAnswer)
-                .where(StudentAnswer.submission_id == submission.id)
-                .order_by(StudentAnswer.id)
-                .with_for_update()
-            )
+        answers = _active_paper_answers(
+            db, submission_id=submission.id, lock=True
         )
         answer_entries: list[dict[str, Any]] = []
         blockers: list[str] = []

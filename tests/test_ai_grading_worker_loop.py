@@ -172,7 +172,9 @@ def test_migration_head_matches_strict_audit_models() -> None:
     student_portal_revision = script.get_revision("0031_student_portal")
     joint_exam_revision = script.get_revision("0032_joint_exam_roster")
     structured_only_revision = script.get_revision("0034_structured_rubric_authority")
-    assert script.get_current_head() == structured_only_revision.revision
+    question_anchor_revision = script.get_revision("0035_question_anchor_segmentation")
+    assert script.get_current_head() == question_anchor_revision.revision
+    assert question_anchor_revision.down_revision == structured_only_revision.revision
     assert structured_only_revision.down_revision == "0033_joint_exam_class_authorization"
     assert joint_exam_revision.down_revision == student_portal_revision.revision
     assert student_portal_revision.down_revision == collaboration_revision.revision

@@ -433,6 +433,23 @@ export default function GradingBatchPage({
   const currentProcessingStatusCopy = processingRun
     ? getProcessingStatusCopy(processingRun.status)
     : null;
+  const processingStepBlockers = processingRun
+    ? Array.from(
+        new Map(
+          processingRun.steps
+            .filter(
+              (step) =>
+                step.status === "blocked_review" ||
+                step.status === "retryable_failed" ||
+                step.status === "terminal_failed",
+            )
+            .map((step) => [
+              `${step.submission_id}:${step.error_code ?? ""}:${step.error_message ?? ""}`,
+              step,
+            ]),
+        ).values(),
+      )
+    : [];
   const needsAttentionCount = workflow.blocked_count;
   const latestRelease = releases.reduce<GradeRelease | undefined>(
     (latest, candidate) =>
@@ -604,28 +621,16 @@ export default function GradingBatchPage({
         </div>
         {processingRun ? (
           <div className="space-y-3" data-testid="processing-run-status">
-            {processingRun.steps.some(
-              (step) =>
-                step.status === "blocked_review" ||
-                step.status === "retryable_failed" ||
-                step.status === "terminal_failed",
-            ) && (
+            {processingStepBlockers.length > 0 && (
               <div className="space-y-2" data-testid="processing-step-blockers">
-                {processingRun.steps
-                  .filter(
-                    (step) =>
-                      step.status === "blocked_review" ||
-                      step.status === "retryable_failed" ||
-                      step.status === "terminal_failed",
-                  )
-                  .map((step) => (
-                    <p
-                      key={step.id}
-                      className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-sm"
-                    >
-                      {step.error_message || "此步骤需要教师处理"}
-                    </p>
-                  ))}
+                {processingStepBlockers.map((step) => (
+                  <p
+                    key={step.id}
+                    className="rounded-lg border border-amber-200 bg-amber-50 p-2 text-sm"
+                  >
+                    {step.error_message || "此步骤需要教师处理"}
+                  </p>
+                ))}
               </div>
             )}
             <div className="flex flex-wrap gap-2">

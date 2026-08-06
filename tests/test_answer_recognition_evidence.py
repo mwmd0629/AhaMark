@@ -9,8 +9,11 @@ from app.core.config import Settings, get_settings
 from app.db.session import SessionLocal
 from app.main import app
 from app.models import (
+    Assignment,
     GradingJob,
+    Question,
     QuestionRecognitionEvidence,
+    QuestionStatus,
     RecognitionRevision,
     RegionEvidenceImage,
     StudentAnswer,
@@ -171,6 +174,32 @@ def test_confirmed_regions_create_deterministic_evidence_blocks_and_question_sou
         assert len(blocks) == 2
         assert [block.source_page_number for block in blocks] == [1, 1]
         assert len({block.student_answer_region_id for block in blocks}) == 2
+        linked_evidence: list[RegionEvidenceImage] = []
+        for block in blocks:
+            item = db.get(RegionEvidenceImage, block.region_evidence_image_id)
+            assert item is not None and item.source_kind == "processed"
+            linked_evidence.append(item)
+        assert [block.evidence_image_key for block in blocks] == [
+            item.object_key for item in linked_evidence
+        ]
+        original = db.scalar(
+            select(RegionEvidenceImage).where(
+                RegionEvidenceImage.student_answer_region_id
+                == blocks[0].student_answer_region_id,
+                RegionEvidenceImage.source_kind == "original",
+            )
+        )
+        assert original is not None
+        blocks[0].evidence_image_key = original.object_key
+        db.commit()
+        block_payloads = client.get(
+            f"/api/submissions/{submission_id}/recognition-blocks"
+        )
+        assert block_payloads.status_code == 200, block_payloads.text
+        payload_by_id = {item["id"]: item for item in block_payloads.json()}
+        assert payload_by_id[str(blocks[0].id)]["evidence_image_key"] == linked_evidence[
+            0
+        ].object_key
         evidence = db.scalar(
             select(QuestionRecognitionEvidence).where(
                 QuestionRecognitionEvidence.student_answer_id == answer.id
@@ -212,6 +241,56 @@ def test_confirmed_regions_create_deterministic_evidence_blocks_and_question_sou
         ).all() == [1, 2]
     finally:
         settings.answer_recognition_provider = old
+        app.dependency_overrides.pop(get_storage, None)
+        db.close()
+
+
+def test_removed_question_answer_does_not_block_active_answer_recognition() -> None:
+    db, _storage, submission_id, active_answer = prepared()
+    settings = get_settings()
+    previous = settings.answer_recognition_provider
+    settings.answer_recognition_provider = "fake"
+    try:
+        submission = db.get(Submission, submission_id)
+        assert submission is not None
+        assignment = db.get(Assignment, submission.assignment_id)
+        assert assignment is not None and assignment.active_paper_version_id is not None
+        removed_question = Question(
+            paper_version_id=assignment.active_paper_version_id,
+            question_number="removed-history",
+            display_order=99,
+            question_type="short_answer",
+            status=QuestionStatus.removed,
+        )
+        db.add(removed_question)
+        db.flush()
+        removed_answer = StudentAnswer(
+            submission_id=submission.id,
+            question_id=removed_question.id,
+            question_version_reference=str(assignment.active_paper_version_id),
+        )
+        db.add(removed_answer)
+        db.commit()
+
+        response = client.post(
+            f"/api/submissions/{submission_id}/recognition-jobs?run_now=true",
+            json={"idempotency_key": "ignore-removed-question-answer"},
+        )
+
+        assert response.status_code == 201, response.text
+        assert response.json()["status"] == "completed"
+        assert db.scalar(
+            select(QuestionRecognitionEvidence).where(
+                QuestionRecognitionEvidence.student_answer_id == active_answer.id
+            )
+        ) is not None
+        assert db.scalar(
+            select(QuestionRecognitionEvidence).where(
+                QuestionRecognitionEvidence.student_answer_id == removed_answer.id
+            )
+        ) is None
+    finally:
+        settings.answer_recognition_provider = previous
         app.dependency_overrides.pop(get_storage, None)
         db.close()
 

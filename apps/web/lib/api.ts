@@ -610,6 +610,22 @@ export type QuestionRecord = {
   knowledge_points: { id: string; name: string }[];
   regions: RegionRecord[];
 };
+export type QuestionInput = {
+  question_number: string;
+  question_type: string;
+  max_score: number;
+  content_text?: string;
+  difficulty?: "easy" | "medium" | "hard";
+  knowledge_points: string[];
+};
+export type QuestionRegionInput = {
+  paper_page_id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  region_type: "question";
+};
 export type AssignmentRecord = {
   id: string;
   title: string;
@@ -754,6 +770,13 @@ export const assignmentsApi = {
     request<{ url: string }>(`/api/assignments/${id}/files/${fileId}/preview`, {
       method: "POST",
     }),
+  pagePreview: (id: string, pageId: string) =>
+    request<{
+      url: string;
+      width: number;
+      height: number;
+      rotation: 0 | 90 | 180 | 270;
+    }>(`/api/assignments/${id}/pages/${pageId}/preview`, { method: "POST" }),
   removeFile: (id: string, fileId: string) =>
     request<{ id: string; pages_deleted: number }>(
       `/api/assignments/${id}/files/${fileId}`,
@@ -769,6 +792,20 @@ export const assignmentsApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  cutQuestion: (
+    id: string,
+    pageId: string,
+    data:
+      | { question: QuestionInput; region: QuestionRegionInput }
+      | { question_id: string; region: QuestionRegionInput },
+  ) =>
+    request<QuestionRecord>(
+      `/api/assignments/${id}/pages/${pageId}/question-cuts`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    ),
   updateQuestion: (
     id: string,
     questionId: string,

@@ -14,18 +14,21 @@ from app.models import (
     Submission,
     SubmissionPage,
     SubmissionProcessingJob,
+    SubmissionQuestionAnchor,
     now_utc,
 )
 from app.recognition.pipeline import PageArtifact, ProviderBlock
 from app.recognition.submission_processing import (
     _hash_distance,
     _normalize_question_number,
+    _pdf_text_blocks,
     _segment,
     preprocess_page,
 )
 from app.storage.dependencies import get_storage
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
+from reportlab.pdfgen import canvas
 from sqlalchemy import func, select
 from test_submission_workflow import workflow
 
@@ -41,6 +44,16 @@ def artifact(background: str = "white", text: str | None = None) -> PageArtifact
     return PageArtifact(output.getvalue(), image.width, image.height)
 
 
+def sparse_ruled_artifact(ink: int) -> PageArtifact:
+    image = Image.new("L", (1000, 1000), 255)
+    draw = ImageDraw.Draw(image)
+    for y in range(100, 700, 10):
+        draw.line((80, y, 280, y), fill=ink, width=3)
+    output = io.BytesIO()
+    image.convert("RGB").save(output, "PNG")
+    return PageArtifact(output.getvalue(), image.width, image.height)
+
+
 def test_quality_metrics_detect_blank_and_duplicate_deterministically() -> None:
     _, blank = preprocess_page(artifact())
     _, same = preprocess_page(artifact())
@@ -48,6 +61,28 @@ def test_quality_metrics_detect_blank_and_duplicate_deterministically() -> None:
     assert Decimal(str(blank["blank_probability"])) >= Decimal("0.95")
     assert _hash_distance(str(blank["perceptual_hash"]), str(same["perceptual_hash"])) == 0
     assert str(content["perceptual_hash"]) != str(blank["perceptual_hash"])
+
+
+def test_sparse_white_page_uses_content_brightness_without_false_positive() -> None:
+    _, metrics = preprocess_page(sparse_ruled_artifact(0))
+
+    assert float(metrics["source_brightness"]) > 245
+    assert Decimal(str(metrics["blank_probability"])) < Decimal("0.95")
+    assert float(metrics["source_content_brightness"]) < 210
+    assert metrics["brightness_correction_applied"] is False
+    assert "TOO_BRIGHT" not in metrics["warnings"]
+
+
+def test_washed_out_content_is_corrected_and_rechecked() -> None:
+    processed, metrics = preprocess_page(sparse_ruled_artifact(235))
+    image = Image.open(io.BytesIO(processed.content)).convert("L")
+
+    assert float(metrics["source_brightness"]) > 245
+    assert float(metrics["source_content_brightness"]) > 210
+    assert metrics["brightness_correction_applied"] is True
+    assert float(metrics["processed_content_brightness"]) < 210
+    assert image.getextrema()[0] < 50
+    assert "TOO_BRIGHT" not in metrics["warnings"]
 
 
 def test_question_anchor_formats_are_normalized_without_unknown_creation() -> None:
@@ -76,6 +111,21 @@ def test_question_anchor_formats_are_normalized_without_unknown_creation() -> No
         "1",
     ]
     assert _normalize_question_number("\u7b54\u6848\u5f15\u7528\u7b2c 9 \u9898") is None
+
+
+def test_pdf_text_layer_exposes_normalized_question_anchor_coordinates() -> None:
+    output = io.BytesIO()
+    document = canvas.Canvas(output, pagesize=(600, 800))
+    document.drawString(60, 680, "Q1: answer")
+    document.drawString(60, 520, "Q2: answer")
+    document.save()
+
+    blocks = _pdf_text_blocks(output.getvalue(), 1)
+
+    assert [_normalize_question_number(block.text or "") for block in blocks] == ["1", "2"]
+    assert all(block.block_type == "pdf_text" for block in blocks)
+    assert all(block.confidence == 0.99 for block in blocks)
+    assert blocks[0].region[1] < blocks[1].region[1]
 
 
 def test_processing_job_is_idempotent_and_region_bounds_are_enforced() -> None:
@@ -112,6 +162,19 @@ def test_processing_job_is_idempotent_and_region_bounds_are_enforced() -> None:
         ).all()
         assert len(pages) == 3
         initial_rotation = pages[0].rotation
+        job = db.get(SubmissionProcessingJob, uuid.UUID(first.json()["id"]))
+        assert job is not None
+        job.config_version = "submission-processing-v1"
+        db.commit()
+        retried = client.post(
+            f"/api/submissions/{submission_id}/processing-jobs/{job.id}/pages/{pages[0].id}/retry?run_now=true"
+        )
+        assert retried.status_code == 200, retried.text
+        assert retried.json()["config_version"] == "submission-processing-v2"
+        db.expire_all()
+        retried_page = db.get(SubmissionPage, pages[0].id)
+        assert retried_page is not None
+        assert retried_page.preprocessing_version == "submission-processing-v2"
         answer = db.scalar(
             select(StudentAnswer).where(
                 StudentAnswer.submission_id == submission_id,
@@ -325,6 +388,239 @@ def test_low_confidence_anchor_is_below_auto_threshold() -> None:
     assert block.confidence is not None and block.confidence < 0.8
 
 
+def test_manual_region_create_replaces_current_region_for_the_same_answer() -> None:
+    db, _storage, _batch_id, submission_id, question_id = workflow()
+    try:
+        submission = db.get(Submission, submission_id)
+        page = db.scalar(
+            select(SubmissionPage)
+            .where(SubmissionPage.submission_id == submission_id)
+            .order_by(SubmissionPage.page_number)
+        )
+        assert submission is not None and page is not None
+        assignment = db.get(Assignment, submission.assignment_id)
+        assert assignment is not None and assignment.active_paper_version_id is not None
+        answer = StudentAnswer(
+            submission_id=submission.id,
+            question_id=uuid.UUID(question_id),
+            question_version_reference=str(assignment.active_paper_version_id),
+        )
+        db.add(answer)
+        db.flush()
+        old_region = StudentAnswerRegion(
+            student_answer_id=answer.id,
+            submission_page_id=page.id,
+            x=Decimal("0.10"),
+            y=Decimal("0.20"),
+            width=Decimal("0.30"),
+            height=Decimal("0.40"),
+            source="ocr",
+            status="confirmed",
+            reason="QUESTION_ANCHOR",
+            confirmation_origin="system_auto",
+        )
+        db.add(old_region)
+        db.commit()
+
+        response = client.post(
+            f"/api/submissions/{submission_id}/region-candidates",
+            json={
+                "question_id": question_id,
+                "submission_page_id": str(page.id),
+                "x": 0.1,
+                "y": 0.2,
+                "width": 0.3,
+                "height": 0.4,
+                "source": "manual",
+                "status": "confirmed",
+                "reason": "TEACHER_DRAWN",
+            },
+        )
+
+        assert response.status_code == 201, response.text
+        db.expire_all()
+        persisted_old = db.get(StudentAnswerRegion, old_region.id)
+        current = db.scalars(
+            select(StudentAnswerRegion).where(
+                StudentAnswerRegion.student_answer_id == answer.id,
+                StudentAnswerRegion.status.in_(
+                    ["candidate", "confirmed", "manual_required"]
+                ),
+            )
+        ).all()
+        assert persisted_old is not None
+        assert persisted_old.status == "superseded" and persisted_old.region_version == 2
+        assert len(current) == 1
+        assert str(current[0].id) == response.json()["id"]
+        assert current[0].confirmation_origin == "teacher_explicit"
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+        db.close()
+
+
+def test_complete_unique_anchor_sequence_ignores_removed_questions() -> None:
+    db, _storage, _batch_id, submission_id, question_id = workflow()
+    try:
+        submission = db.get(Submission, submission_id)
+        assert submission is not None
+        assignment = db.get(Assignment, submission.assignment_id)
+        assert assignment is not None and assignment.active_paper_version_id is not None
+        questions = [db.get(Question, uuid.UUID(question_id))]
+        questions.extend(
+            Question(
+                paper_version_id=assignment.active_paper_version_id,
+                question_number=str(number),
+                display_order=number - 1,
+                question_type="calculation",
+                max_score=10,
+                status=QuestionStatus.active,
+                source="manual",
+            )
+            for number in range(2, 6)
+        )
+        removed = Question(
+            paper_version_id=assignment.active_paper_version_id,
+            question_number="3",
+            display_order=99,
+            question_type="other",
+            max_score=0,
+            status=QuestionStatus.removed,
+            source="manual",
+        )
+        db.add_all([*questions[1:], removed])
+        page = db.scalar(
+            select(SubmissionPage)
+            .where(SubmissionPage.submission_id == submission.id)
+            .order_by(SubmissionPage.page_number)
+        )
+        assert page is not None
+        page.page_version = 4
+        job = SubmissionProcessingJob(
+            owner_id=submission.owner_id,
+            submission_id=submission.id,
+            idempotency_key=f"complete-anchors-{uuid.uuid4()}",
+            status="running",
+        )
+        db.add(job)
+        db.flush()
+        blocks = [
+            ProviderBlock(
+                "pdf_text",
+                f"Q{number}:",
+                None,
+                0.99,
+                (0.08, 0.12 + (number - 1) * 0.15, 0.08, 0.025),
+            )
+            for number in range(1, 6)
+        ]
+
+        _segment(db, job, submission, [page], {page.id: blocks})
+        db.commit()
+
+        answers = db.scalars(
+            select(StudentAnswer)
+            .join(Question, Question.id == StudentAnswer.question_id)
+            .where(StudentAnswer.submission_id == submission.id, Question.status == "active")
+        ).all()
+        regions = db.scalars(
+            select(StudentAnswerRegion)
+            .join(StudentAnswer, StudentAnswer.id == StudentAnswerRegion.student_answer_id)
+            .join(Question, Question.id == StudentAnswer.question_id)
+            .where(StudentAnswer.submission_id == submission.id, Question.status == "active")
+        ).all()
+        anchors = db.scalars(
+            select(SubmissionQuestionAnchor).where(
+                SubmissionQuestionAnchor.submission_processing_job_id == job.id
+            )
+        ).all()
+        assert len(answers) == len(regions) == len(anchors) == 5
+        assert {region.status for region in regions} == {"candidate"}
+        assert {region.reason for region in regions} == {"QUESTION_ANCHOR"}
+        assert all(region.source_question_anchor_id for region in regions)
+        assert {anchor.source_kind for anchor in anchors} == {"pdf_text"}
+        assert {anchor.page_version for anchor in anchors} == {4}
+        assert not db.scalars(
+            select(StudentAnswer).where(StudentAnswer.question_id == removed.id)
+        ).all()
+
+        for region in regions:
+            region.status = "confirmed"
+            region.confirmation_origin = "system_auto"
+            region.confirmed_by = submission.owner_id
+            region.confirmed_at = now_utc()
+        second_job = SubmissionProcessingJob(
+            owner_id=submission.owner_id,
+            submission_id=submission.id,
+            idempotency_key=f"repeat-system-anchors-{uuid.uuid4()}",
+            status="running",
+        )
+        db.add(second_job)
+        db.flush()
+        _segment(db, second_job, submission, [page], {page.id: blocks})
+        db.commit()
+
+        repeated_regions = db.scalars(
+            select(StudentAnswerRegion)
+            .join(StudentAnswer, StudentAnswer.id == StudentAnswerRegion.student_answer_id)
+            .join(Question, Question.id == StudentAnswer.question_id)
+            .where(StudentAnswer.submission_id == submission.id, Question.status == "active")
+        ).all()
+        current_regions = [
+            region
+            for region in repeated_regions
+            if region.status in {"candidate", "confirmed", "manual_required"}
+        ]
+        assert len(current_regions) == 5
+        assert {region.status for region in current_regions} == {"candidate"}
+        assert len([region for region in repeated_regions if region.status == "superseded"]) == 5
+        assert not [
+            region for region in current_regions if region.reason == "HIGH_OVERLAP_CONFLICT"
+        ]
+
+        teacher_region = next(
+            region
+            for region in current_regions
+            if next(
+                answer.question_id for answer in answers if answer.id == region.student_answer_id
+            )
+            == uuid.UUID(question_id)
+        )
+        teacher_region.status = "confirmed"
+        teacher_region.confirmation_origin = "teacher_explicit"
+        teacher_region.confirmed_by = submission.owner_id
+        teacher_region.confirmed_at = now_utc()
+        teacher_region_id = teacher_region.id
+        third_job = SubmissionProcessingJob(
+            owner_id=submission.owner_id,
+            submission_id=submission.id,
+            idempotency_key=f"repeat-teacher-anchors-{uuid.uuid4()}",
+            status="running",
+        )
+        db.add(third_job)
+        db.flush()
+        _segment(db, third_job, submission, [page], {page.id: blocks})
+        db.commit()
+
+        visible_regions = client.get(f"/api/submissions/{submission.id}/region-candidates")
+        latest_anchors = client.get(f"/api/submissions/{submission.id}/question-anchors")
+        assert visible_regions.status_code == 200, visible_regions.text
+        assert latest_anchors.status_code == 200, latest_anchors.text
+        assert len(visible_regions.json()) == 5
+        assert len(latest_anchors.json()) == 5
+        assert not [
+            region
+            for region in visible_regions.json()
+            if region["reason"] == "HIGH_OVERLAP_CONFLICT"
+        ]
+        persisted_teacher = db.get(StudentAnswerRegion, teacher_region_id)
+        assert persisted_teacher is not None
+        assert persisted_teacher.status == "confirmed"
+        assert persisted_teacher.confirmation_origin == "teacher_explicit"
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+        db.close()
+
+
 def test_four_page_acceptance_layout_supports_multi_question_and_cross_page() -> None:
     db, _storage, _batch_id, submission_id, question_id = workflow()
     try:
@@ -403,14 +699,19 @@ def test_four_page_acceptance_layout_supports_multi_question_and_cross_page() ->
                 StudentAnswerRegion.student_answer_id == by_number["4"].id
             )
         ).all()
+        rejected_low_anchor = db.scalar(
+            select(SubmissionQuestionAnchor).where(
+                SubmissionQuestionAnchor.submission_processing_job_id == job.id,
+                SubmissionQuestionAnchor.submission_page_id == pages[3].id,
+                SubmissionQuestionAnchor.normalized_number == "4",
+            )
+        )
         assert len(pages) == 4
         assert len(page_two_regions) == 2
-        assert len(question_four_regions) == 2
-        assert {region.submission_page_id for region in question_four_regions} == {
-            pages[2].id,
-            pages[3].id,
-        }
-        assert any(region.status == "manual_required" for region in question_four_regions)
+        assert len(question_four_regions) == 1
+        assert question_four_regions[0].submission_page_id == pages[2].id
+        assert rejected_low_anchor is not None
+        assert rejected_low_anchor.rejection_reason == "LOW_ANCHOR_CONFIDENCE"
     finally:
         app.dependency_overrides.pop(get_storage, None)
         db.close()

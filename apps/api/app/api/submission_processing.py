@@ -249,6 +249,9 @@ def _region_json(
         "confidence": region.confidence,
         "status": region.status,
         "reason": region.reason,
+        "source_question_anchor_id": (
+            str(region.source_question_anchor_id) if region.source_question_anchor_id else None
+        ),
         "segmentation_version": region.segmentation_version,
     }
 
@@ -260,7 +263,10 @@ def list_regions(submission_id: uuid.UUID, db: Db, actor: Actor) -> list[dict[st
         select(StudentAnswerRegion, StudentAnswer, Question)
         .join(StudentAnswer, StudentAnswer.id == StudentAnswerRegion.student_answer_id)
         .join(Question, Question.id == StudentAnswer.question_id)
-        .where(StudentAnswer.submission_id == submission_id)
+        .where(
+            StudentAnswer.submission_id == submission_id,
+            StudentAnswerRegion.status.in_(["candidate", "confirmed", "manual_required"]),
+        )
         .order_by(StudentAnswerRegion.submission_page_id, StudentAnswerRegion.y)
     ).all()
     return [_region_json(region, answer, question) for region, answer, question in rows]
@@ -317,6 +323,7 @@ def _reject_high_overlap(
     submission_id: uuid.UUID,
     data: RegionMutation,
     exclude_id: uuid.UUID | None = None,
+    exclude_answer_id: uuid.UUID | None = None,
 ) -> None:
     rows = db.scalars(
         select(StudentAnswerRegion)
@@ -330,6 +337,8 @@ def _reject_high_overlap(
     area = data.width * data.height
     for region in rows:
         if region.id == exclude_id:
+            continue
+        if region.student_answer_id == exclude_answer_id:
             continue
         left, top = max(data.x, region.x), max(data.y, region.y)
         right = min(data.x + data.width, region.x + region.width)
@@ -352,7 +361,22 @@ def add_region(
 ) -> dict[str, Any]:
     submission = _editable(db, actor.id, submission_id)
     page, answer = _validate_region(db, submission, data)
-    _reject_high_overlap(db, submission.id, data)
+    _reject_high_overlap(db, submission.id, data, exclude_answer_id=answer.id)
+    replaced_regions = list(
+        db.scalars(
+            select(StudentAnswerRegion)
+            .where(
+                StudentAnswerRegion.student_answer_id == answer.id,
+                StudentAnswerRegion.status.in_(
+                    ["candidate", "confirmed", "manual_required"]
+                ),
+            )
+            .with_for_update()
+        )
+    )
+    for replaced in replaced_regions:
+        replaced.status = "superseded"
+        replaced.region_version += 1
     region = StudentAnswerRegion(
         student_answer_id=answer.id,
         submission_page_id=page.id,
@@ -372,7 +396,14 @@ def add_region(
     db.add(region)
     db.flush()
     _invalidate(db, answer)
-    audit(db, actor.id, "submission_region.create", "student_answer_region", region.id)
+    audit(
+        db,
+        actor.id,
+        "submission_region.create",
+        "student_answer_region",
+        region.id,
+        {"superseded_region_ids": [str(item.id) for item in replaced_regions]},
+    )
     db.commit()
     return _region_json(region, answer, db.get(Question, answer.question_id))
 
@@ -404,6 +435,7 @@ def update_region(
     region.x, region.y, region.width, region.height = data.x, data.y, data.width, data.height
     region.source, region.confidence = data.source, data.confidence
     region.status, region.reason = data.status, data.reason
+    region.source_question_anchor_id = None
     region.region_version += 1
     region.confirmed_by = actor.id if data.status == "confirmed" else None
     region.confirmed_at = now_utc() if data.status == "confirmed" else None
@@ -471,9 +503,20 @@ def confirm_high_confidence(submission_id: uuid.UUID, db: Db, actor: Actor) -> d
 @router.get("/submissions/{submission_id}/segmentation-incomplete")
 def segmentation_incomplete(submission_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
     submission = _submission(db, actor.id, submission_id)
-    answers = db.scalars(
-        select(StudentAnswer).where(StudentAnswer.submission_id == submission.id)
-    ).all()
+    assignment = db.get(Assignment, submission.assignment_id)
+    answers = (
+        db.scalars(
+            select(StudentAnswer)
+            .join(Question, Question.id == StudentAnswer.question_id)
+            .where(
+                StudentAnswer.submission_id == submission.id,
+                Question.paper_version_id == assignment.active_paper_version_id,
+                Question.status == "active",
+            )
+        ).all()
+        if assignment and assignment.active_paper_version_id
+        else []
+    )
     incomplete: list[str] = []
     for answer in answers:
         confirmed = db.scalar(
@@ -513,6 +556,7 @@ def retry_page(
     if job is None or page is None:
         raise ApiProblem(404, "PROCESSING_PAGE_NOT_FOUND", "处理页面不存在")
     page.processing_status, job.status, job.stage = "pending", "queued", "page_processing"
+    job.config_version = PROCESSING_VERSION
     db.commit()
     if run_now:
         run_submission_processing(db, storage, get_settings(), job.id, page.id)
@@ -571,6 +615,7 @@ def rotate_page(
         None,
         None,
     )
+    job.config_version = PROCESSING_VERSION
     audit(
         db,
         actor.id,
@@ -590,13 +635,17 @@ def rotate_page(
 @router.get("/submissions/{submission_id}/question-anchors")
 def list_anchors(submission_id: uuid.UUID, db: Db, actor: Actor) -> list[dict[str, Any]]:
     _submission(db, actor.id, submission_id)
+    latest_job_id = db.scalar(
+        select(SubmissionProcessingJob.id)
+        .where(SubmissionProcessingJob.submission_id == submission_id)
+        .order_by(SubmissionProcessingJob.created_at.desc(), SubmissionProcessingJob.id)
+        .limit(1)
+    )
+    if latest_job_id is None:
+        return []
     anchors = db.scalars(
         select(SubmissionQuestionAnchor)
-        .join(
-            SubmissionProcessingJob,
-            SubmissionProcessingJob.id == SubmissionQuestionAnchor.submission_processing_job_id,
-        )
-        .where(SubmissionProcessingJob.submission_id == submission_id)
+        .where(SubmissionQuestionAnchor.submission_processing_job_id == latest_job_id)
         .order_by(SubmissionQuestionAnchor.submission_page_id, SubmissionQuestionAnchor.y)
     ).all()
     return [
@@ -609,6 +658,8 @@ def list_anchors(submission_id: uuid.UUID, db: Db, actor: Actor) -> list[dict[st
                 str(anchor.candidate_question_id) if anchor.candidate_question_id else None
             ),
             "confidence": anchor.confidence,
+            "source_kind": anchor.source_kind,
+            "page_version": anchor.page_version,
             "x": anchor.x,
             "y": anchor.y,
             "width": anchor.width,

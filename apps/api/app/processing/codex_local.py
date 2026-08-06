@@ -1028,6 +1028,7 @@ def _validate_existing_apply(
         for region in db.scalars(
             select(StudentAnswerRegion).where(
                 StudentAnswerRegion.student_answer_id == item.student_answer_id,
+                StudentAnswerRegion.status == "confirmed",
                 StudentAnswerRegion.submission_page_id == row.submission_page_id,
                 StudentAnswerRegion.x == row.x,
                 StudentAnswerRegion.y == row.y,

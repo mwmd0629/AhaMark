@@ -1624,7 +1624,10 @@ class StudentAnswerRegion(TimestampMixin, Base):
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     confirmation_origin: Mapped[str | None] = mapped_column(String(24))
     reason: Mapped[str | None] = mapped_column(String(255))
-    segmentation_version: Mapped[str] = mapped_column(String(80), default="submission-seg-v1")
+    source_question_anchor_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("submission_question_anchors.id", ondelete="SET NULL"), index=True
+    )
+    segmentation_version: Mapped[str] = mapped_column(String(80), default="submission-seg-v2")
     region_version: Mapped[int] = mapped_column(Integer, default=1)
 
 
@@ -1646,7 +1649,7 @@ class SubmissionProcessingJob(TimestampMixin, Base):
     idempotency_key: Mapped[str] = mapped_column(String(128))
     provider: Mapped[str] = mapped_column(String(80), default="local")
     provider_version: Mapped[str] = mapped_column(String(80), default="pillow")
-    config_version: Mapped[str] = mapped_column(String(80), default="submission-processing-v1")
+    config_version: Mapped[str] = mapped_column(String(80), default="submission-processing-v2")
     attempt: Mapped[int] = mapped_column(Integer, default=0)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -1678,6 +1681,8 @@ class SubmissionQuestionAnchor(TimestampMixin, Base):
         ForeignKey("questions.id", ondelete="SET NULL"), index=True
     )
     confidence: Mapped[Any] = mapped_column(Numeric(6, 5))
+    source_kind: Mapped[str] = mapped_column(String(30), default="ocr")
+    page_version: Mapped[int] = mapped_column(Integer, default=1)
     x: Mapped[Any] = mapped_column(Numeric(8, 6))
     y: Mapped[Any] = mapped_column(Numeric(8, 6))
     width: Mapped[Any] = mapped_column(Numeric(8, 6))

@@ -1984,8 +1984,17 @@ def start_submission_recognition(
                 "status": processing_job.status,
             },
         )
+    assignment = db.get(Assignment, submission.assignment_id)
+    if assignment is None or assignment.active_paper_version_id is None:
+        raise ApiProblem(409, "ACTIVE_PAPER_REQUIRED", "当前作业没有生效试卷")
     answers = db.scalars(
-        select(StudentAnswer).where(StudentAnswer.submission_id == submission.id)
+        select(StudentAnswer)
+        .join(Question, Question.id == StudentAnswer.question_id)
+        .where(
+            StudentAnswer.submission_id == submission.id,
+            Question.paper_version_id == assignment.active_paper_version_id,
+            Question.status == QuestionStatus.active,
+        )
     ).all()
     if not answers:
         raise ApiProblem(
@@ -2019,9 +2028,12 @@ def start_submission_recognition(
         db.scalars(
             select(StudentAnswerRegion)
             .join(StudentAnswer, StudentAnswer.id == StudentAnswerRegion.student_answer_id)
+            .join(Question, Question.id == StudentAnswer.question_id)
             .join(SubmissionPage, SubmissionPage.id == StudentAnswerRegion.submission_page_id)
             .where(
                 StudentAnswer.submission_id == submission.id,
+                Question.paper_version_id == assignment.active_paper_version_id,
+                Question.status == QuestionStatus.active,
                 StudentAnswerRegion.status == "confirmed",
             )
             .order_by(
@@ -4652,6 +4664,8 @@ def review_workspace(
 ) -> dict[str, Any]:
     batch, is_owner, assigned_question_ids = _reviewable_batch(db, actor.id, batch_id)
     assignment = db.get(Assignment, batch.assignment_id)
+    if assignment is None or assignment.active_paper_version_id is None:
+        raise ApiProblem(409, "ACTIVE_PAPER_REQUIRED", "当前作业没有可批改的生效试卷")
     submission_filters: list[Any] = [
         Submission.grading_batch_id == batch.id,
         Submission.owner_id == batch.owner_id,
@@ -4671,7 +4685,16 @@ def review_workspace(
             answer_filters.append(StudentAnswer.question_id.in_(assigned_question_ids))
         if question_id:
             answer_filters.append(StudentAnswer.question_id == question_id)
-        answers = db.scalars(select(StudentAnswer).where(*answer_filters)).all()
+        answers = db.scalars(
+            select(StudentAnswer)
+            .join(Question, Question.id == StudentAnswer.question_id)
+            .where(
+                *answer_filters,
+                Question.paper_version_id == assignment.active_paper_version_id,
+                Question.status == QuestionStatus.active,
+            )
+            .order_by(Question.display_order, Question.question_number, StudentAnswer.id)
+        ).all()
         answer_items: list[dict[str, Any]] = []
         allowed_page_ids: set[uuid.UUID] = set()
         for answer in answers:

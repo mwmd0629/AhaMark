@@ -41,6 +41,13 @@ from app.models import (
     User,
     now_utc,
 )
+from app.recognition.pipeline import (
+    DefaultDocumentConverter,
+    PillowPreprocessor,
+    RecognitionError,
+    read_all,
+    store_artifact,
+)
 from app.security.files import UnsafeFile, inspect_upload, safe_filename
 from app.semantic_content import semantic_hash
 from app.storage.base import ObjectStorage
@@ -150,6 +157,18 @@ class RegionInput(BaseModel):
             or self.y + self.height > 1
         ):
             raise ValueError("区域必须位于 0..1 页面坐标内")
+        return self
+
+
+class QuestionCutInput(BaseModel):
+    question: QuestionInput | None = None
+    question_id: uuid.UUID | None = None
+    region: RegionInput
+
+    @model_validator(mode="after")
+    def exactly_one_target(self) -> "QuestionCutInput":
+        if (self.question is None) == (self.question_id is None):
+            raise ValueError("必须创建一道新题或选择一道已有题目")
         return self
 
 
@@ -1523,6 +1542,110 @@ def preview(
     return {"url": storage.presigned_get(sf.storage_key, 900)}
 
 
+@router.post("/{assignment_id}/pages/{page_id}/preview")
+def page_preview(
+    assignment_id: uuid.UUID,
+    page_id: uuid.UUID,
+    db: Db,
+    actor: Actor,
+    storage: Storage,
+) -> dict[str, Any]:
+    item = owned(db, actor.id, assignment_id, lock=True)
+    if item.status != AssignmentStatus.draft:
+        raise ApiProblem(409, "ASSIGNMENT_LOCKED", "只能为草稿生成切题预览")
+    active_paper = paper(db, item)
+    page = db.scalar(
+        select(PaperPage).where(
+            PaperPage.id == page_id,
+            PaperPage.paper_version_id == (active_paper.id if active_paper else None),
+        )
+    )
+    if page is None:
+        raise ApiProblem(404, "PAGE_NOT_FOUND", "页面不存在")
+    if page.status != "ready":
+        raise ApiProblem(409, "PAGE_NOT_READY", "页面当前不能用于切题")
+    source = db.scalar(
+        select(StoredFile).where(
+            StoredFile.id == page.stored_file_id,
+            StoredFile.owner_id == actor.id,
+            StoredFile.status == FileStatus.ready,
+        )
+    )
+    if source is None:
+        raise ApiProblem(404, "FILE_NOT_FOUND", "页面原文件不存在")
+
+    preview_prefix = (
+        f"assignment-page-previews/{actor.id}/{item.id}/{page.paper_version_id}/{page.id}/"
+    )
+    key = f"{preview_prefix}{source.checksum}-r{page.rotation}.png"
+    generated = False
+    artifact_width = page.width
+    artifact_height = page.height
+    try:
+        storage.stat(key)
+    except Exception:
+        try:
+            original = DefaultDocumentConverter(get_settings()).convert(
+                read_all(storage.get(source.storage_key)),
+                source.content_type,
+                page.source_page_number or 1,
+            )
+            rendered = PillowPreprocessor().process(
+                original,
+                {"rotation": page.rotation, "denoise": False, "contrast": False},
+            )
+            store_artifact(storage, key, rendered)
+            generated = True
+            artifact_width, artifact_height = rendered.width, rendered.height
+        except RecognitionError as exc:
+            raise ApiProblem(422, exc.code, str(exc)) from exc
+        except Exception as exc:
+            raise ApiProblem(503, "PAGE_PREVIEW_FAILED", "页面预览生成失败") from exc
+
+    if artifact_width is None or artifact_height is None:
+        try:
+            image = PillowPreprocessor().process(
+                DefaultDocumentConverter(get_settings()).convert(
+                    read_all(storage.get(source.storage_key)),
+                    source.content_type,
+                    page.source_page_number or 1,
+                ),
+                {"rotation": page.rotation, "denoise": False, "contrast": False},
+            )
+            artifact_width, artifact_height = image.width, image.height
+        except RecognitionError as exc:
+            raise ApiProblem(422, exc.code, str(exc)) from exc
+        except Exception as exc:
+            raise ApiProblem(503, "PAGE_PREVIEW_FAILED", "页面预览生成失败") from exc
+    elif not generated and page.rotation in {90, 270}:
+        artifact_width, artifact_height = artifact_height, artifact_width
+
+    previous_key = page.preview_storage_key
+    page.preview_storage_key = key
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        if generated:
+            try:
+                storage.delete(key)
+            except Exception:
+                pass
+        raise ApiProblem(503, "PAGE_PREVIEW_SAVE_FAILED", "页面预览状态保存失败") from exc
+    if previous_key and previous_key != key and previous_key.startswith(preview_prefix):
+        try:
+            storage.delete(previous_key)
+        except Exception:
+            pass
+
+    return {
+        "url": storage.presigned_get(key, 900),
+        "width": artifact_width,
+        "height": artifact_height,
+        "rotation": page.rotation,
+    }
+
+
 @router.delete("/{assignment_id}/files/{file_id}")
 def delete_file(
     assignment_id: uuid.UUID, file_id: uuid.UUID, db: Db, actor: Actor, storage: Storage
@@ -1624,6 +1747,8 @@ def patch_page(
     assignment_id: uuid.UUID, page_id: uuid.UUID, data: PagePatch, db: Db, actor: Actor
 ) -> dict[str, Any]:
     item = owned(db, actor.id, assignment_id, lock=True)
+    if item.status != AssignmentStatus.draft:
+        raise ApiProblem(409, "ASSIGNMENT_LOCKED", "只能整理草稿中的试卷页面")
     pp = db.scalar(
         select(PaperPage)
         .join(PaperVersion)
@@ -1648,6 +1773,8 @@ def reorder_pages(
     assignment_id: uuid.UUID, data: ReorderInput, db: Db, actor: Actor
 ) -> dict[str, Any]:
     item = owned(db, actor.id, assignment_id, lock=True)
+    if item.status != AssignmentStatus.draft:
+        raise ApiProblem(409, "ASSIGNMENT_LOCKED", "只能整理草稿中的试卷页面")
     pv = paper(db, item)
     pages = db.scalars(
         select(PaperPage).where(PaperPage.paper_version_id == (pv.id if pv else None))
@@ -1673,29 +1800,14 @@ def create_question(
     assignment_id: uuid.UUID, data: QuestionInput, db: Db, actor: Actor
 ) -> dict[str, Any]:
     item = owned(db, actor.id, assignment_id, lock=True)
+    ensure_assignment_draft(item)
     pv = paper(db, item)
     if not pv:
         pv = PaperVersion(assignment_id=item.id, version=1, created_by=actor.id)
         db.add(pv)
         db.flush()
         item.active_paper_version_id = pv.id
-    if data.question_type not in QUESTION_TYPES:
-        raise ApiProblem(422, "QUESTION_TYPE_INVALID", "题型无效")
-    order = (
-        db.scalar(
-            select(func.max(Question.display_order)).where(Question.paper_version_id == pv.id)
-        )
-        or 0
-    ) + 1
-    q = Question(
-        paper_version_id=pv.id,
-        display_order=order,
-        **data.model_dump(exclude={"knowledge_points"}),
-        source="manual",
-    )
-    db.add(q)
-    db.flush()
-    set_kps(db, actor.id, item, q, data.knowledge_points)
+    q = insert_question(db, actor.id, item, pv, data)
     audit(db, actor.id, "question.create", "question", q.id)
     db.commit()
     return question_json(db, q)
@@ -1723,11 +1835,119 @@ def set_kps(
         db.add(QuestionKnowledgePoint(question_id=q.id, knowledge_point_id=kp.id))
 
 
+def ensure_assignment_draft(item: Assignment) -> None:
+    if item.status != AssignmentStatus.draft:
+        raise ApiProblem(409, "ASSIGNMENT_LOCKED", "只能修改草稿中的题目与切题区域")
+
+
+def ensure_question_number_available(
+    db: Session,
+    paper_version_id: uuid.UUID,
+    question_number: str,
+    *,
+    exclude_question_id: uuid.UUID | None = None,
+) -> str:
+    normalized = question_number.strip()
+    query = select(Question.id).where(
+        Question.paper_version_id == paper_version_id,
+        Question.status == QuestionStatus.active,
+        func.lower(Question.question_number) == normalized.lower(),
+    )
+    if exclude_question_id is not None:
+        query = query.where(Question.id != exclude_question_id)
+    if db.scalar(query) is not None:
+        raise ApiProblem(409, "QUESTION_NUMBER_CONFLICT", "该题号已存在，请检查重复识别")
+    return normalized
+
+
+def insert_question(
+    db: Session,
+    actor_id: uuid.UUID,
+    item: Assignment,
+    paper_version: PaperVersion,
+    data: QuestionInput,
+) -> Question:
+    if data.question_type not in QUESTION_TYPES:
+        raise ApiProblem(422, "QUESTION_TYPE_INVALID", "题型无效")
+    values = data.model_dump(exclude={"knowledge_points", "question_number"})
+    values["question_number"] = ensure_question_number_available(
+        db, paper_version.id, data.question_number
+    )
+    order = (
+        db.scalar(
+            select(func.max(Question.display_order)).where(
+                Question.paper_version_id == paper_version.id,
+                Question.status == QuestionStatus.active,
+            )
+        )
+        or 0
+    ) + 1
+    question = Question(
+        paper_version_id=paper_version.id,
+        display_order=order,
+        **values,
+        source="manual",
+    )
+    db.add(question)
+    db.flush()
+    set_kps(db, actor_id, item, question, data.knowledge_points)
+    return question
+
+
+def ensure_region_available(db: Session, data: RegionInput) -> None:
+    new_x1, new_y1 = data.x, data.y
+    new_x2, new_y2 = data.x + data.width, data.y + data.height
+    new_area = data.width * data.height
+    existing_regions = db.scalars(
+        select(QuestionRegion)
+        .join(Question)
+        .where(
+            QuestionRegion.paper_page_id == data.paper_page_id,
+            Question.status == QuestionStatus.active,
+        )
+    ).all()
+    for region in existing_regions:
+        overlap_width = max(
+            Decimal(0), min(new_x2, region.x + region.width) - max(new_x1, region.x)
+        )
+        overlap_height = max(
+            Decimal(0), min(new_y2, region.y + region.height) - max(new_y1, region.y)
+        )
+        overlap_area = overlap_width * overlap_height
+        smaller_area = min(new_area, region.width * region.height)
+        if smaller_area and overlap_area / smaller_area >= Decimal("0.90"):
+            raise ApiProblem(
+                409,
+                "QUESTION_REGION_OVERLAP",
+                "该区域与已有题目高度重叠，请检查重复框选",
+            )
+
+
+def active_page_for_cut(
+    db: Session, item: Assignment, page_id: uuid.UUID
+) -> tuple[PaperVersion, PaperPage]:
+    paper_version = paper(db, item)
+    if paper_version is None:
+        raise ApiProblem(422, "PAPER_VERSION_REQUIRED", "请先上传并确认试卷页面")
+    page = db.scalar(
+        select(PaperPage).where(
+            PaperPage.id == page_id,
+            PaperPage.paper_version_id == paper_version.id,
+        )
+    )
+    if page is None:
+        raise ApiProblem(404, "PAGE_NOT_FOUND", "页面不存在")
+    if page.status != "ready":
+        raise ApiProblem(409, "PAGE_NOT_READY", "页面当前不能用于切题")
+    return paper_version, page
+
+
 @router.patch("/{assignment_id}/questions/{question_id}")
 def patch_question(
     assignment_id: uuid.UUID, question_id: uuid.UUID, data: QuestionInput, db: Db, actor: Actor
 ) -> dict[str, Any]:
     item = owned(db, actor.id, assignment_id, lock=True)
+    ensure_assignment_draft(item)
     q = db.scalar(
         select(Question)
         .join(PaperVersion)
@@ -1735,7 +1955,15 @@ def patch_question(
     )
     if not q:
         raise ApiProblem(404, "QUESTION_NOT_FOUND", "题目不存在")
-    for k, v in data.model_dump(exclude={"knowledge_points", "parent_question_id"}).items():
+    if data.question_type not in QUESTION_TYPES:
+        raise ApiProblem(422, "QUESTION_TYPE_INVALID", "题型无效")
+    values = data.model_dump(
+        exclude={"knowledge_points", "parent_question_id", "question_number"}
+    )
+    values["question_number"] = ensure_question_number_available(
+        db, q.paper_version_id, data.question_number, exclude_question_id=q.id
+    )
+    for k, v in values.items():
         setattr(q, k, v)
     q.parent_question_id = data.parent_question_id
     set_kps(db, actor.id, item, q, data.knowledge_points)
@@ -1748,6 +1976,7 @@ def patch_question(
 @router.delete("/{assignment_id}/questions/{question_id}", status_code=204)
 def remove_question(assignment_id: uuid.UUID, question_id: uuid.UUID, db: Db, actor: Actor) -> None:
     item = owned(db, actor.id, assignment_id, lock=True)
+    ensure_assignment_draft(item)
     q = db.scalar(
         select(Question)
         .join(PaperVersion)
@@ -1766,6 +1995,7 @@ def reorder_questions(
     assignment_id: uuid.UUID, data: ReorderInput, db: Db, actor: Actor
 ) -> dict[str, Any]:
     item = owned(db, actor.id, assignment_id, lock=True)
+    ensure_assignment_draft(item)
     pv = paper(db, item)
     qs = db.scalars(
         select(Question).where(
@@ -1789,18 +2019,16 @@ def add_region(
     assignment_id: uuid.UUID, question_id: uuid.UUID, data: RegionInput, db: Db, actor: Actor
 ) -> dict[str, Any]:
     item = owned(db, actor.id, assignment_id, lock=True)
+    ensure_assignment_draft(item)
     q = db.scalar(
         select(Question)
         .join(PaperVersion)
         .where(Question.id == question_id, PaperVersion.assignment_id == item.id)
     )
-    page = db.scalar(
-        select(PaperPage)
-        .join(PaperVersion)
-        .where(PaperPage.id == data.paper_page_id, PaperVersion.assignment_id == item.id)
-    )
-    if not q or not page or q.paper_version_id != page.paper_version_id:
+    paper_version, page = active_page_for_cut(db, item, data.paper_page_id)
+    if not q or q.status != QuestionStatus.active or q.paper_version_id != paper_version.id:
         raise ApiProblem(422, "REGION_TARGET_INVALID", "题目和页面必须属于同一试卷版本")
+    ensure_region_available(db, data)
     r = QuestionRegion(question_id=q.id, source="manual", **data.model_dump())
     db.add(r)
     db.flush()
@@ -1809,9 +2037,56 @@ def add_region(
     return {"id": str(r.id), **data.model_dump(mode="json"), "source": "manual"}
 
 
+@router.post("/{assignment_id}/pages/{page_id}/question-cuts", status_code=201)
+def cut_question(
+    assignment_id: uuid.UUID,
+    page_id: uuid.UUID,
+    data: QuestionCutInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    item = owned(db, actor.id, assignment_id, lock=True)
+    ensure_assignment_draft(item)
+    paper_version, _ = active_page_for_cut(db, item, page_id)
+    if data.region.paper_page_id != page_id:
+        raise ApiProblem(422, "REGION_PAGE_MISMATCH", "框选区域必须属于当前页面")
+    ensure_region_available(db, data.region)
+
+    if data.question is not None:
+        question = insert_question(db, actor.id, item, paper_version, data.question)
+        action = "question.cut.create"
+    else:
+        existing_question = db.scalar(
+            select(Question).where(
+                Question.id == data.question_id,
+                Question.paper_version_id == paper_version.id,
+                Question.status == QuestionStatus.active,
+            )
+        )
+        if existing_question is None:
+            raise ApiProblem(422, "REGION_TARGET_INVALID", "只能把区域附加到当前试卷的有效题目")
+        question = existing_question
+        action = "question.cut.attach"
+
+    region = QuestionRegion(question_id=question.id, source="manual", **data.region.model_dump())
+    db.add(region)
+    db.flush()
+    audit(
+        db,
+        actor.id,
+        action,
+        "question_region",
+        region.id,
+        {"question_id": str(question.id), "paper_page_id": str(page_id)},
+    )
+    db.commit()
+    return question_json(db, question)
+
+
 @router.delete("/{assignment_id}/regions/{region_id}", status_code=204)
 def remove_region(assignment_id: uuid.UUID, region_id: uuid.UUID, db: Db, actor: Actor) -> None:
     item = owned(db, actor.id, assignment_id, lock=True)
+    ensure_assignment_draft(item)
     r = db.scalar(
         select(QuestionRegion)
         .join(Question)

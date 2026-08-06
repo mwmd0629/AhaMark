@@ -781,6 +781,35 @@ it("retries only retryable failed processing steps with the current generation",
   );
 });
 
+it("shows a submission-level processing blocker only once", async () => {
+  const message = "Every answer must have exactly one current region";
+  mocks.continueProcessing.mockResolvedValue(
+    processingRun({
+      status: "waiting_input",
+      steps: Array.from({ length: 5 }, (_, index) => ({
+        id: `step-${index}`,
+        submission_id: "submission-1",
+        scope_key: `answer:${index}`,
+        kind: "recognition",
+        status: "blocked_review",
+        generation: 1,
+        attempt: 0,
+        max_attempts: 3,
+        retryable: false,
+        error_code: "SEGMENTATION_AMBIGUOUS",
+        error_message: message,
+      })),
+    }),
+  );
+  setupProcessingPage();
+
+  fireEvent.click(
+    await screen.findByTestId("continue-processing-to-teacher-review"),
+  );
+
+  expect(await screen.findAllByText(message)).toHaveLength(1);
+});
+
 it("links to explicit teacher review without presenting suggestions as final grades", async () => {
   mocks.continueProcessing.mockResolvedValue(
     processingRun({

@@ -10,7 +10,10 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.models import (
+    Assignment,
+    Question,
     QuestionRecognitionEvidence,
+    QuestionStatus,
     RecognitionRevision,
     RegionEvidenceImage,
     StudentAnswer,
@@ -243,15 +246,27 @@ def run_answer_evidence_phase(
             )
             db.commit()
         return
+    assignment = db.get(Assignment, submission.assignment_id)
+    if assignment is None or assignment.active_paper_version_id is None:
+        job.status, job.error_code, job.error_message = (
+            "failed",
+            "ACTIVE_PAPER_REQUIRED",
+            "the submission assignment has no active paper",
+        )
+        db.commit()
+        return
     generation = job.generation
     regions = list(
         db.scalars(
             select(StudentAnswerRegion)
             .join(StudentAnswer, StudentAnswer.id == StudentAnswerRegion.student_answer_id)
+            .join(Question, Question.id == StudentAnswer.question_id)
             .join(SubmissionPage, SubmissionPage.id == StudentAnswerRegion.submission_page_id)
             .where(
                 StudentAnswer.submission_id == submission.id,
                 StudentAnswerRegion.status == "confirmed",
+                Question.paper_version_id == assignment.active_paper_version_id,
+                Question.status == QuestionStatus.active,
             )
             .order_by(
                 SubmissionPage.page_number,
@@ -262,7 +277,15 @@ def run_answer_evidence_phase(
         ).all()
     )
     answers = list(
-        db.scalars(select(StudentAnswer).where(StudentAnswer.submission_id == submission.id)).all()
+        db.scalars(
+            select(StudentAnswer)
+            .join(Question, Question.id == StudentAnswer.question_id)
+            .where(
+                StudentAnswer.submission_id == submission.id,
+                Question.paper_version_id == assignment.active_paper_version_id,
+                Question.status == QuestionStatus.active,
+            )
+        ).all()
     )
     answer_versions = {
         answer.id: (
@@ -351,7 +374,7 @@ def run_answer_evidence_phase(
                 raise AnswerProviderError(
                     "PAGE_ARTIFACT_UNAVAILABLE", "page processing is incomplete"
                 )
-            original, _ = _evidence(
+            _evidence(
                 db,
                 storage,
                 settings,
@@ -449,7 +472,7 @@ def run_answer_evidence_phase(
                     provider_version=provider.version,
                     warning_codes=warnings,
                     requires_review=requires_review,
-                    evidence_image_key=original.object_key,
+                    evidence_image_key=processed.object_key,
                     recognition_version=version,
                     input_hash=processed.input_hash,
                     output_hash=output_hash,

@@ -2,10 +2,12 @@ import io
 import math
 import re
 import uuid
+from collections import Counter
 from decimal import Decimal
-from typing import Any, cast
+from typing import cast
 
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps, ImageStat
+from pypdf import PdfReader
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -34,8 +36,10 @@ from app.recognition.pipeline import (
 )
 from app.storage.base import ObjectStorage
 
-PROCESSING_VERSION = "submission-processing-v1"
-SEGMENTATION_VERSION = "submission-seg-v1"
+PROCESSING_VERSION = "submission-processing-v2"
+SEGMENTATION_VERSION = "submission-seg-v2"
+CONTENT_PIXEL_CUTOFF = 245
+CONTENT_BRIGHTNESS_LIMIT = 210.0
 ANCHOR_RE = re.compile(
     r"^\s*(?:第\s*)?[（(]?\s*(\d+(?:\.\d+)?(?:[a-zA-Z])?)\s*[）)]?"
     r"(?:\s*题)?(?:[.、:：)\s]|$)",
@@ -60,7 +64,7 @@ def _artifact(image: Image.Image) -> PageArtifact:
 
 def _average_hash(image: Image.Image) -> str:
     small = ImageOps.grayscale(image).resize((16, 16))
-    pixels = list(small.getdata())
+    pixels = cast(list[int], list(small.get_flattened_data()))
     mean = sum(pixels) / len(pixels)
     bits = "".join("1" if pixel >= mean else "0" for pixel in pixels)
     return f"{int(bits, 2):064x}"
@@ -68,6 +72,46 @@ def _average_hash(image: Image.Image) -> str:
 
 def _hash_distance(left: str, right: str) -> int:
     return (int(left, 16) ^ int(right, 16)).bit_count()
+
+
+def _content_brightness(image: Image.Image) -> float | None:
+    """Measure likely ink/content without letting a sparse white page dominate."""
+    histogram = image.histogram()
+    content_count = sum(histogram[:CONTENT_PIXEL_CUTOFF])
+    if content_count < 32:
+        return None
+    weighted_sum = sum(
+        value * count for value, count in enumerate(histogram[:CONTENT_PIXEL_CUTOFF])
+    )
+    return weighted_sum / content_count
+
+
+def _page_metrics(image: Image.Image) -> dict[str, float | None]:
+    gray = ImageOps.grayscale(image)
+    stat = ImageStat.Stat(gray)
+    histogram = gray.histogram()
+    pixel_count = sum(histogram)
+    white_ratio = sum(histogram[CONTENT_PIXEL_CUTOFF:]) / pixel_count
+    return {
+        "brightness": float(stat.mean[0]),
+        "contrast": float(stat.stddev[0]),
+        "blank_probability": max(0.0, min(1.0, (white_ratio - 0.80) / 0.20)),
+        "content_brightness": _content_brightness(gray),
+    }
+
+
+def _is_too_bright(metrics: dict[str, float | None]) -> bool:
+    brightness = metrics["brightness"]
+    blank_probability = metrics["blank_probability"]
+    content_brightness = metrics["content_brightness"]
+    return bool(
+        brightness is not None
+        and brightness > 245
+        and blank_probability is not None
+        and blank_probability < 0.95
+        and content_brightness is not None
+        and content_brightness > CONTENT_BRIGHTNESS_LIMIT
+    )
 
 
 def preprocess_page(rendered: PageArtifact) -> tuple[PageArtifact, dict[str, object]]:
@@ -79,24 +123,13 @@ def preprocess_page(rendered: PageArtifact) -> tuple[PageArtifact, dict[str, obj
         detected_rotation = 90
         orientation_confidence = 0.75
     gray = ImageOps.grayscale(image)
-    stat = ImageStat.Stat(gray)
-    brightness = float(stat.mean[0])
-    contrast = float(stat.stddev[0])
+    source_metrics = _page_metrics(gray)
     # RMS edge energy is deterministic, cheap, and useful as a blur warning signal.
     edges = gray.filter(ImageFilter.FIND_EDGES)
     blur_score = float(ImageStat.Stat(edges).rms[0])
-    sample = list(cast(Any, gray.resize((128, 128)).getdata()))
-    white_ratio = sum(1 for value in sample if int(value) >= 245) / 16384
-    blank_probability = max(0.0, min(1.0, (white_ratio - 0.80) / 0.20))
     warnings: list[str] = []
     if blur_score < 8:
         warnings.append("LOW_SHARPNESS")
-    if brightness < 55:
-        warnings.append("TOO_DARK")
-    if brightness > 245 and blank_probability < 0.95:
-        warnings.append("TOO_BRIGHT")
-    if contrast < 8 and blank_probability < 0.95:
-        warnings.append("LOW_CONTRAST")
     # Conservative crop: remove only a nearly-uniform white scanner border.
     inverted = ImageOps.invert(gray)
     bbox = inverted.point(lambda value: 255 if value > 12 else 0).getbbox()
@@ -121,13 +154,35 @@ def preprocess_page(rendered: PageArtifact) -> tuple[PageArtifact, dict[str, obj
             }
         elif retained < 0.65:
             warnings.append("CROP_ANOMALY")
-    processed = ImageEnhance.Contrast(ImageOps.grayscale(image)).enhance(1.12)
+    processing_gray = ImageOps.grayscale(image)
+    brightness_correction_applied = _is_too_bright(source_metrics)
+    if brightness_correction_applied:
+        # Stretch a genuinely washed-out content range before the normal mild
+        # contrast pass. The original rendered artifact is still preserved.
+        processing_gray = ImageOps.autocontrast(processing_gray)
+    processed = ImageEnhance.Contrast(processing_gray).enhance(1.12)
     processed = processed.filter(ImageFilter.MedianFilter(3)).convert("RGB")
+    processed_metrics = _page_metrics(processed)
+    if processed_metrics["brightness"] is not None and processed_metrics["brightness"] < 55:
+        warnings.append("TOO_DARK")
+    if _is_too_bright(processed_metrics):
+        warnings.append("TOO_BRIGHT")
+    if (
+        processed_metrics["contrast"] is not None
+        and processed_metrics["contrast"] < 8
+        and source_metrics["blank_probability"] is not None
+        and source_metrics["blank_probability"] < 0.95
+    ):
+        warnings.append("LOW_CONTRAST")
     return _artifact(processed), {
         "blur_score": blur_score,
-        "brightness": brightness,
-        "contrast": contrast,
-        "blank_probability": blank_probability,
+        "brightness": processed_metrics["brightness"],
+        "contrast": processed_metrics["contrast"],
+        "blank_probability": source_metrics["blank_probability"],
+        "source_brightness": source_metrics["brightness"],
+        "source_content_brightness": source_metrics["content_brightness"],
+        "processed_content_brightness": processed_metrics["content_brightness"],
+        "brightness_correction_applied": brightness_correction_applied,
         "orientation_confidence": orientation_confidence,
         "rotation": detected_rotation,
         "crop": crop,
@@ -143,12 +198,72 @@ def _normalize_question_number(text: str) -> str | None:
     return f"{match.group(1)}{match.group(2) or ''}".lower()
 
 
+def _pdf_text_blocks(content: bytes, source_page: int) -> list[ProviderBlock]:
+    """Extract trustworthy question anchors from a PDF text layer.
+
+    The coordinates are normalized into the same top-left 0–1 space used by
+    OCR providers. Malformed or image-only PDFs simply provide no blocks and
+    continue through the configured OCR path.
+    """
+
+    try:
+        reader = PdfReader(io.BytesIO(content), strict=False)
+        if source_page < 1 or source_page > len(reader.pages):
+            return []
+        page = reader.pages[source_page - 1]
+        width = float(page.mediabox.width)
+        height = float(page.mediabox.height)
+        if width <= 0 or height <= 0:
+            return []
+        blocks: list[ProviderBlock] = []
+
+        def visit(
+            text: str,
+            current_matrix: list[float],
+            text_matrix: list[float],
+            _font: object,
+            font_size: float,
+        ) -> None:
+            clean = text.strip()
+            if not clean or _normalize_question_number(clean) is None:
+                return
+            a, b, c, d, e, f = (float(value) for value in current_matrix)
+            tx, ty = float(text_matrix[4]), float(text_matrix[5])
+            baseline_x = tx * a + ty * c + e
+            baseline_y = tx * b + ty * d + f
+            scaled_height = max(1.0, abs(float(font_size)) * math.hypot(c, d))
+            left = max(0.0, min(1.0, baseline_x / width))
+            top = max(0.0, min(1.0, 1 - (baseline_y + scaled_height) / height))
+            block_height = max(0.005, min(1 - top, scaled_height * 1.5 / height))
+            estimated_width = len(clean) * max(1.0, abs(float(font_size))) * 0.65 / width
+            block_width = max(0.01, min(1 - left, estimated_width))
+            if block_width > 0 and block_height > 0:
+                blocks.append(
+                    ProviderBlock(
+                        "pdf_text",
+                        clean[:120],
+                        None,
+                        0.99,
+                        (left, top, block_width, block_height),
+                    )
+                )
+
+        page.extract_text(visitor_text=visit)
+        return blocks
+    except Exception:
+        return []
+
+
 def _region_conflict(
-    existing: list[StudentAnswerRegion], candidate: tuple[Decimal, Decimal, Decimal, Decimal]
+    existing: list[StudentAnswerRegion],
+    submission_page_id: uuid.UUID,
+    candidate: tuple[Decimal, Decimal, Decimal, Decimal],
 ) -> bool:
     x, y, width, height = candidate
     area = width * height
     for region in existing:
+        if region.submission_page_id != submission_page_id:
+            continue
         left, top = max(x, region.x), max(y, region.y)
         right = min(x + width, region.x + region.width)
         bottom = min(y + height, region.y + region.height)
@@ -193,23 +308,48 @@ def _segment(
     questions = list(
         db.scalars(
             select(Question)
-            .where(Question.paper_version_id == assignment.active_paper_version_id)
+            .where(
+                Question.paper_version_id == assignment.active_paper_version_id,
+                Question.status == "active",
+            )
             .order_by(Question.display_order, Question.question_number)
         )
     )
     _ensure_answers(db, submission, questions)
-    by_number = {question.question_number.strip().lower(): question for question in questions}
+    number_counts = Counter(question.question_number.strip().lower() for question in questions)
+    by_number = {
+        question.question_number.strip().lower(): question
+        for question in questions
+        if number_counts[question.question_number.strip().lower()] == 1
+    }
+    question_order = {question.id: index for index, question in enumerate(questions)}
     answers = {
         answer.question_id: answer
         for answer in db.scalars(
             select(StudentAnswer).where(StudentAnswer.submission_id == submission.id)
         )
     }
+    prior_system_regions = list(
+        db.scalars(
+            select(StudentAnswerRegion).where(
+                StudentAnswerRegion.student_answer_id.in_(
+                    [answer.id for answer in answers.values()]
+                ),
+                StudentAnswerRegion.source.in_(["ocr", "alignment"]),
+                StudentAnswerRegion.status == "confirmed",
+                StudentAnswerRegion.confirmation_origin == "system_auto",
+            )
+        )
+    )
+    for region in prior_system_regions:
+        region.status = "superseded"
+        region.region_version += 1
+    db.flush()
     db.execute(
         delete(StudentAnswerRegion).where(
             StudentAnswerRegion.student_answer_id.in_([answer.id for answer in answers.values()]),
             StudentAnswerRegion.source.in_(["ocr", "alignment"]),
-            StudentAnswerRegion.status != "confirmed",
+            StudentAnswerRegion.status.in_(["candidate", "manual_required"]),
         )
     )
     db.execute(
@@ -227,6 +367,11 @@ def _segment(
             )
         )
     )
+    teacher_confirmed_answer_ids = {
+        region.student_answer_id
+        for region in existing_regions
+        if region.status == "confirmed" and region.confirmation_origin != "system_auto"
+    }
     # Template regions are copied only after a high-confidence page alignment.
     # Page ordinal is never used as a question identity signal.
     for page in pages:
@@ -242,11 +387,14 @@ def _segment(
             .where(
                 QuestionRegion.paper_page_id == page.aligned_paper_page_id,
                 Question.paper_version_id == assignment.active_paper_version_id,
+                Question.status == "active",
             )
         ).all():
             answer = answers[question.id]
+            if answer.id in teacher_confirmed_answer_ids:
+                continue
             candidate = (template.x, template.y, template.width, template.height)
-            if _region_conflict(existing_regions, candidate):
+            if _region_conflict(existing_regions, page.id, candidate):
                 continue
             region = StudentAnswerRegion(
                 student_answer_id=answer.id,
@@ -263,8 +411,10 @@ def _segment(
             )
             db.add(region)
             existing_regions.append(region)
+    discovered: list[
+        tuple[SubmissionPage, ProviderBlock, SubmissionQuestionAnchor, Question, Decimal]
+    ] = []
     for page in pages:
-        anchors: list[tuple[ProviderBlock, str, Question, Decimal]] = []
         for index, block in enumerate(blocks_by_page.get(page.id, [])):
             text = getattr(block, "text", None) or ""
             normalized = _normalize_question_number(text)
@@ -275,33 +425,60 @@ def _segment(
             confidence = raw_confidence
             if x > Decimal("0.45") or y > Decimal("0.92") or y < Decimal("0.025"):
                 confidence *= Decimal("0.55")
-            db.add(
-                SubmissionQuestionAnchor(
-                    submission_processing_job_id=job.id,
-                    submission_page_id=page.id,
-                    block_index=index,
-                    text=text[:120],
-                    normalized_number=normalized,
-                    candidate_question_id=question.id if question else None,
-                    confidence=confidence,
-                    x=x,
-                    y=y,
-                    width=width,
-                    height=height,
-                    rejection_reason=(
-                        None
+            actionable = question is not None and confidence >= Decimal("0.80")
+            anchor = SubmissionQuestionAnchor(
+                submission_processing_job_id=job.id,
+                submission_page_id=page.id,
+                block_index=index,
+                text=text[:120],
+                normalized_number=normalized,
+                candidate_question_id=question.id if question else None,
+                confidence=confidence,
+                source_kind="pdf_text" if block.block_type == "pdf_text" else "ocr",
+                page_version=page.page_version,
+                x=x,
+                y=y,
+                width=width,
+                height=height,
+                rejection_reason=(
+                    None
+                    if actionable
+                    else (
+                        "LOW_ANCHOR_CONFIDENCE"
                         if question
-                        else ("UNKNOWN_QUESTION_NUMBER" if normalized else "NOT_QUESTION_ANCHOR")
-                    ),
-                )
+                        else (
+                            "AMBIGUOUS_QUESTION_NUMBER"
+                            if normalized and number_counts[normalized] > 1
+                            else (
+                                "UNKNOWN_QUESTION_NUMBER" if normalized else "NOT_QUESTION_ANCHOR"
+                            )
+                        )
+                    )
+                ),
             )
-            if question:
-                anchors.append((block, normalized or "", question, confidence))
-        anchors.sort(key=lambda item: item[0].region[1])
-        for index, (block, _number, question, confidence) in enumerate(anchors):
+            db.add(anchor)
+            if actionable and question is not None:
+                discovered.append((page, block, anchor, question, confidence))
+    db.flush()
+    occurrence_counts = Counter(question.id for _, _, _, question, _ in discovered)
+    ordered_discovered = sorted(
+        discovered,
+        key=lambda item: (item[0].page_number, item[1].region[1], item[1].region[0]),
+    )
+    sequence = [question_order[question.id] for _, _, _, question, _ in ordered_discovered]
+    sequence_valid = all(left < right for left, right in zip(sequence, sequence[1:], strict=False))
+    by_page: dict[
+        uuid.UUID,
+        list[tuple[SubmissionPage, ProviderBlock, SubmissionQuestionAnchor, Question, Decimal]],
+    ] = {}
+    for item in ordered_discovered:
+        by_page.setdefault(item[0].id, []).append(item)
+    for page in pages:
+        anchors = by_page.get(page.id, [])
+        for index, (_page, block, anchor, question, confidence) in enumerate(anchors):
             x, y, _width, _height = (Decimal(str(value)) for value in block.region)
             next_y = (
-                Decimal(str(anchors[index + 1][0].region[1]))
+                Decimal(str(anchors[index + 1][1].region[1]))
                 if index + 1 < len(anchors)
                 else Decimal(1)
             )
@@ -318,9 +495,15 @@ def _segment(
                 ),
             )
             answer = answers[question.id]
-            status = "candidate" if confidence >= Decimal("0.80") else "manual_required"
-            reason = "QUESTION_ANCHOR" if status == "candidate" else "LOW_ANCHOR_CONFIDENCE"
-            if _region_conflict(existing_regions, candidate):
+            if answer.id in teacher_confirmed_answer_ids:
+                continue
+            if occurrence_counts[question.id] != 1:
+                status, reason = "manual_required", "DUPLICATE_QUESTION_ANCHOR"
+            elif not sequence_valid:
+                status, reason = "manual_required", "OUT_OF_ORDER_QUESTION_ANCHOR"
+            else:
+                status, reason = "candidate", "QUESTION_ANCHOR"
+            if _region_conflict(existing_regions, page.id, candidate):
                 status, reason = "manual_required", "HIGH_OVERLAP_CONFLICT"
             region = StudentAnswerRegion(
                 student_answer_id=answer.id,
@@ -333,6 +516,7 @@ def _segment(
                 confidence=confidence,
                 status=status,
                 reason=reason,
+                source_question_anchor_id=anchor.id,
                 segmentation_version=SEGMENTATION_VERSION,
             )
             db.add(region)
@@ -384,10 +568,12 @@ def run_submission_processing(
             stored = db.get(StoredFile, page.stored_file_id)
             if stored is None or stored.owner_id != submission.owner_id:
                 raise RecognitionError("SOURCE_FILE_NOT_FOUND", "原始文件不存在")
+            source_content = read_all(storage.get(stored.storage_key))
+            source_page = page.source_page_number or 1
             rendered = DefaultDocumentConverter(settings).convert(
-                read_all(storage.get(stored.storage_key)),
+                source_content,
                 stored.content_type,
-                page.source_page_number or 1,
+                source_page,
             )
             if page.rotation:
                 source_image = Image.open(io.BytesIO(rendered.content)).convert("RGB")
@@ -447,9 +633,7 @@ def run_submission_processing(
                     "scale_x": rendered.width / matched_width,
                     "scale_y": rendered.height / matched_height,
                 }
-                page.alignment_confidence = (
-                    Decimal("0.99") if provider.is_demo else Decimal("0.88")
-                )
+                page.alignment_confidence = Decimal("0.99") if provider.is_demo else Decimal("0.88")
                 page.alignment_failure_reason = None
             else:
                 page.aligned_paper_page_id = None
@@ -473,10 +657,19 @@ def run_submission_processing(
             page.processing_status = (
                 "blank" if page.blank_probability >= Decimal("0.95") else "completed"
             )
+            embedded_blocks = (
+                _pdf_text_blocks(source_content, source_page)
+                if stored.content_type == "application/pdf"
+                else []
+            )
             blocks_by_page[page.id] = (
                 []
-                if page.processing_status == "blank" or provider.is_demo
-                else provider.recognize(processed)
+                if page.processing_status == "blank"
+                else (
+                    embedded_blocks
+                    if embedded_blocks
+                    else ([] if provider.is_demo else provider.recognize(processed))
+                )
             )
             job.progress = math.floor((index + 1) * 70 / max(1, len(pages)))
             db.commit()
@@ -518,3 +711,18 @@ def run_submission_processing(
         )
         job.stage = "completed"
         db.commit()
+        if job.status == "completed" and only_page_id is None:
+            # A complete, one-to-one, current anchor set can safely advance
+            # without asking the teacher to redraw deterministic regions.
+            from app.processing.automatic_confirmation import (
+                auto_confirm_deterministic_regions,
+            )
+
+            auto_confirm_deterministic_regions(
+                db,
+                owner_id=job.owner_id,
+                submission_id=submission.id,
+                processing_job_id=job.id,
+                processing_run_id=None,
+            )
+            db.commit()

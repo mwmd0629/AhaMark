@@ -16,9 +16,11 @@ from app.models import (
     CodexWorkItem,
     GradeRelease,
     GradingBatch,
+    PaperVersion,
     ProcessingRun,
     ProcessingRunCommand,
     ProcessingStep,
+    Question,
     SchoolClass,
     Status,
     Student,
@@ -1210,15 +1212,37 @@ def test_no_answer_submission_scope_expands_to_one_codex_step_per_answer(
     run, steps = _recognition_run_and_steps(db, actor, batch)
     source_step = steps[0]
     source_step.status = "succeeded"
+    assignment = db.get(Assignment, batch.assignment_id)
+    assert assignment is not None
+    paper = PaperVersion(
+        assignment_id=assignment.id,
+        version=1,
+        created_by=actor.id,
+    )
+    db.add(paper)
+    db.flush()
+    assignment.active_paper_version_id = paper.id
+    questions = [
+        Question(
+            paper_version_id=paper.id,
+            question_number=str(index + 1),
+            display_order=index + 1,
+            question_type="short_answer",
+            content_text=f"Question {index + 1}",
+        )
+        for index in range(2)
+    ]
+    db.add_all(questions)
+    db.flush()
     answers = [
         StudentAnswer(
             submission_id=source_step.submission_id,
-            question_id=uuid.uuid4(),
-            question_version_reference=str(uuid.uuid4()),
+            question_id=question.id,
+            question_version_reference=str(paper.id),
             status="recognition_confirmed",
             requires_review=False,
         )
-        for _ in range(2)
+        for question in questions
     ]
     db.add_all(answers)
     db.flush()

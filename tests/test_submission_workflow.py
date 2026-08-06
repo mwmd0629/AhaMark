@@ -194,6 +194,93 @@ def test_batch_submissions_include_optional_student_identity() -> None:
         db.close()
 
 
+def test_review_workspace_excludes_removed_active_paper_question_answers() -> None:
+    db, _storage, batch_id, submission_id, question_id = workflow()
+    try:
+        active_question = db.get(Question, uuid.UUID(question_id))
+        assert active_question is not None
+        active_answer = StudentAnswer(
+            submission_id=submission_id,
+            question_id=active_question.id,
+            question_version_reference=str(active_question.paper_version_id),
+        )
+        removed_question = Question(
+            paper_version_id=active_question.paper_version_id,
+            question_number="1",
+            display_order=99,
+            question_type="short_answer",
+            content_text="Removed historical question",
+            status="removed",
+        )
+        db.add_all([active_answer, removed_question])
+        db.flush()
+        removed_answer = StudentAnswer(
+            submission_id=submission_id,
+            question_id=removed_question.id,
+            question_version_reference=str(active_question.paper_version_id),
+        )
+        db.add(removed_answer)
+        db.commit()
+
+        response = client.get(f"/api/grading-batches/{batch_id}/review-workspace")
+
+        assert response.status_code == 200, response.text
+        projected_answers = [
+            item
+            for submission in response.json()["items"]
+            for item in submission["answers"]
+        ]
+        answer_ids = {item["id"] for item in projected_answers}
+        assert str(removed_answer.id) not in answer_ids
+        assert question_id in {item["question"]["id"] for item in projected_answers}
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+        db.close()
+
+
+def test_review_workspace_orders_answers_by_question_display_order() -> None:
+    db, _storage, batch_id, submission_id, question_id = workflow()
+    try:
+        second_question = db.get(Question, uuid.UUID(question_id))
+        assert second_question is not None
+        second_question.question_number = "2"
+        second_question.display_order = 2
+        first_question = Question(
+            paper_version_id=second_question.paper_version_id,
+            question_number="1",
+            display_order=1,
+            question_type="short_answer",
+            content_text="First question",
+        )
+        db.add(first_question)
+        db.flush()
+        db.add_all(
+            [
+                StudentAnswer(
+                    submission_id=submission_id,
+                    question_id=second_question.id,
+                    question_version_reference=str(second_question.paper_version_id),
+                ),
+                StudentAnswer(
+                    submission_id=submission_id,
+                    question_id=first_question.id,
+                    question_version_reference=str(first_question.paper_version_id),
+                ),
+            ]
+        )
+        db.commit()
+
+        response = client.get(f"/api/grading-batches/{batch_id}/review-workspace")
+
+        assert response.status_code == 200, response.text
+        assert [
+            item["question"]["number"] for item in response.json()["items"][0]["answers"]
+        ] == ["1", "2"]
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+        db.close()
+
+
 def test_submission_ocr_worker_is_idempotent_and_writes_answers() -> None:
     db, storage, _batch_id, submission_id, _question_id = workflow()
     settings = get_settings()

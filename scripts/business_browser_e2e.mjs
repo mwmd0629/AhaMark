@@ -1240,10 +1240,15 @@ async function deleteSyntheticRegionThroughUi(
   const pageControl = submissionCard.locator(
     `[data-testid="submission-processing-page"][data-page-id="${region.submission_page_id}"]`,
   );
-  await pageControl.locator("button").first().click();
+  if ((await pageControl.count()) > 0) {
+    await pageControl.locator("button").first().click();
+  }
   const regionCard = submissionCard.locator(
     `[data-testid="submission-region-card"][data-region-id="${region.id}"]`,
   );
+  if (!(await regionCard.isVisible())) {
+    await submissionCard.getByTestId("submission-adjust-segmentation").click();
+  }
   await regionCard.waitFor();
   const [writeResponse] = await Promise.all([
     page.waitForResponse(
@@ -1575,7 +1580,7 @@ async function processAndSegmentSyntheticSubmission(
   );
   assert.equal(completed.job.stage, "completed");
   assert.equal(completed.job.progress, 100);
-  assert.equal(completed.job.config_version, "submission-processing-v1");
+  assert.equal(completed.job.config_version, "submission-processing-v2");
   assert.equal(completed.job.error_code, null);
   await submissionCard
     .locator(
@@ -1599,7 +1604,7 @@ async function processAndSegmentSyntheticSubmission(
     processingPages.every(
       (item) =>
         ["completed", "blank"].includes(item.processing_status) &&
-        item.preprocessing_version === "submission-processing-v1" &&
+        item.preprocessing_version === "submission-processing-v2" &&
         item.processed_url,
     ),
     "processed pages must expose completed artifacts",

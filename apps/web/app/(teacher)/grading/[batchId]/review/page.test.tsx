@@ -255,6 +255,30 @@ function mockReadiness(ready = true) {
   mocks.confirmResultsReadiness.mockResolvedValue(readinessPayload(ready));
 }
 
+it("shows concrete labels for suggestion review blockers", async () => {
+  mocks.confirmResultsReadiness.mockResolvedValue({
+    ...readinessPayload(false),
+    blockers: [
+      { code: "CONFIDENCE_LOW", submission_id: "sub-1", question_id: "q-1" },
+      { code: "REQUIRES_REVIEW", submission_id: "sub-1", question_id: "q-1" },
+      {
+        code: "CRITERION_INCOMPLETE",
+        submission_id: "sub-1",
+        question_id: "q-1",
+      },
+    ],
+  });
+  mocks.reviewWorkspace.mockResolvedValue(workspace({ reviewed: 0 }));
+
+  render(<ReviewPage />);
+
+  const blockers = await screen.findByTestId("confirm-results-blockers");
+  expect(blockers).toHaveTextContent("评分建议置信度不足，需要教师逐题核对");
+  expect(blockers).toHaveTextContent("评分建议仍在待复核状态");
+  expect(blockers).toHaveTextContent("评分项尚未完成教师确认");
+  expect(blockers).not.toHaveTextContent("请检查未完成项");
+});
+
 it("blocks accepting a stale result and offers explicit regrading", async () => {
   mockReadiness(false);
   mocks.reviewWorkspace.mockResolvedValue(

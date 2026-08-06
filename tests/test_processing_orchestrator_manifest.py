@@ -68,6 +68,7 @@ def _seed_mixed_batch(
     )
     db.add_all([paper, batch])
     db.flush()
+    assignment.active_paper_version_id = paper.id
     questions = [
         Question(
             id=_id(20 + offset),
@@ -228,6 +229,57 @@ def test_mixed_manifest_is_stable_complete_and_never_writes_formal_grades(
         db.scalar(select(func.count()).select_from(SubmissionScoreSnapshot)),
         db.scalar(select(func.count()).select_from(GradeRelease)),
     ) == (0, 0, 0)
+
+
+def test_manifest_ignores_answers_for_removed_active_paper_questions(
+    isolated_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = isolated_session
+    owner_id, batch, _answer_modes = _seed_mixed_batch(db)
+    assignment = db.get(Assignment, batch.assignment_id)
+    assert assignment is not None and assignment.active_paper_version_id is not None
+    removed_question = Question(
+        id=_id(90),
+        paper_version_id=assignment.active_paper_version_id,
+        question_number="2",
+        display_order=90,
+        question_type="short_answer",
+        content_text="Removed historical question",
+        status="removed",
+    )
+    removed_answer = StudentAnswer(
+        id=_id(91),
+        submission_id=_id(12),
+        question_id=removed_question.id,
+        question_version_reference=str(assignment.active_paper_version_id),
+    )
+    db.add_all([removed_question, removed_answer])
+    db.commit()
+    snapshotted: list[uuid.UUID] = []
+
+    def snapshot(
+        _db: Session,
+        *,
+        owner_id: uuid.UUID,
+        grading_batch_id: uuid.UUID,
+        submission_id: uuid.UUID,
+        answer_id: uuid.UUID,
+    ) -> ProcessingInputSnapshot:
+        del _db, owner_id, grading_batch_id, submission_id
+        snapshotted.append(answer_id)
+        return ProcessingInputSnapshot(
+            payload={"answer": {"id": answer_id}},
+            input_version=f"{answer_id.int:064x}",
+        )
+
+    monkeypatch.setattr(orchestrator, "build_processing_input_snapshot", snapshot)
+    manifest = orchestrator._manifest(db, owner_id, batch)
+
+    ready_entry = next(
+        item for item in manifest["included"] if item["submission_id"] == str(_id(12))
+    )
+    assert [item["answer_id"] for item in ready_entry["answers"]] == [str(_id(31))]
+    assert removed_answer.id not in snapshotted
 
 
 @pytest.mark.parametrize("code", ["PROCESSING_INPUT_STALE", "SUBMISSION_SCOPE_MISMATCH"])

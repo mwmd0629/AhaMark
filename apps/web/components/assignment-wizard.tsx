@@ -24,6 +24,7 @@ import { AssignmentGenerationPanel } from "@/components/assignment-generation-pa
 import { AnswerRubricGenerationReview } from "@/components/answer-rubric-generation-review";
 import { AssignmentCentralReview } from "@/components/assignment-central-review";
 import { JointExamTeamPanel } from "@/components/joint-exam-team-panel";
+import { QuestionPageCutter } from "@/components/question-page-cutter";
 import {
   ApiError,
   assignmentsApi,
@@ -964,6 +965,17 @@ export function AssignmentWizard({
                     排除此页
                   </Button>
                 </div>
+                <QuestionPageCutter
+                  assignmentId={item.id}
+                  page={selectedPage}
+                  questions={item.paper_version?.questions ?? []}
+                  selectedQuestionId={selectedQuestion}
+                  onSaved={async (savedQuestion) => {
+                    await load(savedQuestion.id);
+                    setSelectedQuestion(savedQuestion.id);
+                    toast("题目区域已保存");
+                  }}
+                />
               </div>
             ) : (
               <p className="grid place-items-center text-sm text-slate-500">

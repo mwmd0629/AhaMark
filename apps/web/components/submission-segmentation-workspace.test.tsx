@@ -51,7 +51,7 @@ const region = {
   confidence: 0.91,
   status: "candidate",
   reason: "QUESTION_ANCHOR",
-  segmentation_version: "submission-seg-v1",
+  segmentation_version: "submission-seg-v2",
 };
 
 function deferred<T>() {
@@ -83,7 +83,7 @@ beforeEach(() => {
     progress: 0,
     provider: "local",
     provider_version: "pillow",
-    config_version: "submission-processing-v1",
+    config_version: "submission-processing-v2",
     attempt: 1,
   });
   mocks.start.mockResolvedValue({
@@ -94,7 +94,7 @@ beforeEach(() => {
     progress: 100,
     provider: "local",
     provider_version: "pillow",
-    config_version: "submission-processing-v1",
+    config_version: "submission-processing-v2",
     attempt: 1,
   });
 });
@@ -104,9 +104,9 @@ it("draws, confirms, deletes, and retries answer regions", async () => {
   await screen.findAllByText("图像清晰度较低");
 
   expect(screen.getByTestId("submission-processing-start")).toHaveTextContent(
-    "处理并自动切题",
+    "重新自动切题",
   );
-  expect(screen.getByTestId("submission-processing-page")).toHaveAttribute(
+  expect(screen.getByTestId("submission-region-canvas")).toHaveAttribute(
     "data-page-id",
     "page-1",
   );
@@ -148,6 +148,14 @@ it("draws, confirms, deletes, and retries answer regions", async () => {
   });
   canvas.setPointerCapture = vi.fn();
   canvas.releasePointerCapture = vi.fn();
+  expect(canvas).toHaveAttribute("data-draw-enabled", "false");
+  fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 10, clientY: 40 });
+  fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 70, clientY: 80 });
+  fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 70, clientY: 80 });
+  expect(mocks.addRegion).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByTestId("submission-region-draw-toggle"));
+  expect(canvas).toHaveAttribute("data-draw-enabled", "true");
   fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 10, clientY: 40 });
   fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 70, clientY: 80 });
   fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 70, clientY: 80 });
@@ -161,6 +169,58 @@ it("draws, confirms, deletes, and retries answer regions", async () => {
         status: "confirmed",
       }),
     ),
+  );
+});
+
+it("keeps the completed default view focused and expands editing on demand", async () => {
+  mocks.pages.mockResolvedValue([
+    {
+      ...page,
+      processing_status: "completed",
+      quality: { warnings: [] },
+      retryable: false,
+    },
+  ]);
+  mocks.regions.mockResolvedValue([{ ...region, status: "confirmed" }]);
+  mocks.incomplete.mockResolvedValue({ complete: true, question_ids: [] });
+
+  render(<SubmissionSegmentationWorkspace submissionId="submission-1" />);
+
+  expect(await screen.findByText("切题已完成")).toBeInTheDocument();
+  expect(
+    screen.getByText("1 道题已匹配，可继续识别答案。"),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByTestId("submission-processing-start"),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByTestId("submission-processing-page"),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByTestId("page-quality")).not.toBeInTheDocument();
+  expect(
+    screen.queryByTestId("submission-question-select"),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByTestId("submission-region-card"),
+  ).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByTestId("submission-adjust-segmentation"));
+
+  expect(await screen.findByTestId("submission-question-select")).toHaveValue(
+    "question-1",
+  );
+  expect(screen.getByTestId("submission-region-card")).toHaveAttribute(
+    "data-region-id",
+    "region-1",
+  );
+  expect(screen.getByTestId("page-quality")).toHaveTextContent("页面调整");
+  expect(screen.getByTestId("submission-region-delete")).toBeInTheDocument();
+  expect(screen.getByTestId("submission-region-draw-toggle")).toHaveTextContent(
+    "开始框选",
+  );
+  expect(screen.getByTestId("submission-region-canvas")).toHaveAttribute(
+    "data-draw-enabled",
+    "false",
   );
 });
 
@@ -214,6 +274,7 @@ it("keeps an incomplete question without a region selectable for manual drawing"
   canvas.setPointerCapture = vi.fn();
   canvas.releasePointerCapture = vi.fn();
 
+  fireEvent.click(screen.getByTestId("submission-region-draw-toggle"));
   fireEvent.pointerDown(canvas, { pointerId: 2, clientX: 3, clientY: 3 });
   fireEvent.pointerMove(canvas, { pointerId: 2, clientX: 97, clientY: 97 });
   fireEvent.pointerUp(canvas, { pointerId: 2, clientX: 97, clientY: 97 });
@@ -252,6 +313,7 @@ it("keeps only the newest reload when delete and draw refreshes resolve out of o
   });
   canvas.setPointerCapture = vi.fn();
   canvas.releasePointerCapture = vi.fn();
+  fireEvent.click(screen.getByTestId("submission-region-draw-toggle"));
 
   const oldPages = deferred<(typeof page)[]>();
   const oldRegions = deferred<(typeof region)[]>();
@@ -308,7 +370,7 @@ it("keeps only the newest reload when delete and draw refreshes resolve out of o
       "question-new",
     ),
   );
-  expect(screen.getByTestId("submission-processing-page")).toHaveAttribute(
+  expect(screen.getByTestId("submission-region-canvas")).toHaveAttribute(
     "data-page-id",
     "page-new",
   );
@@ -329,7 +391,7 @@ it("keeps only the newest reload when delete and draw refreshes resolve out of o
   expect(screen.getByTestId("submission-question-select")).toHaveValue(
     "question-new",
   );
-  expect(screen.getByTestId("submission-processing-page")).toHaveAttribute(
+  expect(screen.getByTestId("submission-region-canvas")).toHaveAttribute(
     "data-page-id",
     "page-new",
   );

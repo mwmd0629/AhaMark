@@ -1,4 +1,5 @@
 import uuid
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
@@ -11,16 +12,19 @@ from app.models import (
     Question,
     QuestionRecognitionEvidence,
     QuestionRegion,
+    QuestionStatus,
     RecognitionRevision,
     StudentAnswer,
     StudentAnswerRegion,
     Submission,
     SubmissionPage,
     SubmissionProcessingJob,
+    SubmissionQuestionAnchor,
     SubmissionRecognitionBlock,
     SubmissionRecognitionJob,
     SubmissionScoreSnapshot,
     TeacherReview,
+    now_utc,
 )
 from app.processing.automatic_confirmation import (
     auto_confirm_deterministic_recognition,
@@ -115,6 +119,75 @@ def region_fixture(
                 height=Decimal("0.40"),
             )
         )
+    db.commit()
+    return db, submission, answer, region, job
+
+
+def anchored_region_fixture(*, stale_anchor: bool = False):
+    db, _storage, _batch_id, submission_id, question_id = workflow()
+    submission = db.get(Submission, submission_id)
+    assert submission is not None
+    assignment = db.get(Assignment, submission.assignment_id)
+    assert assignment is not None and assignment.active_paper_version_id is not None
+    page = db.scalar(
+        select(SubmissionPage)
+        .where(SubmissionPage.submission_id == submission.id)
+        .order_by(SubmissionPage.page_number)
+    )
+    assert page is not None
+    page.processing_status = "completed"
+    page.preprocessing_version = "submission-processing-v2"
+    page.processing_error_code = None
+    page.quality_warnings = []
+    page.page_version = 3
+    answer = StudentAnswer(
+        submission_id=submission.id,
+        question_id=uuid.UUID(question_id),
+        question_version_reference=f"{assignment.active_paper_version_id}:{question_id}",
+        status="pending",
+        requires_review=True,
+    )
+    job = SubmissionProcessingJob(
+        owner_id=submission.owner_id,
+        submission_id=submission.id,
+        status="completed",
+        config_version="submission-processing-v2",
+        idempotency_key=f"anchor-region-{uuid.uuid4()}",
+    )
+    db.add_all([answer, job])
+    db.flush()
+    anchor = SubmissionQuestionAnchor(
+        submission_processing_job_id=job.id,
+        submission_page_id=page.id,
+        block_index=0,
+        text="Q1:",
+        normalized_number="1",
+        candidate_question_id=answer.question_id,
+        confidence=Decimal("0.99"),
+        source_kind="pdf_text",
+        page_version=2 if stale_anchor else page.page_version,
+        x=Decimal("0.10"),
+        y=Decimal("0.20"),
+        width=Decimal("0.08"),
+        height=Decimal("0.03"),
+    )
+    db.add(anchor)
+    db.flush()
+    region = StudentAnswerRegion(
+        student_answer_id=answer.id,
+        submission_page_id=page.id,
+        source="ocr",
+        confidence=Decimal("0.99"),
+        status="candidate",
+        reason="QUESTION_ANCHOR",
+        source_question_anchor_id=anchor.id,
+        segmentation_version="submission-seg-v2",
+        x=Decimal("0.08"),
+        y=Decimal("0.19"),
+        width=Decimal("0.90"),
+        height=Decimal("0.50"),
+    )
+    db.add(region)
     db.commit()
     return db, submission, answer, region, job
 
@@ -235,6 +308,100 @@ def test_region_happy_path_records_system_auto_and_is_idempotent() -> None:
         close_fixture(db)
 
 
+def test_latest_teacher_region_supersedes_older_current_regions() -> None:
+    db, submission, answer, older, job = region_fixture()
+    try:
+        older.status = "confirmed"
+        older.confirmation_origin = "teacher_explicit"
+        older.confirmed_by = submission.owner_id
+        older.confirmed_at = now_utc()
+        older.created_at = now_utc()
+        latest = StudentAnswerRegion(
+            student_answer_id=answer.id,
+            submission_page_id=older.submission_page_id,
+            source="manual",
+            status="confirmed",
+            reason="TEACHER_DRAWN",
+            confirmation_origin="teacher_explicit",
+            confirmed_by=submission.owner_id,
+            confirmed_at=now_utc(),
+            created_at=older.created_at + timedelta(seconds=1),
+            x=Decimal("0.20"),
+            y=Decimal("0.30"),
+            width=Decimal("0.30"),
+            height=Decimal("0.40"),
+        )
+        db.add(latest)
+        db.commit()
+
+        decision = auto_confirm_deterministic_regions(
+            db,
+            owner_id=submission.owner_id,
+            submission_id=submission.id,
+            processing_job_id=job.id,
+            processing_run_id=uuid.uuid4(),
+        )
+
+        assert decision.eligible and decision.changed_count == 1
+        assert older.status == "superseded" and older.region_version == 2
+        assert latest.status == "confirmed"
+        audit = db.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "processing.segmentation.teacher_region_precedence"
+            )
+        )
+        assert audit is not None
+        assert audit.metadata_["reconciled_answers"][0]["winner_region_id"] == str(
+            latest.id
+        )
+    finally:
+        close_fixture(db)
+
+
+def test_complete_current_pdf_anchor_is_eligible_for_system_auto_confirmation() -> None:
+    db, submission, answer, region, job = anchored_region_fixture()
+    try:
+        decision = auto_confirm_deterministic_regions(
+            db,
+            owner_id=submission.owner_id,
+            submission_id=submission.id,
+            processing_job_id=job.id,
+            processing_run_id=None,
+        )
+        assert decision.eligible and decision.changed_count == 1
+        assert region.status == "confirmed"
+        assert region.confirmation_origin == "system_auto"
+        assert answer.status == "segmented"
+        assert answer.requires_review is False
+        audit = db.scalar(
+            select(AuditLog).where(AuditLog.action == "processing.segmentation.auto_confirm")
+        )
+        assert audit is not None
+        assert audit.resource_type == "submission_processing_job"
+        assert audit.resource_id == str(job.id)
+        assert audit.metadata_["processing_run_id"] is None
+    finally:
+        close_fixture(db)
+
+
+def test_stale_pdf_anchor_fails_closed_without_confirmation() -> None:
+    db, submission, _answer, region, job = anchored_region_fixture(stale_anchor=True)
+    try:
+        decision = auto_confirm_deterministic_regions(
+            db,
+            owner_id=submission.owner_id,
+            submission_id=submission.id,
+            processing_job_id=job.id,
+            processing_run_id=uuid.uuid4(),
+        )
+        assert not decision.eligible
+        assert decision.code == "SEGMENTATION_ANCHOR_STALE"
+        assert region.status == "candidate"
+        assert region.confirmation_origin is None
+    finally:
+        close_fixture(db)
+
+
 @pytest.mark.parametrize(
     ("confidence", "extra_region", "expected_code"),
     [
@@ -291,9 +458,7 @@ def test_recognition_happy_path_is_system_auto_suggestion_only_and_idempotent() 
         assert block.status == "confirmed"
         assert answer.status == "recognition_confirmed"
         revisions = db.scalars(
-            select(RecognitionRevision).where(
-                RecognitionRevision.recognition_block_id == block.id
-            )
+            select(RecognitionRevision).where(RecognitionRevision.recognition_block_id == block.id)
         ).all()
         assert len(revisions) == 1
         assert revisions[0].source == "system_auto"
@@ -323,13 +488,51 @@ def test_recognition_happy_path_is_system_auto_suggestion_only_and_idempotent() 
         close_fixture(db)
 
 
+def test_removed_question_answer_does_not_block_recognition_auto_confirmation() -> None:
+    db, submission, answer, block, evidence, job = recognition_fixture()
+    try:
+        assignment = db.get(Assignment, submission.assignment_id)
+        assert assignment is not None and assignment.active_paper_version_id is not None
+        removed_question = Question(
+            paper_version_id=assignment.active_paper_version_id,
+            question_number="removed-history",
+            display_order=99,
+            question_type="short_answer",
+            status=QuestionStatus.removed,
+        )
+        db.add(removed_question)
+        db.flush()
+        db.add(
+            StudentAnswer(
+                submission_id=submission.id,
+                question_id=removed_question.id,
+                question_version_reference=str(assignment.active_paper_version_id),
+            )
+        )
+        db.commit()
+
+        decision = auto_confirm_deterministic_recognition(
+            db,
+            owner_id=submission.owner_id,
+            submission_id=submission.id,
+            recognition_job_id=job.id,
+            processing_run_id=uuid.uuid4(),
+            min_confidence=Decimal("0.95"),
+        )
+
+        assert decision.eligible and decision.changed_count == 1
+        assert evidence.status == "confirmed"
+        assert block.status == "confirmed"
+        assert answer.status == "recognition_confirmed"
+    finally:
+        close_fixture(db)
+
+
 @pytest.mark.parametrize(
     ("job_status", "warning"),
     [("partially_completed", False), ("completed", True)],
 )
-def test_recognition_warning_or_partial_is_zero_write(
-    job_status: str, warning: bool
-) -> None:
+def test_recognition_warning_or_partial_is_zero_write(job_status: str, warning: bool) -> None:
     db, submission, answer, block, evidence, job = recognition_fixture(
         job_status=job_status, warning=warning
     )
