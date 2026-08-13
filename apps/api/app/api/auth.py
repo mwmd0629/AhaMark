@@ -5,13 +5,22 @@ import threading
 import time
 from collections import defaultdict, deque
 from datetime import timedelta
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 
 import structlog
 from app.api.actor import authenticated_session, digest
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.models import Status, User, UserSession, now_utc
+from app.models import (
+    Role,
+    Status,
+    Student,
+    StudentAccountLink,
+    User,
+    UserRole,
+    UserSession,
+    now_utc,
+)
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr, Field, TypeAdapter, field_validator
 from sqlalchemy import select
@@ -112,19 +121,54 @@ def check_rate_limit(key: str) -> None:
         attempts.append(time.monotonic())
 
 
-def user_view(user: User, csrf_token: str | None = None) -> dict[str, str | None]:
+def user_view(db: Session, user: User, csrf_token: str | None = None) -> dict[str, Any]:
+    roles = sorted(
+        db.scalars(
+            select(Role.name)
+            .join(UserRole, UserRole.role_id == Role.id)
+            .where(UserRole.user_id == user.id)
+        ).all()
+    )
+    has_any_student_link = bool(
+        db.scalar(
+            select(StudentAccountLink.id).where(StudentAccountLink.user_id == user.id).limit(1)
+        )
+    )
+    active_student_link = bool(
+        db.scalar(
+            select(StudentAccountLink.id)
+            .join(Student, Student.id == StudentAccountLink.student_id)
+            .where(
+                StudentAccountLink.user_id == user.id,
+                StudentAccountLink.status == "active",
+                Student.status == "active",
+            )
+            .limit(1)
+        )
+    )
+    student_account = "student" in roles or has_any_student_link
+    if user.must_change_password:
+        landing_surface = "change_password"
+    elif active_student_link:
+        landing_surface = "student"
+    elif student_account:
+        landing_surface = "account_unavailable"
+    else:
+        landing_surface = "teacher"
     return {
         "id": str(user.id),
         "email": user.email,
         "display_name": user.display_name,
         "csrf_token": csrf_token,
+        "must_change_password": user.must_change_password,
+        "roles": roles,
+        "active_student_link": active_student_link,
+        "landing_surface": landing_surface,
     }
 
 
 @router.post("/login")
-def login(
-    payload: LoginInput, request: Request, response: Response, db: Db
-) -> dict[str, str | None]:
+def login(payload: LoginInput, request: Request, response: Response, db: Db) -> dict[str, Any]:
     email = payload.email.lower().strip()
     check_rate_limit(f"{request.client.host if request.client else 'unknown'}:{email}")
     user = db.scalar(select(User).where(User.email == email))
@@ -162,15 +206,40 @@ def login(
         samesite="lax",
         path="/",
     )
-    return user_view(user, csrf)
+    return user_view(db, user, csrf)
 
 
 @router.get("/me")
-def me(request: Request, db: Db) -> dict[str, str | None]:
+def me(request: Request, db: Db) -> dict[str, Any]:
     authenticated = authenticated_session(request, db)
     if not authenticated:
         raise HTTPException(401, "请先登录")
-    return user_view(authenticated[1])
+    return user_view(db, authenticated[1])
+
+
+class ChangePasswordInput(BaseModel):
+    current_password: str = Field(min_length=8, max_length=256)
+    new_password: str = Field(min_length=12, max_length=256)
+
+
+@router.post("/change-password")
+def change_password(
+    payload: ChangePasswordInput,
+    request: Request,
+    db: Db,
+) -> dict[str, Any]:
+    authenticated = authenticated_session(request, db)
+    if not authenticated:
+        raise HTTPException(401, "请先登录")
+    user = authenticated[1]
+    if not verify_password(payload.current_password, user.password_hash):
+        raise HTTPException(401, "当前密码错误")
+    if hmac.compare_digest(payload.current_password, payload.new_password):
+        raise HTTPException(422, "新密码不能与当前密码相同")
+    user.password_hash = hash_password(payload.new_password)
+    user.must_change_password = False
+    db.commit()
+    return user_view(db, user)
 
 
 @router.post("/logout", status_code=204)

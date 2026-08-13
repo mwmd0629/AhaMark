@@ -130,6 +130,7 @@ class User(TimestampMixin, Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(120))
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[Status] = mapped_column(Enum(Status), default=Status.active, index=True)
     roles: Mapped[list["Role"]] = relationship(secondary="user_roles", back_populates="users")
 
@@ -1465,6 +1466,11 @@ class Submission(TimestampMixin, Base):
         UniqueConstraint(
             "grading_batch_id", "student_id", "attempt_number", name="uq_submission_attempt"
         ),
+        UniqueConstraint(
+            "submitted_by_user_id",
+            "student_idempotency_key",
+            name="uq_student_submission_idempotency",
+        ),
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     owner_id: Mapped[uuid.UUID] = mapped_column(
@@ -1482,6 +1488,10 @@ class Submission(TimestampMixin, Base):
     student_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("students.id", ondelete="RESTRICT"), index=True
     )
+    submitted_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    student_idempotency_key: Mapped[str | None] = mapped_column(String(128))
     attempt_number: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(30), default="uploaded", index=True)
     source: Mapped[str] = mapped_column(String(30), default="teacher_upload")
@@ -2655,3 +2665,230 @@ class AISuggestionReview(Base):
         ForeignKey("structured_rubric_versions.id", ondelete="RESTRICT")
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+# Student portal entities intentionally reference the immutable score-release chain.  AI
+# entities below can store suggestions and explanations, but none of them can mutate a
+# TeacherReview, ScoreRevision, or SubmissionScoreSnapshot.
+class StudentAccountLink(TimestampMixin, Base):
+    __tablename__ = "student_account_links"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_student_account_link_user"),
+        UniqueConstraint("student_id", name="uq_student_account_link_student"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    student_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("students.id", ondelete="CASCADE"), index=True
+    )
+    linked_by: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="active", index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TeachingResource(TimestampMixin, Base):
+    __tablename__ = "teaching_resources"
+    __table_args__ = (
+        CheckConstraint(
+            "(stored_file_id IS NOT NULL) <> (external_url IS NOT NULL)",
+            name="ck_teaching_resource_target",
+        ),
+        UniqueConstraint("stored_file_id", name="uq_teaching_resource_stored_file"),
+        Index(
+            "ix_teaching_resources_class_status_sort_published",
+            "class_id",
+            "status",
+            "sort_order",
+            "published_at",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    class_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("classes.id", ondelete="RESTRICT"), index=True
+    )
+    assignment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("assignments.id", ondelete="SET NULL"), index=True
+    )
+    resource_type: Mapped[str] = mapped_column(String(30), index=True)
+    title: Mapped[str] = mapped_column(String(200), index=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    stored_file_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("stored_files.id", ondelete="RESTRICT"), index=True
+    )
+    external_url: Mapped[str | None] = mapped_column(String(2048))
+    status: Mapped[str] = mapped_column(String(30), default="draft", index=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class WrongQuestionThread(TimestampMixin, Base):
+    __tablename__ = "wrong_question_threads"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "student_answer_id", "score_snapshot_id", name="uq_wrong_question_thread"
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    student_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("students.id", ondelete="RESTRICT"), index=True
+    )
+    student_answer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("student_answers.id", ondelete="RESTRICT"), index=True
+    )
+    score_snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("submission_score_snapshots.id", ondelete="RESTRICT"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="open", index=True)
+
+
+class WrongQuestionMessage(Base):
+    __tablename__ = "wrong_question_messages"
+    __table_args__ = (
+        Index("ix_wrong_question_messages_thread_created", "thread_id", "created_at"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    thread_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("wrong_question_threads.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(20), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    structured_payload: Mapped[dict[str, Any]] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"), default=dict
+    )
+    provider_request_id: Mapped[str | None] = mapped_column(String(160), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, index=True
+    )
+
+
+class WrongQuestionAIJob(TimestampMixin, Base):
+    __tablename__ = "wrong_question_ai_jobs"
+    __table_args__ = (
+        UniqueConstraint("thread_id", "generation", name="uq_wrong_question_ai_generation"),
+        Index("ix_wrong_question_ai_jobs_thread_created", "thread_id", "created_at"),
+        Index("ix_wrong_question_ai_jobs_thread_status", "thread_id", "status"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    thread_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("wrong_question_threads.id", ondelete="CASCADE"), index=True
+    )
+    user_message_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("wrong_question_messages.id", ondelete="RESTRICT"), index=True
+    )
+    generation: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    input_hash: Mapped[str] = mapped_column(String(64))
+    provider: Mapped[str] = mapped_column(String(80), default="unavailable")
+    model: Mapped[str | None] = mapped_column(String(160))
+    prompt_version: Mapped[str] = mapped_column(String(80), default="wrong-question-v1")
+    schema_version: Mapped[str] = mapped_column(String(40), default="1.0")
+    provider_request_id: Mapped[str | None] = mapped_column(String(160), index=True)
+    request_hash: Mapped[str | None] = mapped_column(String(64))
+    response_hash: Mapped[str | None] = mapped_column(String(64))
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    retryable: Mapped[bool] = mapped_column(Boolean, default=False)
+    error_code: Mapped[str | None] = mapped_column(String(80), index=True)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class StudentTeacherReviewRequest(TimestampMixin, Base):
+    __tablename__ = "student_teacher_review_requests"
+    __table_args__ = (
+        UniqueConstraint("thread_id", name="uq_student_review_request_thread"),
+        Index(
+            "ix_student_review_teacher_status_submitted",
+            "teacher_id",
+            "status",
+            "submitted_at",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    thread_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("wrong_question_threads.id", ondelete="RESTRICT"), index=True
+    )
+    requester_user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    student_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("students.id", ondelete="RESTRICT"), index=True
+    )
+    teacher_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    student_answer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("student_answers.id", ondelete="RESTRICT"), index=True
+    )
+    score_snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("submission_score_snapshots.id", ondelete="RESTRICT"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="pending", index=True)
+    student_question: Mapped[str] = mapped_column(Text)
+    conversation_summary: Mapped[str | None] = mapped_column(Text)
+    decision: Mapped[str | None] = mapped_column(String(40), index=True)
+    teacher_response: Mapped[str | None] = mapped_column(Text)
+    score_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("score_revisions.id", ondelete="SET NULL"), index=True
+    )
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class StudentLearningAnalysis(TimestampMixin, Base):
+    __tablename__ = "student_learning_analyses"
+    __table_args__ = (
+        UniqueConstraint("student_id", "source_hash", name="uq_student_analysis_source"),
+        Index("ix_student_analysis_user_created", "user_id", "created_at"),
+        Index(
+            "ix_student_analysis_user_status_generated",
+            "user_id",
+            "status",
+            "generated_at",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    student_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("students.id", ondelete="RESTRICT"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    source_hash: Mapped[str] = mapped_column(String(64), index=True)
+    source_grade_release_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    provider: Mapped[str] = mapped_column(String(80), default="unavailable")
+    model: Mapped[str | None] = mapped_column(String(160))
+    prompt_version: Mapped[str] = mapped_column(String(80), default="student-analysis-v1")
+    schema_version: Mapped[str] = mapped_column(String(40), default="1.0")
+    provider_request_id: Mapped[str | None] = mapped_column(String(160), index=True)
+    request_hash: Mapped[str | None] = mapped_column(String(64))
+    response_hash: Mapped[str | None] = mapped_column(String(64))
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    content: Mapped[dict[str, Any]] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"), default=dict
+    )
+    evidence: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"), default=list
+    )
+    error_code: Mapped[str | None] = mapped_column(String(80), index=True)
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)

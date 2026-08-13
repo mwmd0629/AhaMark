@@ -77,15 +77,33 @@ class InputSnapshot:
 
 
 def _provider_error_code(error: str | None) -> str:
-    if error in {"provider_unavailable", "provider_configuration_incomplete"}:
+    if error in {
+        "provider_unavailable",
+        "provider_configuration_incomplete",
+        "provider_external_requests_disabled",
+        "openai_sdk_unavailable",
+    }:
         return ErrorCodes.PROVIDER_UNAVAILABLE
-    if error in {"provider_timeout", "TimeoutError", "URLError"}:
+    if error in {
+        "provider_timeout",
+        "provider_rate_limited",
+        "provider_network_error",
+        "TimeoutError",
+        "URLError",
+    }:
         return "PROVIDER_TIMEOUT"
     if error and ("json" in error.lower() or "invalid_response" in error.lower()):
         return "PROVIDER_INVALID_JSON"
     if error == "provider_schema_invalid":
         return ErrorCodes.PROVIDER_INVALID_RESPONSE
     return "PROVIDER_FAILED"
+
+
+def _release_unused_reservation(
+    job: AIScoringJob, *, provider_may_have_been_called: bool = False
+) -> None:
+    if not provider_may_have_been_called:
+        job.estimated_cost = Decimal("0")
 
 
 def _region_images(
@@ -153,9 +171,8 @@ def _region_images(
     return images, refs, total_bytes, total_pixels
 
 
-@celery_app.task(name="ahamark.ai_grading.run", bind=True, soft_time_limit=90, time_limit=105)
-def run_ai_grading(
-    self: Any, job_id: str, generation: int, criterion_key: str | None = None
+def _run_ai_grading(
+    job_id: str, generation: int, criterion_key: str | None = None
 ) -> dict[str, Any]:
     with SessionLocal() as db:
         job = db.scalar(
@@ -165,6 +182,7 @@ def run_ai_grading(
             return {"status": "discarded_late"}
         if job.status in TERMINAL_JOB_STATUSES:
             return {"status": "already_processed"}
+        provider_may_have_been_called = job.status in {"running", "validating"}
         evidence = db.get(QuestionRecognitionEvidence, job.recognition_evidence_id)
         rubric = db.get(StructuredRubricVersion, job.rubric_version_id)
         reference = db.get(ReferenceAnswerVersion, job.reference_answer_version_id)
@@ -179,6 +197,9 @@ def run_ai_grading(
             job.status = "stale"
             job.error_code = exc.code
             job.stale_at = now_utc()
+            _release_unused_reservation(
+                job, provider_may_have_been_called=provider_may_have_been_called
+            )
             db.commit()
             return {"status": "stale", "error_code": exc.code}
         if (
@@ -203,6 +224,9 @@ def run_ai_grading(
         ):
             job.status = "stale"
             job.stale_at = now_utc()
+            _release_unused_reservation(
+                job, provider_may_have_been_called=provider_may_have_been_called
+            )
             db.commit()
             return {"status": "stale"}
         assert evidence is not None
@@ -240,6 +264,9 @@ def run_ai_grading(
                 job.error_code = ErrorCodes.VALIDATION_STALE
                 job.stale_at = now_utc()
                 job.finished_at = now_utc()
+                _release_unused_reservation(
+                    job, provider_may_have_been_called=provider_may_have_been_called
+                )
                 db.commit()
                 return {"status": "stale", "error_code": job.error_code}
             validation_generation = validation_job.generation
@@ -355,6 +382,9 @@ def run_ai_grading(
             job.status = "abstained"
             job.error_code = "input_token_budget_exceeded"
             job.finished_at = now_utc()
+            _release_unused_reservation(
+                job, provider_may_have_been_called=provider_may_have_been_called
+            )
             db.commit()
             return {"status": "abstained"}
         settings = get_settings()
@@ -365,8 +395,10 @@ def run_ai_grading(
         if worst_case_cost > settings.ai_grading_max_cost_per_question:
             job.status = "abstained"
             job.error_code = "question_cost_budget_exceeded"
-            job.estimated_cost = Decimal(str(worst_case_cost))
             job.finished_at = now_utc()
+            _release_unused_reservation(
+                job, provider_may_have_been_called=provider_may_have_been_called
+            )
             db.commit()
             return {"status": "abstained"}
         input_snapshot = InputSnapshot(
@@ -386,11 +418,11 @@ def run_ai_grading(
             block_evidence_refs=block_evidence_refs,
             confirmed_region_refs=confirmed_region_refs,
         )
+        provider = provider_from_settings(settings)
         job.status = "running"
         db.commit()
         invocation_started_at = now_utc()
         started = time.monotonic()
-        provider = provider_from_settings(get_settings())
         try:
             response = provider.score(payload, ctx)
         except TimeoutError:
@@ -400,7 +432,7 @@ def run_ai_grading(
                 None,
                 error=(
                     "provider_schema_invalid"
-                    if isinstance(exc, (TypeError, ValueError))
+                    if isinstance(exc, TypeError | ValueError)
                     else "provider_internal_error"
                 ),
             )
@@ -416,6 +448,7 @@ def run_ai_grading(
                     request_id=response.request_id,
                     input_tokens=response.input_tokens,
                     output_tokens=response.output_tokens,
+                    request_hash=response.request_hash,
                     response_hash=response.response_hash,
                     error="provider_schema_invalid",
                     attempts=response.attempts,
@@ -426,6 +459,7 @@ def run_ai_grading(
                     request_id=response.request_id,
                     input_tokens=response.input_tokens,
                     output_tokens=response.output_tokens,
+                    request_hash=response.request_hash,
                     response_hash=response.response_hash,
                     attempts=response.attempts,
                 )
@@ -525,7 +559,7 @@ def run_ai_grading(
             prompt_version=job.prompt_version,
             schema_version=job.schema_version,
             provider_request_id=response.request_id,
-            request_hash=job.request_hash,
+            request_hash=response.request_hash or job.request_hash,
             response_hash=response.response_hash,
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
@@ -574,7 +608,13 @@ def run_ai_grading(
         if not response.output:
             job.status = (
                 "review_pending"
-                if response.error in {"provider_unavailable", "provider_configuration_incomplete"}
+                if response.error
+                in {
+                    "provider_unavailable",
+                    "provider_configuration_incomplete",
+                    "provider_external_requests_disabled",
+                    "openai_sdk_unavailable",
+                }
                 else "failed"
             )
             job.error_code = _provider_error_code(response.error)
@@ -642,3 +682,40 @@ def run_ai_grading(
         job.finished_at = now_utc()
         db.commit()
         return {"status": job.status, "suggestions": len(suggestion_ids)}
+
+
+def _mark_worker_failure(job_id: str, generation: int) -> None:
+    try:
+        parsed_job_id = uuid.UUID(job_id)
+    except ValueError:
+        return
+    with SessionLocal() as db:
+        job = db.scalar(
+            select(AIScoringJob).where(AIScoringJob.id == parsed_job_id).with_for_update()
+        )
+        if job is None or job.generation != generation or job.status in TERMINAL_JOB_STATUSES:
+            return
+        call_not_started = job.status in {"queued", "preparing"}
+        job.status = "failed"
+        job.error_code = "AI_WORKER_INTERNAL_ERROR"
+        job.error_message = "The AI grading worker failed before producing a durable result."
+        job.retryable = True
+        job.finished_at = now_utc()
+        if call_not_started:
+            job.estimated_cost = Decimal("0")
+        db.commit()
+
+
+@celery_app.task(name="ahamark.ai_grading.run", bind=True, soft_time_limit=180, time_limit=195)
+def run_ai_grading(
+    self: Any, job_id: str, generation: int, criterion_key: str | None = None
+) -> dict[str, Any]:
+    del self
+    try:
+        return _run_ai_grading(job_id, generation, criterion_key)
+    except Exception:
+        try:
+            _mark_worker_failure(job_id, generation)
+        except Exception:
+            pass
+        return {"status": "failed", "error_code": "AI_WORKER_INTERNAL_ERROR"}

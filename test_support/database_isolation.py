@@ -179,6 +179,11 @@ def sqlite_path(database_url: str) -> Path:
     candidate = Path(parsed.database)
     if not candidate.is_absolute():
         raise TestDatabaseSafetyError("pytest database path must be absolute")
+    # pathlib on some Windows/Python combinations preserves a NUL-containing
+    # path instead of rejecting it during resolve().  Reject it explicitly so
+    # destructive test setup remains fail-closed across supported runtimes.
+    if "\x00" in str(candidate):
+        raise TestDatabaseSafetyError("pytest database path could not be normalized")
     try:
         return candidate.resolve(strict=False)
     except (OSError, RuntimeError, ValueError) as exc:

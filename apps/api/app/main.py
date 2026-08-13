@@ -2,6 +2,7 @@ from collections.abc import Awaitable, Callable
 
 import structlog
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -68,6 +69,27 @@ async def http_error(request: Request, exc: HTTPException) -> JSONResponse:
             "request_id": request.state.request_id,
         },
         status_code=exc.status_code,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+    errors = [
+        {
+            "location": [str(value) for value in item.get("loc", ())],
+            "message": str(item.get("msg", "请求参数无效")),
+            "type": str(item.get("type", "validation_error")),
+        }
+        for item in exc.errors()
+    ]
+    return JSONResponse(
+        {
+            "code": "REQUEST_VALIDATION_FAILED",
+            "message": "请求参数无效，请检查填写内容",
+            "details": {"errors": errors},
+            "request_id": request.state.request_id,
+        },
+        status_code=422,
     )
 
 

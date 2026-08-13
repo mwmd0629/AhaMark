@@ -7,7 +7,7 @@ from typing import Annotated
 
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.models import Status, User, UserSession
+from app.models import Role, Status, StudentAccountLink, User, UserRole, UserSession
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -56,22 +56,37 @@ def authenticated_session(request: Request, db: Session) -> tuple[UserSession, U
 def get_current_actor(request: Request, db: Annotated[Session, Depends(get_db)]) -> CurrentActor:
     authenticated = authenticated_session(request, db)
     if authenticated:
-        return CurrentActor(authenticated[1].id, authenticated[1].email)
+        user = authenticated[1]
+        if user.must_change_password:
+            raise HTTPException(403, "必须先修改临时密码")
+        student_only = db.scalar(
+            select(UserRole.user_id)
+            .join(Role, Role.id == UserRole.role_id)
+            .where(UserRole.user_id == user.id, Role.name == "student")
+            .limit(1)
+        ) or db.scalar(
+            select(StudentAccountLink.user_id).where(StudentAccountLink.user_id == user.id).limit(1)
+        )
+        path = request.url.path
+        student_surface = path == "/api/student" or path.startswith("/api/student/")
+        if student_only and not student_surface:
+            raise HTTPException(403, "学生账号无权访问教师端功能")
+        return CurrentActor(user.id, user.email)
     settings = get_settings()
     if settings.app_env.lower() == "production" or not settings.demo_actor_enabled:
         raise HTTPException(401, "请先登录")
-    user = db.scalar(select(User).where(User.email == settings.demo_actor_email))
-    if user is None:
-        user = User(
+    demo_user = db.scalar(select(User).where(User.email == settings.demo_actor_email))
+    if demo_user is None:
+        demo_user = User(
             email=settings.demo_actor_email,
             password_hash="!demo-no-login!",
             display_name="演示教师",
             status=Status.active,
         )
-        db.add(user)
+        db.add(demo_user)
         db.commit()
-        db.refresh(user)
-    return CurrentActor(user.id, user.email)
+        db.refresh(demo_user)
+    return CurrentActor(demo_user.id, demo_user.email)
 
 
 Actor = Annotated[CurrentActor, Depends(get_current_actor)]

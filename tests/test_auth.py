@@ -32,6 +32,9 @@ def test_login_me_csrf_logout_and_expiry() -> None:
         "/auth/login", json={"email": "teacher@example.com", "password": "secure-pass-123"}
     )
     assert login.status_code == 200
+    assert login.json()["landing_surface"] == "teacher"
+    assert login.json()["active_student_link"] is False
+    assert login.json()["roles"] == []
     assert (
         "HttpOnly" in login.headers["set-cookie"] and "SameSite=lax" in login.headers["set-cookie"]
     )
@@ -50,6 +53,47 @@ def test_login_me_csrf_logout_and_expiry() -> None:
         session.expires_at = now_utc() - timedelta(seconds=1)
         db.commit()
     assert client.get("/auth/me").status_code == 401
+
+
+def test_temporary_password_must_be_changed_before_business_access() -> None:
+    user = create_teacher()
+    with SessionLocal() as db:
+        current = db.get(User, user.id)
+        assert current is not None
+        current.must_change_password = True
+        db.commit()
+    client = TestClient(app)
+    login = client.post(
+        "/auth/login", json={"email": "teacher@example.com", "password": "secure-pass-123"}
+    )
+    assert login.status_code == 200
+    assert login.json()["must_change_password"] is True
+    assert login.json()["landing_surface"] == "change_password"
+    assert client.get("/api/classes").status_code == 403
+    csrf = client.cookies.get("ahamark_csrf") or ""
+    changed = client.post(
+        "/auth/change-password",
+        headers={"x-csrf-token": csrf},
+        json={
+            "current_password": "secure-pass-123",
+            "new_password": "new-secure-password-456",
+        },
+    )
+    assert changed.status_code == 200
+    assert changed.json()["must_change_password"] is False
+    assert changed.json()["landing_surface"] == "teacher"
+    assert client.get("/api/classes").status_code == 200
+
+
+def test_request_validation_errors_use_the_stable_problem_schema() -> None:
+    response = TestClient(app).post(
+        "/auth/login",
+        json={"email": "teacher@example.com", "password": "short"},
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == "REQUEST_VALIDATION_FAILED"
+    assert response.json()["message"]
+    assert response.json()["details"]["errors"]
 
 
 def test_production_never_falls_back_to_demo_actor() -> None:

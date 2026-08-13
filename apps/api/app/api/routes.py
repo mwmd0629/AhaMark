@@ -16,11 +16,12 @@ from app.api.math_validation import router as math_validation_router
 from app.api.recognition import router as recognition_router
 from app.api.results import router as results_router
 from app.api.structured_rubrics import router as structured_rubrics_router
+from app.api.student_portal import router as student_portal_router
 from app.api.submission_processing import router as submission_processing_router
 from app.core.config import get_settings
 from app.core.readiness import dependency_readiness
 from app.db.session import get_db
-from app.models import FileStatus, StoredFile
+from app.models import FileStatus, StoredFile, SubmissionPage, TeachingResource
 from app.security.files import UnsafeFile, inspect_upload, safe_filename
 from app.storage.base import ObjectStorage
 from app.storage.dependencies import get_storage
@@ -44,6 +45,7 @@ router.include_router(math_validation_router)
 router.include_router(submission_processing_router)
 router.include_router(structured_rubrics_router)
 router.include_router(results_router)
+router.include_router(student_portal_router)
 
 
 @router.get("/health")
@@ -134,6 +136,13 @@ def delete_file(
     storage: Annotated[ObjectStorage, Depends(get_storage)],
 ) -> None:
     item = owned_file(db, actor, key)
+    in_use = db.scalar(
+        select(SubmissionPage.id).where(SubmissionPage.stored_file_id == item.id).limit(1)
+    ) or db.scalar(
+        select(TeachingResource.id).where(TeachingResource.stored_file_id == item.id).limit(1)
+    )
+    if in_use:
+        raise HTTPException(409, "文件已被作业提交或教学资源引用，不能直接删除")
     if not item.storage_key.startswith(f"uploads/{actor.id}/"):
         raise HTTPException(409, "业务文件必须从所属资源删除")
     storage.delete(key)

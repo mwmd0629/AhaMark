@@ -137,6 +137,73 @@ export class ApiError extends Error {
 }
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
+function errorDetailMessage(detail: unknown): string | undefined {
+  if (typeof detail === "string" && detail.trim()) return detail.trim();
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => {
+        if (typeof item === "string") return item.trim();
+        if (!item || typeof item !== "object") return "";
+        const record = item as Record<string, unknown>;
+        const message = typeof record.msg === "string" ? record.msg.trim() : "";
+        if (!message) return "";
+        const location = Array.isArray(record.loc)
+          ? record.loc
+              .filter(
+                (part) => typeof part === "string" || typeof part === "number",
+              )
+              .join(".")
+          : "";
+        return location ? `${location}：${message}` : message;
+      })
+      .filter(Boolean);
+    return messages.length ? messages.join("；") : undefined;
+  }
+  if (detail && typeof detail === "object") {
+    const record = detail as Record<string, unknown>;
+    if (typeof record.message === "string" && record.message.trim()) {
+      return record.message.trim();
+    }
+  }
+  return undefined;
+}
+
+async function apiErrorBody(response: Response): Promise<ApiErrorBody> {
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = undefined;
+  }
+  const record =
+    payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : undefined;
+  const requestId =
+    (typeof record?.request_id === "string" && record.request_id) ||
+    response.headers.get("x-request-id") ||
+    "";
+  const message =
+    (typeof record?.message === "string" && record.message.trim()) ||
+    errorDetailMessage(record?.detail) ||
+    response.statusText.trim() ||
+    `请求失败（HTTP ${response.status}）`;
+  const details =
+    record?.details &&
+    typeof record.details === "object" &&
+    !Array.isArray(record.details)
+      ? (record.details as Record<string, unknown>)
+      : {};
+  return {
+    code:
+      (typeof record?.code === "string" && record.code) ||
+      `HTTP_${response.status}`,
+    message,
+    details,
+    request_id: requestId,
+  };
+}
+
 function csrfToken(): string | undefined {
   if (typeof document === "undefined") return undefined;
   return document.cookie
@@ -160,13 +227,21 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
           },
   });
   if (!response.ok) {
-    const body = (await response.json()) as ApiErrorBody;
-    throw new ApiError(response.status, body);
+    throw new ApiError(response.status, await apiErrorBody(response));
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
-export type AuthUser = { id: string; email: string; display_name: string };
+export type AuthUser = {
+  id: string;
+  email: string;
+  display_name: string;
+  must_change_password: boolean;
+  roles: string[];
+  active_student_link: boolean;
+  landing_surface:
+    "teacher" | "student" | "change_password" | "account_unavailable";
+};
 export const authApi = {
   login: (email: string, password: string) =>
     request<AuthUser>("/auth/login", {
@@ -174,6 +249,14 @@ export const authApi = {
       body: JSON.stringify({ email, password }),
     }),
   me: () => request<AuthUser>("/auth/me"),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<AuthUser>("/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    }),
   logout: () => request<void>("/auth/logout", { method: "POST" }),
 };
 export async function getHealth(signal?: AbortSignal): Promise<Health> {

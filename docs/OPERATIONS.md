@@ -22,11 +22,11 @@ manual/unsupported 遵从率 100%、状态准确率至少 95%，并需人工抽�
 
 ## 架构与启动
 
-六个核心服务为 web、api、worker、PostgreSQL、Redis、MinIO；可选 Nginx proxy 是入口层。复制 `.env.example` 为 `.env`，替换全部 `change-me` 值，生产必须设 `APP_ENV=production`、`DEMO_ACTOR_ENABLED=false`、`AUTH_COOKIE_SECURE=true`、HTTPS Origin 和专用 Bucket。
+六个核心服务为 web、api、worker、PostgreSQL、Redis、MinIO；浏览器必须通过 Nginx proxy 统一入口访问。复制 `.env.example` 为 `.env`，替换全部 `change-me` 值，生产必须设 `APP_ENV=production`、`DEMO_ACTOR_ENABLED=false`、`AUTH_COOKIE_SECURE=true`、HTTPS Origin 和专用 Bucket。
 
 ```powershell
-docker compose config --quiet
-docker compose up --build -d
+docker compose -f docker-compose.yml -f docker-compose.proxy.yml config --quiet
+docker compose -f docker-compose.yml -f docker-compose.proxy.yml up --build -d
 docker compose exec -T api alembic upgrade head
 docker compose ps
 ```
@@ -38,7 +38,7 @@ docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d proxy
 Invoke-WebRequest -UseBasicParsing http://localhost:8080/health
 ```
 
-生产在 Nginx 前终止 TLS 或增加 443 server，证书从 secret store 挂载，不入库；只在 HTTPS 域启用 HSTS。生产不要暴露 API、Web、MinIO 9000/9001 的宿主端口，只暴露代理。当前 Compose 是开发配置，MinIO 控制台仍绑定 localhost 的所有接口，不能直接用于公网。
+生产在 Nginx 前终止 TLS 或增加 443 server，证书从 secret store 挂载，不入库；只在 HTTPS 域启用 HSTS。生产不要暴露 API、Web、MinIO 9000/9001 的宿主端口，只暴露代理。当前 Compose 不发布 MinIO API 或控制台；签名 GET/HEAD 由 proxy 按 bucket 路径转发并保留原始 Host。该开发配置仍不能直接用于公网。
 
 停止但保留卷：`docker compose stop`。禁止使用 `docker compose down -v`。
 
@@ -52,7 +52,7 @@ docker compose exec -T api alembic heads
 docker compose exec -T api alembic upgrade head
 ```
 
-当前代码与活动库 current/heads 均应为 `0024_nullable_publish_readiness_due_at`。回滚只能在名称
+当前代码的唯一 head 应为 `0026_student_portal`；活动库只有在本次迁移完成后才应显示该 revision。回滚只能在名称
 明确的非生产库验证；历史上已在独立库完成空库 `upgrade head` 与 `0010 -> 0009 -> 0010`，
 该历史记录不表示当前活动库仍停留在 0010。
 

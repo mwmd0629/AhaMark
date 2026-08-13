@@ -3,6 +3,7 @@
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ApiError, authApi } from "@/lib/api";
+import { accountUnavailableMessage, landingPath } from "@/lib/auth-routing";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -14,11 +15,17 @@ export default function LoginPage() {
     setError("");
     const data = new FormData(event.currentTarget);
     try {
-      await authApi.login(
+      const user = await authApi.login(
         String(data.get("email")),
         String(data.get("password")),
       );
-      router.replace("/dashboard");
+      const destination = landingPath(user.landing_surface);
+      if (destination) {
+        router.replace(destination);
+        return;
+      }
+      await authApi.logout().catch(() => undefined);
+      setError(accountUnavailableMessage);
     } catch (reason) {
       setError(
         reason instanceof ApiError ? reason.message : "登录失败，请稍后重试",
@@ -37,9 +44,9 @@ export default function LoginPage() {
           <div className="mb-3 grid h-11 w-11 place-items-center rounded-xl bg-[var(--brand-600)] text-xl font-black text-white">
             A
           </div>
-          <h1 className="text-2xl font-bold">教师登录</h1>
+          <h1 className="text-2xl font-bold">师生登录</h1>
           <p className="mt-1 text-sm text-slate-500">
-            登录 AhaMark 批改与学情分析平台
+            登录后将根据账号身份进入教师端或学生学习空间
           </p>
         </div>
         <label className="mb-4 block text-sm font-medium">

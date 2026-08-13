@@ -307,11 +307,14 @@ def _submission_workflow(db: Session, submission: Submission) -> dict[str, Any]:
             "action": "确认题目区域后继续",
         }
     for answer in answers:
-        region_count = db.scalar(
-            select(func.count())
-            .select_from(StudentAnswerRegion)
-            .where(StudentAnswerRegion.student_answer_id == answer.id)
-        ) or 0
+        region_count = (
+            db.scalar(
+                select(func.count())
+                .select_from(StudentAnswerRegion)
+                .where(StudentAnswerRegion.student_answer_id == answer.id)
+            )
+            or 0
+        )
         effective_text = (
             answer.corrected_text
             or answer.recognized_text
@@ -1452,6 +1455,7 @@ def patch_answer(answer_id: uuid.UUID, data: AnswerPatch, db: Db, actor: Actor) 
         select(StudentAnswer)
         .join(Submission, Submission.id == StudentAnswer.submission_id)
         .where(StudentAnswer.id == answer_id, Submission.owner_id == actor.id)
+        .with_for_update()
     )
     if answer is None:
         raise ApiProblem(404, "ANSWER_NOT_FOUND", "答案不存在")
@@ -1921,6 +1925,7 @@ def review_answer(answer_id: uuid.UUID, data: ReviewInput, db: Db, actor: Actor)
         select(StudentAnswer)
         .join(Submission, Submission.id == StudentAnswer.submission_id)
         .where(StudentAnswer.id == answer_id, Submission.owner_id == actor.id)
+        .with_for_update()
     )
     if answer is None:
         raise ApiProblem(404, "ANSWER_NOT_FOUND", "答案不存在")
@@ -1981,7 +1986,9 @@ def review_answer(answer_id: uuid.UUID, data: ReviewInput, db: Db, actor: Actor)
         for item_id, awarded in data.criterion_scores.items():
             row = by_item[item_id]
             row.awarded_points, row.status = awarded, "teacher_confirmed"
-    review = db.scalar(select(TeacherReview).where(TeacherReview.student_answer_id == answer.id))
+    review = db.scalar(
+        select(TeacherReview).where(TeacherReview.student_answer_id == answer.id).with_for_update()
+    )
     if review is None:
         review = TeacherReview(
             student_answer_id=answer.id,
@@ -2352,6 +2359,8 @@ def bulk_accept(batch_id: uuid.UUID, data: BulkAcceptInput, db: Db, actor: Actor
             Submission.grading_batch_id == batch.id,
             Submission.owner_id == actor.id,
         )
+        .order_by(StudentAnswer.id)
+        .with_for_update()
     ).all()
     if len(answers) != len(set(data.answer_ids)):
         raise ApiProblem(422, "BULK_ACCEPT_SCOPE_INVALID", "答案列表包含不存在或越权项目")
@@ -2363,7 +2372,9 @@ def bulk_accept(batch_id: uuid.UUID, data: BulkAcceptInput, db: Db, actor: Actor
             excluded.append({"answer_id": str(answer.id), "reasons": reasons})
             continue
         review = db.scalar(
-            select(TeacherReview).where(TeacherReview.student_answer_id == answer.id)
+            select(TeacherReview)
+            .where(TeacherReview.student_answer_id == answer.id)
+            .with_for_update()
         )
         if review is None:
             review = TeacherReview(
@@ -2571,7 +2582,12 @@ def finalize_submission(submission_id: uuid.UUID, db: Db, actor: Actor) -> dict[
                 "question_id": str(q.id),
                 "question_number": q.question_number,
                 "question_type": q.question_type,
+                # Student-facing review must be derived from the immutable
+                # published snapshot, never from a later edit to Question or
+                # StudentAnswer.
+                "question_text": q.content_text,
                 "student_answer_id": str(answer.id),
+                "student_answer_text": answer.corrected_text or answer.recognized_text,
                 "teacher_review_id": str(review.id),
                 "score": str(review.final_score),
                 "max_score": str(q.max_score),

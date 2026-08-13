@@ -12,6 +12,7 @@ import {
   type InputHTMLAttributes,
   type ReactNode,
   type SelectHTMLAttributes,
+  type TextareaHTMLAttributes,
 } from "react";
 import { Icon } from "./icons";
 
@@ -124,6 +125,53 @@ export const Select = forwardRef<
     </label>
   );
 });
+export function Textarea({
+  label,
+  description,
+  error,
+  required,
+  className,
+  ...props
+}: TextareaHTMLAttributes<HTMLTextAreaElement> & {
+  label?: string;
+  description?: string;
+  error?: string;
+}) {
+  const id = useId();
+  return (
+    <label className="grid gap-1.5 text-sm font-medium" htmlFor={id}>
+      {label && (
+        <span>
+          {label}
+          {required && <span className="text-[var(--danger)]"> *</span>}
+        </span>
+      )}
+      <textarea
+        id={id}
+        required={required}
+        aria-invalid={!!error}
+        aria-describedby={description || error ? `${id}-help` : undefined}
+        className={cx(
+          "min-h-28 resize-y rounded-[var(--radius-md)] border bg-white px-3 py-2 font-normal leading-6 outline-none transition placeholder:text-slate-400 focus:border-[var(--brand-500)] disabled:bg-slate-100",
+          error ? "border-[var(--danger)]" : "border-[var(--border)]",
+          className,
+        )}
+        {...props}
+      />
+      {(description || error) && (
+        <span
+          id={`${id}-help`}
+          className={cx(
+            "text-xs font-normal",
+            error ? "text-[var(--danger)]" : "text-[var(--text-secondary)]",
+          )}
+        >
+          {error || description}
+        </span>
+      )}
+    </label>
+  );
+}
 export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
   return (
     <div

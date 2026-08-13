@@ -1,6 +1,7 @@
 {
   "name": "ahamark",
   "private": true,
+  "engines": {"node": ">=20.19.0"},
   "workspaces": ["apps/web"],
   "scripts": {
     "dev": "npm run dev --workspace apps/web",

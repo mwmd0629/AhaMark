@@ -27,6 +27,7 @@ import {
   type ImportPreview,
   type Student,
 } from "@/lib/api";
+import { StudentAccountDialog } from "@/components/student-account-dialog";
 
 export default function ClassDetailPage({
   params,
@@ -427,15 +428,20 @@ export default function ClassDetailPage({
                     {new Date(student.joined_at).toLocaleDateString("zh-CN")}
                   </td>
                   <td>
-                    <Button
-                      variant="ghost"
-                      onClick={() => void remove(student)}
-                      disabled={
-                        saving || student.membership_status !== "active"
-                      }
-                    >
-                      移出
-                    </Button>
+                    <div className="flex flex-wrap gap-1">
+                      {student.membership_status === "active" && (
+                        <StudentAccountDialog student={student} />
+                      )}
+                      <Button
+                        variant="ghost"
+                        onClick={() => void remove(student)}
+                        disabled={
+                          saving || student.membership_status !== "active"
+                        }
+                      >
+                        移出
+                      </Button>
+                    </div>
                   </td>
                 </tr>
               ))}

@@ -17,6 +17,8 @@ celery_app = Celery(
         "workers.tasks.answer_recognition",
         "workers.tasks.math_validation",
         "workers.tasks.ai_grading",
+        "workers.tasks.wrong_question_ai",
+        "workers.tasks.student_learning_analysis",
         "workers.tasks.assignment_generation",
     ],
 )

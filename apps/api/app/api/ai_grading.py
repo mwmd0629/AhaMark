@@ -25,6 +25,7 @@ from app.models import (
     AIProviderInvocation,
     AIScoringJob,
     AISuggestionReview,
+    Assignment,
     CriterionValidationResult,
     MathValidationJob,
     Question,
@@ -87,7 +88,17 @@ def _assert_submission_mutable(db: Session, submission_id: uuid.UUID) -> None:
 def _enqueue(job: AIScoringJob, db: Session, criterion_key: str | None) -> None:
     from workers.tasks.ai_grading import run_ai_grading
 
-    task = run_ai_grading.delay(str(job.id), job.generation, criterion_key)
+    try:
+        task = run_ai_grading.delay(str(job.id), job.generation, criterion_key)
+    except Exception:
+        job.status = "failed"
+        job.error_code = "AI_WORKER_UNAVAILABLE"
+        job.error_message = "The AI grading task broker was unavailable during dispatch."
+        job.retryable = True
+        job.estimated_cost = Decimal("0")
+        job.finished_at = now_utc()
+        db.commit()
+        return
     job.celery_task_id = task.id
     db.commit()
 
@@ -319,13 +330,51 @@ def create_job(data: CreateJob, db: Db, actor: Actor) -> dict[str, Any]:
         require_submission_mutable(submission)
     except GuardViolation as exc:
         raise exc.problem(409) from exc
-    batch_cost = db.scalar(
-        select(func.coalesce(func.sum(AIScoringJob.estimated_cost), 0)).where(
-            AIScoringJob.assignment_id == submission.assignment_id,
+    db.scalar(
+        select(Assignment.id)
+        .where(Assignment.id == submission.assignment_id, Assignment.owner_id == actor.id)
+        .with_for_update()
+    )
+    # The assignment lock serializes the cost ledger. Re-read the idempotency key
+    # after waiting for that lock so a concurrent winner is returned rather than
+    # reaching the database uniqueness constraint.
+    concurrent_existing = db.scalar(
+        select(AIScoringJob).where(
             AIScoringJob.owner_id == actor.id,
+            AIScoringJob.idempotency_key == data.idempotency_key,
         )
     )
-    if batch_cost and float(batch_cost) >= settings.ai_grading_max_cost_per_batch:
+    if concurrent_existing:
+        payload = job_json(db, concurrent_existing)
+        db.commit()
+        return payload
+    reserved_cost = Decimal(
+        str(
+            (
+                settings.ai_grading_max_input_tokens * settings.ai_grading_input_cost_per_million
+                + settings.ai_grading_max_output_tokens
+                * settings.ai_grading_output_cost_per_million
+            )
+            / 1_000_000
+        )
+    )
+    if reserved_cost > Decimal(str(settings.ai_grading_max_cost_per_question)):
+        raise ApiProblem(
+            429,
+            "AI_QUESTION_COST_BUDGET_EXCEEDED",
+            "The question AI grading cost budget would be exceeded",
+        )
+    batch_cost = Decimal(
+        db.scalar(
+            select(func.coalesce(func.sum(AIScoringJob.estimated_cost), 0)).where(
+                AIScoringJob.assignment_id == submission.assignment_id,
+                AIScoringJob.owner_id == actor.id,
+                AIScoringJob.status.notin_(["stale", "cancelled"]),
+            )
+        )
+        or 0
+    )
+    if batch_cost + reserved_cost > Decimal(str(settings.ai_grading_max_cost_per_batch)):
         raise ApiProblem(
             429,
             "AI_BATCH_COST_BUDGET_EXCEEDED",
@@ -418,12 +467,20 @@ def create_job(data: CreateJob, db: Db, actor: Actor) -> dict[str, Any]:
         request_hash=request_hash,
         image_count=0,
         image_bytes=0,
+        estimated_cost=reserved_cost,
         retryable=False,
     )
     db.add(job)
-    db.flush()
-    audit(db, actor.id, "ai_grading.create", "ai_scoring_job", job.id, {"generation": generation})
     try:
+        db.flush()
+        audit(
+            db,
+            actor.id,
+            "ai_grading.create",
+            "ai_scoring_job",
+            job.id,
+            {"generation": generation},
+        )
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -520,8 +577,11 @@ def cancel(job_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
     job = _owned_job(db, actor.id, job_id)
     _assert_submission_mutable(db, job.submission_id)
     if job.status not in {"completed", "partially_completed", "abstained", "failed", "stale"}:
+        release_unused_reservation = job.status in {"queued", "preparing"}
         job.status = "cancelled"
         job.cancelled_at = now_utc()
+        if release_unused_reservation:
+            job.estimated_cost = Decimal("0")
     audit(db, actor.id, "ai_grading.cancel", "ai_scoring_job", job.id, {})
     db.commit()
     return job_json(db, job)
@@ -696,7 +756,8 @@ def assignment_summary(assignment_id: uuid.UUID, db: Db, actor: Actor) -> dict[s
     total_output_tokens = 0
     for job in jobs:
         status_counts[job.status] = status_counts.get(job.status, 0) + 1
-        total_cost += float(job.estimated_cost or 0)
+        if job.status not in {"stale", "cancelled"}:
+            total_cost += float(job.estimated_cost or 0)
         total_input_tokens += job.input_tokens or 0
         total_output_tokens += job.output_tokens or 0
     manual_count = db.scalar(

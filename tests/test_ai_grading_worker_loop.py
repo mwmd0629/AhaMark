@@ -1,4 +1,5 @@
 import uuid
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -10,8 +11,10 @@ from app.ai_grading.providers import (
     UnavailableAIScoringProvider,
     provider_from_settings,
 )
+from app.api import ai_grading as ai_grading_api
 from app.api.actor import CurrentActor
-from app.api.ai_grading import ReviewInput, job_json, retry_job
+from app.api.ai_grading import CreateJob, ReviewInput, create_job, job_json, retry_job
+from app.api.ai_grading import cancel as cancel_job
 from app.api.ai_grading import review as review_suggestion
 from app.api.domain import ApiProblem
 from app.core.config import Settings, get_settings
@@ -90,9 +93,11 @@ def scoring_job() -> tuple[Any, AIScoringJob]:
 
 def test_migration_head_matches_strict_audit_models() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
-    revision = script.get_revision("0025_ai_grading_audit_contract")
-    assert script.get_current_head() == revision.revision
-    assert revision.down_revision == "0024_nullable_publish_readiness_due_at"
+    portal_revision = script.get_revision("0026_student_portal")
+    audit_revision = script.get_revision("0025_ai_grading_audit_contract")
+    assert script.get_current_head() == portal_revision.revision
+    assert portal_revision.down_revision == audit_revision.revision
+    assert audit_revision.down_revision == "0024_nullable_publish_readiness_due_at"
     assert {"validation_refs", "error_codes", "requires_review"} <= set(
         AICriterionSuggestion.__table__.columns.keys()
     )
@@ -350,4 +355,144 @@ def test_failed_retry_creates_new_generation_without_reviving_source(
     assert replacement.generation == source.generation + 1
     assert replacement.status == "queued"
     assert source.status == "failed"
+    db.close()
+
+
+def _align_job_with_current_provider(job: AIScoringJob) -> None:
+    settings = get_settings()
+    job.provider = settings.ai_grading_provider
+    job.model = settings.ai_grading_model
+    job.prompt_version = settings.ai_grading_prompt_version
+    job.schema_version = settings.ai_grading_schema_version
+    job.grading_config_version = settings.ai_grading_config_version
+
+
+@pytest.mark.parametrize("hidden_reads", [1, 2])
+def test_create_job_rechecks_and_recovers_idempotency_conflicts(
+    monkeypatch: pytest.MonkeyPatch,
+    hidden_reads: int,
+) -> None:
+    db, winner = scoring_job()
+    winner.idempotency_key = "concurrent-idempotency-key"
+    _align_job_with_current_provider(winner)
+    db.commit()
+    original_scalar = db.scalar
+    idempotency_reads = 0
+
+    def hide_concurrent_winner(statement: Any, *args: Any, **kwargs: Any) -> Any:
+        nonlocal idempotency_reads
+        sql = str(statement)
+        if "ai_scoring_jobs.idempotency_key" in sql and "ai_scoring_jobs.owner_id" in sql:
+            idempotency_reads += 1
+            if idempotency_reads <= hidden_reads:
+                return None
+        return original_scalar(statement, *args, **kwargs)
+
+    monkeypatch.setattr(db, "scalar", hide_concurrent_winner)
+    response = create_job(
+        CreateJob(
+            student_answer_id=winner.student_answer_id,
+            rubric_version_id=winner.rubric_version_id,
+            idempotency_key=winner.idempotency_key,
+        ),
+        db,
+        CurrentActor(winner.owner_id, "teacher@example.test"),
+    )
+
+    assert response["id"] == str(winner.id)
+    assert idempotency_reads >= hidden_reads + 1
+    assert (
+        db.scalar(
+            select(func.count())
+            .select_from(AIScoringJob)
+            .where(AIScoringJob.idempotency_key == winner.idempotency_key)
+        )
+        == 1
+    )
+    db.close()
+
+
+def test_broker_dispatch_failure_is_durable_and_releases_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db, job = scoring_job()
+    job.estimated_cost = Decimal("1.25")
+    db.commit()
+
+    def unavailable(*_args: Any, **_kwargs: Any) -> None:
+        raise ConnectionError("synthetic broker outage")
+
+    monkeypatch.setattr(worker.run_ai_grading, "delay", unavailable)
+    ai_grading_api._enqueue(job, db, None)
+    db.expire_all()
+    current = db.get(AIScoringJob, job.id)
+    assert current is not None
+    assert current.status == "failed"
+    assert current.error_code == "AI_WORKER_UNAVAILABLE"
+    assert current.retryable is True
+    assert current.estimated_cost == Decimal("0")
+    assert current.finished_at is not None
+    db.close()
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_cost"),
+    [("queued", Decimal("0")), ("preparing", Decimal("0")), ("running", Decimal("1.25"))],
+)
+def test_worker_outer_failure_persists_terminal_state_and_reconciles_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    expected_cost: Decimal,
+) -> None:
+    db, job = scoring_job()
+    job.status = status
+    job.estimated_cost = Decimal("1.25")
+    db.commit()
+
+    def crash(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("synthetic worker failure")
+
+    monkeypatch.setattr(worker, "_run_ai_grading", crash)
+    result = worker.run_ai_grading.run(str(job.id), job.generation)
+    db.expire_all()
+    current = db.get(AIScoringJob, job.id)
+    assert result == {"status": "failed", "error_code": "AI_WORKER_INTERNAL_ERROR"}
+    assert current is not None
+    assert current.status == "failed"
+    assert current.error_code == "AI_WORKER_INTERNAL_ERROR"
+    assert current.retryable is True
+    assert current.estimated_cost == expected_cost
+    assert current.finished_at is not None
+    db.close()
+
+
+def test_pre_provider_stale_releases_reservation() -> None:
+    db, stale_job = scoring_job()
+    stale_job.estimated_cost = Decimal("1.25")
+    answer = db.get(StudentAnswer, stale_job.student_answer_id)
+    assert answer is not None
+    answer.status = "draft"
+    db.commit()
+    result = worker.run_ai_grading.run(str(stale_job.id), stale_job.generation)
+    db.expire_all()
+    current = db.get(AIScoringJob, stale_job.id)
+    assert result["status"] == "stale"
+    assert current is not None and current.estimated_cost == Decimal("0")
+    db.close()
+
+
+def test_queued_cancel_releases_reservation() -> None:
+    db, queued_job = scoring_job()
+    queued_job.estimated_cost = Decimal("1.25")
+    db.commit()
+    cancel_job(
+        queued_job.id,
+        db,
+        CurrentActor(queued_job.owner_id, "teacher@example.test"),
+    )
+    db.expire_all()
+    cancelled = db.get(AIScoringJob, queued_job.id)
+    assert cancelled is not None
+    assert cancelled.status == "cancelled"
+    assert cancelled.estimated_cost == Decimal("0")
     db.close()

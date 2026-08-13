@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { use, useEffect, useState } from "react";
 import { Badge, Button, Card, PageHeader } from "@/components/ui";
 import { assignmentsApi, type AssignmentRecord } from "@/lib/api";
@@ -13,6 +14,7 @@ export default function AssignmentDetailPage({
   params: Promise<{ assignmentId: string }>;
 }) {
   const { assignmentId } = use(params);
+  const router = useRouter();
   const [item, setItem] = useState<AssignmentRecord>();
   useEffect(
     () => void assignmentsApi.get(assignmentId).then(setItem),
@@ -35,7 +37,7 @@ export default function AssignmentDetailPage({
               variant="outline"
               onClick={async () => {
                 const copy = await assignmentsApi.copy(item.id);
-                location.href = `/assignments/${copy.id}/edit`;
+                router.push(`/assignments/${copy.id}/edit`);
               }}
             >
               复制

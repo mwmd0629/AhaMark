@@ -17,6 +17,8 @@ def production_settings(**overrides: object) -> dict[str, object]:
         "csrf_trusted_origins": ["https://localhost:9443"],
         "minio_access_key": "preproduction-access",
         "minio_secret_key": "strong-storage-secret-value",
+        "minio_public_endpoint": "files.example.invalid",
+        "minio_public_secure": True,
         "session_hmac_secret": "a" * 48,
         "demo_actor_enabled": False,
         "auth_cookie_secure": True,
@@ -43,6 +45,8 @@ def production_settings(**overrides: object) -> dict[str, object]:
         ("trusted_hosts", ["*"]),
         ("debug", True),
         ("auth_cookie_secure", False),
+        ("minio_public_endpoint", None),
+        ("minio_public_secure", False),
     ],
 )
 def test_production_configuration_rejects_unsafe_values(field: str, value: object) -> None:

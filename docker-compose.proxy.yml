@@ -1,12 +1,30 @@
 services:
+  web:
+    build:
+      args: {NEXT_PUBLIC_API_URL: ""}
+    environment:
+      NEXT_PUBLIC_API_URL: ""
+    ports: !reset []
+  minio:
+    ports: !reset []
+  api:
+    environment:
+      MINIO_PUBLIC_ENDPOINT: "localhost:${PROXY_PORT:-8080}"
+      MINIO_PUBLIC_SECURE: "false"
+  worker:
+    environment:
+      MINIO_PUBLIC_ENDPOINT: "localhost:${PROXY_PORT:-8080}"
+      MINIO_PUBLIC_SECURE: "false"
   proxy:
     image: nginx:1.27-alpine
-    ports: ["8080:8080"]
+    environment: {MINIO_BUCKET: "${MINIO_BUCKET:-ahamark-files}", NGINX_ENVSUBST_FILTER: "^MINIO_BUCKET$"}
+    ports: ["${PROXY_PORT:-8080}:8080"]
     volumes:
-      - ./deploy/nginx/ahamark.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/nginx/ahamark.conf:/etc/nginx/templates/default.conf.template:ro
     depends_on:
       api: {condition: service_healthy}
       web: {condition: service_healthy}
+      minio: {condition: service_healthy}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/health"]
       interval: 10s

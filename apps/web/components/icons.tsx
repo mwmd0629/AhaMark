@@ -37,6 +37,24 @@ const paths: Record<string, React.ReactNode> = {
       <path d="M4 5.5A3.5 3.5 0 0 1 7.5 2H11v18H7.5A3.5 3.5 0 0 0 4 23ZM20 5.5A3.5 3.5 0 0 0 16.5 2H13v18h3.5a3.5 3.5 0 0 1 3.5 3Z" />
     </>
   ),
+  results: (
+    <>
+      <path d="M5 3h14v18H5zM8 8h8M8 12h3M8 16h3" />
+      <path d="m14 15 1.5 1.5L19 13" />
+    </>
+  ),
+  resources: (
+    <>
+      <path d="M4 4h7v16H4zM13 4h7v16h-7z" />
+      <path d="M7 8h1M16 8h1M7 12h1M16 12h1" />
+    </>
+  ),
+  review: (
+    <>
+      <path d="M4 4h16v13H8l-4 4Z" />
+      <path d="M8 9h8M8 13h5" />
+    </>
+  ),
   rubrics: (
     <>
       <path d="M4 3h16v18H4zM8 8h8M8 12h8M8 16h5" />

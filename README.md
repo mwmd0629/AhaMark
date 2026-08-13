@@ -1,8 +1,8 @@
 # AhaMark
 
-> **当前仓库状态（2026-07-28）：** 本地 `master` 功能基线位于
-> `2377cd3`（包含线性代数批改第 1–4 部分），尚未 push；Alembic
-> 唯一 head 为 `0025_ai_grading_audit_contract`。第 5 部分离线评测命令见
+> **当前仓库状态（2026-08-13）：** 当前工作树已加入学生端、教学资源、错题 AI/人工申疑、
+> 学习分析和服务端 OpenAI Responses API 适配；Alembic 唯一 head 为
+> `0026_student_portal`。本次修改尚未提交、推送或部署。第 5 部分离线评测命令见
 > `scripts/linear_algebra_offline_evaluate.py`；所有样本均为本地 Codex 生成的合成数据。
 > Assignment Generation（编排、元数据/文件分析、题目提取、答案与 Rubric 草稿、集中复核发布、
 > Provider 调用审计）已按受控、仅建议方式落地。Provider 默认 `unavailable`，外部请求默认
@@ -21,7 +21,7 @@
 > `manual_only` 可绑定空 `validation_rule`，集中审查过滤 stale/superseded 并限制人工解决动作，
 > 浏览器门禁有界；failed ReportJob 只能创建新任务重试，XLSX 所有外部文本列均防公式注入。
 
-AhaMark 是面向教师的 AI 作业批改与学情分析平台。当前已实现数据库会话认证、Submission OCR 工程链路、教师评分复核、不可变成绩发布、异步 Excel/中文 PDF 报告和版本化学情统计。RapidOCR 是真实本地印刷体 OCR；当前没有真实主观题 AI Provider，主观题必须人工评分。第五部分权限与文件安全、第六部分开发机有界容量及第七部分开发环境备份/故障恢复均已完成定义范围内验收。整体等级仍为 **C（内部演示或开发测试）**，不适合真实学生数据、真实教学试点、生产部署或公网开放。
+AhaMark 是面向教师与学生的 AI 作业批改和学习分析平台。当前已实现数据库会话认证、Submission OCR 工程链路、教师评分复核、不可变成绩发布、异步 Excel/中文 PDF 报告、版本化学情统计，以及学生提交作业、错题追问/教师复核、学习分析和教学资源访问。RapidOCR 是真实本地印刷体 OCR；OpenAI Provider 仅作为服务端可选建议能力，外部请求默认关闭，最终成绩仍由教师负责。第五部分权限与文件安全、第六部分开发机有界容量及第七部分开发环境备份/故障恢复均已完成定义范围内验收。整体等级仍为 **C（内部演示或开发测试）**，不适合真实学生数据、真实教学试点、生产部署或公网开放。
 
 ## 当前可用的教师流程
 
@@ -34,17 +34,19 @@ AhaMark 是面向教师的 AI 作业批改与学情分析平台。当前已实�
 
 ## 本地运行与数据位置
 
-推荐在 D 盘工作区运行：
+在当前仓库根目录运行：
 
 ```powershell
-cd D:\OpenAIData\Workspaces\AhaMark
+cd D:\git\AhaMark
 Copy-Item .env.example .env
-docker compose up --build -d
-Invoke-WebRequest -UseBasicParsing http://localhost:8000/health
+docker compose -f docker-compose.yml -f docker-compose.proxy.yml up --build -d
+Invoke-WebRequest -UseBasicParsing http://localhost:8080/health
 ```
 
-Web 地址为 <http://localhost:3000>，API 健康检查为 <http://localhost:8000/health>。
-Docker 数据、项目工作区和桌面交付文件已迁移到 `D:\OpenAIData`；C 盘保留的路径只是兼容性目录联接。
+统一入口为 <http://localhost:8080>，API 健康检查通过同源代理访问
+<http://localhost:8080/health>。教师登录后可进入 `/classes`、`/resources` 和
+`/review-requests`；学生登录后从 `/student` 进入作业、错题本、学习分析和教学资源页面。
+Compose 不直接发布 MinIO API 或控制台，浏览器下载使用同源 Nginx 代理签名地址。
 不要提交 `.env`、数据库文件、`node_modules` 或 `.next`。
 
 ## 第七部分：开发环境恢复验收
@@ -99,11 +101,11 @@ manual/unsupported 遵从率 100%、状态准确率至少 95%，并保留人工�
 
 新版 details schema 包含题目 ID/题号/题型、最终分/满分、TeacherReview ID、最终错误代码/评语、知识点 ID、评分方法和确认时间；校验题目不重复、分值范围、题目存在、顶层分数与分题和一致。旧快照缺少必填字段时不会进入发布或统计。
 
-`GradeRelease` 以作业/班级递增 version 保存发布记录，`GradeReleaseItem` 固定具体 ScoreSnapshot ID。released 的产品含义仅是“教师已确认发布数据，尚未发送到学生端”，不是学生已收到。修改成绩后需生成新快照和新发布版本，旧版本不变。
+`GradeRelease` 以作业/班级递增 version 保存发布记录，`GradeReleaseItem` 固定具体 ScoreSnapshot ID。`released` 表示该版本已由教师发布；学生端按账号、班级和 `release_mode` 权限读取它，但该状态不表示学生已经实际打开或收到通知。修改成绩后需生成新快照和新发布版本，旧版本不变。
 
 Excel 是真实 `.xlsx`，包含“成绩总表、题目统计、知识点统计、导出说明”。学号强制文本，缺失成绩不写零，外部文本防公式注入。API 只创建 ReportJob 并派发 job ID；`workers/tasks/reports.py` 幂等生成、写对象存储、登记 StoredFile。该边界已有自动化测试及真实 Celery/MinIO 冒烟。个人与批量学生 PDF 使用仓库内 Noto Sans SC TTF，来源、许可证和校验值见 `apps/api/assets/fonts/SOURCE.md`。
 
-AnalyticsSnapshot 固定 GradeRelease，旧快照不覆盖。后端统一计算参与人数、平均/最高/最低/中位数、归一化分数段、题目得分率/满分率/零分率、客观题正确率、知识点掌握率、教师确认错误频次和透明 A/B/C/D 临时分层。未完成学生不进入分母；一题多知识点时完整计入每个知识点并明确样本。主观题不显示“正确率”。RuleBased 教学建议只引用快照 metrics 的题目 ID、得分率和样本数；没有真实 AI 教学助手。
+AnalyticsSnapshot 固定 GradeRelease，旧快照不覆盖。后端统一计算参与人数、平均/最高/最低/中位数、归一化分数段、题目得分率/满分率/零分率、客观题正确率、知识点掌握率、教师确认错误频次和透明 A/B/C/D 临时分层。未完成学生不进入分母；一题多知识点时完整计入每个知识点并明确样本。主观题不显示“正确率”。教师端 RuleBased 教学建议仍只引用快照 metrics；学生端另有可选 OpenAI 学习分析，但默认关闭且不构成教师确认的最终结论。
 
 主要 API：
 
@@ -113,7 +115,7 @@ AnalyticsSnapshot 固定 GradeRelease，旧快照不覆盖。后端统一计算�
 - `POST /api/grade-releases/{id}/analytics`
 - `POST /api/analytics/{id}/insights`
 
-当前仓库 Alembic 唯一 head 为 `0024_nullable_publish_readiness_due_at`；`0010_report_student`
+当前仓库 Alembic 唯一 head 为 `0026_student_portal`；`0010_report_student`
 是下述报告与学情功能对应的历史迁移节点。`/analytics` 已包含加载、空、错误、小样本、0–100%
 图表、键盘可访问表格和数据版本选择。分数段、题目、知识点、最终错误类型均可分页下钻；班级、
 学生及知识点历史趋势只读取每份作业最新有效发布版本，缺失作业不记零。学生详情路由为
@@ -137,8 +139,8 @@ Analytics 7.1 新增 API：
 
 历史上的后续接手条件包含浏览器闭环、性能、安全专项、代理和隔离矩阵；第五部分权限与
 文件安全、第六部分开发机容量和第七部分开发环境恢复现已完成定义范围内验收。生产容量、
-生产灾备、高可用、正式部署和运维体系仍未建立。当前仍没有真实主观题 AI Provider，
-主观题必须教师人工评分。
+生产灾备、高可用、正式部署和运维体系仍未建立。主观题、错题答疑和学生学习分析已实现
+OpenAI Provider 适配器，但外部请求默认关闭，尚未完成真实模型质量门禁；主观题最终分数仍必须由教师确认。
 
 ## 验收与交付入口
 
@@ -207,7 +209,7 @@ Submission OCR 数据与试卷 RecognitionJob/PaperPage 隔离：学生域使用
 `POST /api/submissions/{id}/finalize` 会逐题检查答案、教师最终分、分值范围、强制复核和当前 RubricVersion，并生成新的 SubmissionScoreSnapshot 版本而不覆盖旧版本。第七部分只能读取最新 `status=complete` 快照；`details` 保存每题 question/answer/review ID、最终分、满分、错误类型和评语。AI/规则 GradingResult 不是最终成绩来源。
 
 学生作业与批改子系统对应迁移为 `0006_submissions_grading_review`；仓库当前 Alembic 唯一 head
-为 `0023_assignment_provider_invocation_audit`：
+为 `0026_student_portal`：
 
 ```powershell
 python -m alembic upgrade head
@@ -222,7 +224,7 @@ npm.cmd run build
 
 ## 技术栈与本地运行
 
-- Web：Next.js 15、React 19、TypeScript、Tailwind CSS 4。
+- Web：Next.js 16、React 19、TypeScript、Tailwind CSS 4；本地 Node.js 要求 `>=20.19.0`。
 - API：FastAPI、SQLAlchemy 2、Alembic；生产数据库为 PostgreSQL。
 - Worker：Celery + Redis；对象存储：MinIO。
 - 文字 OCR：RapidOCR 3.9.2 + ONNX Runtime 1.27.0（本地处理，不上传第三方）。
@@ -238,7 +240,12 @@ npm.cmd install
 npm.cmd run dev
 ```
 
-复制 `.env.example` 为 `.env`、替换专用凭据后运行 `docker compose up --build -d`。Compose 定义 PostgreSQL 16、Redis 7、MinIO、API、Worker 和 Web；2026-07-22 已完成空库迁移、六服务启动、Celery 往返和 MinIO 上传/读取/签名 URL 冒烟。
+若采用上述“后端服务由 Compose、Web 由 `npm run dev`”的直连方式，基础 Compose 会只在
+本机发布 Web 3000、API 8000 与 MinIO API 9000，资源签名地址应设为
+`MINIO_PUBLIC_ENDPOINT=localhost:9000`。采用下述统一 proxy 方式时，override 会移除 Web/MinIO
+直连端口并把签名地址改为同源 8080；不要将 MinIO 控制台 9001 暴露到宿主机。
+
+复制 `.env.example` 为 `.env`、替换专用凭据后运行 `docker compose -f docker-compose.yml -f docker-compose.proxy.yml up --build -d`。基础 Compose 定义 PostgreSQL 16、Redis 7、MinIO、API、Worker 和 Web，proxy override 增加统一入口；Web 构建时 `NEXT_PUBLIC_API_URL` 保持为空。MinIO 控制台不发布，签名下载通过 proxy 转发。2026-07-22 的旧六服务证据仅适用于当时基线；加入学生端和同源 proxy 后必须重新执行空库迁移、服务健康、Celery 往返及浏览器下载冒烟。
 
 ## 分值完整性规则
 

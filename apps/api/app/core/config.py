@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import field_validator, model_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -65,6 +65,15 @@ class Settings(BaseSettings):
     grading_prompt_version: str = "subjective-v1"
     grading_config_version: str = "2026-07-22"
     grading_auto_accept_confidence: float = 0.95
+    # Shared, server-only OpenAI connection. Feature-specific values below may
+    # override the base URL or key temporarily for backwards compatibility.
+    ai_external_requests_enabled: bool = False
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_api_key: SecretStr | None = None
+    openai_organization: str | None = None
+    openai_project: str | None = None
+    ai_safety_hmac_secret: SecretStr | None = None
+    openai_allow_private_base_url_for_tests: bool = False
     ai_grading_provider: str = "unavailable"
     assignment_generation_enabled: bool = True
     assignment_generation_provider: str = "unavailable"
@@ -112,6 +121,29 @@ class Settings(BaseSettings):
     ai_grading_store_responses: bool = False
     ai_grading_review_provider: str | None = None
     ai_grading_review_model: str | None = None
+    ai_tutor_provider: str = "unavailable"
+    ai_tutor_model: str | None = None
+    ai_tutor_timeout_seconds: float = 45.0
+    ai_tutor_max_retries: int = 2
+    ai_tutor_max_input_tokens: int = 12000
+    ai_tutor_max_output_tokens: int = 2000
+    ai_tutor_max_conversation_messages: int = 20
+    ai_tutor_max_questions_per_hour: int = 30
+    ai_tutor_prompt_version: str = "wrong-question-tutor-v1"
+    ai_tutor_schema_version: str = "wrong-question-reply-v1"
+    student_learning_provider: str = "unavailable"
+    student_learning_model: str | None = None
+    student_learning_timeout_seconds: float = 60.0
+    student_learning_max_retries: int = 2
+    student_learning_max_input_tokens: int = 24000
+    student_learning_max_output_tokens: int = 3000
+    student_learning_max_grade_releases: int = 50
+    student_learning_max_requests_per_day: int = 10
+    student_learning_retry_cooldown_seconds: int = 300
+    student_learning_prompt_version: str = "student-learning-analysis-v1"
+    student_learning_schema_version: str = "student-learning-analysis-v1"
+    student_upload_max_unattached_files: int = 50
+    student_upload_max_files_per_hour: int = 30
     submission_max_files: int = 100
     submission_batch_max_bytes: int = 250 * 1024 * 1024
     submission_match_threshold: float = 0.95
@@ -151,6 +183,10 @@ class Settings(BaseSettings):
             errors.append("GRADING_PROVIDER cannot be fake")
         if self.ai_grading_provider.lower() == "fake":
             errors.append("AI_GRADING_PROVIDER cannot be fake")
+        if self.ai_tutor_provider.lower() == "fake":
+            errors.append("AI_TUTOR_PROVIDER cannot be fake")
+        if self.student_learning_provider.lower() == "fake":
+            errors.append("STUDENT_LEARNING_PROVIDER cannot be fake")
         if self.assignment_generation_provider.lower() == "fake":
             errors.append("ASSIGNMENT_GENERATION_PROVIDER cannot be fake")
         if not self.assignment_generation_suggestion_only:
@@ -176,6 +212,56 @@ class Settings(BaseSettings):
             errors.append("AUTH_COOKIE_SECURE must be true")
         if not self.auth_rate_limit_fail_closed:
             errors.append("AUTH_RATE_LIMIT_FAIL_CLOSED must be true")
+        if not self.minio_public_endpoint:
+            errors.append("MINIO_PUBLIC_ENDPOINT is required for browser downloads")
+        if not self.minio_public_secure:
+            errors.append("MINIO_PUBLIC_SECURE must be true")
+        real_ai_providers = {
+            self.ai_grading_provider.lower(),
+            self.ai_tutor_provider.lower(),
+            self.student_learning_provider.lower(),
+        } & {"openai", "openai_compatible"}
+        if self.ai_external_requests_enabled and real_ai_providers:
+            shared_key = (
+                self.openai_api_key.get_secret_value().strip()
+                if self.openai_api_key is not None
+                else ""
+            )
+            tutor_or_learning_enabled = any(
+                value.lower() in {"openai", "openai_compatible"}
+                for value in (self.ai_tutor_provider, self.student_learning_provider)
+            )
+            has_usable_key = bool(shared_key) or (
+                not tutor_or_learning_enabled and bool((self.ai_grading_api_key or "").strip())
+            )
+            if not has_usable_key:
+                errors.append("OPENAI_API_KEY is required when an OpenAI provider is enabled")
+            if not self.openai_base_url.startswith("https://"):
+                errors.append("OPENAI_BASE_URL must use HTTPS")
+            safety_secret = (
+                self.ai_safety_hmac_secret.get_secret_value().strip()
+                if self.ai_safety_hmac_secret is not None
+                else ""
+            )
+            if len(safety_secret) < 32 or safety_secret == self.session_hmac_secret:
+                errors.append(
+                    "AI_SAFETY_HMAC_SECRET must be at least 32 characters and distinct "
+                    "from SESSION_HMAC_SECRET"
+                )
+            if self.ai_grading_provider.lower() in {"openai", "openai_compatible"}:
+                if (
+                    self.ai_grading_input_cost_per_million <= 0
+                    or self.ai_grading_output_cost_per_million <= 0
+                ):
+                    errors.append(
+                        "AI_GRADING_INPUT_COST_PER_MILLION and "
+                        "AI_GRADING_OUTPUT_COST_PER_MILLION must be positive"
+                    )
+                if (
+                    self.ai_grading_max_cost_per_question <= 0
+                    or self.ai_grading_max_cost_per_batch <= 0
+                ):
+                    errors.append("AI grading cost budgets must be positive")
         if errors:
             raise ValueError("production configuration rejected: " + "; ".join(errors))
         return self
