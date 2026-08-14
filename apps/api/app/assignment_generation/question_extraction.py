@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -19,6 +19,7 @@ from app.models import (
     QuestionRegion,
     RecognitionBlock,
 )
+from app.recognition.text_integrity import ensure_text_fields_integrity
 
 QUESTION_TYPES = {
     "single_choice",
@@ -158,7 +159,29 @@ class ExtractionOutput(BaseModel):
                     raise ValueError("parent cycle")
                 seen.add(cur)
                 cur = parents[cur] or ""
+        ensure_extraction_text_integrity(self)
         return self
+
+
+def ensure_extraction_text_integrity(output: ExtractionOutput) -> None:
+    """Validate the complete batch before callers perform any database writes."""
+
+    fields: list[tuple[str, str | None]] = []
+    for index, candidate in enumerate(output.candidates):
+        prefix = f"candidates[{index}]"
+        fields.extend(
+            [
+                (f"{prefix}.question_number", candidate.question_number),
+                (f"{prefix}.content_text", candidate.content_text),
+                (f"{prefix}.content_latex", candidate.content_latex),
+                (f"{prefix}.difficulty", candidate.difficulty),
+            ]
+        )
+        fields.extend(
+            (f"{prefix}.knowledge_points[{point_index}]", point)
+            for point_index, point in enumerate(candidate.knowledge_points)
+        )
+    ensure_text_fields_integrity(fields)
 
 
 def validate_references(
@@ -227,11 +250,19 @@ def materialize(
         if existing:
             return existing
     values = candidate.teacher_value or {}
+    next_display_order = (
+        db.scalar(
+            select(func.max(Question.display_order)).where(
+                Question.paper_version_id == candidate.paper_version_id
+            )
+        )
+        or 0
+    ) + 1
     question = Question(
         paper_version_id=candidate.paper_version_id,
         parent_question_id=None,
         question_number=values.get("question_number", candidate.question_number) or "",
-        display_order=0,
+        display_order=next_display_order,
         question_type=values.get("question_type", candidate.question_type),
         content_text=values.get("content_text", candidate.content_text),
         content_latex=values.get("content_latex", candidate.content_latex),

@@ -16,7 +16,10 @@ from app.assignment_generation.answer_rubric import (
     route_scoring_mode,
     validate_candidate_structure,
 )
-from app.assignment_generation.question_extraction import ExtractionOutput
+from app.assignment_generation.question_extraction import (
+    ExtractionOutput,
+    ensure_extraction_text_integrity,
+)
 from app.assignment_generation.schemas import FileAnalysisOutput, MetadataProviderOutput
 from app.models import (
     Assignment,
@@ -35,10 +38,15 @@ from app.models import (
     PaperVersion,
     Question,
     QuestionCandidate,
+    QuestionStatus,
     RecognitionBlock,
     RecognitionJob,
     StoredFile,
     now_utc,
+)
+from app.recognition.text_integrity import (
+    CharacterEncodingCorruptionError,
+    text_quality_statistics,
 )
 
 
@@ -112,8 +120,14 @@ def materialize_metadata(
     output: MetadataProviderOutput,
 ) -> int:
     known = _known_entities(db, job)
+    assignment = db.get(Assignment, job.assignment_id)
+    has_total_score = bool(
+        assignment is not None and assignment.total_score is not None and assignment.total_score > 0
+    )
     created = 0
     for candidate in output.suggestions:
+        if candidate.field_name == "total_score" and has_total_score:
+            continue
         _validate_evidence(candidate.evidence, known)
         previous = list(
             db.scalars(
@@ -200,6 +214,21 @@ def materialize_file_analysis(
         if answer_source in {"teacher_official", "publisher_official"}:
             answer_source = "unknown"
             warnings.append("ANSWER_SOURCE_CONFIRMATION_REQUIRED")
+        inherited_confirmation = db.scalar(
+            select(AssignmentSourceFileAnalysis)
+            .where(
+                AssignmentSourceFileAnalysis.assignment_id == job.assignment_id,
+                AssignmentSourceFileAnalysis.stored_file_id == file_id,
+                AssignmentSourceFileAnalysis.checksum == file_candidate.checksum,
+                AssignmentSourceFileAnalysis.analysis_status == "confirmed",
+                AssignmentSourceFileAnalysis.teacher_confirmed_role.is_not(None),
+            )
+            .order_by(
+                AssignmentSourceFileAnalysis.confirmed_at.desc(),
+                AssignmentSourceFileAnalysis.updated_at.desc(),
+            )
+            .limit(1)
+        )
         row = AssignmentSourceFileAnalysis(
             owner_id=job.owner_id,
             assignment_id=job.assignment_id,
@@ -210,6 +239,9 @@ def materialize_file_analysis(
             detected_mime_type=file_candidate.detected_mime_type,
             checksum=file_candidate.checksum,
             page_count=file_candidate.page_count,
+            content_mode=file_candidate.content_mode,
+            text_source=file_candidate.text_source,
+            content_mode_confidence=file_candidate.content_mode_confidence,
             suggested_role=file_candidate.suggested_role,
             role_confidence=file_candidate.role_confidence,
             suggested_answer_source=answer_source,
@@ -217,6 +249,21 @@ def materialize_file_analysis(
             duplicate_of_file_id=duplicate_id,
             evidence=[item.model_dump(mode="json") for item in file_candidate.evidence],
             warning_codes=sorted(set(warnings)),
+            analysis_status="confirmed" if inherited_confirmation else "suggested",
+            teacher_confirmed_role=(
+                inherited_confirmation.teacher_confirmed_role if inherited_confirmation else None
+            ),
+            teacher_confirmed_answer_source=(
+                inherited_confirmation.teacher_confirmed_answer_source
+                if inherited_confirmation
+                else None
+            ),
+            teacher_edit_version=(
+                inherited_confirmation.teacher_edit_version if inherited_confirmation else 0
+            ),
+            confirmed_by=(inherited_confirmation.confirmed_by if inherited_confirmation else None),
+            confirmed_at=(inherited_confirmation.confirmed_at if inherited_confirmation else None),
+            review_note=(inherited_confirmation.review_note if inherited_confirmation else None),
         )
         db.add(row)
         db.flush()
@@ -248,6 +295,10 @@ def materialize_file_analysis(
                 source_file_analysis_id=analysis.id,
                 source_snapshot_hash=job.source_snapshot_hash,
                 status=page_candidate.status,
+                content_mode=page_candidate.content_mode,
+                text_source=page_candidate.text_source,
+                content_mode_confidence=page_candidate.content_mode_confidence,
+                text_character_count=page_candidate.text_character_count,
                 quality_score=page_candidate.quality_score,
                 blank_probability=page_candidate.blank_probability,
                 duplicate_probability=page_candidate.duplicate_probability,
@@ -312,6 +363,10 @@ def materialize_questions(
     revision: AssignmentDraftRevision,
     output: ExtractionOutput,
 ) -> dict[str, int]:
+    try:
+        ensure_extraction_text_integrity(output)
+    except CharacterEncodingCorruptionError as exc:
+        raise ProviderSemanticError(exc.code) from exc
     paper = _paper_version(db, job)
     pages = {
         page.id: page
@@ -339,8 +394,20 @@ def materialize_questions(
         )
     )
     for old in old_rows:
-        if old.status == "suggested":
+        if old.status in {"suggested", "manual_required"}:
             old.status = "superseded"
+        if (
+            old.status in {"suggested", "superseded"}
+            and old.reviewed_by is None
+            and old.materialized_question_id is not None
+        ):
+            old_question = db.get(Question, old.materialized_question_id)
+            if (
+                old_question is not None
+                and old_question.status == QuestionStatus.active
+                and old_question.source == "ai_draft"
+            ):
+                old_question.status = QuestionStatus.removed
     version = max((old.candidate_version for old in old_rows), default=0) + 1
     number_counts = Counter(
         item.question_number for item in output.candidates if item.question_number
@@ -349,6 +416,24 @@ def materialize_questions(
     manual_count = 0
     for candidate in output.candidates:
         kinds = {region.region_type for region in candidate.regions}
+        quality_block_ids = {
+            block_id for region in candidate.regions for block_id in region.block_ids
+        }
+        quality_blocks = [
+            block
+            for block_id in quality_block_ids
+            if (block := db.get(RecognitionBlock, block_id)) is not None
+        ]
+        quality_stats = text_quality_statistics(
+            [candidate.content_text, candidate.content_latex],
+            sources=[block.source for block in quality_blocks] or ["openai_compatible"],
+            confidences=[
+                float(block.confidence) if block.confidence is not None else None
+                for block in quality_blocks
+            ]
+            or [float(candidate.overall_confidence)],
+            block_types=kinds | {block.block_type for block in quality_blocks},
+        )
         warnings = set(candidate.warning_codes)
         if candidate.question_number and number_counts[candidate.question_number] > 1:
             warnings.add("QUESTION_NUMBER_CONFLICT")
@@ -393,7 +478,7 @@ def materialize_questions(
             },
             overall_confidence=candidate.overall_confidence,
             extraction_method="openai_compatible",
-            evidence=candidate.evidence,
+            evidence={**candidate.evidence, "quality_stats": quality_stats},
             warning_codes=sorted(warnings),
             manual_required=manual,
             source_snapshot_hash=job.source_snapshot_hash,
@@ -452,7 +537,7 @@ def materialize_answer(
         )
     )
     for old in old_rows:
-        if old.status == "suggested":
+        if old.status in {"suggested", "manual_required"}:
             old.status = "superseded"
     version = max((old.candidate_version for old in old_rows), default=0) + 1
     _mode, routed_manual, route_warnings = route_scoring_mode(question, output)

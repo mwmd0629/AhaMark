@@ -20,13 +20,19 @@ const mocks = vi.hoisted(() => ({
   removeGroup: vi.fn(),
   previewImport: vi.fn(),
   confirmImport: vi.fn(),
+  listResources: vi.fn(),
+  uploadResource: vi.fn(),
 }));
 
 vi.mock("@/lib/api", () => ({
   ApiError: class ApiError extends Error {
     body = { message: "请求失败" };
   },
-  classesApi: { get: mocks.getClass },
+  classesApi: {
+    get: mocks.getClass,
+    resources: mocks.listResources,
+    uploadResource: mocks.uploadResource,
+  },
   studentsApi: {
     list: mocks.listStudents,
     add: mocks.addStudent,
@@ -67,6 +73,17 @@ describe("class detail student creation", () => {
       pages: 0,
     });
     mocks.listGroups.mockResolvedValue([]);
+    mocks.listResources.mockResolvedValue([
+      {
+        id: "resource-1",
+        title: "矩阵习题",
+        file_name: "矩阵习题.pdf",
+        resource_type: "exercise",
+        page_count: 3,
+        status: "ready",
+        created_at: "2026-08-12T00:00:00Z",
+      },
+    ]);
     mocks.addStudent.mockResolvedValue({
       id: "student-1",
       name: "演示学生",
@@ -112,5 +129,24 @@ describe("class detail student creation", () => {
     expect(screen.queryByText("添加失败")).not.toBeInTheDocument();
     expect(mocks.getClass).toHaveBeenCalledTimes(2);
     expect(mocks.listStudents).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows organized class resources and the reusable upload controls", async () => {
+    render(
+      <ToastProvider>
+        <Suspense fallback={<div>加载中</div>}>
+          <ClassDetailPage params={Promise.resolve({ classId: "class-1" })} />
+        </Suspense>
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByText("班级资料")).toBeInTheDocument();
+    expect(screen.getByText("矩阵习题")).toBeInTheDocument();
+    expect(screen.getByLabelText("选择班级资料文件")).toHaveAttribute(
+      "accept",
+      ".pdf,.png,.jpg,.jpeg",
+    );
+    expect(screen.getByLabelText("资料类型")).toHaveValue("exercise");
+    expect(screen.getByRole("button", { name: "添加资料" })).toBeEnabled();
   });
 });

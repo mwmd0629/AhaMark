@@ -134,6 +134,20 @@ def _latest_run(db: Session, batch_id: uuid.UUID) -> ProcessingRun | None:
     )
 
 
+def get_latest_processing_run(
+    db: Session, *, owner_id: uuid.UUID, batch_id: uuid.UUID
+) -> ProcessingRun | None:
+    owned_batch_id = db.scalar(
+        select(GradingBatch.id).where(
+            GradingBatch.id == batch_id,
+            GradingBatch.owner_id == owner_id,
+        )
+    )
+    if owned_batch_id is None:
+        _fail(404, "GRADING_BATCH_NOT_FOUND", "Grading batch not found")
+    return _latest_run(db, batch_id)
+
+
 def _command_replay(
     db: Session,
     *,
@@ -247,7 +261,7 @@ def _aggregate_run_state(
         status = "waiting_input"
     elif failed:
         status = "partially_failed" if completed else "failed"
-    elif steps and statuses == {"succeeded"}:
+    elif steps and "succeeded" in statuses and statuses <= {"succeeded", "stale"}:
         status = "awaiting_teacher_review"
     else:
         status = "waiting_input"
@@ -458,9 +472,7 @@ def _materialize_submission_processing_jobs(
     return created
 
 
-def _dispatch_submission_processing_jobs(
-    db: Session, job_ids: list[uuid.UUID]
-) -> None:
+def _dispatch_submission_processing_jobs(db: Session, job_ids: list[uuid.UUID]) -> None:
     for job_id in job_ids:
         try:
             from workers.celery_app import celery_app
@@ -699,9 +711,7 @@ def _reconcile_recognition_children(
                     submission_id=step.submission_id,
                     recognition_job_id=job.id,
                     processing_run_id=run.id,
-                    min_confidence=Decimal(
-                        str(get_settings().recognition_high_confidence)
-                    ),
+                    min_confidence=Decimal(str(get_settings().recognition_high_confidence)),
                 )
                 if decision.eligible:
                     step.status = "succeeded"
@@ -719,9 +729,7 @@ def _reconcile_recognition_children(
                     if job.status == "completed"
                     else "RECOGNITION_PARTIAL_REVIEW_REQUIRED"
                 )
-                step.error_message = (
-                    "Teacher confirmation of recognition evidence is required"
-                )
+                step.error_message = "Teacher confirmation of recognition evidence is required"
             step.status = "blocked_review"
             step.stage = "recognition_confirmation"
             step.retryable = False
@@ -840,9 +848,7 @@ def _manifest(db: Session, owner_id: uuid.UUID, batch: GradingBatch) -> dict[str
                 }
             )
             continue
-        answers = _active_paper_answers(
-            db, submission_id=submission.id, lock=True
-        )
+        answers = _active_paper_answers(db, submission_id=submission.id, lock=True)
         answer_entries: list[dict[str, Any]] = []
         blockers: list[str] = []
         if not answers:
@@ -1049,29 +1055,29 @@ def continue_processing(
             source = planned["source"]
             answer_source = source.get("answer") if isinstance(source, dict) else None
             step = ProcessingStep(
-                    processing_run_id=result.id,
-                    submission_id=planned["submission_id"],
-                    student_answer_id=planned["student_answer_id"],
-                    scope_key=planned["scope_key"],
-                    kind=planned["kind"],
-                    status=planned["status"],
-                    generation=generation,
-                    input_version=(
-                        str(answer_source["input_version"])
-                        if planned["kind"] == "codex_suggestion"
-                        and isinstance(answer_source, dict)
-                        and answer_source.get("input_version")
-                        else canonical_hash(source)
-                    ),
-                    request_hash=canonical_hash(
-                        {"run": result.request_hash, "scope": planned["source"]}
-                    ),
-                    error_code=planned["error_code"],
-                    error_message="Teacher input or recognition confirmation is required"
-                    if planned["error_code"]
-                    else None,
-                    retryable=planned["error_code"] is None,
-                )
+                processing_run_id=result.id,
+                submission_id=planned["submission_id"],
+                student_answer_id=planned["student_answer_id"],
+                scope_key=planned["scope_key"],
+                kind=planned["kind"],
+                status=planned["status"],
+                generation=generation,
+                input_version=(
+                    str(answer_source["input_version"])
+                    if planned["kind"] == "codex_suggestion"
+                    and isinstance(answer_source, dict)
+                    and answer_source.get("input_version")
+                    else canonical_hash(source)
+                ),
+                request_hash=canonical_hash(
+                    {"run": result.request_hash, "scope": planned["source"]}
+                ),
+                error_code=planned["error_code"],
+                error_message="Teacher input or recognition confirmation is required"
+                if planned["error_code"]
+                else None,
+                retryable=planned["error_code"] is None,
+            )
             db.add(step)
             new_steps.append(step)
         db.flush()
@@ -1086,18 +1092,14 @@ def continue_processing(
     processing_job_ids = _materialize_submission_processing_jobs(
         db, run=result, steps=current_steps
     )
-    _reconcile_submission_processing_children(
-        db, run=result, steps=current_steps
-    )
-    recognition_job_ids = _materialize_recognition_jobs(
-        db, run=result, steps=current_steps
-    )
+    _reconcile_submission_processing_children(db, run=result, steps=current_steps)
+    recognition_job_ids = _materialize_recognition_jobs(db, run=result, steps=current_steps)
     work_items = materialize_work_items(db, run=result)
     pending_codex_count = sum(
         item.status in {"queued", "leased", "submitted"} for item in work_items
     )
-    result.status, result.completed_step_count, result.failed_step_count = (
-        _aggregate_run_state(current_steps, pending_codex_count)
+    result.status, result.completed_step_count, result.failed_step_count = _aggregate_run_state(
+        current_steps, pending_codex_count
     )
     result.pending_codex_count = pending_codex_count
     _add_command(
@@ -1244,9 +1246,7 @@ def retry_processing(
         db.add(new_step)
         new_steps.append(new_step)
     db.flush()
-    recognition_job_ids = _materialize_recognition_jobs(
-        db, run=result, steps=new_steps
-    )
+    recognition_job_ids = _materialize_recognition_jobs(db, run=result, steps=new_steps)
     work_items = materialize_work_items(db, run=result, steps=new_steps)
     pending_codex_count = sum(
         item.status in {"queued", "leased", "submitted"} for item in work_items
@@ -1328,15 +1328,11 @@ def reconcile_processing(
             .with_for_update()
         )
     )
-    processing_job_ids = _materialize_submission_processing_jobs(
-        db, run=run, steps=steps
-    )
+    processing_job_ids = _materialize_submission_processing_jobs(db, run=run, steps=steps)
     _reconcile_submission_processing_children(db, run=run, steps=steps)
     recognition_job_ids = _materialize_recognition_jobs(db, run=run, steps=steps)
     _reconcile_recognition_children(db, steps=steps, run=run)
-    new_codex_steps = _materialize_codex_steps_after_recognition(
-        db, run=run, steps=steps
-    )
+    new_codex_steps = _materialize_codex_steps_after_recognition(db, run=run, steps=steps)
     if new_codex_steps:
         materialize_work_items(db, run=run, steps=new_codex_steps)
     run.pending_codex_count = _reconcile_codex_children(db, run=run, steps=steps)

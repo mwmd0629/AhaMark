@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { beforeEach, expect, it, vi } from "vitest";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AppShell } from "./app-shell";
 const pathnameMock = vi.hoisted(() => vi.fn());
 const routerMock = vi.hoisted(() => ({ replace: vi.fn() }));
@@ -16,7 +16,9 @@ vi.mock("@/components/auth-gate", () => ({
 }));
 beforeEach(() => {
   pathnameMock.mockReturnValue("/classes");
+  localStorage.clear();
 });
+afterEach(cleanup);
 it("renders every teacher navigation item and highlights current route", () => {
   render(
     <AppShell>
@@ -56,4 +58,24 @@ it("renders every teacher navigation item and highlights current route", () => {
   );
   expect(screen.getByText("测试教师")).toBeInTheDocument();
   expect(screen.getByText("teacher@ahamark.local")).toBeInTheDocument();
+});
+
+it("shows the locally known unread reminder count and updates it without reload", async () => {
+  localStorage.setItem("ahamark.notifications.unread.teacher-id", "3");
+  render(
+    <AppShell>
+      <div>工作台内容</div>
+    </AppShell>,
+  );
+  expect(
+    screen.getByRole("link", { name: "消息，3 条未读" }),
+  ).toBeInTheDocument();
+  window.dispatchEvent(
+    new CustomEvent("ahamark:notifications", { detail: { unreadCount: 1 } }),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole("link", { name: "消息，1 条未读" }),
+    ).toBeInTheDocument(),
+  );
 });

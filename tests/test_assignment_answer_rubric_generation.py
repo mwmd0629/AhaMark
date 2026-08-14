@@ -10,6 +10,8 @@ from app.api.domain import ApiProblem
 from app.assignment_generation.answer_rubric import (
     AnswerRubricProviderOutput,
     CriterionDraftSchema,
+    _criterion_validation_mode,
+    _formal_criterion_type,
     deterministic_fake_output,
     materialize_reference,
     route_scoring_mode,
@@ -28,8 +30,10 @@ from app.models import (
     AssignmentRubricCriterionDraft,
     AssignmentRubricDraftCandidate,
     AssignmentRubricValidationResult,
+    GenerationStageResult,
     PaperVersion,
     Question,
+    QuestionStatus,
     ReferenceAnswerVersion,
     RubricCriterion,
     SchoolClass,
@@ -64,6 +68,14 @@ def criterion(
         degradation_reason=None,
         **values,
     )
+
+
+def test_formal_criterion_type_accepts_existing_formal_rows_and_rejects_unknown() -> None:
+    assert _formal_criterion_type("step") == "intermediate_result"
+    assert _formal_criterion_type("intermediate_result") == "intermediate_result"
+    assert _formal_criterion_type("final_answer") == "final_answer"
+    with pytest.raises(ValueError, match="RUBRIC_CRITERION_TYPE_INVALID"):
+        _formal_criterion_type("unsupported_type")
 
 
 def test_provider_schema_rejects_privileged_and_unknown_fields() -> None:
@@ -177,6 +189,24 @@ def test_valid_deterministic_provider_output_remains_deterministic() -> None:
     )
 
     assert route_scoring_mode(question, output) == ("deterministic", False, [])
+
+
+@pytest.mark.parametrize(
+    ("scoring_mode", "criterion_manual", "expected"),
+    [
+        ("ai_suggestion", False, "ai_suggestion"),
+        ("ai_suggestion", True, "manual_only"),
+        ("manual_only", False, "manual_only"),
+        ("hybrid", False, "deterministic"),
+    ],
+)
+def test_materialized_criterion_preserves_ai_suggestion_mode(
+    scoring_mode: str, criterion_manual: bool, expected: str
+) -> None:
+    candidate = SimpleNamespace(scoring_mode=scoring_mode)
+    draft_criterion = SimpleNamespace(manual_required=criterion_manual)
+
+    assert _criterion_validation_mode(candidate, draft_criterion) == expected
 
 
 def test_semantic_route_fails_closed_if_schema_is_bypassed_without_degradation_reason() -> None:
@@ -331,6 +361,63 @@ def generation_context(monkeypatch: pytest.MonkeyPatch) -> tuple[uuid.UUID, uuid
     return uuid.UUID(job_data["id"]), uuid.UUID(job_data["revision"]["id"]), question_id
 
 
+def test_regenerate_question_queues_exact_draft_only_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id, revision_id, question_id = generation_context(monkeypatch)
+    dispatched: dict[str, object] = {}
+
+    def capture_task(name: str, *, args: list[object]) -> None:
+        dispatched.update({"name": name, "args": args})
+
+    monkeypatch.setattr("workers.celery_app.celery_app.send_task", capture_task)
+    with SessionLocal() as db:
+        job = db.get(AssignmentGenerationJob, job_id)
+        revision = db.get(AssignmentDraftRevision, revision_id)
+        assert job is not None and revision is not None
+        job.status = "review_required"
+        snapshot = revision.source_snapshot_hash
+        edit_version = revision.teacher_edit_version
+        db.commit()
+
+    response = client.post(
+        f"/api/assignment-draft-revisions/{revision_id}/questions/{question_id}/regenerate-answer-rubric",
+        json={
+            "expected_source_snapshot": snapshot,
+            "expected_draft_revision_edit_version": edit_version,
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    payload = response.json()
+    assert payload == {
+        "request_id": payload["request_id"],
+        "question_id": str(question_id),
+        "status": "queued",
+        "draft_only": True,
+        "replaces_confirmed_content": False,
+    }
+    assert dispatched == {
+        "name": "ahamark.assignment_generation.regenerate_question",
+        "args": [
+            payload["request_id"],
+            str(revision_id),
+            str(question_id),
+            snapshot,
+            edit_version,
+        ],
+    }
+    with SessionLocal() as db:
+        row = db.get(GenerationStageResult, uuid.UUID(payload["request_id"]))
+        assert row is not None
+        assert row.status == "queued"
+        assert row.result_payload == {
+            "scope": "single_question",
+            "question_id": str(question_id),
+            "draft_only": True,
+        }
+
+
 def test_generation_requires_materialized_question_and_provider_unavailable_is_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -350,6 +437,109 @@ def test_generation_requires_materialized_question_and_provider_unavailable_is_e
         assert answer.raw_content is None
         assert answer.status == "manual_required"
         assert db.scalar(select(AssignmentRubricDraftCandidate)) is None
+
+
+def test_missing_total_score_is_derived_from_complete_materialized_pdf_questions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id, revision_id, _question_id = generation_context(monkeypatch)
+    with SessionLocal() as db:
+        from app.api.assignment_generation import (
+            _autofill_total_score_from_confirmed_questions,
+        )
+
+        job = db.get(AssignmentGenerationJob, job_id)
+        revision = db.get(AssignmentDraftRevision, revision_id)
+        assert job is not None and revision is not None
+        assignment = db.get(Assignment, job.assignment_id)
+        assert assignment is not None
+        assignment.total_score = None
+        db.flush()
+
+        _autofill_total_score_from_confirmed_questions(db, revision, job.owner_id)
+        db.commit()
+
+        assert assignment.total_score == Decimal("5")
+
+
+def test_missing_total_score_does_not_wait_for_teacher_question_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _job_id, revision_id, _question_id = generation_context(monkeypatch)
+    with SessionLocal() as db:
+        from app.api.assignment_generation import (
+            _autofill_total_score_from_confirmed_questions,
+        )
+
+        revision = db.get(AssignmentDraftRevision, revision_id)
+        candidate = db.scalar(
+            select(AssignmentQuestionExtractionCandidate).where(
+                AssignmentQuestionExtractionCandidate.draft_revision_id == revision_id
+            )
+        )
+        assert revision is not None and candidate is not None
+        assignment = db.get(Assignment, revision.assignment_id)
+        assert assignment is not None
+        assignment.total_score = None
+        candidate.status = "suggested"
+        candidate.reviewed_by = None
+        db.flush()
+
+        _autofill_total_score_from_confirmed_questions(db, revision, assignment.owner_id)
+        db.commit()
+
+        assert assignment.total_score == Decimal("5")
+
+
+def test_pdf_question_total_score_never_overwrites_teacher_total(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _job_id, revision_id, _question_id = generation_context(monkeypatch)
+    with SessionLocal() as db:
+        from app.api.assignment_generation import (
+            _autofill_total_score_from_confirmed_questions,
+        )
+
+        revision = db.get(AssignmentDraftRevision, revision_id)
+        assert revision is not None
+        assignment = db.get(Assignment, revision.assignment_id)
+        assert assignment is not None
+        assignment.total_score = Decimal("12")
+        db.flush()
+
+        _autofill_total_score_from_confirmed_questions(db, revision, assignment.owner_id)
+        db.commit()
+
+        assert assignment.total_score == Decimal("12")
+
+
+def test_new_extraction_removes_superseded_unreviewed_ai_draft_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id, revision_id, question_id = generation_context(monkeypatch)
+    with SessionLocal() as db:
+        from app.assignment_generation.materializers import materialize_questions
+        from app.assignment_generation.question_extraction import ExtractionOutput
+
+        job = db.get(AssignmentGenerationJob, job_id)
+        revision = db.get(AssignmentDraftRevision, revision_id)
+        question = db.get(Question, question_id)
+        candidate = db.scalar(
+            select(AssignmentQuestionExtractionCandidate).where(
+                AssignmentQuestionExtractionCandidate.materialized_question_id == question_id
+            )
+        )
+        assert job is not None and revision is not None
+        assert question is not None and candidate is not None
+        question.source = "ai_draft"
+        candidate.status = "superseded"
+        candidate.reviewed_by = None
+        db.flush()
+
+        materialize_questions(db, job, revision, ExtractionOutput(candidates=[]))
+        db.commit()
+
+        assert question.status == QuestionStatus.removed
 
 
 def _bulk_accept_answers(revision_id: uuid.UUID, snapshot: str) -> dict[str, object]:
@@ -1179,3 +1369,70 @@ def test_0026_migration_backfills_lineage_and_round_trips(
             item["name"] for item in inspect(connection).get_columns("reference_answer_versions")
         } == {"id", "origin_answer_candidate_id", "materialization_key"}
     engine.dispose()
+
+
+def test_teacher_confirms_current_candidate_bundle_with_one_atomic_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id, revision_id, _question_id = generation_context(monkeypatch)
+    with SessionLocal() as db:
+        from app.assignment_generation.answer_rubric import generate_candidates
+
+        job = db.get(AssignmentGenerationJob, job_id)
+        revision = db.get(AssignmentDraftRevision, revision_id)
+        assert job is not None and revision is not None
+        generate_candidates(db, job, revision, provider_available=True)
+        db.commit()
+        assignment_id = job.assignment_id
+        revision_edit_version = revision.teacher_edit_version
+        source_snapshot = revision.source_snapshot_hash
+
+    bundle_response = client.get(f"/api/assignments/{assignment_id}/review-bundle")
+    answers_response = client.get(
+        f"/api/assignment-draft-revisions/{revision_id}/answer-draft-candidates"
+    )
+    rubrics_response = client.get(
+        f"/api/assignment-draft-revisions/{revision_id}/rubric-draft-candidates"
+    )
+    assert bundle_response.status_code == 200, bundle_response.text
+    assert answers_response.status_code == 200, answers_response.text
+    assert rubrics_response.status_code == 200, rubrics_response.text
+    bundle = bundle_response.json()
+    answers = {item["id"]: item for item in answers_response.json()}
+    rubrics = {item["id"]: item for item in rubrics_response.json()}
+    packages = []
+    for question in bundle["questions"]:
+        answer = answers[question["answer"]["candidate"]["id"]]
+        rubric = rubrics[question["rubric"]["candidate"]["id"]]
+        packages.append(
+            {
+                "question_id": question["id"],
+                "expected_question_content_hash": question["content_hash"],
+                "answer_candidate_id": answer["id"],
+                "expected_answer_candidate_edit_version": answer["teacher_edit_version"],
+                "expected_answer_question_version": answer["question_version"],
+                "rubric_candidate_id": rubric["id"],
+                "expected_rubric_candidate_edit_version": rubric["teacher_edit_version"],
+                "expected_rubric_question_version": rubric["question_version"],
+            }
+        )
+
+    response = client.post(
+        f"/api/assignments/{assignment_id}/confirm-all-candidate-answer-rubrics",
+        json={
+            "expected_bundle_hash": bundle["version"]["bundle_hash"],
+            "expected_draft_revision_id": str(revision_id),
+            "expected_draft_revision_edit_version": revision_edit_version,
+            "expected_source_snapshot_hash": source_snapshot,
+            "packages": packages,
+            "explicit_confirmation": True,
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["confirmed_count"] == len(packages)
+    refreshed = client.get(f"/api/assignments/{assignment_id}/review-bundle").json()
+    assert all(
+        question["answer"]["materialized"]["status"] == "confirmed"
+        and question["rubric"]["materialized"]["status"] == "confirmed"
+        for question in refreshed["questions"]
+    )

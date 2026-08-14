@@ -9,7 +9,7 @@ export default async function EditAssignmentPage({
 }) {
   const requestedStep = Number((await searchParams).step);
   const initialStep =
-    Number.isInteger(requestedStep) && requestedStep >= 1 && requestedStep <= 6
+    Number.isInteger(requestedStep) && requestedStep >= 1 && requestedStep <= 3
       ? requestedStep
       : undefined;
   return (

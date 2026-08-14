@@ -51,6 +51,17 @@ class Settings(BaseSettings):
     recognition_low_confidence: float = 0.70
     recognition_high_confidence: float = 0.90
     recognition_config_version: str = "2026-07-22"
+    formula_recognition_provider: str = "unavailable"
+    formula_recognition_base_url: str | None = None
+    formula_recognition_api_key: SecretStr | None = None
+    formula_recognition_allowed_hosts: list[str] = []
+    formula_recognition_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
+    formula_recognition_max_image_bytes: int = Field(
+        default=5 * 1024 * 1024, ge=1024, le=20 * 1024 * 1024
+    )
+    formula_recognition_max_pixels: int = Field(default=8_000_000, ge=1, le=40_000_000)
+    formula_recognition_max_candidates: int = Field(default=5, ge=1, le=10)
+    formula_recognition_config_version: str = "formula-recognition-v1"
     answer_recognition_provider: str = "unavailable"
     answer_recognition_base_url: str | None = None
     answer_recognition_api_key: str | None = None
@@ -127,6 +138,7 @@ class Settings(BaseSettings):
         "trusted_hosts",
         "csrf_trusted_origins",
         "allowed_upload_types",
+        "formula_recognition_allowed_hosts",
         mode="before",
     )
     @classmethod
@@ -177,6 +189,20 @@ class Settings(BaseSettings):
             errors.append("CODEX_LOCAL_ENABLED must be false")
         if self.recognition_provider.lower() == "fake":
             errors.append("RECOGNITION_PROVIDER cannot be fake")
+        if self.formula_recognition_provider.lower() == "fake":
+            errors.append("FORMULA_RECOGNITION_PROVIDER cannot be fake")
+        if self.formula_recognition_provider.lower() == "http":
+            formula_token = (
+                self.formula_recognition_api_key.get_secret_value()
+                if self.formula_recognition_api_key is not None
+                else ""
+            )
+            if len(formula_token) < 32 or formula_token.lower() in weak:
+                errors.append(
+                    "FORMULA_RECOGNITION_API_KEY must be a strong value of at least 32 characters"
+                )
+            if not self.formula_recognition_allowed_hosts:
+                errors.append("FORMULA_RECOGNITION_ALLOWED_HOSTS is required")
         if self.answer_recognition_provider.lower() == "fake":
             errors.append("ANSWER_RECOGNITION_PROVIDER cannot be fake")
         if self.grading_provider.lower() == "fake":

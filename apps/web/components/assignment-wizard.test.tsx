@@ -90,8 +90,69 @@ vi.mock("@/lib/api", async () => {
     },
     assignmentGenerationApi: {
       ...actual.assignmentGenerationApi,
+      capabilities: vi.fn().mockResolvedValue({
+        enabled: true,
+        provider: "unavailable",
+        provider_status: "unavailable",
+        external_provider_requests: false,
+        teacher_start_allowed: true,
+        suggestion_only: true,
+        real_provider_quality_passed: false,
+      }),
       listJobs: vi.fn().mockResolvedValue([]),
-      listRevisions: vi.fn().mockResolvedValue([]),
+      listRevisions: vi.fn().mockResolvedValue([
+        {
+          id: "revision-1",
+          assignment_id: "assignment-1",
+          generation_job_id: "job-1",
+          revision: 1,
+          source_snapshot_hash: "a".repeat(64),
+          status: "partial",
+          draft_payload: {},
+          risk_summary: { info: 0, warning: 0, blocking: 0 },
+          teacher_edit_version: 0,
+          created_at: "2026-07-25T00:00:00Z",
+          updated_at: "2026-07-25T00:00:00Z",
+        },
+      ]),
+      listFieldSuggestions: vi.fn().mockResolvedValue([
+        {
+          id: "subject-suggestion",
+          field_name: "subject",
+          suggested_value: "数学",
+          normalized_value: "数学",
+          confidence: 0.85,
+          evidence: [],
+          suggestion_version: 1,
+          status: "suggested",
+          teacher_edit_version: 0,
+        },
+        {
+          id: "title-suggestion",
+          field_name: "title",
+          suggested_value: "合成课程-数学分析-第四周",
+          normalized_value: "合成课程-数学分析-第四周",
+          confidence: 0.82,
+          evidence: [],
+          suggestion_version: 1,
+          status: "suggested",
+          teacher_edit_version: 0,
+        },
+        {
+          id: "score-suggestion",
+          field_name: "total_score",
+          suggested_value: "100",
+          normalized_value: "100",
+          confidence: 0.8,
+          evidence: [],
+          suggestion_version: 1,
+          status: "suggested",
+          teacher_edit_version: 0,
+        },
+      ]),
+      listFileAnalyses: vi.fn().mockResolvedValue([]),
+      listTextbookLibraries: vi.fn().mockResolvedValue([]),
+      listTextbookLibrarySelections: vi.fn().mockResolvedValue([]),
     },
     assignmentsApi: {
       ...actual.assignmentsApi,
@@ -113,6 +174,29 @@ vi.mock("@/lib/api", async () => {
       }),
       preview: vi.fn().mockResolvedValue({
         url: "https://example.test/paper.pdf?signature=1",
+      }),
+      pagePreview: vi
+        .fn()
+        .mockImplementation(async (_assignmentId, pageId) => ({
+          url: `https://example.test/${pageId}.png?signature=1`,
+          width: 1200,
+          height: 1600,
+          rotation: 0,
+        })),
+      availableClassResources: vi.fn().mockResolvedValue([
+        {
+          id: "resource-1",
+          title: "矩阵习题",
+          file_name: "矩阵习题.pdf",
+          resource_type: "exercise",
+          page_count: 3,
+          status: "ready",
+          created_at: "2026-08-12T00:00:00Z",
+        },
+      ]),
+      addClassResources: vi.fn().mockResolvedValue({
+        files_created: 1,
+        pages_created: 3,
       }),
       page: vi.fn().mockResolvedValue({}),
       question: vi.fn().mockImplementation(async (_assignmentId, data) => ({
@@ -147,17 +231,95 @@ vi.mock("@/lib/api", async () => {
 beforeEach(() => vi.clearAllMocks());
 afterEach(cleanup);
 
-it("新建作业可明确从步骤 2 上传试卷开始", async () => {
-  render(<AssignmentWizard assignmentId="assignment-1" initialStep={2} />);
+it("三步向导把基本信息和上传集中在准备作业", async () => {
+  render(<AssignmentWizard assignmentId="assignment-1" initialStep={1} />);
 
   expect(
     await screen.findByRole("button", { name: "上传试卷文件" }),
   ).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: /作业名称/ })).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: /步骤 1.*准备作业/ }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: /步骤 2.*核对内容/ }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: /步骤 3.*确认发布/ }),
+  ).toBeInTheDocument();
   expect(screen.queryByText("添加题目")).not.toBeInTheDocument();
 });
 
-it("第 4 步回填所选题目的题号、分值、知识点和内容并可保存", async () => {
-  render(<AssignmentWizard assignmentId="assignment-1" initialStep={4} />);
+it("面向大学课程显示可采用的名称建议且不覆盖已确认总分", async () => {
+  render(<AssignmentWizard assignmentId="assignment-1" initialStep={1} />);
+
+  await screen.findByText("大学课程");
+  await waitFor(() =>
+    expect(document.querySelector('input[name="subject"]')).toHaveValue(
+      "线性代数",
+    ),
+  );
+  expect(document.querySelector('input[name="total_score"]')).toBeRequired();
+  expect(
+    screen.queryByText("请填写具体大学课程，不使用笼统的“数学”。"),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByText(
+      "上传后在下方逐个确认“题目”或“答案”，未经确认不会开始抽取题目。",
+    ),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByText("AI 生成")).not.toBeInTheDocument();
+  const suggestion = screen.getByRole("button", {
+    name: /^线性代数 .+ 作业$/,
+  });
+  const titleField = screen.getByTestId("assignment-title-field");
+  expect(titleField).toContainElement(screen.getByLabelText("作业名称"));
+  expect(titleField).toContainElement(suggestion);
+  expect(suggestion).toHaveClass("text-xs");
+  expect(screen.getByLabelText("作业名称")).toHaveValue("线代期末");
+  fireEvent.click(suggestion);
+  expect((screen.getByLabelText("作业名称") as HTMLInputElement).value).toMatch(
+    /^线性代数 .+ 作业$/,
+  );
+  const subjectSuggestion = await screen.findByRole("button", {
+    name: "数学分析",
+  });
+  const subjectField = screen.getByTestId("assignment-subject-field");
+  const scoreField = screen.getByTestId("assignment-total-score-field");
+  expect(subjectField).toContainElement(screen.getByLabelText("大学课程"));
+  expect(subjectField).toContainElement(subjectSuggestion);
+  expect(scoreField).toContainElement(screen.getByLabelText("总分"));
+  expect(screen.queryByRole("button", { name: "100" })).not.toBeInTheDocument();
+  expect(subjectSuggestion).toHaveClass("text-xs");
+  fireEvent.click(subjectSuggestion);
+  expect(screen.getByLabelText("大学课程")).toHaveValue("数学分析");
+  expect(screen.getByLabelText("总分")).toHaveValue(20);
+  expect(assignmentsApi.update).not.toHaveBeenCalled();
+});
+
+it("发布班级默认收起并支持搜索、全选当前结果和清空", async () => {
+  render(<AssignmentWizard assignmentId="assignment-1" initialStep={1} />);
+
+  expect(await screen.findByText("已选择 1 个班级")).toBeInTheDocument();
+  expect(
+    screen.queryByRole("checkbox", { name: /线代 3 班/ }),
+  ).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "选择发布班级" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "搜索班级" }), {
+    target: { value: "3 班" },
+  });
+  expect(
+    screen.getByText("显示 1 / 2 个班级，已选班级置顶"),
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "全选当前结果" }));
+  expect(screen.getByText("已选择 2 个班级")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "清空" }));
+  expect(screen.getByText("尚未选择发布班级")).toBeInTheDocument();
+});
+
+it("核对内容回填所选题目的题号、分值、知识点和内容并可保存", async () => {
+  render(<AssignmentWizard assignmentId="assignment-1" initialStep={2} />);
 
   expect(await screen.findByDisplayValue("1")).toBeInTheDocument();
   expect(screen.getByDisplayValue("10.00")).toBeInTheDocument();
@@ -182,8 +344,22 @@ it("第 4 步回填所选题目的题号、分值、知识点和内容并可保�
   );
 });
 
+it("整理页面默认折叠且不再显示手工坐标输入", async () => {
+  render(<AssignmentWizard assignmentId="assignment-1" initialStep={2} />);
+
+  const organizer = await screen.findByText("整理页面（3 页）");
+  expect(organizer.closest("details")).not.toHaveAttribute("open");
+  expect(screen.queryByLabelText("x")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("y")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("width")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("height")).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "保存区域" }),
+  ).not.toBeInTheDocument();
+});
+
 it("刷新题目数据时保留当前选择和未保存编辑", async () => {
-  render(<AssignmentWizard assignmentId="assignment-1" initialStep={4} />);
+  render(<AssignmentWizard assignmentId="assignment-1" initialStep={2} />);
 
   fireEvent.click(await screen.findByRole("button", { name: /第 2 题/ }));
   await waitFor(() =>
@@ -192,15 +368,15 @@ it("刷新题目数据时保留当前选择和未保存编辑", async () => {
   fireEvent.change(screen.getByLabelText("题目内容"), {
     target: { value: "第 2 题未保存修改" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "保存区域" }));
+  fireEvent.click(screen.getByRole("button", { name: "旋转 90°" }));
 
-  await waitFor(() => expect(assignmentsApi.region).toHaveBeenCalled());
+  await waitFor(() => expect(assignmentsApi.page).toHaveBeenCalled());
   expect(screen.getByDisplayValue("第 2 题未保存修改")).toBeInTheDocument();
   expect(screen.getByText("编辑第 2 题")).toBeInTheDocument();
 });
 
 it("脏编辑对应题目被后台移除时阻止误写其他题目", async () => {
-  render(<AssignmentWizard assignmentId="assignment-1" initialStep={4} />);
+  render(<AssignmentWizard assignmentId="assignment-1" initialStep={2} />);
 
   fireEvent.click(await screen.findByRole("button", { name: /第 2 题/ }));
   await waitFor(() =>
@@ -220,7 +396,7 @@ it("脏编辑对应题目被后台移除时阻止误写其他题目", async () =
       ),
     },
   });
-  fireEvent.click(screen.getByRole("button", { name: "保存区域" }));
+  fireEvent.click(screen.getByRole("button", { name: "旋转 90°" }));
 
   expect(
     await screen.findByText("当前题目已被后台更新或移除"),
@@ -236,7 +412,7 @@ it("题目提交期间禁用按钮并阻止重复创建", async () => {
   vi.mocked(assignmentsApi.question).mockImplementationOnce(
     () => new Promise(() => undefined),
   );
-  render(<AssignmentWizard assignmentId="assignment-1" initialStep={4} />);
+  render(<AssignmentWizard assignmentId="assignment-1" initialStep={2} />);
 
   fireEvent.click(await screen.findByRole("button", { name: "新增题目" }));
   fireEvent.change(screen.getByLabelText("题号"), { target: { value: "3" } });
@@ -249,35 +425,105 @@ it("题目提交期间禁用按钮并阻止重复创建", async () => {
   expect(submit).toBeDisabled();
 });
 
-it("支持拖拽上传并显示文件、处理状态和成功页数", async () => {
+it("支持拖拽上传且成功时只安静保留文件", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" />);
-  await screen.findByText("尚未创建生成任务。");
-  fireEvent.click(screen.getByRole("button", { name: /上传试卷/ }));
+  await screen.findByRole("heading", { name: "线代期末" });
+  fireEvent.click(screen.getByRole("button", { name: /准备作业/ }));
+  expect(screen.getByRole("status")).toHaveTextContent(
+    "你现在在：第 1 步 · 准备作业",
+  );
   const file = new File(["paper"], "新试卷.pdf", {
     type: "application/pdf",
   });
   fireEvent.drop(screen.getByRole("button", { name: "上传试卷文件" }), {
     dataTransfer: { files: [file] },
   });
-  expect(screen.getByText("新试卷.pdf")).toBeInTheDocument();
-  expect(screen.getByText("等待上传")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "开始上传" }));
-  expect(await screen.findByText("上传成功")).toBeInTheDocument();
-  expect(screen.getAllByText(/共 3 页/).length).toBeGreaterThan(0);
-  expect(screen.getByRole("region", { name: "已上传文件" })).toHaveTextContent(
-    "原试卷.pdf · 3 页 · 已保留",
+  await waitFor(() =>
+    expect(assignmentsApi.upload).toHaveBeenCalledWith("assignment-1", file),
   );
-  expect(screen.getByText("继续添加不会删除已有文件")).toBeInTheDocument();
+  expect(screen.queryByText("上传成功")).not.toBeInTheDocument();
+  expect(screen.queryByText(/共 3 页/)).not.toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "已上传文件" })).toHaveTextContent(
+    "原试卷.pdf",
+  );
+  expect(screen.queryByText("已保留")).not.toBeInTheDocument();
+  expect(
+    screen.queryByText("继续添加不会删除已有文件"),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "进入内容核对" }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "删除 原试卷.pdf" })).toHaveClass(
+    "text-red-600",
+  );
   expect(
     screen.queryByRole("button", { name: "继续添加文件" }),
   ).not.toBeInTheDocument();
 });
 
+it("一次选择多个文件后按顺序自动上传", async () => {
+  vi.mocked(assignmentsApi.upload)
+    .mockResolvedValueOnce({
+      id: "file-2",
+      name: "试卷上册.pdf",
+      pages_created: 2,
+    })
+    .mockResolvedValueOnce({
+      id: "file-3",
+      name: "试卷下册.pdf",
+      pages_created: 3,
+    });
+  render(<AssignmentWizard assignmentId="assignment-1" />);
+  await screen.findByRole("heading", { name: "线代期末" });
+  fireEvent.click(screen.getByRole("button", { name: /准备作业/ }));
+  const first = new File(["first"], "试卷上册.pdf", {
+    type: "application/pdf",
+  });
+  const second = new File(["second"], "试卷下册.pdf", {
+    type: "application/pdf",
+  });
+
+  fireEvent.change(screen.getByLabelText("选择试卷文件"), {
+    target: { files: [first, second] },
+  });
+
+  await waitFor(() =>
+    expect(assignmentsApi.upload).toHaveBeenNthCalledWith(
+      1,
+      "assignment-1",
+      first,
+    ),
+  );
+  expect(screen.queryByText("2 个文件")).not.toBeInTheDocument();
+  expect(screen.queryByText("上传成功")).not.toBeInTheDocument();
+  expect(screen.queryByText(/共 5 页/)).not.toBeInTheDocument();
+  expect(assignmentsApi.upload).toHaveBeenNthCalledWith(
+    2,
+    "assignment-1",
+    second,
+  );
+});
+
+it("可以从班级资料选择文件并复制到当前作业", async () => {
+  render(<AssignmentWizard assignmentId="assignment-1" initialStep={1} />);
+
+  expect(await screen.findByText("从班级资料选择")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("checkbox", { name: /矩阵习题/ }));
+  fireEvent.click(screen.getByRole("button", { name: "加入所选资料" }));
+
+  await waitFor(() =>
+    expect(assignmentsApi.addClassResources).toHaveBeenCalledWith(
+      "assignment-1",
+      ["resource-1"],
+    ),
+  );
+});
+
 it("确认后删除已上传文件", async () => {
   const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
   render(<AssignmentWizard assignmentId="assignment-1" />);
-  await screen.findByText("尚未创建生成任务。");
-  fireEvent.click(screen.getByRole("button", { name: /上传试卷/ }));
+  await screen.findByRole("heading", { name: "线代期末" });
+  fireEvent.click(screen.getByRole("button", { name: /准备作业/ }));
   fireEvent.click(screen.getByRole("button", { name: "删除 原试卷.pdf" }));
   await waitFor(() =>
     expect(assignmentsApi.removeFile).toHaveBeenCalledWith(
@@ -293,8 +539,8 @@ it("确认后删除已上传文件", async () => {
 
 it("拒绝非法格式并允许重新选择", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" />);
-  await screen.findByText("尚未创建生成任务。");
-  fireEvent.click(screen.getByRole("button", { name: /上传试卷/ }));
+  await screen.findByRole("heading", { name: "线代期末" });
+  fireEvent.click(screen.getByRole("button", { name: /准备作业/ }));
   fireEvent.drop(screen.getByRole("button", { name: "上传试卷文件" }), {
     dataTransfer: {
       files: [
@@ -303,27 +549,35 @@ it("拒绝非法格式并允许重新选择", async () => {
     },
   });
   expect(
-    screen.getByText("文件格式不支持，请选择 PDF、PNG 或 JPG 文件。"),
+    screen.getByText("脚本.exe 格式不支持，请选择 PDF、PNG 或 JPG 文件。"),
   ).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "重新上传" })).toBeInTheDocument();
 });
 
 it("切换缩略图时同步当前页面高亮和大图", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" />);
-  await screen.findByText("尚未创建生成任务。");
-  fireEvent.click(screen.getByRole("button", { name: /整理页面/ }));
+  await screen.findByRole("heading", { name: "线代期末" });
+  fireEvent.click(screen.getByRole("button", { name: /核对内容/ }));
+  const thumbnailStrip = await screen.findByTestId(
+    "assignment-page-thumbnails",
+  );
+  expect(thumbnailStrip).toHaveClass("flex", "overflow-x-auto");
   const page2 = await screen.findByRole("button", { name: /第 2 页/ });
+  expect(page2).toHaveClass("w-36", "shrink-0");
   fireEvent.click(page2);
   expect(page2).toHaveAttribute("aria-current", "page");
-  const preview = screen.getByTitle("第 2 页大图预览");
+  const preview = await screen.findByTitle("第 2 页大图预览");
   expect(preview).toBeInTheDocument();
-  expect(preview).toHaveAttribute("src", expect.stringContaining("#page=2"));
+  expect(preview.tagName).toBe("IMG");
+  expect(preview).toHaveAttribute("src", expect.stringContaining("page-2.png"));
+  expect(screen.getByTitle("第 2 页缩略图").tagName).toBe("IMG");
+  expect(document.querySelector('iframe[title*="页缩略图"]')).toBeNull();
 });
 
 it("无截止时间保存为 null，回显时保持无截止时间", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" />);
-  await screen.findByText("尚未创建生成任务。");
-  fireEvent.click(screen.getByRole("button", { name: /基本信息/ }));
+  await screen.findByRole("heading", { name: "线代期末" });
+  fireEvent.click(screen.getByRole("button", { name: /准备作业/ }));
   expect(screen.getByRole("radio", { name: /无截止时间/ })).toBeChecked();
   fireEvent.click(screen.getByRole("button", { name: "保存并继续" }));
   await waitFor(() =>
@@ -337,8 +591,9 @@ it("无截止时间保存为 null，回显时保持无截止时间", async () =>
 
 it("发布前可以调整班级，并将本地截止时间转换为带时区的 ISO 时间", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" />);
-  await screen.findByText("尚未创建生成任务。");
-  fireEvent.click(screen.getByRole("button", { name: /基本信息/ }));
+  await screen.findByRole("heading", { name: "线代期末" });
+  fireEvent.click(screen.getByRole("button", { name: /准备作业/ }));
+  fireEvent.click(screen.getByRole("button", { name: "选择发布班级" }));
   fireEvent.click(screen.getByRole("checkbox", { name: /线代 3 班/ }));
   fireEvent.click(screen.getByRole("radio", { name: /设置截止时间/ }));
   fireEvent.change(screen.getByLabelText("具体截止时间"), {
@@ -366,8 +621,8 @@ it("发布前可以调整班级，并将本地截止时间转换为带时区的 
 
 it("年级允许大学课程自定义教学层级并回填编辑值", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" />);
-  await screen.findByText("尚未创建生成任务。");
-  fireEvent.click(screen.getByRole("button", { name: /基本信息/ }));
+  await screen.findByRole("heading", { name: "线代期末" });
+  fireEvent.click(screen.getByRole("button", { name: /准备作业/ }));
 
   const grade = screen.getByLabelText("年级或教学层级");
   expect(grade).toHaveValue("大二");

@@ -11,15 +11,18 @@ from app.models import (
     AssignmentStatus,
     AuditLog,
     ClassStudent,
+    GradeRelease,
     GradingCriterionResult,
     GradingEvidence,
     GradingJob,
     GradingResult,
+    GradingReviewCommand,
     MembershipStatus,
     PaperVersion,
     Question,
     QuestionRecognitionEvidence,
     RubricCriterion,
+    ScoreRevision,
     StructuredRubricSetItem,
     StructuredRubricVersion,
     Student,
@@ -226,9 +229,7 @@ def test_review_workspace_excludes_removed_active_paper_question_answers() -> No
 
         assert response.status_code == 200, response.text
         projected_answers = [
-            item
-            for submission in response.json()["items"]
-            for item in submission["answers"]
+            item for submission in response.json()["items"] for item in submission["answers"]
         ]
         answer_ids = {item["id"] for item in projected_answers}
         assert str(removed_answer.id) not in answer_ids
@@ -273,9 +274,10 @@ def test_review_workspace_orders_answers_by_question_display_order() -> None:
         response = client.get(f"/api/grading-batches/{batch_id}/review-workspace")
 
         assert response.status_code == 200, response.text
-        assert [
-            item["question"]["number"] for item in response.json()["items"][0]["answers"]
-        ] == ["1", "2"]
+        assert [item["question"]["number"] for item in response.json()["items"][0]["answers"]] == [
+            "1",
+            "2",
+        ]
     finally:
         app.dependency_overrides.pop(get_storage, None)
         db.close()
@@ -947,6 +949,221 @@ def test_criteria_evidence_bulk_eligibility_and_consistency() -> None:
         assert consistency.status_code == 200 and consistency.json()["total"] == 1
     finally:
         settings.recognition_provider = previous
+        settings.answer_recognition_provider = previous_answer
+        app.dependency_overrides.pop(get_storage, None)
+        db.close()
+
+
+def test_safe_submission_accept_is_atomic_idempotent_and_reopen_is_audited() -> None:
+    db, _storage, batch_id, submission_id, _question_id = workflow(
+        criterion_validation_mode="ai_suggestion"
+    )
+    settings = get_settings()
+    previous_recognition = settings.recognition_provider
+    previous_answer = settings.answer_recognition_provider
+    settings.recognition_provider = "fake"
+    settings.answer_recognition_provider = "fake"
+    try:
+        assert (
+            client.post(
+                f"/api/submissions/{submission_id}/processing-jobs?run_now=true",
+                json={"idempotency_key": "safe-accept-processing"},
+            ).status_code
+            == 201
+        )
+        confirm_answer_regions(db, submission_id)
+        assert (
+            client.post(
+                f"/api/submissions/{submission_id}/recognition-jobs?run_now=true",
+                json={"idempotency_key": "safe-accept-recognition"},
+            ).status_code
+            == 201
+        )
+        answer = db.scalar(
+            select(StudentAnswer).where(StudentAnswer.submission_id == submission_id)
+        )
+        assert answer is not None
+        answer.requires_review = False
+        answer.status = "ready_for_grading"
+        answer.recognized_text = "1. 测试题"
+        answer.recognition_confidence = Decimal("0.99")
+        db.commit()
+        grade = client.post(f"/api/student-answers/{answer.id}/grade")
+        assert grade.status_code == 200, grade.text
+
+        result = db.scalar(
+            select(GradingResult)
+            .where(GradingResult.student_answer_id == answer.id)
+            .order_by(GradingResult.created_at.desc())
+        )
+        assert result is not None
+        answer.recognition_confidence = None
+        criterion_result = db.scalar(
+            select(GradingCriterionResult).where(
+                GradingCriterionResult.grading_result_id == result.id
+            )
+        )
+        assert criterion_result is not None
+        criterion_result.status = "scored"
+        grading_job = db.get(GradingJob, result.grading_job_id)
+        assert grading_job is not None
+        grading_job.error_code = "SYNTHETIC_QUALITY_EXCEPTION"
+        db.commit()
+        excluded_preview = client.get(
+            f"/api/grading-batches/{batch_id}/submissions/{submission_id}/safe-accept-preview"
+        )
+        assert excluded_preview.status_code == 200, excluded_preview.text
+        assert excluded_preview.json()["eligible_count"] == 0
+        assert excluded_preview.json()["excluded"] == [
+            {"answer_id": str(answer.id), "reasons": ["QUALITY_FLAG"]}
+        ]
+        grading_job.error_code = None
+        db.commit()
+
+        preview = client.get(
+            f"/api/grading-batches/{batch_id}/submissions/{submission_id}/safe-accept-preview"
+        )
+        assert preview.status_code == 200, preview.text
+        plan = preview.json()
+        assert plan["eligible_count"] == 1, plan
+        assert plan["answer_ids"] == [str(answer.id)]
+        payload = {
+            "answer_ids": plan["answer_ids"],
+            "expected_review_hash": plan["review_hash"],
+            "idempotency_key": "safe-accept-command",
+        }
+        accepted = client.post(
+            f"/api/grading-batches/{batch_id}/submissions/{submission_id}/safe-accept",
+            json=payload,
+        )
+        assert accepted.status_code == 200, accepted.text
+        assert accepted.json()["accepted_count"] == 1
+        assert accepted.json()["published"] is False
+        replay = client.post(
+            f"/api/grading-batches/{batch_id}/submissions/{submission_id}/safe-accept",
+            json=payload,
+        )
+        assert replay.status_code == 200 and replay.json() == accepted.json()
+        reused_with_other_request = client.post(
+            f"/api/grading-batches/{batch_id}/submissions/{submission_id}/safe-accept",
+            json={**payload, "expected_review_hash": "d" * 64},
+        )
+        assert reused_with_other_request.status_code == 409
+        assert reused_with_other_request.json()["code"] == "IDEMPOTENCY_KEY_CONFLICT"
+        assert db.scalar(select(func.count()).select_from(TeacherReview)) == 1
+        assert db.scalar(select(func.count()).select_from(GradingReviewCommand)) == 1
+        assert db.scalar(select(func.count()).select_from(SubmissionScoreSnapshot)) == 0
+        assert db.scalar(select(func.count()).select_from(GradeRelease)) == 0
+
+        review = db.scalar(
+            select(TeacherReview).where(TeacherReview.student_answer_id == answer.id)
+        )
+        assert review is not None
+        reopened = client.post(
+            f"/api/student-answers/{answer.id}/review/reopen",
+            json={
+                "expected_review_version": review.review_version,
+                "reason": "教师撤回刚确认的建议分",
+            },
+        )
+        assert reopened.status_code == 200, reopened.text
+        db.expire_all()
+        review = db.get(TeacherReview, review.id)
+        result = db.scalar(
+            select(GradingResult).where(GradingResult.student_answer_id == answer.id)
+        )
+        assert review is not None and review.decision == "reopened"
+        assert review.final_score is None and review.review_version == 2
+        assert result is not None and result.status == "suggested"
+        revision = db.scalar(
+            select(ScoreRevision).where(ScoreRevision.teacher_review_id == review.id)
+        )
+        assert revision is not None
+        assert revision.previous_score is not None and revision.new_score is None
+        reopen_audit = db.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "grading.review_reopen",
+                AuditLog.resource_id == str(answer.id),
+            )
+        )
+        assert reopen_audit is not None
+        assert reopen_audit.metadata_["before"]["review_version"] == 1
+        assert reopen_audit.metadata_["after"]["review_version"] == 2
+        repeated_reopen = client.post(
+            f"/api/student-answers/{answer.id}/review/reopen",
+            json={
+                "expected_review_version": 1,
+                "reason": "重复撤回不应产生第二条修订",
+            },
+        )
+        assert repeated_reopen.status_code == 409
+        assert repeated_reopen.json()["code"] == "REVIEW_NOT_REOPENABLE"
+        assert (
+            db.scalar(
+                select(func.count())
+                .select_from(ScoreRevision)
+                .where(ScoreRevision.teacher_review_id == review.id)
+            )
+            == 1
+        )
+    finally:
+        settings.recognition_provider = previous_recognition
+        settings.answer_recognition_provider = previous_answer
+        app.dependency_overrides.pop(get_storage, None)
+        db.close()
+
+
+def test_safe_submission_accept_rejects_changed_state_without_partial_review() -> None:
+    db, _storage, batch_id, submission_id, _question_id = workflow(
+        criterion_validation_mode="ai_suggestion"
+    )
+    settings = get_settings()
+    previous_recognition = settings.recognition_provider
+    previous_answer = settings.answer_recognition_provider
+    settings.recognition_provider = "fake"
+    settings.answer_recognition_provider = "fake"
+    try:
+        client.post(
+            f"/api/submissions/{submission_id}/processing-jobs?run_now=true",
+            json={"idempotency_key": "safe-conflict-processing"},
+        )
+        confirm_answer_regions(db, submission_id)
+        client.post(
+            f"/api/submissions/{submission_id}/recognition-jobs?run_now=true",
+            json={"idempotency_key": "safe-conflict-recognition"},
+        )
+        answer = db.scalar(
+            select(StudentAnswer).where(StudentAnswer.submission_id == submission_id)
+        )
+        assert answer is not None
+        answer.requires_review = False
+        answer.status = "ready_for_grading"
+        answer.recognized_text = "1. 测试题"
+        answer.recognition_confidence = Decimal("0.99")
+        db.commit()
+        assert client.post(f"/api/student-answers/{answer.id}/grade").status_code == 200
+        plan = client.get(
+            f"/api/grading-batches/{batch_id}/submissions/{submission_id}/safe-accept-preview"
+        ).json()
+        assert plan["eligible_count"] == 1, plan
+        changed = client.patch(
+            f"/api/student-answers/{answer.id}", json={"corrected_text": "版本已经变化"}
+        )
+        assert changed.status_code == 200, changed.text
+        conflict = client.post(
+            f"/api/grading-batches/{batch_id}/submissions/{submission_id}/safe-accept",
+            json={
+                "answer_ids": plan["answer_ids"],
+                "expected_review_hash": plan["review_hash"],
+                "idempotency_key": "safe-conflict-command",
+            },
+        )
+        assert conflict.status_code == 409, conflict.text
+        assert conflict.json()["code"] == "SAFE_ACCEPT_STATE_CHANGED"
+        assert db.scalar(select(func.count()).select_from(TeacherReview)) == 0
+        assert db.scalar(select(func.count()).select_from(GradingReviewCommand)) == 0
+    finally:
+        settings.recognition_provider = previous_recognition
         settings.answer_recognition_provider = previous_answer
         app.dependency_overrides.pop(get_storage, None)
         db.close()

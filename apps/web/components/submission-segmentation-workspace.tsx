@@ -66,6 +66,9 @@ export function SubmissionSegmentationWorkspace({
   const [pages, setPages] = useState<SubmissionProcessingPage[]>([]);
   const [regions, setRegions] = useState<SubmissionRegionCandidate[]>([]);
   const [questionIds, setQuestionIds] = useState<string[]>([]);
+  const [questionNumbers, setQuestionNumbers] = useState<
+    Record<string, string>
+  >({});
   const [incompleteQuestionIds, setIncompleteQuestionIds] = useState<string[]>(
     [],
   );
@@ -93,12 +96,25 @@ export function SubmissionSegmentationWorkspace({
       submissionProcessingApi.incomplete(submissionId),
     ]);
     if (generation !== reloadGeneration.current) return;
-    const nextQuestionIds = Array.from(
-      new Set([
-        ...nextRegions.map((item) => item.question_id),
-        ...incomplete.question_ids,
+    const nextQuestionIds = incomplete.questions?.length
+      ? incomplete.questions.map((item) => item.id)
+      : Array.from(
+          new Set([
+            ...nextRegions.map((item) => item.question_id),
+            ...incomplete.question_ids,
+          ]),
+        );
+    setQuestionNumbers(
+      Object.fromEntries([
+        ...(incomplete.questions ?? []).map((item) => [
+          item.id,
+          item.question_number,
+        ]),
+        ...nextRegions
+          .filter((item) => item.question_number)
+          .map((item) => [item.question_id, item.question_number!]),
       ]),
-    ).sort();
+    );
     setPages(nextPages);
     setRegions(nextRegions);
     setIncompleteQuestionIds(incomplete.question_ids);
@@ -161,11 +177,13 @@ export function SubmissionSegmentationWorkspace({
   );
   const showEditor = manualMode || !allConfirmed;
   const showPageNavigation = pages.length > 1 || hasPageIssues;
-  const questionNumberById = new Map(
-    regions
-      .filter((item) => item.question_number)
-      .map((item) => [item.question_id, item.question_number]),
-  );
+  const selectedQuestionLabel = questionNumbers[questionId]
+    ? `第 ${questionNumbers[questionId]} 题`
+    : "当前题目";
+  async function removeRegion(regionId: string) {
+    await submissionProcessingApi.removeRegion(submissionId, regionId);
+    await reload();
+  }
   function point(event: React.PointerEvent<HTMLDivElement>) {
     const rect = canvas.current!.getBoundingClientRect();
     return {
@@ -395,11 +413,24 @@ export function SubmissionSegmentationWorkspace({
                 {[
                   ...pageRegions,
                   ...(draft
-                    ? [{ ...draft, id: "draft", status: "candidate" as const }]
+                    ? [
+                        {
+                          ...draft,
+                          id: "draft",
+                          question_id: questionId,
+                          question_number: questionNumbers[questionId],
+                          status: "candidate" as const,
+                        },
+                      ]
                     : []),
                 ].map((region) => (
                   <div
                     key={region.id}
+                    aria-label={`${
+                      region.question_number
+                        ? `第 ${region.question_number} 题`
+                        : "题目"
+                    }框选区域`}
                     className={`absolute border-2 ${
                       region.status === "confirmed"
                         ? "border-emerald-600 bg-emerald-300/20"
@@ -413,7 +444,33 @@ export function SubmissionSegmentationWorkspace({
                       width: `${Number(region.width) * 100}%`,
                       height: `${Number(region.height) * 100}%`,
                     }}
-                  />
+                  >
+                    <span className="absolute left-0 top-0 bg-slate-900/80 px-1.5 py-0.5 text-xs font-semibold text-white">
+                      {region.question_number
+                        ? `第 ${region.question_number} 题`
+                        : "题目"}
+                    </span>
+                    {showEditor && region.id !== "draft" && (
+                      <button
+                        type="button"
+                        data-testid="submission-region-overlay-delete"
+                        data-region-id={region.id}
+                        aria-label={`删除${
+                          region.question_number
+                            ? `第 ${region.question_number} 题`
+                            : "当前题目"
+                        }的这个框选区域`}
+                        className="absolute right-0 top-0 rounded-bl bg-red-700 px-2 py-1 text-xs font-semibold text-white shadow hover:bg-red-800"
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={async (event) => {
+                          event.stopPropagation();
+                          await removeRegion(region.id);
+                        }}
+                      >
+                        删除此框
+                      </button>
+                    )}
+                  </div>
                 ))}
               </div>
             </div>
@@ -501,7 +558,7 @@ export function SubmissionSegmentationWorkspace({
             {showEditor && (
               <div className="space-y-2 rounded-lg border p-2">
                 <label className="grid gap-1">
-                  手动框选题目
+                  框选归属题目
                   <select
                     data-testid="submission-question-select"
                     className="rounded-lg border p-2"
@@ -510,8 +567,8 @@ export function SubmissionSegmentationWorkspace({
                   >
                     {questionIds.map((id) => (
                       <option key={id} value={id}>
-                        {questionNumberById.get(id)
-                          ? `第 ${questionNumberById.get(id)} 题`
+                        {questionNumbers[id]
+                          ? `第 ${questionNumbers[id]} 题`
                           : id}
                       </option>
                     ))}
@@ -527,8 +584,8 @@ export function SubmissionSegmentationWorkspace({
                 </Button>
                 <p className="text-xs text-slate-600">
                   {drawMode
-                    ? "框选已启动，请在左侧图片上拖动。完成一次后会自动关闭。"
-                    : "默认不会在图片上画框，点击开始后才会启用。"}
+                    ? `正在框选${selectedQuestionLabel}，请在左侧图片上拖动。完成一次后会自动关闭。`
+                    : `当前选择：${selectedQuestionLabel}。点击开始后再到左侧图片拖动。`}
                 </p>
               </div>
             )}
@@ -603,11 +660,7 @@ export function SubmissionSegmentationWorkspace({
                         data-region-id={region.id}
                         variant="danger"
                         onClick={async () => {
-                          await submissionProcessingApi.removeRegion(
-                            submissionId,
-                            region.id,
-                          );
-                          await reload();
+                          await removeRegion(region.id);
                         }}
                       >
                         删除

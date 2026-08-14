@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { useAuthUser } from "@/components/auth-gate";
 import { authApi } from "@/lib/api";
@@ -64,9 +64,31 @@ export function AppShell({ children }: { children: ReactNode }) {
   const user = useAuthUser();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
   const title = pageTitles[pathname] ?? "教师端";
   const displayName = user?.display_name || user?.email || "教师";
   const initials = displayName.trim().slice(0, 1).toUpperCase() || "师";
+  useEffect(() => {
+    if (!user?.id) return;
+    const key = `ahamark.notifications.unread.${user.id}`;
+    const readCachedCount = () => {
+      const value = Number(localStorage.getItem(key) || "0");
+      setUnreadCount(Number.isFinite(value) && value > 0 ? value : 0);
+    };
+    const onNotifications = (event: Event) => {
+      const value = Number(
+        (event as CustomEvent<{ unreadCount?: number }>).detail?.unreadCount,
+      );
+      if (Number.isFinite(value)) setUnreadCount(Math.max(0, value));
+    };
+    readCachedCount();
+    window.addEventListener("storage", readCachedCount);
+    window.addEventListener("ahamark:notifications", onNotifications);
+    return () => {
+      window.removeEventListener("storage", readCachedCount);
+      window.removeEventListener("ahamark:notifications", onNotifications);
+    };
+  }, [user?.id]);
   return (
     <ToastProvider>
       <div className="min-h-screen">
@@ -116,11 +138,18 @@ export function AppShell({ children }: { children: ReactNode }) {
               </Link>
               <Link
                 href="/notifications"
-                aria-label="消息"
+                aria-label={
+                  unreadCount ? `消息，${unreadCount} 条未读` : "消息"
+                }
                 title="消息"
                 className="relative grid h-10 w-10 place-items-center rounded-lg text-slate-500 hover:bg-slate-100"
               >
                 <Icon name="bell" />
+                {unreadCount > 0 && (
+                  <span className="absolute right-0.5 top-0.5 grid min-h-4 min-w-4 place-items-center rounded-full bg-red-600 px-1 text-[10px] font-bold leading-none text-white">
+                    {unreadCount > 9 ? "9+" : unreadCount}
+                  </span>
+                )}
               </Link>
               <Link
                 href="/help"

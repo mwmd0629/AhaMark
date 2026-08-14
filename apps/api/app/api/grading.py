@@ -5,6 +5,7 @@ import re
 import unicodedata
 import uuid
 from dataclasses import dataclass, replace
+from datetime import UTC
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
@@ -30,6 +31,7 @@ from app.models import (
     GradingJob,
     GradingQuestionAssignment,
     GradingResult,
+    GradingReviewCommand,
     MembershipStatus,
     Question,
     QuestionKnowledgePoint,
@@ -265,6 +267,17 @@ class MergeSubmissionInput(BaseModel):
 
 class BulkAcceptInput(BaseModel):
     answer_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+
+
+class SafeSubmissionAcceptInput(BaseModel):
+    answer_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+    expected_review_hash: str = Field(min_length=64, max_length=64)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+
+class ReopenReviewInput(BaseModel):
+    expected_review_version: int = Field(ge=1)
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class RegradeInput(BaseModel):
@@ -3155,6 +3168,88 @@ def review_answer(answer_id: uuid.UUID, data: ReviewInput, db: Db, actor: Actor)
     }
 
 
+@router.post("/student-answers/{answer_id}/review/reopen")
+def reopen_answer_review(
+    answer_id: uuid.UUID, data: ReopenReviewInput, db: Db, actor: Actor
+) -> dict[str, Any]:
+    _, answer, batch, _ = _locked_reviewable_answer(db, actor.id, answer_id)
+    review = db.scalar(
+        select(TeacherReview)
+        .where(TeacherReview.student_answer_id == answer.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if review is None or review.decision != "accepted" or review.confirmed_at is None:
+        raise ApiProblem(409, "REVIEW_NOT_REOPENABLE", "该题当前没有可撤回的建议分确认")
+    if review.review_version != data.expected_review_version:
+        raise ApiProblem(
+            409,
+            "REVIEW_CONFLICT",
+            "该题已被其他教师更新，请刷新后重试",
+            {"current_review_version": review.review_version},
+        )
+    confirmed_at = review.confirmed_at
+    if confirmed_at.tzinfo is None:
+        confirmed_at = confirmed_at.replace(tzinfo=UTC)
+    if (now_utc() - confirmed_at).total_seconds() > 300:
+        raise ApiProblem(409, "REOPEN_WINDOW_EXPIRED", "撤回时间已过，请使用修改分数")
+    previous = {
+        "decision": review.decision,
+        "score": str(review.final_score) if review.final_score is not None else None,
+        "feedback": review.final_feedback,
+        "review_version": review.review_version,
+        "confirmed_at": review.confirmed_at.isoformat(),
+    }
+    result = db.get(GradingResult, review.grading_result_id) if review.grading_result_id else None
+    db.add(
+        ScoreRevision(
+            teacher_review_id=review.id,
+            student_answer_id=answer.id,
+            actor_id=actor.id,
+            previous_score=review.final_score,
+            new_score=None,
+            previous_feedback=review.final_feedback,
+            new_feedback=None,
+            reason=data.reason,
+        )
+    )
+    review.decision = "reopened"
+    review.final_score = None
+    review.final_feedback = None
+    review.final_error_type = None
+    review.review_notes = data.reason
+    review.confirmed_at = None
+    review.reviewer_id = actor.id
+    review.review_version += 1
+    answer.requires_review = True
+    if result is not None and result.status == "accepted":
+        result.status = "suggested"
+    audit(
+        db,
+        actor.id,
+        "grading.review_reopen",
+        "student_answer",
+        answer.id,
+        {
+            "grading_batch_id": str(batch.id),
+            "reason": data.reason,
+            "before": previous,
+            "after": {
+                "decision": review.decision,
+                "score": None,
+                "review_version": review.review_version,
+            },
+        },
+    )
+    db.commit()
+    return {
+        "id": str(review.id),
+        "decision": review.decision,
+        "final_score": None,
+        "review_version": review.review_version,
+    }
+
+
 def acceptance_eligibility(
     db: Session, answer: StudentAnswer, assignment: Assignment
 ) -> tuple[list[str], GradingResult | None]:
@@ -3216,7 +3311,8 @@ def acceptance_eligibility(
             .select_from(GradingCriterionResult)
             .where(
                 GradingCriterionResult.grading_result_id == result.id,
-                GradingCriterionResult.status == "evaluated",
+                GradingCriterionResult.status.in_({"evaluated", "scored"}),
+                GradingCriterionResult.awarded_points.is_not(None),
             )
         )
         or 0
@@ -4262,6 +4358,11 @@ def confirm_results(
         idempotency_key=_confirm_results_storage_key(actor.id, data.idempotency_key),
     )
     db.add(release)
+    # The item rows reference UUIDs assigned in Python, so SQLAlchemy cannot infer
+    # the dependency from ORM relationships. Persist the referenced snapshots and
+    # release before adding their children; PostgreSQL otherwise may insert the
+    # items first and reject the transaction on its immediate foreign keys.
+    db.flush()
     for submission, snapshot in snapshot_rows:
         db.add(
             GradeReleaseItem(
@@ -4329,6 +4430,364 @@ def bulk_accept_eligibility(batch_id: uuid.UUID, db: Db, actor: Actor) -> dict[s
         "reason_counts": reason_counts,
         "items": items,
     }
+
+
+def _safe_accept_reasons(
+    db: Session, answer: StudentAnswer, assignment: Assignment
+) -> tuple[list[str], GradingResult | None, list[GradingCriterionResult]]:
+    reasons: list[str] = []
+    result = db.scalar(
+        select(GradingResult)
+        .where(
+            GradingResult.student_answer_id == answer.id,
+            GradingResult.status != "superseded",
+        )
+        .order_by(GradingResult.created_at.desc())
+    )
+    if result is None:
+        return ["RESULT_MISSING"], None, []
+    try:
+        authority = _require_active_structured_question_rubric(db, assignment, answer.question_id)
+    except ApiProblem as exc:
+        return [exc.code], result, []
+    criterion_rows = list(
+        db.scalars(
+            select(GradingCriterionResult)
+            .where(GradingCriterionResult.grading_result_id == result.id)
+            .order_by(GradingCriterionResult.criterion_id)
+        ).all()
+    )
+    if result.status != "suggested":
+        reasons.append("RESULT_NOT_SUGGESTED")
+    if answer.status == "stale" or result.status == "stale":
+        reasons.append("STALE")
+    if (
+        result.structured_rubric_set_id != authority.rubric_set.id
+        or result.structured_rubric_version_id != authority.rubric.id
+        or result.recognized_answer_snapshot != _effective_answer_content(answer)
+    ):
+        reasons.append("VERSION_CHANGED")
+    if result.score is None or result.score < 0 or result.score > result.max_score:
+        reasons.append("SCORE_INVALID")
+    if not _effective_answer_content(answer).strip():
+        reasons.append("RECOGNITION_UNCLEAR")
+    if answer.recognized_latex or answer.corrected_latex:
+        reasons.append("FORMULA_UNAVAILABLE")
+    if _consistency_differs(db, answer, result):
+        reasons.append("CONSISTENCY_REVIEW_REQUIRED")
+    grading_job = db.get(GradingJob, result.grading_job_id)
+    if grading_job is not None and grading_job.error_code:
+        reasons.append("QUALITY_FLAG")
+    try:
+        current_regions, _ = _require_answer_evidence(db, answer)
+    except ApiProblem:
+        current_regions = []
+        reasons.append("EVIDENCE_REQUIRED")
+    if current_regions and not _has_current_grading_evidence(db, result, answer, current_regions):
+        reasons.append("EVIDENCE_REQUIRED")
+    by_criterion = {row.criterion_id: row for row in criterion_rows}
+    if any(criterion.validation_mode == "manual_only" for criterion in authority.criteria):
+        reasons.append("MANUAL_CRITERION")
+    if set(by_criterion) != {criterion.id for criterion in authority.criteria} or any(
+        row.status not in {"evaluated", "scored"} or row.awarded_points is None
+        for row in criterion_rows
+    ):
+        reasons.append("CRITERION_INCOMPLETE")
+    if db.scalar(select(TeacherReview.id).where(TeacherReview.student_answer_id == answer.id)):
+        reasons.append("ALREADY_REVIEWED")
+    return list(dict.fromkeys(reasons)), result, criterion_rows
+
+
+def _safe_submission_accept_state(
+    db: Session,
+    batch: GradingBatch,
+    submission: Submission,
+    assignment: Assignment,
+    actor_id: uuid.UUID,
+) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+    answer_filters: list[Any] = [StudentAnswer.submission_id == submission.id]
+    if batch.owner_id != actor_id:
+        assigned_question_ids = select(GradingQuestionAssignment.question_id).where(
+            GradingQuestionAssignment.grading_batch_id == batch.id,
+            GradingQuestionAssignment.assignee_id == actor_id,
+        )
+        answer_filters.append(StudentAnswer.question_id.in_(assigned_question_ids))
+    answers = list(
+        db.scalars(
+            select(StudentAnswer)
+            .join(Question, Question.id == StudentAnswer.question_id)
+            .where(
+                *answer_filters,
+                Question.paper_version_id == assignment.active_paper_version_id,
+                Question.status == QuestionStatus.active,
+            )
+            .order_by(Question.display_order, Question.question_number, StudentAnswer.id)
+        ).all()
+    )
+    eligible: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    state_rows: list[dict[str, Any]] = []
+    for answer in answers:
+        _require_question_scope(db, actor_id, batch, answer.question_id)
+        reasons, result, criteria = _safe_accept_reasons(db, answer, assignment)
+        row = {
+            "answer_id": str(answer.id),
+            "answer_status": answer.status,
+            "answer_updated_at": answer.updated_at.isoformat(),
+            "result_id": str(result.id) if result else None,
+            "result_status": result.status if result else None,
+            "rubric_set_id": str(result.structured_rubric_set_id) if result else None,
+            "rubric_version_id": str(result.structured_rubric_version_id) if result else None,
+            "score": str(result.score) if result and result.score is not None else None,
+            "criteria": [
+                [str(item.criterion_id), item.status, str(item.awarded_points)] for item in criteria
+            ],
+            "reasons": reasons,
+        }
+        state_rows.append(row)
+        if reasons or result is None:
+            excluded.append({"answer_id": str(answer.id), "reasons": reasons})
+        else:
+            eligible.append(
+                {
+                    "answer_id": str(answer.id),
+                    "question_id": str(answer.question_id),
+                    "grading_result_id": str(result.id),
+                    "suggested_score": str(result.score),
+                }
+            )
+    review_hash = _canonical_digest(
+        {
+            "batch_id": str(batch.id),
+            "submission_id": str(submission.id),
+            "assignment_id": str(assignment.id),
+            "paper_version_id": str(assignment.active_paper_version_id),
+            "rubric_set_id": str(assignment.active_structured_rubric_set_id),
+            "answers": state_rows,
+        }
+    )
+    return review_hash, eligible, excluded
+
+
+def _safe_accept_preview_response(
+    submission: Submission,
+    review_hash: str,
+    eligible: list[dict[str, Any]],
+    excluded: list[dict[str, Any]],
+) -> dict[str, Any]:
+    total = sum((Decimal(item["suggested_score"]) for item in eligible), Decimal("0"))
+    return {
+        "submission_id": str(submission.id),
+        "review_hash": review_hash,
+        "eligible_count": len(eligible),
+        "suggested_total": str(total),
+        "answer_ids": [item["answer_id"] for item in eligible],
+        "excluded": excluded,
+    }
+
+
+@router.get("/grading-batches/{batch_id}/submissions/{submission_id}/safe-accept-preview")
+def safe_submission_accept_preview(
+    batch_id: uuid.UUID, submission_id: uuid.UUID, db: Db, actor: Actor
+) -> dict[str, Any]:
+    batch, _, _ = _reviewable_batch(db, actor.id, batch_id)
+    submission = db.scalar(
+        select(Submission).where(
+            Submission.id == submission_id,
+            Submission.grading_batch_id == batch.id,
+            Submission.owner_id == batch.owner_id,
+        )
+    )
+    if submission is None:
+        raise ApiProblem(404, "SUBMISSION_NOT_FOUND", "作业不存在")
+    assignment = db.get(Assignment, batch.assignment_id)
+    if assignment is None:
+        raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    review_hash, eligible, excluded = _safe_submission_accept_state(
+        db, batch, submission, assignment, actor.id
+    )
+    return _safe_accept_preview_response(submission, review_hash, eligible, excluded)
+
+
+def _safe_accept_replay(
+    db: Session,
+    actor_id: uuid.UUID,
+    batch_id: uuid.UUID,
+    submission_id: uuid.UUID,
+    data: SafeSubmissionAcceptInput,
+) -> dict[str, Any] | None:
+    command = db.scalar(
+        select(GradingReviewCommand).where(
+            GradingReviewCommand.actor_id == actor_id,
+            GradingReviewCommand.idempotency_key == data.idempotency_key,
+        )
+    )
+    if command is None:
+        return None
+    request_hash = _canonical_digest(
+        {
+            "command_type": "safe_submission_accept",
+            "batch_id": str(batch_id),
+            "submission_id": str(submission_id),
+            "answer_ids": sorted(str(item) for item in data.answer_ids),
+            "expected_review_hash": data.expected_review_hash,
+        }
+    )
+    if (
+        command.command_type != "safe_submission_accept"
+        or command.grading_batch_id != batch_id
+        or command.submission_id != submission_id
+        or command.request_hash != request_hash
+    ):
+        raise ApiProblem(409, "IDEMPOTENCY_KEY_CONFLICT", "该操作标识已用于其他请求")
+    return dict(command.response)
+
+
+@router.post("/grading-batches/{batch_id}/submissions/{submission_id}/safe-accept")
+def safe_submission_accept(
+    batch_id: uuid.UUID,
+    submission_id: uuid.UUID,
+    data: SafeSubmissionAcceptInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    replay = _safe_accept_replay(db, actor.id, batch_id, submission_id, data)
+    if replay is not None:
+        return replay
+    batch_reference, _, _ = _reviewable_batch(db, actor.id, batch_id)
+    batch = db.scalar(
+        select(GradingBatch).where(GradingBatch.id == batch_reference.id).with_for_update()
+    )
+    submission = db.scalar(
+        select(Submission)
+        .where(
+            Submission.id == submission_id,
+            Submission.grading_batch_id == batch_id,
+            Submission.owner_id == batch_reference.owner_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if batch is None or submission is None:
+        raise ApiProblem(404, "SUBMISSION_NOT_FOUND", "作业不存在")
+    if submission.status == "finalized" or submission.finalized_at is not None:
+        raise ApiProblem(409, "SUBMISSION_FINALIZED", "已完成作业不能再次确认")
+    assignment = db.scalar(
+        select(Assignment).where(Assignment.id == batch.assignment_id).with_for_update()
+    )
+    if assignment is None:
+        raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    replay = _safe_accept_replay(db, actor.id, batch_id, submission_id, data)
+    if replay is not None:
+        return replay
+    db.scalars(
+        select(StudentAnswer)
+        .where(StudentAnswer.submission_id == submission.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).all()
+    review_hash, eligible, excluded = _safe_submission_accept_state(
+        db, batch, submission, assignment, actor.id
+    )
+    requested_ids = sorted(str(item) for item in data.answer_ids)
+    eligible_ids = sorted(item["answer_id"] for item in eligible)
+    if data.expected_review_hash != review_hash or requested_ids != eligible_ids or not eligible:
+        raise ApiProblem(
+            409,
+            "SAFE_ACCEPT_STATE_CHANGED",
+            "作业内容已变化，请刷新后重新确认",
+            {
+                "current_review_hash": review_hash,
+                "eligible_answer_ids": eligible_ids,
+                "excluded": excluded,
+            },
+        )
+    result_by_id = {
+        result.id: result
+        for result in db.scalars(
+            select(GradingResult)
+            .where(
+                GradingResult.id.in_([uuid.UUID(item["grading_result_id"]) for item in eligible])
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).all()
+    }
+    review_ids: list[str] = []
+    confirmed_at = now_utc()
+    for item in eligible:
+        answer_id = uuid.UUID(item["answer_id"])
+        result = result_by_id[uuid.UUID(item["grading_result_id"])]
+        review = TeacherReview(
+            student_answer_id=answer_id,
+            grading_result_id=result.id,
+            reviewer_id=actor.id,
+            decision="accepted",
+            final_score=result.score,
+            confirmed_at=confirmed_at,
+            review_version=1,
+        )
+        db.add(review)
+        db.flush()
+        result.status = "accepted"
+        answer = db.get(StudentAnswer, answer_id)
+        if answer is not None:
+            answer.requires_review = False
+        review_ids.append(str(review.id))
+    response = {
+        "submission_id": str(submission.id),
+        "accepted_answer_ids": eligible_ids,
+        "teacher_review_ids": review_ids,
+        "accepted_count": len(eligible_ids),
+        "suggested_total": str(
+            sum((Decimal(item["suggested_score"]) for item in eligible), Decimal("0"))
+        ),
+        "review_hash": review_hash,
+        "published": False,
+    }
+    request_hash = _canonical_digest(
+        {
+            "command_type": "safe_submission_accept",
+            "batch_id": str(batch_id),
+            "submission_id": str(submission_id),
+            "answer_ids": requested_ids,
+            "expected_review_hash": data.expected_review_hash,
+        }
+    )
+    db.add(
+        GradingReviewCommand(
+            actor_id=actor.id,
+            grading_batch_id=batch.id,
+            submission_id=submission.id,
+            command_type="safe_submission_accept",
+            idempotency_key=data.idempotency_key,
+            request_hash=request_hash,
+            response=response,
+        )
+    )
+    audit(
+        db,
+        actor.id,
+        "grading.safe_submission_accept",
+        "submission",
+        submission.id,
+        {
+            "answer_ids": eligible_ids,
+            "teacher_review_ids": review_ids,
+            "suggested_total": response["suggested_total"],
+            "review_hash": review_hash,
+            "published": False,
+        },
+    )
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        replay = _safe_accept_replay(db, actor.id, batch_id, submission_id, data)
+        if replay is not None:
+            return replay
+        raise ApiProblem(409, "SAFE_ACCEPT_CONFLICT", "确认期间内容已变化，请刷新后重试") from exc
+    return response
 
 
 def _collaboration_json(db: Session, batch: GradingBatch, actor_id: uuid.UUID) -> dict[str, Any]:
@@ -4771,6 +5230,7 @@ def review_workspace(
                     if result
                     else None,
                     "review": {
+                        "id": str(review.id),
                         "decision": review.decision,
                         "final_score": str(review.final_score)
                         if review.final_score is not None
@@ -4779,6 +5239,9 @@ def review_workspace(
                         "error_type": review.final_error_type,
                         "reviewer_id": str(review.reviewer_id),
                         "review_version": review.review_version,
+                        "confirmed_at": review.confirmed_at.isoformat()
+                        if review.confirmed_at
+                        else None,
                     }
                     if review
                     else None,
@@ -4789,7 +5252,7 @@ def review_workspace(
                                 criterion.title
                                 if (criterion := criterion_definitions.get(item.criterion_id))
                                 is not None
-                                else None
+                                else "评分项"
                             ),
                             "description": (
                                 criterion_for_description.description

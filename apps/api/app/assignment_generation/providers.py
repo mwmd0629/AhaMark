@@ -21,6 +21,7 @@ from app.assignment_generation.answer_rubric import (
 from app.assignment_generation.question_extraction import ExtractionOutput
 from app.assignment_generation.schemas import FileAnalysisOutput, MetadataProviderOutput
 from app.core.config import Settings
+from app.recognition.text_integrity import CHARACTER_ENCODING_CORRUPTION_DETECTED
 
 StageName = Literal[
     "metadata_analysis",
@@ -359,7 +360,10 @@ class OpenAICompatibleAssignmentGenerationProvider:
                 )
             except (json.JSONDecodeError, ValidationError, KeyError, TypeError, ValueError) as exc:
                 stable_errors = {"provider_refusal", "provider_empty_response"}
-                stable = str(exc) if str(exc) in stable_errors else "provider_schema_invalid"
+                if CHARACTER_ENCODING_CORRUPTION_DETECTED in str(exc):
+                    stable = CHARACTER_ENCODING_CORRUPTION_DETECTED
+                else:
+                    stable = str(exc) if str(exc) in stable_errors else "provider_schema_invalid"
                 return AssignmentProviderResponse(
                     None,
                     request_hash=request_hash,
@@ -373,6 +377,8 @@ class OpenAICompatibleAssignmentGenerationProvider:
 
 def select_provider(settings: Settings, requested: str | None = None) -> ProviderSelection:
     mode = requested or settings.assignment_generation_provider
+    if mode == "codex_local":
+        return ProviderSelection("codex_local", "internal_work_queue", True, None)
     if mode not in {"unavailable", "fake", "openai_compatible"}:
         mode = "unavailable"
     if mode == "fake" and settings.app_env != "test":

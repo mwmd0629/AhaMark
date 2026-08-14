@@ -1,6 +1,8 @@
 import uuid
 from datetime import timedelta
 from decimal import Decimal
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from app.main import app
@@ -27,12 +29,32 @@ from app.models import (
     now_utc,
 )
 from app.processing.automatic_confirmation import (
+    _anchored_regions_are_disjoint,
     auto_confirm_deterministic_recognition,
     auto_confirm_deterministic_regions,
 )
 from app.storage.dependencies import get_storage
 from sqlalchemy import func, select
 from test_submission_workflow import workflow
+
+
+def test_overlapping_anchor_regions_fail_geometry_gate() -> None:
+    page = SimpleNamespace(id=uuid.uuid4(), page_number=1)
+    first = SimpleNamespace(x=Decimal("0.1"), y=Decimal("0.2"), height=Decimal("0.3"))
+    second = SimpleNamespace(x=Decimal("0.1"), y=Decimal("0.4"), height=Decimal("0.2"))
+    candidates = cast(
+        list[
+            tuple[
+                StudentAnswer,
+                StudentAnswerRegion,
+                SubmissionQuestionAnchor,
+                SubmissionPage,
+            ]
+        ],
+        [(None, first, None, page), (None, second, None, page)],
+    )
+
+    assert not _anchored_regions_are_disjoint(candidates)
 
 
 def region_fixture(
@@ -351,9 +373,7 @@ def test_latest_teacher_region_supersedes_older_current_regions() -> None:
             )
         )
         assert audit is not None
-        assert audit.metadata_["reconciled_answers"][0]["winner_region_id"] == str(
-            latest.id
-        )
+        assert audit.metadata_["reconciled_answers"][0]["winner_region_id"] == str(latest.id)
     finally:
         close_fixture(db)
 

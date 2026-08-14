@@ -87,7 +87,7 @@ describe("classes API page", () => {
     fireEvent.click(
       within(container).getByRole("button", { name: "创建班级" }),
     );
-    const subject = within(container).getByLabelText("学科");
+    const subject = within(container).getByLabelText("大学课程");
     const academicYear = within(container).getByLabelText("学年");
     expect(academicYear).toHaveDisplayValue("请选择学年");
     expect(
@@ -122,6 +122,9 @@ describe("classes API page", () => {
     );
     fireEvent.change(within(container).getByLabelText(/班级名称/), {
       target: { value: "八年级（5）班" },
+    });
+    fireEvent.change(within(container).getByLabelText("大学课程"), {
+      target: { value: "数学分析" },
     });
     fireEvent.click(
       within(container).getByRole("button", { name: "保存班级" }),

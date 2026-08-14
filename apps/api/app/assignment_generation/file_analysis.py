@@ -21,19 +21,70 @@ _INJECTION = re.compile(
 
 def _role(name: str, text: str) -> tuple[str, float, str, float]:
     corpus = f"{name} {text[:2000]}".lower()
+    if re.search(r"教材|课本|教科书|数学分析讲义|textbook", corpus, re.I):
+        return "textbook", 0.82, "not_applicable", 1.0
     if re.search(r"ai.{0,8}(?:生成|generated).{0,8}(?:答案|answer)", corpus, re.I):
         return "reference_answer", 0.75, "ai_generated", 0.95
     if re.search(r"第三方|third[ _-]?party", corpus, re.I):
         return "reference_answer", 0.7, "third_party", 0.95
-    if re.search(r"参考答案|答案|answer|solution", corpus, re.I):
+    has_answer = bool(re.search(r"参考答案|答案|解答|answer|solution", corpus, re.I))
+    has_questions = bool(re.search(r"习题|练习|试卷|题目|question|paper|测试|考试", corpus, re.I))
+    if has_answer and has_questions:
+        return "question_and_answer", 0.78, "unknown", 0.3
+    if has_answer:
         return "reference_answer", 0.78, "unknown", 0.3
     if re.search(r"评分标准|rubric|评分细则", corpus, re.I):
         return "rubric", 0.85, "not_applicable", 1.0
     if re.search(r"说明|instructions?|须知", corpus, re.I):
         return "instructions", 0.75, "not_applicable", 1.0
-    if re.search(r"试卷|question|paper|测试|考试", corpus, re.I):
+    if has_questions:
         return "question_paper", 0.72, "not_applicable", 1.0
     return "unknown", 0.25, "unknown", 0.2
+
+
+def _content_evidence(
+    blocks: list[RecognitionBlock], job: RecognitionJob | None
+) -> tuple[str, str, float, int]:
+    pdf_blocks = [block for block in blocks if block.source.startswith("pdf_text:")]
+    provider_is_test_or_unavailable = job is None or job.provider in {"fake", "unavailable"}
+    ocr_blocks = (
+        []
+        if provider_is_test_or_unavailable
+        else [block for block in blocks if not block.source.startswith("pdf_text:")]
+    )
+    text_character_count = sum(
+        len("".join((block.text or "").split())) for block in [*pdf_blocks, *ocr_blocks]
+    )
+    if pdf_blocks and ocr_blocks:
+        confidences = [
+            float(block.confidence)
+            for block in [*pdf_blocks, *ocr_blocks]
+            if block.confidence is not None
+        ]
+        return "mixed", "mixed", min(confidences, default=0.5), text_character_count
+    if pdf_blocks:
+        return "text", "pdf_text", 1.0, text_character_count
+    if ocr_blocks:
+        confidences = [
+            float(block.confidence) for block in ocr_blocks if block.confidence is not None
+        ]
+        return "scanned", "ocr", min(confidences, default=0.5), text_character_count
+    return "unknown", "unavailable", 0.0, 0
+
+
+def _file_content_evidence(
+    page_evidence: list[tuple[str, str, float, int]],
+) -> tuple[str, str, float]:
+    if not page_evidence or any(
+        mode == "unknown" for mode, _source, _confidence, _count in page_evidence
+    ):
+        return "unknown", "unavailable", 0.0
+    modes = {mode for mode, _source, _confidence, _count in page_evidence}
+    sources = {source for _mode, source, _confidence, _count in page_evidence}
+    confidence = min(item[2] for item in page_evidence)
+    if "mixed" in modes or len(modes) > 1:
+        return "mixed", "mixed", confidence
+    return next(iter(modes)), next(iter(sources)), confidence
 
 
 def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOutput:
@@ -78,6 +129,12 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
             )
             if row:
                 results[page.id] = row
+    content_by_page = {
+        page.id: _content_evidence(
+            blocks_by_page.get(page.id, []), latest_jobs.get(page.paper_version_id)
+        )
+        for page in pages
+    }
     checksum_first: dict[str, uuid.UUID] = {}
     name_page_signatures: dict[tuple[str, int], uuid.UUID] = {}
     roles_by_file: dict[uuid.UUID, str] = {}
@@ -91,9 +148,14 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
             (block.text or "") for page in file_pages for block in blocks_by_page.get(page.id, [])
         )[:8000]
         role, role_conf, answer_source, source_conf = _role(stored.original_name, text)
+        content_mode, text_source, content_confidence = _file_content_evidence(
+            [content_by_page[page.id] for page in file_pages]
+        )
         warnings: list[str] = []
         if role == "unknown" or role_conf < 0.7:
             warnings.append("FILE_ROLE_REVIEW_REQUIRED")
+        if content_mode == "unknown":
+            warnings.append("TEXT_SOURCE_UNAVAILABLE")
         duplicate = checksum_first.get(stored.checksum)
         if duplicate:
             warnings.append("DUPLICATE_FILE")
@@ -118,8 +180,7 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
                 summary=(
                     "文件用途无法可靠判断，需要教师选择"
                     if any(
-                        code
-                        in {"FILE_ROLE_REVIEW_REQUIRED", "FILE_ROLE_CONFLICT_REVIEW_REQUIRED"}
+                        code in {"FILE_ROLE_REVIEW_REQUIRED", "FILE_ROLE_CONFLICT_REVIEW_REQUIRED"}
                         for code in warnings
                     )
                     else "文件用途由受控文件名与 OCR 线索自动识别，可由教师修改"
@@ -146,6 +207,9 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
                 detected_mime_type=stored.content_type,
                 checksum=stored.checksum,
                 page_count=len(file_pages),
+                content_mode=content_mode,
+                text_source=text_source,
+                content_mode_confidence=content_confidence,
                 suggested_role=role,
                 role_confidence=role_conf,
                 suggested_answer_source=answer_source,
@@ -161,6 +225,9 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
         for page in ordered:
             result = results.get(page.id)
             params = dict(result.processing_parameters) if result else {}
+            page_content_mode, page_text_source, page_content_confidence, text_count = (
+                content_by_page[page.id]
+            )
             blank = (
                 float(params.get("blank_probability", 0))
                 if params.get("blank_probability") is not None
@@ -193,11 +260,17 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
                 codes.append("LOW_QUALITY_PAGE")
             if missing:
                 codes.append("POSSIBLE_MISSING_PAGE")
+            if page_content_mode == "unknown":
+                codes.append("TEXT_SOURCE_UNAVAILABLE")
             page_rows.append(
                 PageAnalysisCandidate(
                     paper_page_id=str(page.id),
                     stored_file_id=str(stored.id),
                     status=status,
+                    content_mode=page_content_mode,
+                    text_source=page_text_source,
+                    content_mode_confidence=page_content_confidence,
+                    text_character_count=text_count,
                     quality_score=quality,
                     blank_probability=blank,
                     missing_page_suspected=missing,

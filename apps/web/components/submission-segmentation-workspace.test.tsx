@@ -41,6 +41,7 @@ const page = {
 const region = {
   id: "region-1",
   question_id: "question-1",
+  question_number: "1",
   student_answer_id: "answer-1",
   submission_page_id: "page-1",
   x: 0.1,
@@ -70,6 +71,7 @@ beforeEach(() => {
   mocks.incomplete.mockResolvedValue({
     complete: false,
     question_ids: ["question-1"],
+    questions: [{ id: "question-1", question_number: "1", display_order: 1 }],
   });
   mocks.updateRegion.mockResolvedValue({ ...region, status: "confirmed" });
   mocks.removeRegion.mockResolvedValue(undefined);
@@ -113,6 +115,8 @@ it("draws, confirms, deletes, and retries answer regions", async () => {
   expect(screen.getByTestId("submission-question-select")).toHaveValue(
     "question-1",
   );
+  expect(screen.getByRole("option", { name: "第 1 题" })).toBeInTheDocument();
+  expect(screen.getByLabelText("第 1 题框选区域")).toBeInTheDocument();
   expect(screen.getByTestId("submission-region-card")).toHaveAttribute(
     "data-region-id",
     "region-1",
@@ -215,6 +219,9 @@ it("keeps the completed default view focused and expands editing on demand", asy
   );
   expect(screen.getByTestId("page-quality")).toHaveTextContent("页面调整");
   expect(screen.getByTestId("submission-region-delete")).toBeInTheDocument();
+  const overlayDelete = screen.getByTestId("submission-region-overlay-delete");
+  expect(overlayDelete).toHaveAttribute("data-region-id", "region-1");
+  expect(overlayDelete).toHaveAccessibleName("删除第 1 题的这个框选区域");
   expect(screen.getByTestId("submission-region-draw-toggle")).toHaveTextContent(
     "开始框选",
   );
@@ -237,6 +244,10 @@ it("keeps an incomplete question without a region selectable for manual drawing"
   mocks.incomplete.mockResolvedValue({
     complete: false,
     question_ids: ["question-2"],
+    questions: [
+      { id: "question-1", question_number: "1", display_order: 1 },
+      { id: "question-2", question_number: "2", display_order: 2 },
+    ],
   });
 
   render(<SubmissionSegmentationWorkspace submissionId="submission-1" />);
@@ -248,6 +259,11 @@ it("keeps an incomplete question without a region selectable for manual drawing"
   expect(
     Array.from(select.querySelectorAll("option")).map((option) => option.value),
   ).toEqual(["question-1", "question-2"]);
+  expect(
+    Array.from(select.querySelectorAll("option")).map(
+      (option) => option.textContent,
+    ),
+  ).toEqual(["第 1 题", "第 2 题"]);
 
   fireEvent.change(select, { target: { value: "question-2" } });
   expect(select).toHaveValue("question-2");
@@ -275,6 +291,7 @@ it("keeps an incomplete question without a region selectable for manual drawing"
   canvas.releasePointerCapture = vi.fn();
 
   fireEvent.click(screen.getByTestId("submission-region-draw-toggle"));
+  expect(screen.getByText(/正在框选第 2 题/)).toBeInTheDocument();
   fireEvent.pointerDown(canvas, { pointerId: 2, clientX: 3, clientY: 3 });
   fireEvent.pointerMove(canvas, { pointerId: 2, clientX: 97, clientY: 97 });
   fireEvent.pointerUp(canvas, { pointerId: 2, clientX: 97, clientY: 97 });

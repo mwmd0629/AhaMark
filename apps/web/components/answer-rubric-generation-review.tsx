@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button, Card, Select, useToast } from "@/components/ui";
+import { RubricTemplateActions } from "@/components/rubric-template-actions";
 import {
   ApiError,
   assignmentGenerationApi,
@@ -48,10 +49,36 @@ const eligibilityReasonLabels: Record<string, string> = {
   FORMULA_ANSWER_REVIEW_REQUIRED: "公式答案需要人工核对",
   MANUAL_ANSWER_REQUIRED: "答案需要人工填写",
   ANSWER_SCHEMA_INVALID: "答案结构不完整",
+  PROVIDER_OUTPUT_DEGRADED: "生成内容包含需要教师判断的部分",
 };
 
 const eligibilityReason = (code: string) =>
   eligibilityReasonLabels[code] ?? `需要人工核对（${code}）`;
+
+function teacherEligibilityMessages(
+  codes: string[] | undefined,
+  status: string,
+  kind: "answer" | "rubric",
+) {
+  const uniqueCodes = [...new Set(codes ?? [])];
+  if (status !== "manual_required") return uniqueCodes.map(eligibilityReason);
+
+  const genericManualCodes = new Set([
+    "CANDIDATE_NOT_SUGGESTED",
+    "MANUAL_REVIEW_REQUIRED",
+    "PROVIDER_OUTPUT_DEGRADED",
+    "SCORING_MODE_NOT_DETERMINISTIC",
+  ]);
+  const details = uniqueCodes
+    .filter((code) => !genericManualCodes.has(code))
+    .map(eligibilityReason);
+  return [
+    kind === "answer"
+      ? "请核对答案内容、推导过程和部分分要求"
+      : "请核对评分项、分值和部分分规则",
+    ...details,
+  ];
+}
 
 type QuestionOption = {
   id: string;
@@ -98,6 +125,7 @@ export function AnswerRubricGenerationReview({
   const [domainJson, setDomainJson] = useState("{}");
   const [validationJson, setValidationJson] = useState("{}");
   const [busy, setBusy] = useState(false);
+  const [regeneratingQuestionId, setRegeneratingQuestionId] = useState("");
   const [message, setMessage] = useState("");
   const loadGeneration = useRef(0);
   const actionInFlight = useRef(false);
@@ -158,6 +186,16 @@ export function AnswerRubricGenerationReview({
     () => rubrics.find((item) => item.question_id === selectedQuestion),
     [rubrics, selectedQuestion],
   );
+  const answerEligibilityMessages = teacherEligibilityMessages(
+    answer?.ineligibility_reasons,
+    answer?.status ?? "",
+    "answer",
+  );
+  const rubricEligibilityMessages = teacherEligibilityMessages(
+    rubric?.ineligibility_reasons,
+    rubric?.status ?? "",
+    "rubric",
+  );
   const bundleQuestion = bundle?.questions.find(
     (question) => question.id === selectedQuestion,
   );
@@ -207,6 +245,95 @@ export function AnswerRubricGenerationReview({
           JSON.stringify(rubric.domain_requirements ?? {}, null, 2) ||
         validationJson !==
           JSON.stringify(rubric.validation_config ?? {}, null, 2)));
+  const allQuestionPackages = useMemo(() => {
+    if (!bundle?.questions.length) return null;
+    const packages = bundle.questions.map((question) => {
+      const answerToConfirm =
+        question.answer.materialized?.status === "draft"
+          ? question.answer.materialized
+          : question.answer.selected;
+      const rubricToConfirm =
+        question.rubric.materialized?.status === "draft"
+          ? question.rubric.materialized
+          : question.rubric.selected;
+      if (
+        !answerToConfirm ||
+        !rubricToConfirm ||
+        rubricToConfirm.reference_answer_version_id !== answerToConfirm.id
+      )
+        return null;
+      return {
+        question_id: question.id,
+        expected_question_content_hash: question.content_hash,
+        reference_answer_version_id: answerToConfirm.id,
+        expected_reference_answer_content_hash: answerToConfirm.content_hash,
+        structured_rubric_version_id: rubricToConfirm.id,
+        expected_structured_rubric_content_hash: rubricToConfirm.content_hash,
+        confirmed:
+          answerToConfirm.status === "confirmed" &&
+          rubricToConfirm.status === "confirmed",
+      };
+    });
+    return packages.some((item) => item === null)
+      ? null
+      : packages.filter((item) => item !== null);
+  }, [bundle]);
+  const allQuestionPackagesConfirmed =
+    !!allQuestionPackages?.length &&
+    allQuestionPackages.every((item) => item.confirmed);
+  const allCandidatePackages = useMemo(() => {
+    if (!bundle?.questions.length || !revision) return null;
+    const packages = bundle.questions.map((question) => {
+      const answerCandidate = answers.find(
+        (item) => item.id === question.answer.candidate?.id,
+      );
+      const rubricCandidate = rubrics.find(
+        (item) => item.id === question.rubric.candidate?.id,
+      );
+      if (
+        !answerCandidate ||
+        !rubricCandidate ||
+        rubricCandidate.answer_candidate_id !== answerCandidate.id
+      )
+        return null;
+      return {
+        question_id: question.id,
+        expected_question_content_hash: question.content_hash,
+        answer_candidate_id: answerCandidate.id,
+        expected_answer_candidate_edit_version:
+          answerCandidate.teacher_edit_version,
+        expected_answer_question_version: answerCandidate.question_version,
+        rubric_candidate_id: rubricCandidate.id,
+        expected_rubric_candidate_edit_version:
+          rubricCandidate.teacher_edit_version,
+        expected_rubric_question_version: rubricCandidate.question_version,
+      };
+    });
+    return packages.some((item) => item === null)
+      ? null
+      : packages.filter((item) => item !== null);
+  }, [answers, bundle, revision, rubrics]);
+  const canConfirmAll = !!allQuestionPackages || !!allCandidatePackages;
+  const localDraftKey = `ahamark:answer-rubric-draft:${assignmentId}:${selectedQuestion}`;
+
+  const saveLocalDraft = (changes: Record<string, unknown>) => {
+    if (typeof window === "undefined" || !selectedQuestion) return;
+    window.localStorage.setItem(
+      localDraftKey,
+      JSON.stringify({
+        answerCandidateId: answer?.id ?? null,
+        rubricCandidateId: rubric?.id ?? null,
+        answerText,
+        alternativeText,
+        rubricTitle,
+        scoringMode,
+        domainJson,
+        validationJson,
+        savedAt: new Date().toISOString(),
+        ...changes,
+      }),
+    );
+  };
 
   useEffect(() => {
     if (
@@ -240,6 +367,47 @@ export function AnswerRubricGenerationReview({
       .then(setValidations)
       .catch(() => setValidations([]));
   }, [rubric]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !selectedQuestion) return;
+    const raw = window.localStorage.getItem(localDraftKey);
+    if (!raw) return;
+    try {
+      const saved = JSON.parse(raw) as Record<string, unknown>;
+      if (
+        saved.answerCandidateId !== (answer?.id ?? null) ||
+        saved.rubricCandidateId !== (rubric?.id ?? null)
+      )
+        return;
+      if (typeof saved.answerText === "string") setAnswerText(saved.answerText);
+      if (typeof saved.alternativeText === "string")
+        setAlternativeText(saved.alternativeText);
+      if (typeof saved.rubricTitle === "string")
+        setRubricTitle(saved.rubricTitle);
+      if (
+        saved.scoringMode === "deterministic" ||
+        saved.scoringMode === "ai_suggestion" ||
+        saved.scoringMode === "hybrid" ||
+        saved.scoringMode === "manual_only"
+      )
+        setScoringMode(saved.scoringMode);
+      if (typeof saved.domainJson === "string") setDomainJson(saved.domainJson);
+      if (typeof saved.validationJson === "string")
+        setValidationJson(saved.validationJson);
+    } catch {
+      window.localStorage.removeItem(localDraftKey);
+    }
+  }, [answer?.id, localDraftKey, rubric?.id, selectedQuestion]);
+
+  useEffect(() => {
+    if (!hasLocalEdits) return;
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
+  }, [hasLocalEdits]);
 
   const expected = (candidate: AnswerDraftCandidate | RubricDraftCandidate) => {
     if (!revision) throw new Error("没有可审查的生成草稿");
@@ -346,22 +514,25 @@ export function AnswerRubricGenerationReview({
   if (!revision && !bundle?.questions.length)
     return (
       <Card className="space-y-3 p-4" data-testid="answer-rubric-empty">
-        <p>
-          {bundleError ||
-            "尚无第四部分生成草稿。请先运行生成任务并确认题目；系统不会伪造答案。"}
-        </p>
+        <p>{bundleError || "还没有可核对的内容，请先整理试卷并确认题目。"}</p>
         {bundleError && <Button onClick={() => void load()}>重试</Button>}
       </Card>
     );
 
   return (
-    <section
-      className="space-y-4"
-      aria-label="标准答案与 Structured Rubric 草稿"
-    >
-      <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm">
-        AI 或外部参考内容不等于教师确认答案；接受后仍需教师明确确认。
-        无法确定的校验结果不会被当作已验证，系统不会自动发布或写入最终分数。
+    <section className="space-y-4" aria-label="答案与评分标准">
+      <div
+        role="status"
+        className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm"
+      >
+        <span className="text-slate-600">你现在在：</span>
+        <strong>
+          核对内容
+          {bundleQuestion ? ` · 第 ${bundleQuestion.number} 题` : ""}
+        </strong>
+        {hasLocalEdits && (
+          <span className="ml-2 text-emerald-700">编辑已自动保存到本机</span>
+        )}
       </div>
       {message && (
         <p
@@ -386,46 +557,121 @@ export function AnswerRubricGenerationReview({
           </Button>
         </p>
       )}
-      <div className="flex flex-wrap gap-2">
-        <Button
-          variant="outline"
-          disabled={busy || !revision}
-          onClick={() =>
-            revision &&
-            void performBulk("答案", () =>
-              assignmentGenerationApi.acceptEligibleAnswers(revision.id, {
-                expected_draft_revision_edit_version:
-                  revision.teacher_edit_version,
-                expected_source_snapshot: revision.source_snapshot_hash,
-              }),
-            )
-          }
-        >
-          批量接受可用答案
-        </Button>
-        <Button
-          variant="outline"
-          disabled={busy || !revision}
-          onClick={() =>
-            revision &&
-            void performBulk("评分标准", () =>
-              assignmentGenerationApi.acceptEligibleRubrics(revision.id, {
-                expected_draft_revision_edit_version:
-                  revision.teacher_edit_version,
-                expected_source_snapshot: revision.source_snapshot_hash,
-              }),
-            )
-          }
-        >
-          批量接受可用评分标准
-        </Button>
-        <Button variant="outline" disabled={busy} onClick={() => void load()}>
-          刷新草稿
-        </Button>
-      </div>
+      <details>
+        <summary className="cursor-pointer text-sm text-slate-600">
+          更多操作
+        </summary>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <Button
+            variant="outline"
+            disabled={busy || !revision}
+            onClick={() =>
+              revision &&
+              void performBulk("答案", () =>
+                assignmentGenerationApi.acceptEligibleAnswers(revision.id, {
+                  expected_draft_revision_edit_version:
+                    revision.teacher_edit_version,
+                  expected_source_snapshot: revision.source_snapshot_hash,
+                }),
+              )
+            }
+          >
+            处理可用答案
+          </Button>
+          <Button
+            variant="outline"
+            disabled={busy || !revision}
+            onClick={() =>
+              revision &&
+              void performBulk("评分标准", () =>
+                assignmentGenerationApi.acceptEligibleRubrics(revision.id, {
+                  expected_draft_revision_edit_version:
+                    revision.teacher_edit_version,
+                  expected_source_snapshot: revision.source_snapshot_hash,
+                }),
+              )
+            }
+          >
+            处理可用评分标准
+          </Button>
+          <Button variant="outline" disabled={busy} onClick={() => void load()}>
+            重新载入
+          </Button>
+        </div>
+      </details>
       <div className="grid gap-4 xl:grid-cols-[24rem_minmax(0,1fr)_minmax(0,1.2fr)]">
         <Card className="space-y-2 p-4">
-          <h3 className="font-bold">题目与风险</h3>
+          <div className="space-y-2">
+            <h3 className="font-bold">题目</h3>
+            <Button
+              className="w-full"
+              variant={allQuestionPackagesConfirmed ? "outline" : "primary"}
+              disabled={
+                busy ||
+                hasLocalEdits ||
+                !bundle ||
+                !canConfirmAll ||
+                allQuestionPackagesConfirmed
+              }
+              onClick={() => {
+                if (!bundle) return;
+                if (!allQuestionPackages && allCandidatePackages && revision) {
+                  void perform(
+                    () =>
+                      structuredRubricApi.confirmAllCandidateQuestionPackages(
+                        assignmentId,
+                        {
+                          expected_bundle_hash: bundle.version.bundle_hash,
+                          expected_draft_revision_id: revision.id,
+                          expected_draft_revision_edit_version:
+                            revision.teacher_edit_version,
+                          expected_source_snapshot_hash:
+                            revision.source_snapshot_hash,
+                          packages: allCandidatePackages,
+                          explicit_confirmation: true,
+                        },
+                      ),
+                    `已确认全部 ${allCandidatePackages.length} 道题`,
+                  );
+                  return;
+                }
+                if (!allQuestionPackages) return;
+                void perform(
+                  () =>
+                    structuredRubricApi.confirmAllQuestionPackages(
+                      assignmentId,
+                      {
+                        expected_bundle_hash: bundle.version.bundle_hash,
+                        packages: allQuestionPackages.map((item) => ({
+                          question_id: item.question_id,
+                          expected_question_content_hash:
+                            item.expected_question_content_hash,
+                          reference_answer_version_id:
+                            item.reference_answer_version_id,
+                          expected_reference_answer_content_hash:
+                            item.expected_reference_answer_content_hash,
+                          structured_rubric_version_id:
+                            item.structured_rubric_version_id,
+                          expected_structured_rubric_content_hash:
+                            item.expected_structured_rubric_content_hash,
+                        })),
+                        explicit_confirmation: true,
+                      },
+                    ),
+                  `已确认全部 ${allQuestionPackages.length} 道题`,
+                );
+              }}
+              title={
+                hasLocalEdits
+                  ? "请先保存或撤销当前编辑"
+                  : !canConfirmAll
+                    ? "每道题都需准备相互绑定的完整答案和评分标准"
+                    : undefined
+              }
+            >
+              {allQuestionPackagesConfirmed ? "已全部确认" : "确认全部"}
+            </Button>
+          </div>
           {displayQuestions.map((question) => {
             const questionNumber =
               "number" in question ? question.number : question.question_number;
@@ -468,24 +714,11 @@ export function AnswerRubricGenerationReview({
                 >
                   <span className="font-semibold">第 {questionNumber} 题</span>
                   <span className="block text-xs">
-                    参考答案：
-                    {answerToConfirm?.status === "confirmed"
+                    {packageConfirmed
                       ? "已确认"
-                      : answerToConfirm?.status === "draft"
+                      : packageMatches
                         ? "等待确认"
-                        : savedQuestion?.answer.candidate
-                          ? "有生成建议"
-                          : "尚未生成"}
-                  </span>
-                  <span className="block text-xs">
-                    评分标准：
-                    {rubricToConfirm?.status === "confirmed"
-                      ? "已确认"
-                      : rubricToConfirm?.status === "draft"
-                        ? "等待确认"
-                        : savedQuestion?.rubric.candidate
-                          ? "有生成建议"
-                          : "尚未生成"}
+                        : "需要补充内容"}
                   </span>
                   {riskCount > 0 && (
                     <span className="mt-1 block text-xs text-amber-700">
@@ -524,7 +757,7 @@ export function AnswerRubricGenerationReview({
                             explicit_confirmation: true,
                           },
                         ),
-                      `第 ${questionNumber} 题的题目、答案和评分标准已确认`,
+                      `第 ${questionNumber} 题已确认`,
                     );
                   }}
                   title={
@@ -535,25 +768,77 @@ export function AnswerRubricGenerationReview({
                         : undefined
                   }
                 >
-                  {packageConfirmed
-                    ? "题目、答案和评分标准已确认"
-                    : "确认题目、答案和评分标准"}
+                  {packageConfirmed ? "已确认" : "确认本题"}
                 </Button>
+                <details className="shrink-0 text-sm">
+                  <summary className="cursor-pointer rounded-lg px-2 py-1 text-slate-600">
+                    更多
+                  </summary>
+                  <div className="mt-2 w-full space-y-2 rounded-lg border bg-white p-3 sm:w-64">
+                    <Button
+                      className="w-full"
+                      variant="outline"
+                      disabled={
+                        busy ||
+                        hasLocalEdits ||
+                        !revision ||
+                        regeneratingQuestionId === question.id
+                      }
+                      onClick={async () => {
+                        if (!revision) return;
+                        setRegeneratingQuestionId(question.id);
+                        setBusy(true);
+                        setSelectedQuestion(question.id);
+                        try {
+                          await assignmentGenerationApi.regenerateQuestion(
+                            revision.id,
+                            question.id,
+                            {
+                              expected_source_snapshot:
+                                revision.source_snapshot_hash,
+                              expected_draft_revision_edit_version:
+                                revision.teacher_edit_version,
+                            },
+                          );
+                          toast(`第 ${questionNumber} 题已开始重新生成`);
+                          setMessage(
+                            `正在为第 ${questionNumber} 题生成新的答案与评分标准建议；旧内容和已确认内容保持不变。`,
+                          );
+                          window.setTimeout(() => void load(), 1500);
+                          window.setTimeout(() => void load(), 4000);
+                        } catch (error) {
+                          setMessage(
+                            error instanceof ApiError
+                              ? error.message
+                              : "本题暂时无法重新生成，请稍后重试。",
+                          );
+                        } finally {
+                          setBusy(false);
+                          setRegeneratingQuestionId("");
+                        }
+                      }}
+                    >
+                      {regeneratingQuestionId === question.id
+                        ? "正在生成"
+                        : "重新生成本题"}
+                    </Button>
+                    <p className="text-xs text-slate-500">
+                      只生成新的答案与评分标准建议，不改题目，不覆盖已确认内容。
+                    </p>
+                  </div>
+                </details>
               </div>
             );
           })}
         </Card>
 
         <Card className="space-y-3 p-4" data-testid="answer-candidate-panel">
-          <h3 className="font-bold">标准答案草稿与证据</h3>
+          <h3 className="font-bold">参考答案</h3>
           {formalAnswer ? (
             <div className="space-y-3" data-testid="saved-reference-answer">
-              <div className="flex flex-wrap gap-2 text-sm">
-                <span>版本 {formalAnswer.version}</span>
-                <span>
-                  {formalAnswer.status === "confirmed" ? "已确认" : "待确认"}
-                </span>
-              </div>
+              <p className="text-sm">
+                {formalAnswer.status === "confirmed" ? "已确认" : "待确认"}
+              </p>
               <div className="whitespace-pre-wrap rounded-lg border bg-slate-50 p-3 text-sm">
                 {formalAnswer.content}
               </div>
@@ -640,7 +925,7 @@ export function AnswerRubricGenerationReview({
               )}
             </div>
           ) : !answer ? (
-            <p>Provider unavailable 或题目尚未确认；没有伪造答案。</p>
+            <p>尚未生成标准答案。请先确认题目，再重新生成作业内容。</p>
           ) : (
             <>
               <div className="flex flex-wrap gap-2 text-sm">
@@ -650,12 +935,12 @@ export function AnswerRubricGenerationReview({
                 <span>置信度 {answer.confidence.toFixed(2)}</span>
               </div>
               {answer.server_eligible === false &&
-                (answer.ineligibility_reasons?.length ?? 0) > 0 && (
+                answerEligibilityMessages.length > 0 && (
                   <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm">
-                    <p className="font-medium">此答案不能自动接受</p>
+                    <p className="font-medium">此答案需要教师核对</p>
                     <ul className="mt-1 list-disc pl-5">
-                      {answer.ineligibility_reasons?.map((code) => (
-                        <li key={code}>{eligibilityReason(code)}</li>
+                      {answerEligibilityMessages.map((text) => (
+                        <li key={text}>{text}</li>
                       ))}
                     </ul>
                     <p className="mt-1 text-slate-700">
@@ -668,7 +953,10 @@ export function AnswerRubricGenerationReview({
                 <textarea
                   className="min-h-32 rounded-lg border p-2"
                   value={answerText}
-                  onChange={(event) => setAnswerText(event.target.value)}
+                  onChange={(event) => {
+                    setAnswerText(event.target.value);
+                    saveLocalDraft({ answerText: event.target.value });
+                  }}
                 />
               </label>
               <label className="grid gap-1 text-sm font-medium">
@@ -676,11 +964,17 @@ export function AnswerRubricGenerationReview({
                 <textarea
                   className="min-h-20 rounded-lg border p-2"
                   value={alternativeText}
-                  onChange={(event) => setAlternativeText(event.target.value)}
+                  onChange={(event) => {
+                    setAlternativeText(event.target.value);
+                    saveLocalDraft({ alternativeText: event.target.value });
+                  }}
                 />
               </label>
               <details>
-                <summary>查看证据与技术详情</summary>
+                <summary>历史生成依据</summary>
+                <p className="mt-2 text-xs text-slate-500">
+                  仅用于追溯当时如何生成，不代表当前代码检查已经通过。
+                </p>
                 <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap rounded bg-slate-50 p-2 text-xs">
                   {JSON.stringify(
                     {
@@ -783,7 +1077,12 @@ export function AnswerRubricGenerationReview({
         </Card>
 
         <Card className="space-y-3 p-4" data-testid="rubric-candidate-panel">
-          <h3 className="font-bold">评分标准草稿</h3>
+          <h3 className="font-bold">评分标准</h3>
+          <RubricTemplateActions
+            questionId={selectedQuestion}
+            rubricId={formalRubric?.id}
+            onApplied={load}
+          />
           {formalRubric ? (
             <div className="space-y-3" data-testid="saved-structured-rubric">
               <div>
@@ -883,42 +1182,52 @@ export function AnswerRubricGenerationReview({
               )}
             </div>
           ) : !rubric ? (
-            <p>暂无评分标准建议，也没有已生成的 Structured Rubric。</p>
+            <p>尚未生成评分标准。请先确认题目，再重新生成作业内容。</p>
           ) : (
             <>
               <label className="grid gap-1 text-sm font-medium">
-                Rubric 标题
+                评分标准名称
                 <input
                   className="rounded-lg border p-2"
                   value={rubricTitle}
-                  onChange={(event) => setRubricTitle(event.target.value)}
+                  onChange={(event) => {
+                    setRubricTitle(event.target.value);
+                    saveLocalDraft({ rubricTitle: event.target.value });
+                  }}
                 />
               </label>
-              <Select
-                label="评分模式"
-                value={scoringMode}
-                onChange={(event) =>
-                  setScoringMode(
-                    event.target.value as RubricDraftCandidate["scoring_mode"],
-                  )
-                }
-              >
-                <option value="deterministic">deterministic</option>
-                <option value="ai_suggestion">ai_suggestion</option>
-                <option value="hybrid">hybrid</option>
-                <option value="manual_only">manual_only</option>
-              </Select>
+              <details className="rounded-lg border p-3 text-sm">
+                <summary className="cursor-pointer font-medium">
+                  更多设置
+                </summary>
+                <div className="mt-3 space-y-3">
+                  <Select
+                    label="评分方式"
+                    value={scoringMode}
+                    onChange={(event) => {
+                      const value = event.target
+                        .value as RubricDraftCandidate["scoring_mode"];
+                      setScoringMode(value);
+                      saveLocalDraft({ scoringMode: value });
+                    }}
+                  >
+                    <option value="deterministic">规则评分</option>
+                    <option value="ai_suggestion">智能建议</option>
+                    <option value="hybrid">规则与建议结合</option>
+                    <option value="manual_only">教师评分</option>
+                  </Select>
+                </div>
+              </details>
               <p className="text-sm">
-                总分：{rubric.total_points ?? "未知（阻止确认）"} · confidence{" "}
-                {rubric.confidence.toFixed(2)}
+                总分：{rubric.total_points ?? "尚未设置"}
               </p>
               {rubric.server_eligible === false &&
-                (rubric.ineligibility_reasons?.length ?? 0) > 0 && (
+                rubricEligibilityMessages.length > 0 && (
                   <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm">
-                    <p className="font-medium">此评分标准不能自动接受</p>
+                    <p className="font-medium">此评分标准需要教师核对</p>
                     <ul className="mt-1 list-disc pl-5">
-                      {rubric.ineligibility_reasons?.map((code) => (
-                        <li key={code}>{eligibilityReason(code)}</li>
+                      {rubricEligibilityMessages.map((text) => (
+                        <li key={text}>{text}</li>
                       ))}
                     </ul>
                     <p className="mt-1 text-slate-700">
@@ -926,73 +1235,91 @@ export function AnswerRubricGenerationReview({
                     </p>
                   </div>
                 )}
-              <div className="space-y-2" aria-label="Rubric 评分项">
+              <div className="space-y-2" aria-label="评分项">
                 {rubric.criteria.map((criterion) => (
                   <div
                     key={criterion.id}
                     className="rounded-lg border p-3 text-sm"
                   >
-                    <strong>
-                      {criterion.criterion_key} · {criterion.title}
-                    </strong>
+                    <strong>{criterion.title}</strong>
                     <p>
-                      分值 {criterion.points ?? "未知"} ·{" "}
-                      {criterion.criterion_type} ·{" "}
+                      {criterion.points ?? "未设置"} 分 ·{" "}
                       {criterion.required ? "必要" : "可选"}
                     </p>
-                    <p>
-                      依赖：{criterion.dependency_keys.join(", ") || "无"} ·
-                      替代路径：{criterion.alternative_group ?? "无"}
-                    </p>
-                    <p>
-                      部分分：{JSON.stringify(criterion.partial_credit_rule)} ·
-                      扣分：{JSON.stringify(criterion.deduction_rule)}
-                    </p>
-                    <p>
-                      常见错误：
-                      {criterion.common_error_codes.join(", ") || "无"}
-                    </p>
-                    <p>反馈模板：{criterion.feedback_template ?? "无"}</p>
+                    {criterion.feedback_template && (
+                      <p>{criterion.feedback_template}</p>
+                    )}
+                    <details className="mt-2 text-xs text-slate-600">
+                      <summary className="cursor-pointer">详细信息</summary>
+                      <p>类型：{criterion.criterion_type}</p>
+                      <p>
+                        依赖：{criterion.dependency_keys.join(", ") || "无"} ·
+                        替代路径：{criterion.alternative_group ?? "无"}
+                      </p>
+                      <p>
+                        部分分：{JSON.stringify(criterion.partial_credit_rule)}{" "}
+                        · 扣分：{JSON.stringify(criterion.deduction_rule)}
+                      </p>
+                      <p>
+                        常见错误：
+                        {criterion.common_error_codes.join(", ") || "无"}
+                      </p>
+                    </details>
                   </div>
                 ))}
               </div>
-              <label className="grid gap-1 text-sm font-medium">
-                数域/单位/精度/格式要求 JSON
-                <textarea
-                  className="min-h-24 rounded-lg border p-2 font-mono text-xs"
-                  value={domainJson}
-                  onChange={(event) => setDomainJson(event.target.value)}
-                />
-              </label>
-              <label className="grid gap-1 text-sm font-medium">
-                确定性验证配置 JSON
-                <textarea
-                  className="min-h-24 rounded-lg border p-2 font-mono text-xs"
-                  value={validationJson}
-                  onChange={(event) => setValidationJson(event.target.value)}
-                />
-              </label>
-              <div
-                aria-label="数学验证结果"
-                className="space-y-1 rounded-lg bg-slate-50 p-3 text-sm"
-              >
-                {validations.length ? (
-                  validations.map((result) => (
-                    <p key={result.id}>
-                      <strong>
-                        {validationLabels[result.status] ?? result.status}
-                      </strong>{" "}
-                      · {result.issue_codes.join(", ")}
-                    </p>
-                  ))
-                ) : (
-                  <p>尚无验证结果。</p>
-                )}
-              </div>
-              <details>
-                <summary>
-                  evidence / common errors / feedback templates / issues
+              <details className="rounded-lg border p-3 text-sm">
+                <summary className="cursor-pointer font-medium">
+                  高级规则
                 </summary>
+                <div className="mt-3 space-y-3">
+                  <label className="grid gap-1 font-medium">
+                    答案格式要求
+                    <textarea
+                      className="min-h-24 rounded-lg border p-2 font-mono text-xs"
+                      value={domainJson}
+                      onChange={(event) => {
+                        setDomainJson(event.target.value);
+                        saveLocalDraft({ domainJson: event.target.value });
+                      }}
+                    />
+                  </label>
+                  <label className="grid gap-1 font-medium">
+                    自动检查规则
+                    <textarea
+                      className="min-h-24 rounded-lg border p-2 font-mono text-xs"
+                      value={validationJson}
+                      onChange={(event) => {
+                        setValidationJson(event.target.value);
+                        saveLocalDraft({ validationJson: event.target.value });
+                      }}
+                    />
+                  </label>
+                  <div
+                    aria-label="当前代码检查"
+                    className="space-y-1 rounded-lg bg-slate-50 p-3 text-sm"
+                  >
+                    <strong className="block">当前代码检查</strong>
+                    {validations.length ? (
+                      validations.map((result) => (
+                        <p key={result.id}>
+                          <strong>
+                            {validationLabels[result.status] ?? result.status}
+                          </strong>{" "}
+                          · {result.issue_codes.join(", ")}
+                        </p>
+                      ))
+                    ) : (
+                      <p>暂无检查结果</p>
+                    )}
+                  </div>
+                </div>
+              </details>
+              <details>
+                <summary>历史生成依据</summary>
+                <p className="mt-2 text-xs text-slate-500">
+                  这里是生成时保存的证据和提示，不等同于当前代码检查结果。
+                </p>
                 <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap rounded bg-slate-50 p-2 text-xs">
                   {JSON.stringify(
                     {

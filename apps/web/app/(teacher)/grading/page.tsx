@@ -15,6 +15,7 @@ import {
 } from "@/lib/api";
 import { Button, Card, Input, PageHeader, Select } from "@/components/ui";
 import { JointExamTeamPanel } from "@/components/joint-exam-team-panel";
+import { useSmartRefresh } from "@/lib/use-smart-refresh";
 
 export default function GradingPage() {
   const searchParams = useSearchParams();
@@ -93,6 +94,34 @@ export default function GradingPage() {
       )
       .finally(() => setLoading(false));
   }, [assignmentId, assignments]);
+
+  useSmartRefresh(
+    async () => {
+      const [assignmentPage, teams, work] = await Promise.all([
+        assignmentsApi.list("page_size=100"),
+        assignmentsApi.jointInvitations(),
+        gradingApi.jointWork(),
+      ]);
+      const nextAssignments = assignmentPage.items.filter(
+        (item) => item.status !== "draft",
+      );
+      setAssignments(nextAssignments);
+      setInvitations(teams);
+      setJointWork(work);
+      if (!assignmentId) return;
+      const selected = nextAssignments.find((item) => item.id === assignmentId);
+      if (selected?.delivery_mode === "joint_exam") {
+        const pool = await gradingApi.jointPool(assignmentId);
+        setJointPool(pool);
+        setItems(pool.items);
+      } else {
+        const page = await gradingApi.batches(assignmentId);
+        setJointPool(undefined);
+        setItems(page.items);
+      }
+    },
+    { intervalMs: 60_000 },
+  );
 
   async function createBatch(form: FormData) {
     if (!assignmentId) return;

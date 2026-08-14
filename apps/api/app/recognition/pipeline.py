@@ -1,13 +1,14 @@
 import hashlib
 import io
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, BinaryIO, Protocol, cast
 
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps, UnidentifiedImageError
 
 from app.core.config import Settings
+from app.recognition.question_numbers import normalize_question_number
 from app.storage.base import ObjectStorage
 
 
@@ -33,6 +34,181 @@ class ProviderBlock:
     confidence: float | None
     region: tuple[float, float, float, float]
     status: str = "recognized"
+    source: str | None = None
+    character_boxes: list[dict[str, int | float | str]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class QuestionAnchor:
+    block_id: uuid.UUID
+    paper_page_id: uuid.UUID
+    y: float
+
+
+@dataclass(frozen=True)
+class DerivedQuestionRegion:
+    paper_page_id: uuid.UUID
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+def derive_question_regions(
+    page_ids: list[uuid.UUID], anchors: list[QuestionAnchor]
+) -> dict[uuid.UUID, list[DerivedQuestionRegion]]:
+    """Partition pages between ordered anchors without inferring beyond the final anchor page."""
+    page_order = {page_id: index for index, page_id in enumerate(page_ids)}
+    valid = [anchor for anchor in anchors if anchor.paper_page_id in page_order]
+    ordered = sorted(valid, key=lambda item: (page_order[item.paper_page_id], item.y))
+    output: dict[uuid.UUID, list[DerivedQuestionRegion]] = {}
+    for index, anchor in enumerate(ordered):
+        start_page = page_order[anchor.paper_page_id]
+        start_y = min(1.0, max(0.0, anchor.y))
+        next_anchor = ordered[index + 1] if index + 1 < len(ordered) else None
+        end_page = page_order[next_anchor.paper_page_id] if next_anchor is not None else start_page
+        regions: list[DerivedQuestionRegion] = []
+        if end_page == start_page:
+            end_y = min(1.0, max(start_y, next_anchor.y)) if next_anchor is not None else 1.0
+            if end_y > start_y:
+                regions.append(
+                    DerivedQuestionRegion(anchor.paper_page_id, 0.0, start_y, 1.0, end_y - start_y)
+                )
+        else:
+            if start_y < 1.0:
+                regions.append(
+                    DerivedQuestionRegion(anchor.paper_page_id, 0.0, start_y, 1.0, 1.0 - start_y)
+                )
+            for page_index in range(start_page + 1, end_page):
+                regions.append(DerivedQuestionRegion(page_ids[page_index], 0.0, 0.0, 1.0, 1.0))
+            assert next_anchor is not None
+            end_y = min(1.0, max(0.0, next_anchor.y))
+            if end_y > 0.0:
+                regions.append(
+                    DerivedQuestionRegion(next_anchor.paper_page_id, 0.0, 0.0, 1.0, end_y)
+                )
+        output[anchor.block_id] = regions
+    return output
+
+
+def parse_hierarchical_question_number(text: str) -> str | None:
+    return normalize_question_number(text)
+
+
+def text_for_question_region(
+    blocks: list[tuple[uuid.UUID, ProviderBlock]],
+    regions: list[DerivedQuestionRegion],
+    *,
+    max_characters: int = 20000,
+) -> str | None:
+    """Join trustworthy reading-order text whose centre falls inside a question region."""
+    selected: list[tuple[int, float, float, str]] = []
+    for block_order, (paper_page_id, block) in enumerate(blocks):
+        text = " ".join((block.text or "").split())
+        if (
+            not text
+            or block.source is None
+            or not (block.source.startswith("pdf_text:") or block.source.startswith("rapidocr:"))
+        ):
+            continue
+        x, y, width, height = block.region
+        centre_x, centre_y = x + width / 2, y + height / 2
+        for region_order, region in enumerate(regions):
+            if (
+                region.paper_page_id == paper_page_id
+                and region.x <= centre_x <= region.x + region.width
+                and region.y <= centre_y <= region.y + region.height
+            ):
+                selected.append((region_order, y, x + block_order * 1e-9, text))
+                break
+    if not selected:
+        return None
+    joined = "\n".join(item[3] for item in sorted(selected))
+    return joined[:max_characters]
+
+
+def _line_block(
+    characters: list[str],
+    positioned_characters: list[tuple[int, str, tuple[float, float, float, float]]],
+    page_width: float,
+    page_height: float,
+) -> ProviderBlock | None:
+    text = " ".join("".join(characters).split())
+    boxes = [item[2] for item in positioned_characters]
+    if not text or not boxes or page_width <= 0 or page_height <= 0:
+        return None
+    left = max(0.0, min(box[0] for box in boxes))
+    bottom = max(0.0, min(box[1] for box in boxes))
+    right = min(page_width, max(box[2] for box in boxes))
+    top = min(page_height, max(box[3] for box in boxes))
+    if right <= left or top <= bottom:
+        return None
+    return ProviderBlock(
+        block_type=(
+            "question_number" if parse_hierarchical_question_number(text) is not None else "text"
+        ),
+        text=text,
+        latex=None,
+        confidence=1.0,
+        region=(
+            left / page_width,
+            (page_height - top) / page_height,
+            (right - left) / page_width,
+            (top - bottom) / page_height,
+        ),
+        source="pdf_text:pypdfium2",
+        character_boxes=[
+            {
+                "source_index": source_index,
+                "text": character,
+                "x": box[0] / page_width,
+                "y": (page_height - box[3]) / page_height,
+                "width": (box[2] - box[0]) / page_width,
+                "height": (box[3] - box[1]) / page_height,
+            }
+            for source_index, character, box in positioned_characters
+        ],
+    )
+
+
+def extract_pdf_text_layer(content: bytes, source_page: int) -> list[ProviderBlock]:
+    """Read an embedded PDF text layer without treating it as OCR output."""
+    try:
+        import pypdfium2 as pdfium  # type: ignore[import-untyped]
+
+        document = pdfium.PdfDocument(content)
+        if source_page < 1 or source_page > len(document):
+            raise RecognitionError("PAGE_RENDER_FAILED", "PDF 页面编号无效")
+        page = document[source_page - 1]
+        text_page = page.get_textpage()
+        page_width, page_height = page.get_size()
+        line_characters: list[str] = []
+        positioned_characters: list[tuple[int, str, tuple[float, float, float, float]]] = []
+        blocks: list[ProviderBlock] = []
+        for index in range(text_page.count_chars()):
+            character = text_page.get_text_range(index, 1)
+            if character in {"\r", "\n"}:
+                block = _line_block(line_characters, positioned_characters, page_width, page_height)
+                if block is not None:
+                    blocks.append(block)
+                line_characters = []
+                positioned_characters = []
+                continue
+            line_characters.append(character)
+            try:
+                box = text_page.get_charbox(index)
+            except Exception:
+                continue
+            if box[2] > box[0] and box[3] > box[1]:
+                positioned_characters.append((len(line_characters) - 1, character, box))
+        block = _line_block(line_characters, positioned_characters, page_width, page_height)
+        if block is not None:
+            blocks.append(block)
+    except RecognitionError:
+        raise
+    except Exception as exc:
+        raise RecognitionError("PDF_TEXT_EXTRACTION_FAILED", "PDF 文字层无法读取") from exc
+    return blocks
 
 
 class DocumentConverter(Protocol):
@@ -59,7 +235,7 @@ class DefaultDocumentConverter:
     def convert(self, content: bytes, content_type: str, source_page: int) -> PageArtifact:
         if content_type == "application/pdf":
             try:
-                import pypdfium2 as pdfium  # type: ignore[import-untyped]
+                import pypdfium2 as pdfium
 
                 document = pdfium.PdfDocument(content)
                 if len(document) > self.settings.recognition_max_pdf_pages:

@@ -1,6 +1,7 @@
 import io
 import json
 import uuid
+from decimal import Decimal
 
 from app.assignment_generation.question_extraction import materialize
 from app.assignment_generation.service import transition
@@ -306,6 +307,12 @@ def test_mocked_http_provider_worker_materializes_only_versioned_drafts(monkeypa
             )
         )
         assert candidate is not None
+        current_assignment = db.get(Assignment, assignment.id)
+        current_job = db.get(AssignmentGenerationJob, job_id)
+        assert current_assignment is not None and current_job is not None
+        assert current_assignment.total_score == Decimal("5")
+        assert candidate.source_snapshot_hash == current_job.source_snapshot_hash
+        assert revision.source_snapshot_hash == current_job.source_snapshot_hash
         regions = list(
             db.scalars(
                 select(AssignmentQuestionExtractionRegion).where(

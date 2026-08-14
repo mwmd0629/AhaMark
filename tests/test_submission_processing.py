@@ -19,6 +19,7 @@ from app.models import (
 )
 from app.recognition.pipeline import PageArtifact, ProviderBlock
 from app.recognition.submission_processing import (
+    _anchor_region_candidate,
     _hash_distance,
     _normalize_question_number,
     _pdf_text_blocks,
@@ -27,12 +28,53 @@ from app.recognition.submission_processing import (
 )
 from app.storage.dependencies import get_storage
 from fastapi.testclient import TestClient
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 from reportlab.pdfgen import canvas
 from sqlalchemy import func, select
 from test_submission_workflow import workflow
 
 client = TestClient(app)
+
+
+def test_anchor_regions_follow_content_without_overlap_or_page_tail() -> None:
+    first_anchor = ProviderBlock("pdf_text", "第 1 题", None, 0.99, (0.08, 0.20, 0.08, 0.025))
+    first_answer = ProviderBlock("pdf_text", "answer one", None, 0.99, (0.08, 0.25, 0.40, 0.03))
+    second_anchor = ProviderBlock("pdf_text", "第 2 题", None, 0.99, (0.08, 0.50, 0.08, 0.025))
+    second_answer = ProviderBlock("pdf_text", "answer two", None, 0.99, (0.08, 0.55, 0.40, 0.04))
+    footer = ProviderBlock("pdf_text", "第 1 页", None, 0.99, (0.85, 0.96, 0.08, 0.02))
+    blocks = [first_anchor, first_answer, second_anchor, second_answer, footer]
+
+    first = _anchor_region_candidate(first_anchor, second_anchor, blocks, Decimal("0.15"))
+    second = _anchor_region_candidate(second_anchor, None, blocks, Decimal("0.15"))
+
+    assert first == (
+        Decimal("0.06"),
+        Decimal("0.19"),
+        Decimal("0.92"),
+        Decimal("0.30"),
+    )
+    assert second == (
+        Decimal("0.06"),
+        Decimal("0.49"),
+        Decimal("0.92"),
+        Decimal("0.115"),
+    )
+    assert first[1] + first[3] <= second[1]
+    assert second[1] + second[3] < Decimal("0.70")
+
+
+def test_heading_only_pdf_keeps_answer_space_for_final_question() -> None:
+    first_anchor = ProviderBlock("pdf_text", "第 1 题", None, 0.99, (0.08, 0.20, 0.08, 0.025))
+    second_anchor = ProviderBlock("pdf_text", "第 2 题", None, 0.99, (0.08, 0.50, 0.08, 0.025))
+    footer = ProviderBlock("pdf_text", "第 1 页", None, 0.99, (0.85, 0.96, 0.08, 0.02))
+    blocks = [first_anchor, second_anchor, footer]
+
+    first = _anchor_region_candidate(first_anchor, second_anchor, blocks, Decimal("0.15"))
+    second = _anchor_region_candidate(second_anchor, None, blocks, Decimal("0.15"))
+
+    assert first[1] + first[3] == second[1]
+    assert second[3] == Decimal("0.15")
+    assert second[1] + second[3] < Decimal("0.92")
 
 
 def artifact(background: str = "white", text: str | None = None) -> PageArtifact:
@@ -85,6 +127,29 @@ def test_washed_out_content_is_corrected_and_rechecked() -> None:
     assert "TOO_BRIGHT" not in metrics["warnings"]
 
 
+def test_white_border_crop_preserves_processed_coordinate_space() -> None:
+    image = Image.new("RGB", (600, 800), "white")
+    ImageDraw.Draw(image).rectangle((40, 60, 560, 740), outline="black", width=3)
+    output = io.BytesIO()
+    image.save(output, "PNG")
+
+    processed, metrics = preprocess_page(PageArtifact(output.getvalue(), 600, 800))
+    processed_image = Image.open(io.BytesIO(processed.content)).convert("L")
+    source_bbox = (
+        ImageOps.invert(image.convert("L")).point(lambda value: 255 if value > 12 else 0).getbbox()
+    )
+    processed_bbox = (
+        ImageOps.invert(processed_image).point(lambda value: 255 if value > 12 else 0).getbbox()
+    )
+
+    assert metrics["crop"] is not None
+    assert (processed.width, processed.height) == image.size
+    assert source_bbox is not None and processed_bbox is not None
+    assert all(
+        abs(left - right) <= 2 for left, right in zip(source_bbox, processed_bbox, strict=True)
+    )
+
+
 def test_question_anchor_formats_are_normalized_without_unknown_creation() -> None:
     variants = [
         "1",
@@ -97,6 +162,9 @@ def test_question_anchor_formats_are_normalized_without_unknown_creation() -> No
         "(1)",
         "2.1",
         "Q1:",
+        "2(3)",
+        "12（2）：",
+        "第 2(5) 题",
     ]
     assert [_normalize_question_number(value) for value in variants] == [
         "1",
@@ -109,8 +177,90 @@ def test_question_anchor_formats_are_normalized_without_unknown_creation() -> No
         "1",
         "2.1",
         "1",
+        "2(3)",
+        "12(2)",
+        "2(5)",
     ]
     assert _normalize_question_number("\u7b54\u6848\u5f15\u7528\u7b2c 9 \u9898") is None
+    assert _normalize_question_number("2026 academic year") is None
+
+
+def test_numeric_subquestions_bind_to_stable_question_ids_without_page_identity() -> None:
+    db, _storage, _batch_id, submission_id, question_id = workflow()
+    try:
+        submission = db.get(Submission, submission_id)
+        first = db.get(Question, uuid.UUID(question_id))
+        assert submission is not None and first is not None
+        first.question_number = "02(03)"
+        first.display_order = 0
+        expected = {"2(3)": first.id}
+        for display_order, number in enumerate(["2(5)", "12(1)", "12(2)"], start=1):
+            question = Question(
+                paper_version_id=first.paper_version_id,
+                question_number=number,
+                display_order=display_order,
+                question_type="calculation",
+                max_score=10,
+                status=QuestionStatus.active,
+                source="manual",
+            )
+            db.add(question)
+            db.flush()
+            expected[number] = question.id
+        page = db.scalar(
+            select(SubmissionPage)
+            .where(SubmissionPage.submission_id == submission.id)
+            .order_by(SubmissionPage.page_number)
+        )
+        assert page is not None
+        job = SubmissionProcessingJob(
+            owner_id=submission.owner_id,
+            submission_id=submission.id,
+            idempotency_key=f"hierarchical-anchors-{uuid.uuid4()}",
+            status="running",
+        )
+        db.add(job)
+        db.flush()
+        labels = ["2（3）：", "第 2(5) 题", "12(1).", "12（2）"]
+        blocks = [
+            ProviderBlock(
+                "pdf_text",
+                label,
+                None,
+                0.99,
+                (0.08, 0.10 + index * 0.18, 0.12, 0.025),
+            )
+            for index, label in enumerate(labels)
+        ]
+
+        _segment(db, job, submission, [page], {page.id: blocks})
+        db.commit()
+
+        anchors = list(
+            db.scalars(
+                select(SubmissionQuestionAnchor)
+                .where(SubmissionQuestionAnchor.submission_processing_job_id == job.id)
+                .order_by(SubmissionQuestionAnchor.y)
+            )
+        )
+        assert [anchor.normalized_number for anchor in anchors] == list(expected)
+        assert {
+            anchor.normalized_number: anchor.candidate_question_id for anchor in anchors
+        } == expected
+        regions = list(
+            db.execute(
+                select(StudentAnswerRegion, StudentAnswer)
+                .join(StudentAnswer, StudentAnswer.id == StudentAnswerRegion.student_answer_id)
+                .where(StudentAnswer.submission_id == submission.id)
+            ).all()
+        )
+        assert len(regions) == 4
+        assert {answer.question_id for _region, answer in regions} == set(expected.values())
+        assert {region.reason for region, _answer in regions} == {"QUESTION_ANCHOR"}
+        assert {region.submission_page_id for region, _answer in regions} == {page.id}
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+        db.close()
 
 
 def test_pdf_text_layer_exposes_normalized_question_anchor_coordinates() -> None:
@@ -170,11 +320,11 @@ def test_processing_job_is_idempotent_and_region_bounds_are_enforced() -> None:
             f"/api/submissions/{submission_id}/processing-jobs/{job.id}/pages/{pages[0].id}/retry?run_now=true"
         )
         assert retried.status_code == 200, retried.text
-        assert retried.json()["config_version"] == "submission-processing-v2"
+        assert retried.json()["config_version"] == "submission-processing-v3"
         db.expire_all()
         retried_page = db.get(SubmissionPage, pages[0].id)
         assert retried_page is not None
-        assert retried_page.preprocessing_version == "submission-processing-v2"
+        assert retried_page.preprocessing_version == "submission-processing-v3"
         answer = db.scalar(
             select(StudentAnswer).where(
                 StudentAnswer.submission_id == submission_id,
@@ -205,6 +355,18 @@ def test_processing_job_is_idempotent_and_region_bounds_are_enforced() -> None:
         rotated_page = db.get(SubmissionPage, pages[0].id)
         assert rotated_page is not None
         assert rotated_page.rotation == (initial_rotation + 90) % 360
+
+        incomplete = client.get(f"/api/submissions/{submission_id}/segmentation-incomplete")
+        assert incomplete.status_code == 200, incomplete.text
+        question = db.get(Question, uuid.UUID(question_id))
+        assert question is not None
+        assert incomplete.json()["questions"] == [
+            {
+                "id": question_id,
+                "question_number": question.question_number,
+                "display_order": question.display_order,
+            }
+        ]
     finally:
         settings.recognition_provider = previous
         app.dependency_overrides.pop(get_storage, None)
@@ -443,9 +605,7 @@ def test_manual_region_create_replaces_current_region_for_the_same_answer() -> N
         current = db.scalars(
             select(StudentAnswerRegion).where(
                 StudentAnswerRegion.student_answer_id == answer.id,
-                StudentAnswerRegion.status.in_(
-                    ["candidate", "confirmed", "manual_required"]
-                ),
+                StudentAnswerRegion.status.in_(["candidate", "confirmed", "manual_required"]),
             )
         ).all()
         assert persisted_old is not None

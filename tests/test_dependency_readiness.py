@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 from app.core.config import Settings
 from app.core.readiness import dependency_readiness
+from pydantic import SecretStr
 
 
 class FakeDb:
@@ -91,6 +92,60 @@ def test_worker_is_soft_degraded_component(monkeypatch: pytest.MonkeyPatch) -> N
     result = dependency_readiness(FakeDb(), settings)
     assert result["ready"] is True
     assert result["components"]["celery_worker"]["status"] == "degraded"
+
+
+def test_formula_http_readiness_is_bounded_authenticated_and_soft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = configure(monkeypatch)
+    settings.formula_recognition_provider = "http"
+    settings.formula_recognition_base_url = "http://formula.internal:8765"
+    settings.formula_recognition_api_key = SecretStr("synthetic-formula-readiness-token-32-chars")
+    settings.formula_recognition_allowed_hosts = ["formula.internal"]
+    observed: dict[str, object] = {}
+
+    def ready_response(request: object, *, timeout: float) -> FakeResponse:
+        if hasattr(request, "full_url") and str(request.full_url).endswith("/ready"):
+            observed["authorization"] = request.get_header("Authorization")
+            observed["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr("app.core.readiness.urlopen", ready_response)
+    result = dependency_readiness(FakeDb(), settings)
+
+    assert result["ready"] is True
+    assert result["components"]["formula_ocr"] == {
+        "status": "available",
+        "provider": "http",
+        "hard_dependency": False,
+        "human_confirmation_required": True,
+    }
+    assert observed == {
+        "authorization": "Bearer synthetic-formula-readiness-token-32-chars",
+        "timeout": 1.0,
+    }
+
+
+def test_formula_http_readiness_failure_is_unavailable_but_soft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = configure(monkeypatch)
+    settings.formula_recognition_provider = "http"
+    settings.formula_recognition_base_url = "http://formula.internal:8765"
+    settings.formula_recognition_api_key = SecretStr("synthetic-formula-readiness-token-32-chars")
+    settings.formula_recognition_allowed_hosts = ["formula.internal"]
+    original_urlopen = __import__("app.core.readiness", fromlist=["urlopen"]).urlopen
+
+    def fail_formula(request: object, **kwargs: object) -> object:
+        if hasattr(request, "full_url"):
+            raise TimeoutError
+        return original_urlopen(request, **kwargs)
+
+    monkeypatch.setattr("app.core.readiness.urlopen", fail_formula)
+    result = dependency_readiness(FakeDb(), settings)
+
+    assert result["ready"] is True
+    assert result["components"]["formula_ocr"]["status"] == "unavailable"
 
 
 def test_compose_uses_ready_and_nginx_retries_503() -> None:

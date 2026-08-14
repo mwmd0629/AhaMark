@@ -10,6 +10,9 @@ from app.db.session import get_db
 from app.math_validation.stale import stale_for_question
 from app.models import (
     Assignment,
+    AssignmentAnswerDraftCandidate,
+    AssignmentDraftRevision,
+    AssignmentRubricDraftCandidate,
     PaperVersion,
     Question,
     ReferenceAnswerVersion,
@@ -82,6 +85,41 @@ class ConfirmQuestionPackageInput(BaseModel):
     expected_reference_answer_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     structured_rubric_version_id: uuid.UUID
     expected_structured_rubric_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    explicit_confirmation: Literal[True]
+
+
+class ConfirmAllQuestionPackageItem(BaseModel):
+    question_id: uuid.UUID
+    expected_question_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reference_answer_version_id: uuid.UUID
+    expected_reference_answer_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    structured_rubric_version_id: uuid.UUID
+    expected_structured_rubric_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ConfirmAllQuestionPackagesInput(BaseModel):
+    expected_bundle_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    packages: list[ConfirmAllQuestionPackageItem] = Field(min_length=1)
+    explicit_confirmation: Literal[True]
+
+
+class ConfirmAllCandidatePackageItem(BaseModel):
+    question_id: uuid.UUID
+    expected_question_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    answer_candidate_id: uuid.UUID
+    expected_answer_candidate_edit_version: int = Field(ge=0)
+    expected_answer_question_version: str = Field(min_length=1, max_length=160)
+    rubric_candidate_id: uuid.UUID
+    expected_rubric_candidate_edit_version: int = Field(ge=0)
+    expected_rubric_question_version: str = Field(min_length=1, max_length=160)
+
+
+class ConfirmAllCandidatePackagesInput(BaseModel):
+    expected_bundle_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expected_draft_revision_id: uuid.UUID
+    expected_draft_revision_edit_version: int = Field(ge=0)
+    expected_source_snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    packages: list[ConfirmAllCandidatePackageItem] = Field(min_length=1)
     explicit_confirmation: Literal[True]
 
 
@@ -417,18 +455,14 @@ def confirm_rubric(rubric_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]
     return _rubric_json(db, item)
 
 
-@router.post("/assignments/{assignment_id}/questions/{question_id}/confirm-answer-rubric")
-def confirm_question_package(
+def _confirm_question_package_against_bundle(
     assignment_id: uuid.UUID,
     question_id: uuid.UUID,
     payload: ConfirmQuestionPackageInput,
-    db: Db,
+    db: Session,
     actor: Actor,
-) -> dict[str, Any]:
-    """Confirm one question's exact answer/rubric pair atomically."""
-    from app.api.assignment_central_review import owned_assignment, review_bundle
-
-    owned_assignment(db, actor.id, assignment_id, lock=True)
+    current_bundle: dict[str, Any],
+) -> tuple[ReferenceAnswerVersion, StructuredRubricVersion, bool]:
     question = _owned_question(db, actor.id, question_id)
     paper = db.get(PaperVersion, question.paper_version_id)
     if paper is None or paper.assignment_id != assignment_id:
@@ -464,7 +498,6 @@ def confirm_question_package(
             .with_for_update()
         )
     )
-    current_bundle = review_bundle(db, actor.id, assignment_id)
     bundle_hash_matches = current_bundle["version"]["bundle_hash"] == payload.expected_bundle_hash
     bundle_question = next(
         (item for item in current_bundle["questions"] if item["id"] == str(question_id)),
@@ -553,11 +586,260 @@ def confirm_question_package(
                 "bundle_hash": payload.expected_bundle_hash,
             },
         )
+    return reference, rubric, not changed
+
+
+@router.post("/assignments/{assignment_id}/questions/{question_id}/confirm-answer-rubric")
+def confirm_question_package(
+    assignment_id: uuid.UUID,
+    question_id: uuid.UUID,
+    payload: ConfirmQuestionPackageInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    """Confirm one question's exact answer/rubric pair atomically."""
+    from app.api.assignment_central_review import owned_assignment, review_bundle
+
+    owned_assignment(db, actor.id, assignment_id, lock=True)
+    current_bundle = review_bundle(db, actor.id, assignment_id)
+    reference, rubric, already_confirmed = _confirm_question_package_against_bundle(
+        assignment_id, question_id, payload, db, actor, current_bundle
+    )
     db.commit()
     return {
         "answer": _reference_json(reference),
         "rubric": _rubric_json(db, rubric),
-        "already_confirmed": not changed,
+        "already_confirmed": already_confirmed,
+    }
+
+
+@router.post("/assignments/{assignment_id}/confirm-all-answer-rubrics")
+def confirm_all_question_packages(
+    assignment_id: uuid.UUID,
+    payload: ConfirmAllQuestionPackagesInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    """Confirm every current question package in one transaction."""
+    from app.api.assignment_central_review import owned_assignment, review_bundle
+
+    owned_assignment(db, actor.id, assignment_id, lock=True)
+    current_bundle = review_bundle(db, actor.id, assignment_id)
+    if current_bundle["version"]["bundle_hash"] != payload.expected_bundle_hash:
+        raise ApiProblem(409, "REVIEW_BUNDLE_STALE", "审查内容已变化，请刷新后重试")
+
+    expected_question_ids = {item["id"] for item in current_bundle["questions"]}
+    submitted_question_ids = [str(item.question_id) for item in payload.packages]
+    if len(set(submitted_question_ids)) != len(submitted_question_ids):
+        raise ApiProblem(422, "DUPLICATE_QUESTION_PACKAGE", "同一道题不能重复确认")
+    if set(submitted_question_ids) != expected_question_ids:
+        raise ApiProblem(409, "QUESTION_PACKAGE_SET_STALE", "题目集合已变化，请刷新后重试")
+
+    results: list[tuple[ReferenceAnswerVersion, StructuredRubricVersion, bool]] = []
+    for item in sorted(payload.packages, key=lambda value: str(value.question_id)):
+        results.append(
+            _confirm_question_package_against_bundle(
+                assignment_id,
+                item.question_id,
+                ConfirmQuestionPackageInput(
+                    expected_bundle_hash=payload.expected_bundle_hash,
+                    expected_question_content_hash=item.expected_question_content_hash,
+                    reference_answer_version_id=item.reference_answer_version_id,
+                    expected_reference_answer_content_hash=(
+                        item.expected_reference_answer_content_hash
+                    ),
+                    structured_rubric_version_id=item.structured_rubric_version_id,
+                    expected_structured_rubric_content_hash=(
+                        item.expected_structured_rubric_content_hash
+                    ),
+                    explicit_confirmation=True,
+                ),
+                db,
+                actor,
+                current_bundle,
+            )
+        )
+    db.commit()
+    return {
+        "confirmed_count": sum(not already for _, _, already in results),
+        "already_confirmed_count": sum(already for _, _, already in results),
+        "packages": [
+            {
+                "answer": _reference_json(reference),
+                "rubric": _rubric_json(db, rubric),
+                "already_confirmed": already,
+            }
+            for reference, rubric, already in results
+        ],
+    }
+
+
+@router.post("/assignments/{assignment_id}/confirm-all-candidate-answer-rubrics")
+def confirm_all_candidate_question_packages(
+    assignment_id: uuid.UUID,
+    payload: ConfirmAllCandidatePackagesInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    """Accept, materialize, and confirm every displayed candidate package atomically."""
+    from app.api.assignment_answer_rubric import (
+        _materialize_reference_or_conflict,
+        _materialize_rubric_or_conflict,
+    )
+    from app.api.assignment_central_review import owned_assignment, review_bundle
+
+    owned_assignment(db, actor.id, assignment_id, lock=True)
+    current_bundle = review_bundle(db, actor.id, assignment_id)
+    if current_bundle["version"]["bundle_hash"] != payload.expected_bundle_hash:
+        raise ApiProblem(409, "REVIEW_BUNDLE_STALE", "审查内容已变化，请刷新后重试")
+    if current_bundle["version"]["draft_revision_id"] != str(payload.expected_draft_revision_id):
+        raise ApiProblem(409, "DRAFT_REVISION_STALE", "生成草稿已变化，请刷新后重试")
+
+    revision = db.scalar(
+        select(AssignmentDraftRevision)
+        .where(
+            AssignmentDraftRevision.id == payload.expected_draft_revision_id,
+            AssignmentDraftRevision.assignment_id == assignment_id,
+            AssignmentDraftRevision.owner_id == actor.id,
+        )
+        .execution_options(populate_existing=True)
+        .with_for_update()
+    )
+    if (
+        revision is None
+        or revision.teacher_edit_version != payload.expected_draft_revision_edit_version
+        or revision.source_snapshot_hash != payload.expected_source_snapshot_hash
+    ):
+        raise ApiProblem(409, "CANDIDATE_EDIT_CONFLICT", "生成草稿已变化，请刷新后重试")
+
+    expected_question_ids = {item["id"] for item in current_bundle["questions"]}
+    submitted_question_ids = [str(item.question_id) for item in payload.packages]
+    if len(set(submitted_question_ids)) != len(submitted_question_ids):
+        raise ApiProblem(422, "DUPLICATE_QUESTION_PACKAGE", "同一道题不能重复确认")
+    if set(submitted_question_ids) != expected_question_ids:
+        raise ApiProblem(409, "QUESTION_PACKAGE_SET_STALE", "题目集合已变化，请刷新后重试")
+
+    now = now_utc()
+    answers: dict[uuid.UUID, AssignmentAnswerDraftCandidate] = {}
+    rubrics: dict[uuid.UUID, AssignmentRubricDraftCandidate] = {}
+    bundle_questions = {item["id"]: item for item in current_bundle["questions"]}
+    for item in sorted(payload.packages, key=lambda value: str(value.question_id)):
+        bundle_question = bundle_questions[str(item.question_id)]
+        if bundle_question["content_hash"] != item.expected_question_content_hash:
+            raise ApiProblem(409, "QUESTION_CONTENT_STALE", "题目内容已变化，请刷新后重试")
+        if (
+            bundle_question["answer"]["candidate"] is None
+            or bundle_question["answer"]["candidate"]["id"] != str(item.answer_candidate_id)
+            or bundle_question["rubric"]["candidate"] is None
+            or bundle_question["rubric"]["candidate"]["id"] != str(item.rubric_candidate_id)
+        ):
+            raise ApiProblem(409, "QUESTION_PACKAGE_STALE", "答案或评分标准已变化，请刷新后重试")
+        answer = db.scalar(
+            select(AssignmentAnswerDraftCandidate)
+            .where(AssignmentAnswerDraftCandidate.id == item.answer_candidate_id)
+            .execution_options(populate_existing=True)
+            .with_for_update()
+        )
+        rubric = db.scalar(
+            select(AssignmentRubricDraftCandidate)
+            .where(AssignmentRubricDraftCandidate.id == item.rubric_candidate_id)
+            .execution_options(populate_existing=True)
+            .with_for_update()
+        )
+        if (
+            answer is None
+            or answer.owner_id != actor.id
+            or answer.draft_revision_id != revision.id
+            or answer.question_id != item.question_id
+            or answer.teacher_edit_version != item.expected_answer_candidate_edit_version
+            or answer.question_version != item.expected_answer_question_version
+            or answer.source_snapshot_hash != payload.expected_source_snapshot_hash
+            or answer.status not in {"suggested", "manual_required", "accepted", "modified"}
+        ):
+            raise ApiProblem(409, "ANSWER_CANDIDATE_STALE", "答案候选已变化，请刷新后重试")
+        if answer.source_type == "unknown":
+            raise ApiProblem(422, "ANSWER_SOURCE_UNCONFIRMED", "未知来源答案不能确认")
+        if (
+            rubric is None
+            or rubric.owner_id != actor.id
+            or rubric.draft_revision_id != revision.id
+            or rubric.question_id != item.question_id
+            or rubric.answer_candidate_id != answer.id
+            or rubric.teacher_edit_version != item.expected_rubric_candidate_edit_version
+            or rubric.question_version != item.expected_rubric_question_version
+            or rubric.source_snapshot_hash != payload.expected_source_snapshot_hash
+            or rubric.status not in {"suggested", "manual_required", "accepted", "modified"}
+        ):
+            raise ApiProblem(409, "RUBRIC_CANDIDATE_STALE", "评分标准候选已变化，请刷新后重试")
+        answers[item.question_id] = answer
+        rubrics[item.question_id] = rubric
+
+    changed_candidates = 0
+    for question_id in sorted(answers, key=str):
+        answer = answers[question_id]
+        if answer.status not in {"accepted", "modified"}:
+            answer.status, answer.reviewed_by, answer.reviewed_at = "accepted", actor.id, now
+            answer.teacher_edit_version += 1
+            changed_candidates += 1
+        _materialize_reference_or_conflict(db, answer, actor.id)
+    db.flush()
+    for question_id in sorted(rubrics, key=str):
+        rubric = rubrics[question_id]
+        if rubric.status not in {"accepted", "modified"}:
+            rubric.status, rubric.reviewed_by, rubric.reviewed_at = "accepted", actor.id, now
+            rubric.teacher_edit_version += 1
+            changed_candidates += 1
+        _materialize_rubric_or_conflict(db, rubric, actor.id)
+    revision.teacher_edit_version += changed_candidates
+    db.flush()
+
+    materialized_bundle = review_bundle(db, actor.id, assignment_id)
+    results: list[tuple[ReferenceAnswerVersion, StructuredRubricVersion, bool]] = []
+    for item in sorted(payload.packages, key=lambda value: str(value.question_id)):
+        answer = answers[item.question_id]
+        rubric = rubrics[item.question_id]
+        if (
+            answer.materialized_reference_answer_id is None
+            or rubric.materialized_structured_rubric_id is None
+        ):
+            raise ApiProblem(409, "QUESTION_PACKAGE_NOT_MATERIALIZED", "整套内容尚未准备完成")
+        bundle_question = next(
+            row for row in materialized_bundle["questions"] if row["id"] == str(item.question_id)
+        )
+        bundle_answer = bundle_question["answer"]["materialized"]
+        bundle_rubric = bundle_question["rubric"]["materialized"]
+        if bundle_answer is None or bundle_rubric is None:
+            raise ApiProblem(409, "QUESTION_PACKAGE_NOT_MATERIALIZED", "整套内容尚未准备完成")
+        results.append(
+            _confirm_question_package_against_bundle(
+                assignment_id,
+                item.question_id,
+                ConfirmQuestionPackageInput(
+                    expected_bundle_hash=materialized_bundle["version"]["bundle_hash"],
+                    expected_question_content_hash=bundle_question["content_hash"],
+                    reference_answer_version_id=answer.materialized_reference_answer_id,
+                    expected_reference_answer_content_hash=bundle_answer["content_hash"],
+                    structured_rubric_version_id=rubric.materialized_structured_rubric_id,
+                    expected_structured_rubric_content_hash=bundle_rubric["content_hash"],
+                    explicit_confirmation=True,
+                ),
+                db,
+                actor,
+                materialized_bundle,
+            )
+        )
+    audit(
+        db,
+        actor.id,
+        "confirm_all_candidate_question_packages",
+        "assignment",
+        assignment_id,
+        {"question_count": len(results), "bundle_hash": payload.expected_bundle_hash},
+    )
+    db.commit()
+    return {
+        "confirmed_count": sum(not already for _, _, already in results),
+        "already_confirmed_count": sum(already for _, _, already in results),
     }
 
 

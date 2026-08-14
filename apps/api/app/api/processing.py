@@ -9,6 +9,7 @@ from app.db.session import get_db
 from app.processing.orchestrator import (
     OrchestratorProblem,
     continue_processing,
+    get_latest_processing_run,
     get_processing_run,
     processing_run_json,
     reconcile_processing,
@@ -66,6 +67,15 @@ def continue_batch(batch_id: uuid.UUID, data: CommandInput, db: Db, actor: Actor
         return processing_run_json(db, run)
     except OrchestratorProblem as exc:
         db.rollback()
+        raise _translate(exc) from exc
+
+
+@router.get("/{batch_id}/processing-runs/latest")
+def get_latest_run(batch_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any] | None:
+    try:
+        run = get_latest_processing_run(db, owner_id=actor.id, batch_id=batch_id)
+        return processing_run_json(db, run) if run is not None else None
+    except OrchestratorProblem as exc:
         raise _translate(exc) from exc
 
 

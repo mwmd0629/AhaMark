@@ -12,8 +12,13 @@ from app.assignment_generation.answer_rubric import (
     question_version,
     validate_candidate_structure,
 )
+from app.assignment_generation.reference_bindings import (
+    ReferenceTextExtractionError,
+    extract_reference_answer_candidate,
+)
 from app.assignment_generation.service import owned_revision
 from app.assignment_generation.snapshot import source_snapshot_hash
+from app.assignment_generation.textbook_sources import auto_match_available_solutions
 from app.db.session import get_db
 from app.models import (
     Assignment,
@@ -23,6 +28,7 @@ from app.models import (
     AssignmentRubricDraftCandidate,
     AssignmentRubricValidationResult,
     Question,
+    ReferenceAnswerSourceBinding,
     now_utc,
 )
 from fastapi import APIRouter, Depends, Query
@@ -95,6 +101,13 @@ class EligibleInput(BaseModel):
     expected_source_snapshot: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class ExtractBoundReferenceInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_binding_edit_version: int = Field(ge=0)
+    expected_draft_revision_edit_version: int = Field(ge=0)
+    expected_source_snapshot: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 def _criteria(db: Session, rubric_id: uuid.UUID) -> list[AssignmentRubricCriterionDraft]:
     return list(
         db.scalars(
@@ -137,6 +150,9 @@ def _answer_json(row: AssignmentAnswerDraftCandidate) -> dict[str, Any]:
         if row.source_file_analysis_id
         else None,
         "source_page_id": str(row.source_page_id) if row.source_page_id else None,
+        "source_reference_binding_id": str(row.source_reference_binding_id)
+        if row.source_reference_binding_id
+        else None,
         "source_region": row.source_region,
         "raw_content": row.raw_content,
         "normalized_content": row.normalized_content,
@@ -239,6 +255,72 @@ def _owned_rubric(
     if row is None:
         raise ApiProblem(404, "RUBRIC_CANDIDATE_NOT_FOUND", "Rubric 候选不存在")
     return row
+
+
+@router.post("/reference-answer-bindings/{binding_id}/extract-answer-candidate")
+def extract_bound_reference_answer(
+    binding_id: uuid.UUID,
+    data: ExtractBoundReferenceInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    binding = db.scalar(
+        select(ReferenceAnswerSourceBinding)
+        .where(
+            ReferenceAnswerSourceBinding.id == binding_id,
+            ReferenceAnswerSourceBinding.owner_id == actor.id,
+        )
+        .with_for_update()
+    )
+    if binding is None:
+        raise ApiProblem(404, "REFERENCE_BINDING_NOT_FOUND", "参考答案来源绑定不存在")
+    revision = owned_revision(db, actor.id, binding.draft_revision_id, for_update=True)
+    assignment = db.scalar(
+        select(Assignment)
+        .where(Assignment.id == binding.assignment_id, Assignment.owner_id == actor.id)
+        .with_for_update()
+    )
+    if assignment is None:
+        raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    if assignment.status.value != "draft":
+        raise ApiProblem(409, "ASSIGNMENT_LOCKED", "只能为草稿作业生成答案候选")
+    if binding.status != "confirmed" or binding.question_id is None:
+        raise ApiProblem(409, "REFERENCE_BINDING_NOT_CONFIRMED", "请先确认参考答案来源绑定")
+    if (
+        binding.edit_version != data.expected_binding_edit_version
+        or revision.teacher_edit_version != data.expected_draft_revision_edit_version
+        or binding.draft_revision_id != revision.id
+        or binding.assignment_id != assignment.id
+        or revision.assignment_id != assignment.id
+        or binding.paper_version_id != assignment.active_paper_version_id
+        or binding.source_snapshot_hash != data.expected_source_snapshot
+        or revision.source_snapshot_hash != data.expected_source_snapshot
+        or source_snapshot_hash(db, assignment) != data.expected_source_snapshot
+    ):
+        raise ApiProblem(409, "REFERENCE_BINDING_STALE", "参考答案来源已变化，请刷新后重试")
+    try:
+        candidate = extract_reference_answer_candidate(db, binding)
+    except ReferenceTextExtractionError as exc:
+        raise ApiProblem(422, str(exc), "确认区域内没有可安全提取的 PDF 文本") from exc
+    auto_match_available_solutions(
+        db,
+        assignment=assignment,
+        revision=revision,
+    )
+    audit(
+        db,
+        actor.id,
+        "extract_answer_candidate",
+        "reference_answer_source_binding",
+        binding.id,
+        {
+            "answer_candidate_id": str(candidate.id),
+            "deterministic_pdf_text_only": True,
+            "teacher_confirmation_required": True,
+        },
+    )
+    db.commit()
+    return _answer_json(candidate)
 
 
 @overload

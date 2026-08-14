@@ -43,6 +43,7 @@ InternalSettings = Annotated[Settings, Depends(_internal_auth)]
 class ClaimInput(BaseModel):
     worker_id: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9._:-]+$")
     limit: int = Field(default=1, ge=1, le=100)
+    grading_batch_id: uuid.UUID | None = None
 
 
 class SubmitInput(BaseModel):
@@ -66,6 +67,7 @@ def claim(data: ClaimInput, db: Db, settings: InternalSettings) -> dict[str, Any
             worker_id=data.worker_id,
             limit=min(data.limit, settings.codex_local_max_claim),
             lease_seconds=settings.codex_local_lease_seconds,
+            grading_batch_id=data.grading_batch_id,
         )
     except CodexLocalProblem as exc:
         db.rollback()

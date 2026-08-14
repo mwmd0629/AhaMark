@@ -9,7 +9,9 @@ from app.models import (
     ArchiveStatus,
     Assignment,
     AssignmentClass,
+    AssignmentDraftRevision,
     AssignmentGenerationJob,
+    AssignmentSourceFileAnalysis,
     AssignmentStatus,
     AuditLog,
     FileStatus,
@@ -152,18 +154,14 @@ def test_rotation_preview_atomic_question_cut_and_duplicate_guards():
             )
             assert response.status_code == 201, response.text
 
-        pages = client.get(f"/api/assignments/{assignment_id}").json()["paper_version"][
-            "pages"
-        ]
+        pages = client.get(f"/api/assignments/{assignment_id}").json()["paper_version"]["pages"]
         first_page, second_page = pages
         rotated = client.patch(
             f"/api/assignments/{assignment_id}/pages/{first_page['id']}",
             json={"rotation": 90},
         )
         assert rotated.status_code == 200, rotated.text
-        preview = client.post(
-            f"/api/assignments/{assignment_id}/pages/{first_page['id']}/preview"
-        )
+        preview = client.post(f"/api/assignments/{assignment_id}/pages/{first_page['id']}/preview")
         assert preview.status_code == 200, preview.text
         assert preview.json()["rotation"] == 90
         assert (preview.json()["width"], preview.json()["height"]) == (200, 100)
@@ -367,12 +365,63 @@ def test_delete_draft_file_removes_object_pages_and_renumbers_remaining_pages():
             file_ids.append(response.json()["id"])
 
         assert len(fake.objects) == 2
+        job = AssignmentGenerationJob(
+            owner_id=actor.id,
+            assignment_id=uuid.UUID(aid),
+            generation=1,
+            status="review_required",
+            current_stage="validating",
+            progress=100,
+            idempotency_key=f"delete-file-{aid}",
+            request_fingerprint="a" * 64,
+            source_snapshot_hash="b" * 64,
+            provider_mode="unavailable",
+            provider_config_version="test-unavailable-v1",
+            prompt_version="test-v1",
+            schema_version="test-v1",
+        )
+        db.add(job)
+        db.flush()
+        revision = AssignmentDraftRevision(
+            owner_id=actor.id,
+            assignment_id=uuid.UUID(aid),
+            generation_job_id=job.id,
+            revision=1,
+            source_snapshot_hash=job.source_snapshot_hash,
+            status="review_required",
+        )
+        db.add(revision)
+        db.flush()
+        analysis = AssignmentSourceFileAnalysis(
+            owner_id=actor.id,
+            assignment_id=uuid.UUID(aid),
+            generation_job_id=job.id,
+            draft_revision_id=revision.id,
+            stored_file_id=uuid.UUID(file_ids[0]),
+            source_snapshot_hash=job.source_snapshot_hash,
+            detected_mime_type="image/png",
+            checksum="a" * 64,
+            page_count=1,
+            role_confidence=1,
+            suggested_role="question_paper",
+            answer_source_confidence=1,
+            suggested_answer_source="not_applicable",
+            analysis_status="confirmed",
+            teacher_confirmed_role="question_paper",
+            teacher_confirmed_answer_source="not_applicable",
+        )
+        db.add(analysis)
+        db.commit()
         deleted = client.delete(f"/api/assignments/{aid}/files/{file_ids[0]}")
         assert deleted.status_code == 200, deleted.text
         assert deleted.json() == {"id": file_ids[0], "pages_deleted": 1}
         assert len(fake.objects) == 1
         pages = client.get(f"/api/assignments/{aid}").json()["paper_version"]["pages"]
         assert [(page["file_name"], page["page_number"]) for page in pages] == [("second.png", 1)]
+        db.expire_all()
+        assert job.status == "stale"
+        assert revision.status == "stale"
+        assert analysis.analysis_status == "superseded"
         repeated = client.delete(f"/api/assignments/{aid}/files/{file_ids[0]}")
         assert repeated.status_code == 404
         assert repeated.json()["code"] == "FILE_NOT_FOUND"

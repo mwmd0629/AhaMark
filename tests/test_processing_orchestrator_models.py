@@ -32,9 +32,7 @@ ORCHESTRATOR_TABLES = {
 
 def _constraint_names(model: type[OrchestratorModel]) -> set[str]:
     return {
-        constraint.name
-        for constraint in model.__table__.constraints
-        if constraint.name is not None
+        constraint.name for constraint in model.__table__.constraints if constraint.name is not None
     }
 
 
@@ -222,9 +220,9 @@ def test_processing_orchestrator_metadata_contract() -> None:
     assert "lease_token_hash" in CodexWorkItem.__table__.c
 
 
-def test_repository_migrations_have_a_single_question_anchor_segmentation_head() -> None:
+def test_repository_migrations_have_a_single_head() -> None:
     config = Config(str(Path(__file__).parents[1] / "alembic.ini"))
-    expected_head = "0035_question_anchor_segmentation"
+    expected_head = "0048_class_resources"
     assert ScriptDirectory.from_config(config).get_heads() == [expected_head]
 
 
@@ -357,14 +355,20 @@ def test_processing_orchestrator_defaults_relationships_and_sqlite_constraints()
                 "now": now,
             },
         )
-        assert connection.scalar(
-            select(ProcessingRun.input_manifest).where(ProcessingRun.id == raw_run_id)
-        ) == {}
-        assert connection.scalar(
-            select(ProcessingRunCommand.request_payload).where(
-                ProcessingRunCommand.id == raw_command_id
+        assert (
+            connection.scalar(
+                select(ProcessingRun.input_manifest).where(ProcessingRun.id == raw_run_id)
             )
-        ) == {}
+            == {}
+        )
+        assert (
+            connection.scalar(
+                select(ProcessingRunCommand.request_payload).where(
+                    ProcessingRunCommand.id == raw_command_id
+                )
+            )
+            == {}
+        )
 
     with Session(engine) as session:
         duplicate = ProcessingRunCommand(
@@ -555,16 +559,22 @@ def test_processing_orchestrator_sqlite_schema_is_inspectable() -> None:
     )
     inspector = inspect(engine)
     assert ORCHESTRATOR_TABLES <= set(inspector.get_table_names())
-    assert next(
-        column["default"]
-        for column in inspector.get_columns("processing_runs")
-        if column["name"] == "input_manifest"
-    ) is not None
-    assert next(
-        column["default"]
-        for column in inspector.get_columns("processing_run_commands")
-        if column["name"] == "request_payload"
-    ) is not None
+    assert (
+        next(
+            column["default"]
+            for column in inspector.get_columns("processing_runs")
+            if column["name"] == "input_manifest"
+        )
+        is not None
+    )
+    assert (
+        next(
+            column["default"]
+            for column in inspector.get_columns("processing_run_commands")
+            if column["name"] == "request_payload"
+        )
+        is not None
+    )
     assert {
         constraint["name"] for constraint in inspector.get_check_constraints("codex_work_items")
     } >= {
@@ -575,18 +585,16 @@ def test_processing_orchestrator_sqlite_schema_is_inspectable() -> None:
         "ck_codex_work_item_applied_refs_complete",
         "ck_codex_work_item_applied_state",
     }
-    work_item_columns = {
-        column["name"] for column in inspector.get_columns("codex_work_items")
-    }
+    work_item_columns = {column["name"] for column in inspector.get_columns("codex_work_items")}
     assert "lease_token" not in work_item_columns
     assert {
         "lease_token_hash",
         "submitted_lease_token_hash",
         "submitted_at",
     } <= work_item_columns
-    assert {
-        index["name"] for index in inspector.get_indexes("codex_work_items")
-    } >= {"ix_codex_work_item_claim"}
+    assert {index["name"] for index in inspector.get_indexes("codex_work_items")} >= {
+        "ix_codex_work_item_claim"
+    }
 
 
 def test_codex_work_item_sqlite_status_and_audit_matrix() -> None:
@@ -687,16 +695,22 @@ def test_processing_orchestrator_postgresql_migration_contract(
         ),
         JSONB,
     )
-    assert next(
-        column["default"]
-        for column in inspector.get_columns("processing_runs")
-        if column["name"] == "input_manifest"
-    ) is not None
-    assert next(
-        column["default"]
-        for column in inspector.get_columns("processing_run_commands")
-        if column["name"] == "request_payload"
-    ) is not None
+    assert (
+        next(
+            column["default"]
+            for column in inspector.get_columns("processing_runs")
+            if column["name"] == "input_manifest"
+        )
+        is not None
+    )
+    assert (
+        next(
+            column["default"]
+            for column in inspector.get_columns("processing_run_commands")
+            if column["name"] == "request_payload"
+        )
+        is not None
+    )
     assert isinstance(
         next(
             column["type"]
@@ -797,21 +811,25 @@ def test_processing_run_command_postgresql_constraints(
                 "now": now,
             },
         )
-        assert connection.scalar(
-            select(ProcessingRun.input_manifest).where(ProcessingRun.id == raw_run_id)
-        ) == {}
-        assert connection.scalar(
-            select(ProcessingRunCommand.request_payload).where(
-                ProcessingRunCommand.id == raw_command_id
+        assert (
+            connection.scalar(
+                select(ProcessingRun.input_manifest).where(ProcessingRun.id == raw_run_id)
             )
-        ) == {}
+            == {}
+        )
+        assert (
+            connection.scalar(
+                select(ProcessingRunCommand.request_payload).where(
+                    ProcessingRunCommand.id == raw_command_id
+                )
+            )
+            == {}
+        )
 
         def assert_rejected(**overrides: object) -> None:
             savepoint = connection.begin_nested()
             try:
-                connection.execute(
-                    insert(ProcessingRunCommand).values(**values(**overrides))
-                )
+                connection.execute(insert(ProcessingRunCommand).values(**values(**overrides)))
             except (DataError, IntegrityError):
                 savepoint.rollback()
             else:
@@ -839,9 +857,7 @@ def test_processing_run_command_postgresql_constraints(
 
         stable_key = "owner-global-stable-key"
         connection.execute(
-            insert(ProcessingRunCommand).values(
-                **values(idempotency_key=stable_key)
-            )
+            insert(ProcessingRunCommand).values(**values(idempotency_key=stable_key))
         )
         assert_rejected(
             idempotency_key=stable_key,
@@ -1036,9 +1052,7 @@ def test_codex_work_item_postgresql_rejects_partial_or_illegal_states(
                 )
             )
         )
-        connection.execute(
-            insert(CodexWorkItem).values(**values(status="stale"))
-        )
+        connection.execute(insert(CodexWorkItem).values(**values(status="stale")))
         connection.execute(
             insert(CodexWorkItem).values(
                 **values(

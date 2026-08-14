@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from typing import Any
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from app.assignment_generation.providers import select_provider as select_assignment_provider
 from app.core.config import Settings
+from app.recognition.formula import HttpFormulaProvider, formula_provider_from_settings
 from redis import Redis
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
@@ -77,6 +78,33 @@ def dependency_readiness(db: Session, settings: Settings) -> dict[str, Any]:
     components["text_ocr"] = {
         "status": ocr_status,
         "hard_dependency": False,
+    }
+    formula_provider = formula_provider_from_settings(settings)
+    formula_available, _ = formula_provider.available()
+    formula_status = "unavailable"
+    if formula_available and isinstance(formula_provider, HttpFormulaProvider):
+        token = settings.formula_recognition_api_key
+        base_url = settings.formula_recognition_base_url
+        assert token is not None and base_url is not None
+        request = Request(
+            base_url.rstrip("/") + "/ready",
+            headers={"Authorization": f"Bearer {token.get_secret_value()}"},
+        )
+        try:
+            with urlopen(
+                request,
+                timeout=min(settings.formula_recognition_timeout_seconds, 1.0),
+            ) as response:
+                formula_status = "available" if response.status == 200 else "unavailable"
+        except Exception:
+            formula_status = "unavailable"
+    elif formula_available:
+        formula_status = "degraded"
+    components["formula_ocr"] = {
+        "status": formula_status,
+        "provider": formula_provider.name,
+        "hard_dependency": False,
+        "human_confirmation_required": True,
     }
     hard_ready = all(
         component["status"] == "available"

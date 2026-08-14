@@ -28,15 +28,23 @@ from app.models import (
     VersionStatus,
     now_utc,
 )
+from app.recognition.formula import formula_provider_from_settings
 from app.recognition.pipeline import (
     DefaultDocumentConverter,
     PillowPreprocessor,
+    ProviderBlock,
+    QuestionAnchor,
     RecognitionError,
     derivative_key,
+    derive_question_regions,
+    extract_pdf_text_layer,
+    parse_hierarchical_question_number,
     provider_from_settings,
     read_all,
     store_artifact,
+    text_for_question_region,
 )
+from app.recognition.text_integrity import text_quality_statistics
 from app.storage.base import ObjectStorage
 from app.storage.dependencies import get_storage
 from fastapi import APIRouter, Depends, Query
@@ -176,13 +184,6 @@ def run_recognition_job(
         return
     provider = provider_from_settings(settings)
     available, reason = provider.available()
-    if not available:
-        job.status = RecognitionStatus.failed
-        job.error_code = "RECOGNITION_PROVIDER_UNAVAILABLE"
-        job.error_message = reason
-        job.failed_at = now_utc()
-        db.commit()
-        return
     transitioned_to_running = job.status != RecognitionStatus.running
     job.status = RecognitionStatus.running
     if transitioned_to_running:
@@ -223,11 +224,9 @@ def run_recognition_job(
             source = db.get(StoredFile, page.stored_file_id)
             if not source:
                 raise RecognitionError("PAGE_CONVERSION_FAILED", "页面原文件不存在")
-            original = converter.convert(
-                read_all(storage.get(source.storage_key)),
-                source.content_type,
-                page.source_page_number or 1,
-            )
+            source_content = read_all(storage.get(source.storage_key))
+            source_page = page.source_page_number or 1
+            original = converter.convert(source_content, source.content_type, source_page)
             rendered_key = derivative_key(job.owner_id, job.id, page.id, "rendered")
             store_artifact(storage, rendered_key, original)
             result.rendered_storage_key = rendered_key
@@ -269,7 +268,49 @@ def run_recognition_job(
                     RecognitionBlock.paper_page_id == page.id,
                 )
             )
-            blocks = provider.recognize(processed)
+            text_layer_error: str | None = None
+            try:
+                text_layer_blocks = (
+                    extract_pdf_text_layer(source_content, source_page)
+                    if source.content_type == "application/pdf"
+                    else []
+                )
+            except RecognitionError as exc:
+                if exc.code != "PDF_TEXT_EXTRACTION_FAILED":
+                    raise
+                text_layer_blocks = []
+                text_layer_error = exc.code
+            text_character_count = sum(
+                len("".join((block.text or "").split())) for block in text_layer_blocks
+            )
+            text_layer_sufficient = text_character_count >= 20
+            if text_layer_sufficient:
+                blocks = text_layer_blocks
+            elif available:
+                blocks = [*text_layer_blocks, *provider.recognize(processed)]
+            elif text_layer_blocks:
+                blocks = text_layer_blocks
+            else:
+                raise RecognitionError(
+                    "RECOGNITION_PROVIDER_UNAVAILABLE", reason or "文字 OCR 不可用"
+                )
+            sources = sorted(
+                {block.source or f"{provider.name}:{provider.version}" for block in blocks}
+            )
+            quality_stats = text_quality_statistics(
+                [block.text for block in blocks],
+                sources=[block.source or f"{provider.name}:{provider.version}" for block in blocks],
+                confidences=[block.confidence for block in blocks],
+                block_types=[block.block_type for block in blocks],
+            )
+            result.processing_parameters = {
+                **params,
+                "text_character_count": text_character_count,
+                "text_layer_sufficient": text_layer_sufficient,
+                "recognition_sources": sources,
+                "text_layer_error": text_layer_error,
+                "text_quality": quality_stats,
+            }
             for order, recognized_block in enumerate(blocks, 1):
                 x, y, width, height = recognized_block.region
                 db.add(
@@ -286,7 +327,8 @@ def run_recognition_job(
                         y=y,
                         width=width,
                         height=height,
-                        source=f"{provider.name}:{provider.version}",
+                        source=recognized_block.source or f"{provider.name}:{provider.version}",
+                        character_boxes=recognized_block.character_boxes,
                         status=recognized_block.status,
                     )
                 )
@@ -307,39 +349,77 @@ def run_recognition_job(
         db.commit()
     job.stage = "structuring"
     db.execute(delete(QuestionCandidate).where(QuestionCandidate.recognition_job_id == job.id))
-    for candidate_order, block in enumerate(
+    question_number_blocks = list(
         db.scalars(
             select(RecognitionBlock)
+            .join(PaperPage, PaperPage.id == RecognitionBlock.paper_page_id)
             .where(
                 RecognitionBlock.recognition_job_id == job.id,
                 RecognitionBlock.block_type == "question_number",
             )
-            .order_by(RecognitionBlock.paper_page_id, RecognitionBlock.display_order)
-        ).all(),
-        1,
-    ):
+            .order_by(PaperPage.page_number, RecognitionBlock.y, RecognitionBlock.display_order)
+        ).all()
+    )
+    derived_regions = derive_question_regions(
+        [page.id for page in pages],
+        [
+            QuestionAnchor(block.id, block.paper_page_id, float(block.y))
+            for block in question_number_blocks
+        ],
+    )
+    content_blocks = [
+        (
+            item.paper_page_id,
+            ProviderBlock(
+                item.block_type,
+                item.text,
+                item.latex,
+                float(item.confidence) if item.confidence is not None else None,
+                (float(item.x), float(item.y), float(item.width), float(item.height)),
+                source=item.source,
+            ),
+        )
+        for item in db.scalars(
+            select(RecognitionBlock)
+            .join(PaperPage, PaperPage.id == RecognitionBlock.paper_page_id)
+            .where(RecognitionBlock.recognition_job_id == job.id)
+            .order_by(PaperPage.page_number, RecognitionBlock.y, RecognitionBlock.display_order)
+        ).all()
+    ]
+    seen_numbers: dict[str, int] = {}
+    for candidate_order, block in enumerate(question_number_blocks, 1):
+        detected_number = parse_hierarchical_question_number(block.text or "") or str(
+            candidate_order
+        )
+        occurrence = seen_numbers.get(detected_number, 0) + 1
+        seen_numbers[detected_number] = occurrence
+        temporary_number = (
+            detected_number if occurrence == 1 else f"{detected_number} [重复 {occurrence}]"
+        )
+        candidate_regions = derived_regions.get(block.id, [])
         candidate = QuestionCandidate(
             recognition_job_id=job.id,
             paper_version_id=job.paper_version_id,
-            temporary_number=str(candidate_order),
+            temporary_number=temporary_number,
             question_type="other",
-            content_text=block.text,
+            content_text=text_for_question_region(content_blocks, candidate_regions) or block.text,
             confidence=block.confidence,
-            source=f"{provider.name}:{provider.version}",
+            source=block.source,
         )
         db.add(candidate)
         db.flush()
-        db.add(
-            QuestionCandidateRegion(
-                question_candidate_id=candidate.id,
-                paper_page_id=block.paper_page_id,
-                x=block.x,
-                y=block.y,
-                width=block.width,
-                height=block.height,
-                confidence=block.confidence,
+        for region in candidate_regions:
+            db.add(
+                QuestionCandidateRegion(
+                    question_candidate_id=candidate.id,
+                    paper_page_id=region.paper_page_id,
+                    x=region.x,
+                    y=region.y,
+                    width=region.width,
+                    height=region.height,
+                    confidence=block.confidence,
+                )
             )
-        )
     job.stage = "completed"
     job.progress = 100
     job.completed_at = now_utc()
@@ -358,15 +438,26 @@ def providers(assignment_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
     )
     if not assignment:
         raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
-    provider = provider_from_settings(get_settings())
+    settings = get_settings()
+    provider = provider_from_settings(settings)
     available, reason = provider.available()
+    formula_provider = formula_provider_from_settings(settings)
+    formula_available, formula_reason = formula_provider.available()
     return {
         "provider": provider.name,
         "version": provider.version,
         "available": available,
         "demo": provider.is_demo,
         "reason": reason,
-        "formula": {"provider": "unavailable", "available": False, "reason": "未配置公式识别模型"},
+        "pdf_text": {
+            "available": True,
+            "reason": "PDF 优先读取内嵌文字层；无文字层的页面才需要 OCR",
+        },
+        "formula": {
+            "provider": formula_provider.name,
+            "available": formula_available,
+            "reason": formula_reason,
+        },
     }
 
 
@@ -396,7 +487,20 @@ def create_job(
         return job_json(db, existing)
     provider = provider_from_settings(get_settings())
     available, reason = provider.available()
-    if not available:
+    page_file_ids = set(
+        db.scalars(
+            select(PaperPage.stored_file_id).where(PaperPage.paper_version_id == version.id)
+        ).all()
+    )
+    has_pdf_source = bool(
+        page_file_ids
+        and db.scalar(
+            select(func.count())
+            .select_from(StoredFile)
+            .where(StoredFile.id.in_(page_file_ids), StoredFile.content_type == "application/pdf")
+        )
+    )
+    if not available and not has_pdf_source:
         raise ApiProblem(503, "RECOGNITION_PROVIDER_UNAVAILABLE", reason or "识别器不可用")
     job = RecognitionJob(
         owner_id=actor.id,
@@ -484,6 +588,7 @@ def get_blocks(
                 "height": str(x.height),
             },
             "source": x.source,
+            "character_boxes": x.character_boxes,
             "status": x.status,
         }
         for x in db.scalars(query.order_by(RecognitionBlock.display_order)).all()
@@ -494,6 +599,12 @@ def candidate_json(db: Session, x: QuestionCandidate) -> dict[str, Any]:
     regions = db.scalars(
         select(QuestionCandidateRegion).where(QuestionCandidateRegion.question_candidate_id == x.id)
     ).all()
+    quality_stats = text_quality_statistics(
+        [x.content_text, x.content_latex],
+        sources=[x.source],
+        confidences=[float(x.confidence) if x.confidence is not None else None],
+        block_types=["formula"] if x.content_latex else [],
+    )
     return {
         "id": str(x.id),
         "temporary_number": x.temporary_number,
@@ -504,6 +615,7 @@ def candidate_json(db: Session, x: QuestionCandidate) -> dict[str, Any]:
         "confidence": str(x.confidence) if x.confidence is not None else None,
         "status": x.status,
         "source": x.source,
+        "quality_stats": quality_stats,
         "confirmed_question_id": str(x.confirmed_question_id) if x.confirmed_question_id else None,
         "regions": [
             {
@@ -588,6 +700,12 @@ def confirm(
     )
     if len(candidates) != len(set(data.candidate_ids)):
         raise ApiProblem(422, "QUESTION_CANDIDATE_INVALID", "候选题目集合无效")
+    if any("[重复 " in candidate.temporary_number for candidate in candidates):
+        raise ApiProblem(
+            422,
+            "QUESTION_NUMBER_CONFLICT",
+            "检测到重复题号，请教师先修改题号再确认",
+        )
     existing_order = (
         db.scalar(
             select(func.max(Question.display_order)).where(
@@ -603,6 +721,7 @@ def confirm(
             continue
         if candidate.status == CandidateStatus.rejected:
             continue
+        source_kind = "pdf_text" if candidate.source.startswith("pdf_text:") else "ocr"
         question = Question(
             paper_version_id=job.paper_version_id,
             question_number=candidate.temporary_number,
@@ -611,7 +730,7 @@ def confirm(
             content_text=candidate.content_text,
             content_latex=candidate.content_latex,
             max_score=candidate.suggested_score,
-            source="ocr",
+            source=source_kind,
         )
         db.add(question)
         db.flush()
@@ -628,7 +747,7 @@ def confirm(
                     y=region.y,
                     width=region.width,
                     height=region.height,
-                    source="ocr",
+                    source=source_kind,
                     confidence=region.confidence,
                 )
             )

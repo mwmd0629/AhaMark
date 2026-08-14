@@ -15,6 +15,7 @@ import {
 } from "@/lib/api";
 import { Button, Card, PageHeader } from "@/components/ui";
 import { SubmissionSegmentationWorkspace } from "@/components/submission-segmentation-workspace";
+import { useSmartRefresh } from "@/lib/use-smart-refresh";
 
 const terminal = new Set(["completed", "partially_completed", "failed"]);
 const terminalSubmissionStatuses = new Set(["finalized", "merged", "voided"]);
@@ -127,12 +128,14 @@ export default function GradingBatchPage({
 
   const load = useCallback(async () => {
     const nextBatch = await gradingApi.getBatch(batchId);
-    const [nextSubmissions, releases] = await Promise.all([
+    const [nextSubmissions, releases, latestProcessingRun] = await Promise.all([
       gradingApi.submissions(batchId),
       analyticsApi.releases(nextBatch.assignment_id),
+      gradingApi.latestProcessingRun(batchId),
     ]);
     setBatch(nextBatch);
     setSubmissions(nextSubmissions);
+    setProcessingRun(latestProcessingRun ?? undefined);
     const classReleases = releases.filter(
       (item) => item.class_id === nextBatch.class_id,
     );
@@ -152,6 +155,7 @@ export default function GradingBatchPage({
   useEffect(() => {
     load().catch(() => setError("无法加载批次工作台"));
   }, [load]);
+  useSmartRefresh(load, { intervalMs: 30_000 });
 
   useEffect(() => {
     if (!release) {
@@ -676,11 +680,34 @@ export default function GradingBatchPage({
           <h2 className="font-bold">学生作业</h2>
         </div>
         <details
-          className="rounded-xl border bg-slate-50 p-4"
+          className="rounded-xl border border-indigo-200 bg-indigo-50/70 p-4 shadow-sm"
+          data-testid="submission-upload-section"
+          data-section-kind="upload"
           open={submissions.length === 0}
         >
-          <summary className="cursor-pointer font-semibold">
-            {submissions.length ? "补充上传" : "上传学生作业"}
+          <summary className="flex cursor-pointer list-none items-center gap-3 font-semibold text-indigo-950 [&::-webkit-details-marker]:hidden">
+            <span
+              aria-hidden="true"
+              className="grid h-8 w-8 place-items-center rounded-lg bg-indigo-100 text-lg text-indigo-700"
+            >
+              ＋
+            </span>
+            <span className="flex flex-wrap items-center gap-2">
+              <span>{submissions.length ? "补充上传" : "上传学生作业"}</span>
+              {batch.matching.items.some(
+                (item) => item.status === "confirmed",
+              ) && (
+                <span className="rounded-full bg-cyan-100 px-2.5 py-0.5 text-xs font-medium text-cyan-800">
+                  已匹配{" "}
+                  {
+                    batch.matching.items.filter(
+                      (item) => item.status === "confirmed",
+                    ).length
+                  }
+                  个文件
+                </span>
+              )}
+            </span>
           </summary>
           <form
             action={upload}
@@ -754,142 +781,231 @@ export default function GradingBatchPage({
             </div>
             <Button loading={busy}>上传并自动匹配</Button>
           </form>
+          {batch.matching.items.some((item) => item.status === "confirmed") && (
+            <section
+              className="mt-4 border-t border-indigo-200 pt-4"
+              data-testid="matched-upload-section"
+              data-section-kind="matched-files"
+            >
+              <h3 className="text-sm font-semibold text-cyan-950">
+                已匹配上传
+              </h3>
+              <div className="mt-2 space-y-2 rounded-lg border border-cyan-200 bg-cyan-50/80 p-3">
+                {batch.matching.items
+                  .filter((item) => item.status === "confirmed")
+                  .map((item) => (
+                    <div
+                      key={item.id}
+                      className="flex items-center justify-between gap-3 text-sm"
+                    >
+                      <span className="min-w-0 truncate">{item.filename}</span>
+                      <Button
+                        variant="outline"
+                        disabled={busy}
+                        onClick={() => void undoUpload(item.id)}
+                      >
+                        撤销错误上传
+                      </Button>
+                    </div>
+                  ))}
+              </div>
+            </section>
+          )}
         </details>
         <div className="grid gap-3" data-testid="submission-cards">
           {submissions.map((item, index) => {
             const job = jobs[item.id];
             const isActive = isActiveSubmission(item);
+            const workspaceSubmission = workspace?.items.find(
+              (candidate) => candidate.submission_id === item.id,
+            );
+            const reviewedScores = (workspaceSubmission?.answers ?? []).map(
+              (answer) => answer.review?.final_score,
+            );
+            const hasConfirmedScore =
+              reviewedScores.length > 0 &&
+              reviewedScores.every(
+                (score): score is string =>
+                  typeof score === "string" && score.trim().length > 0,
+              );
+            const confirmedScore = hasConfirmedScore
+              ? reviewedScores.reduce((sum, score) => sum + Number(score), 0)
+              : undefined;
+            const compactStatus =
+              confirmedScore === undefined
+                ? "待批改"
+                : `${Number.isInteger(confirmedScore) ? confirmedScore : confirmedScore.toFixed(2)} 分`;
             return (
               <article
                 key={item.id}
-                className="rounded-xl border p-4"
+                className={`overflow-hidden rounded-xl border border-l-4 shadow-sm transition-colors ${
+                  confirmedScore === undefined
+                    ? "border-amber-200 border-l-amber-400 bg-amber-50/30"
+                    : "border-emerald-200 border-l-emerald-500 bg-emerald-50/30"
+                }`}
                 data-testid="submission"
+                data-section-kind="student-submission"
                 data-submission-id={item.id}
                 data-student-id={item.student_id}
                 data-status={item.status}
               >
-                <div>
-                  <h3 className="font-semibold">
-                    {item.student_name || `学生作业 ${index + 1}`}
-                  </h3>
-                  <p className="text-xs text-slate-500">
-                    {item.student_number
-                      ? `学号 ${item.student_number} · `
-                      : ""}
-                    {item.page_count} 页
-                  </p>
-                </div>
-                <div
-                  className={`mt-3 rounded-lg border p-3 text-sm ${
-                    item.workflow.stage === "completed"
-                      ? "border-emerald-200 bg-emerald-50"
-                      : item.workflow.stage === "failed"
-                        ? "border-red-200 bg-red-50"
-                        : "border-amber-200 bg-amber-50"
-                  }`}
-                  data-testid="submission-workflow"
-                  data-stage={item.workflow.stage}
-                >
-                  <p className="font-medium">{item.workflow.stage_label}</p>
-                  <p className="text-slate-600">{item.workflow.reason}</p>
-                  <p className="text-xs text-slate-500">
-                    {item.workflow.action}
-                  </p>
-                </div>
-                <details className="mt-3 rounded-lg border p-3 text-sm">
-                  <summary className="cursor-pointer font-medium">
-                    页面与高级操作
-                  </summary>
-                  <p className="mt-2 text-xs text-slate-500">
-                    作业记录：{item.id}
-                  </p>
-                  {(() => {
-                    const pageIds =
-                      workspace?.items
-                        .find(
-                          (candidate) => candidate.submission_id === item.id,
-                        )
-                        ?.pages.map((page) => page.id) ?? [];
-                    const primary = submissions.find(
-                      (candidate) =>
-                        candidate.attempt_number === 1 &&
-                        isActiveSubmission(candidate),
-                    );
-                    return (
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {isActive && pageIds.length > 1 && (
-                          <>
-                            <Button
-                              variant="outline"
-                              onClick={() =>
-                                void reversePages(item.id, pageIds)
-                              }
-                            >
-                              反转页面顺序
-                            </Button>
-                            <Button
-                              variant="outline"
-                              onClick={() =>
-                                void splitSubmission(
-                                  item.id,
-                                  pageIds[pageIds.length - 1],
-                                )
-                              }
-                            >
-                              拆出末页
-                            </Button>
-                          </>
-                        )}
-                        {item.attempt_number > 1 && primary && isActive && (
-                          <Button
-                            variant="outline"
-                            onClick={() =>
-                              void mergeSubmission(primary.id, item.id)
-                            }
-                          >
-                            合并回首次 Submission
-                          </Button>
-                        )}
-                      </div>
-                    );
-                  })()}
-                  {job && (
-                    <div
-                      className="mt-2 text-sm"
-                      data-testid="submission-ocr"
-                      data-job-id={job.id}
-                      data-provider={job.provider}
-                      data-status={job.status}
+                <details className="group" data-testid="submission-details">
+                  <summary className="flex min-h-14 cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 [&::-webkit-details-marker]:hidden">
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span
+                        aria-hidden="true"
+                        className={`grid h-8 w-8 shrink-0 place-items-center rounded-full text-xs font-bold ${
+                          confirmedScore === undefined
+                            ? "bg-amber-100 text-amber-800"
+                            : "bg-emerald-100 text-emerald-800"
+                        }`}
+                      >
+                        生
+                      </span>
+                      <span
+                        aria-hidden="true"
+                        className="text-xs text-slate-500 transition-transform group-open:rotate-90"
+                      >
+                        ▶
+                      </span>
+                      <h3 className="truncate font-semibold">
+                        {item.student_name || `学生作业 ${index + 1}`}
+                      </h3>
+                    </span>
+                    <span
+                      className={`shrink-0 rounded-full px-3 py-1 text-sm font-medium ${
+                        confirmedScore === undefined
+                          ? "bg-amber-50 text-amber-800"
+                          : "bg-emerald-50 text-emerald-800"
+                      }`}
+                      data-testid="submission-compact-status"
                     >
-                      OCR：{job.status} · provider={job.provider} · 页面{" "}
-                      {job.pages
-                        .map((page) => `${page.page_number}:${page.status}`)
-                        .join("，")}
-                      {job.pages.length > 0 && (
-                        <Button
-                          className="mt-2"
-                          variant="outline"
-                          onClick={() =>
-                            void act("页面顺序已通过 UI 保存", () =>
-                              gradingApi
-                                .reorderPages(
-                                  item.id,
-                                  job.pages.map((page) => page.id),
-                                )
-                                .then(() => undefined),
+                      {compactStatus}
+                    </span>
+                  </summary>
+                  <div className="border-t p-4">
+                    <p className="text-xs text-slate-500">
+                      {item.student_number
+                        ? `学号 ${item.student_number} · `
+                        : ""}
+                      {item.page_count} 页
+                    </p>
+                    <div
+                      className={`mt-3 rounded-lg border p-3 text-sm ${
+                        item.workflow.stage === "completed"
+                          ? "border-emerald-200 bg-emerald-50"
+                          : item.workflow.stage === "failed"
+                            ? "border-red-200 bg-red-50"
+                            : "border-amber-200 bg-amber-50"
+                      }`}
+                      data-testid="submission-workflow"
+                      data-stage={item.workflow.stage}
+                    >
+                      <p className="font-medium">{item.workflow.stage_label}</p>
+                      <p className="text-slate-600">{item.workflow.reason}</p>
+                      <p className="text-xs text-slate-500">
+                        {item.workflow.action}
+                      </p>
+                    </div>
+                    <details className="mt-3 rounded-lg border p-3 text-sm">
+                      <summary className="cursor-pointer font-medium">
+                        页面与高级操作
+                      </summary>
+                      <p className="mt-2 text-xs text-slate-500">
+                        作业记录：{item.id}
+                      </p>
+                      {(() => {
+                        const pageIds =
+                          workspace?.items
+                            .find(
+                              (candidate) =>
+                                candidate.submission_id === item.id,
                             )
-                          }
+                            ?.pages.map((page) => page.id) ?? [];
+                        const primary = submissions.find(
+                          (candidate) =>
+                            candidate.attempt_number === 1 &&
+                            isActiveSubmission(candidate),
+                        );
+                        return (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {isActive && pageIds.length > 1 && (
+                              <>
+                                <Button
+                                  variant="outline"
+                                  onClick={() =>
+                                    void reversePages(item.id, pageIds)
+                                  }
+                                >
+                                  反转页面顺序
+                                </Button>
+                                <Button
+                                  variant="outline"
+                                  onClick={() =>
+                                    void splitSubmission(
+                                      item.id,
+                                      pageIds[pageIds.length - 1],
+                                    )
+                                  }
+                                >
+                                  拆出末页
+                                </Button>
+                              </>
+                            )}
+                            {item.attempt_number > 1 && primary && isActive && (
+                              <Button
+                                variant="outline"
+                                onClick={() =>
+                                  void mergeSubmission(primary.id, item.id)
+                                }
+                              >
+                                合并回首次 Submission
+                              </Button>
+                            )}
+                          </div>
+                        );
+                      })()}
+                      {job && (
+                        <div
+                          className="mt-2 text-sm"
+                          data-testid="submission-ocr"
+                          data-job-id={job.id}
+                          data-provider={job.provider}
+                          data-status={job.status}
                         >
-                          保存当前页面顺序
-                        </Button>
+                          OCR：{job.status} · provider={job.provider} · 页面{" "}
+                          {job.pages
+                            .map((page) => `${page.page_number}:${page.status}`)
+                            .join("，")}
+                          {job.pages.length > 0 && (
+                            <Button
+                              className="mt-2"
+                              variant="outline"
+                              onClick={() =>
+                                void act("页面顺序已通过 UI 保存", () =>
+                                  gradingApi
+                                    .reorderPages(
+                                      item.id,
+                                      job.pages.map((page) => page.id),
+                                    )
+                                    .then(() => undefined),
+                                )
+                              }
+                            >
+                              保存当前页面顺序
+                            </Button>
+                          )}
+                        </div>
                       )}
-                    </div>
-                  )}
-                  {isActive && (
-                    <div className="mt-3">
-                      <SubmissionSegmentationWorkspace submissionId={item.id} />
-                    </div>
-                  )}
+                      {isActive && (
+                        <div className="mt-3">
+                          <SubmissionSegmentationWorkspace
+                            submissionId={item.id}
+                          />
+                        </div>
+                      )}
+                    </details>
+                  </div>
                 </details>
               </article>
             );
@@ -952,41 +1068,19 @@ export default function GradingBatchPage({
               ))}
           </div>
         )}
-        {batch.matching.items.some((item) => item.status === "confirmed") && (
-          <details className="rounded-xl border p-4">
-            <summary className="cursor-pointer font-semibold">
-              已匹配上传 ·{" "}
-              {
-                batch.matching.items.filter(
-                  (item) => item.status === "confirmed",
-                ).length
-              }
-              个文件
-            </summary>
-            <div className="mt-3 space-y-2">
-              {batch.matching.items
-                .filter((item) => item.status === "confirmed")
-                .map((item) => (
-                  <div
-                    key={item.id}
-                    className="flex items-center justify-between gap-3 text-sm"
-                  >
-                    <span>{item.filename}</span>
-                    <Button
-                      variant="outline"
-                      disabled={busy}
-                      onClick={() => void undoUpload(item.id)}
-                    >
-                      撤销错误上传
-                    </Button>
-                  </div>
-                ))}
-            </div>
-          </details>
-        )}
-        <details className="rounded-xl border p-4 text-sm">
-          <summary className="cursor-pointer font-semibold">
-            高级处理工具
+        <details
+          className="rounded-xl border border-dashed border-slate-300 bg-slate-50/80 p-4 text-sm"
+          data-testid="advanced-processing-section"
+          data-section-kind="advanced-tools"
+        >
+          <summary className="flex cursor-pointer list-none items-center gap-3 font-semibold text-slate-700 [&::-webkit-details-marker]:hidden">
+            <span
+              aria-hidden="true"
+              className="grid h-8 w-8 place-items-center rounded-lg bg-slate-200 text-xs font-bold text-slate-600"
+            >
+              工
+            </span>
+            <span>高级处理工具</span>
           </summary>
           <p className="mt-2 text-slate-600">仅在自动处理未解决问题时使用。</p>
           <div className="mt-3 flex flex-wrap gap-2">

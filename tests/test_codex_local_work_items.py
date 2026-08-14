@@ -288,6 +288,35 @@ def test_partial_materialize_replay_recounts_the_whole_run(
     assert run.pending_codex_count == 1
 
 
+def test_claim_can_be_scoped_to_one_grading_batch(
+    db: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_run, first_step = _seed_step(db)
+    second_run, second_step = _seed_step(db)
+    payload = {"schema": "codex-work-request-v1", "suggestion_only": True}
+    monkeypatch.setattr(
+        codex_local,
+        "build_work_request",
+        lambda *_args, **_kwargs: (payload, "c" * 64, "e" * 64),
+    )
+    first_item = materialize_work_items(db, run=first_run, steps=[first_step])[0]
+    second_item = materialize_work_items(db, run=second_run, steps=[second_step])[0]
+    db.commit()
+    monkeypatch.setattr(codex_local, "_current_item_state", lambda *_args, **_kwargs: None)
+
+    claimed = claim_work_items(
+        db,
+        worker_id="batch-scoped-worker",
+        limit=10,
+        lease_seconds=60,
+        grading_batch_id=second_run.grading_batch_id,
+    )
+
+    assert [item["work_item_id"] for item in claimed] == [str(second_item.id)]
+    assert db.get(CodexWorkItem, first_item.id).status == "queued"
+    assert db.get(CodexWorkItem, second_item.id).status == "leased"
+
+
 def test_claim_and_submit_are_lease_fenced_and_suggestion_only(
     db: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -564,9 +593,7 @@ def test_work_request_contains_real_bundle_content_and_hashes_it(
     assert bundle["question"]["text"] == "What is 1+1?"
     assert bundle["student_answer"]["text"] == "2"
     assert bundle["reference_answer"]["raw_content"] == "Two"
-    assert bundle["structured_rubric"]["criteria"][0]["validation_rule"] == {
-        "equals": "2"
-    }
+    assert bundle["structured_rubric"]["criteria"][0]["validation_rule"] == {"equals": "2"}
     assert bundle["structured_rubric_set"] == snapshot_payload["structured_rubric_set"]
     assert version == "9" * 64
     answer.recognized_text = "two"

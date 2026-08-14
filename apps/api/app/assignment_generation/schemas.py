@@ -13,7 +13,14 @@ FieldName = Literal[
     "total_score",
 ]
 FileRole = Literal[
-    "question_paper", "reference_answer", "rubric", "instructions", "attachment", "unknown"
+    "question_paper",
+    "reference_answer",
+    "question_and_answer",
+    "textbook",
+    "rubric",
+    "instructions",
+    "attachment",
+    "unknown",
 ]
 AnswerSource = Literal[
     "teacher_official",
@@ -24,6 +31,8 @@ AnswerSource = Literal[
     "unknown",
     "not_applicable",
 ]
+ContentMode = Literal["text", "scanned", "mixed", "unknown"]
+TextSource = Literal["pdf_text", "ocr", "mixed", "unavailable"]
 
 
 class EvidenceRef(BaseModel):
@@ -69,6 +78,9 @@ class FileAnalysisCandidate(BaseModel):
     detected_mime_type: str = Field(min_length=1, max_length=127)
     checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
     page_count: int | None = Field(None, ge=0)
+    content_mode: ContentMode = "unknown"
+    text_source: TextSource = "unavailable"
+    content_mode_confidence: float = Field(0, ge=0, le=1)
     suggested_role: FileRole
     role_confidence: float = Field(ge=0, le=1)
     suggested_answer_source: AnswerSource
@@ -92,6 +104,10 @@ class PageAnalysisCandidate(BaseModel):
         "pending_conversion",
         "processing_failed",
     ]
+    content_mode: ContentMode = "unknown"
+    text_source: TextSource = "unavailable"
+    content_mode_confidence: float = Field(0, ge=0, le=1)
+    text_character_count: int = Field(0, ge=0)
     quality_score: float | None = Field(None, ge=0, le=1)
     blank_probability: float | None = Field(None, ge=0, le=1)
     duplicate_probability: float | None = Field(None, ge=0, le=1)

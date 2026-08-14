@@ -29,19 +29,20 @@ import {
   ApiError,
   assignmentsApi,
   classesApi,
+  type AssignmentFieldSuggestion,
   type AssignmentRecord,
+  type ClassResource,
   type ClassRecord,
 } from "@/lib/api";
 import { formatQuestionScore } from "@/lib/question-score";
 
-const steps = [
-  "基本信息",
-  "上传试卷",
-  "整理页面",
-  "编辑题目",
-  "评分标准",
-  "集中审查与发布",
-];
+const steps = ["准备作业", "核对内容", "确认发布"];
+
+function wizardStepForCompleteness(step: number) {
+  if (step <= 2) return 1;
+  if (step <= 5) return 2;
+  return 3;
+}
 
 function toLocalDateTimeInput(value: string) {
   const date = new Date(value);
@@ -56,16 +57,6 @@ function toIsoDateTime(value: string) {
   return Number.isNaN(date.getTime()) ? value : date.toISOString();
 }
 
-function isPdfPreview(url: string) {
-  return /\.pdf(?:$|[?#])/i.test(url);
-}
-
-function pagePreviewUrl(url: string, pageNumber: number) {
-  return isPdfPreview(url)
-    ? `${url}#page=${pageNumber}&toolbar=0&navpanes=0&scrollbar=0`
-    : url;
-}
-
 export function AssignmentWizard({
   assignmentId,
   initialStep,
@@ -77,6 +68,8 @@ export function AssignmentWizard({
   const toast = useToast();
   const [item, setItem] = useState<AssignmentRecord>();
   const [classes, setClasses] = useState<ClassRecord[]>([]);
+  const [classResources, setClassResources] = useState<ClassResource[]>([]);
+  const [selectedResourceIds, setSelectedResourceIds] = useState<string[]>([]);
   const [step, setStep] = useState(1);
   const [reviewInputsRevision, setReviewInputsRevision] = useState(0);
   const [error, setError] = useState("");
@@ -84,18 +77,22 @@ export function AssignmentWizard({
   const [dueMode, setDueMode] = useState<"none" | "scheduled">("none");
   const [dueValue, setDueValue] = useState("");
   const [selectedClassIds, setSelectedClassIds] = useState<string[]>([]);
+  const [classPickerOpen, setClassPickerOpen] = useState(false);
+  const [classQuery, setClassQuery] = useState("");
   const [deliveryMode, setDeliveryMode] = useState<
     "class_assignment" | "joint_exam"
   >("class_assignment");
+  const [assignmentTitle, setAssignmentTitle] = useState("");
+  const [assignmentSubject, setAssignmentSubject] = useState("");
+  const [assignmentTotalScore, setAssignmentTotalScore] = useState("");
+  const [fieldSuggestions, setFieldSuggestions] = useState<
+    AssignmentFieldSuggestion[]
+  >([]);
   const [uploadFile, setUploadFile] = useState<File>();
   const [uploadState, setUploadState] = useState<
     "idle" | "ready" | "uploading" | "processing" | "success" | "error"
   >("idle");
   const [uploadError, setUploadError] = useState("");
-  const [uploadResult, setUploadResult] = useState<{
-    name: string;
-    pages: number;
-  }>();
   const [dragging, setDragging] = useState(false);
   const [deletingFileId, setDeletingFileId] = useState("");
   const [selectedPageId, setSelectedPageId] = useState("");
@@ -105,6 +102,7 @@ export function AssignmentWizard({
   const [previewErrors, setPreviewErrors] = useState<Record<string, boolean>>(
     {},
   );
+  const pagePreviewRequests = useRef(new Set<string>());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const initializedRef = useRef(false);
   const [question, setQuestion] = useState({
@@ -120,13 +118,6 @@ export function AssignmentWizard({
   const [questionSubmitting, setQuestionSubmitting] = useState(false);
   const [questionConflict, setQuestionConflict] = useState(false);
   const questionDirtyRef = useRef(false);
-  const [region, setRegion] = useState({
-    page: "",
-    x: "0.1",
-    y: "0.1",
-    width: "0.8",
-    height: "0.2",
-  });
   const load = useCallback(
     async (preferredQuestionId?: string) => {
       try {
@@ -138,7 +129,10 @@ export function AssignmentWizard({
         setClasses(active.items);
         const initializing = !initializedRef.current;
         if (initializing) {
-          setStep(initialStep ?? assignment.completeness.next_step ?? 1);
+          setStep(
+            initialStep ??
+              wizardStepForCompleteness(assignment.completeness.next_step ?? 1),
+          );
           initializedRef.current = true;
         }
         setSelectedQuestion((current) => {
@@ -162,10 +156,6 @@ export function AssignmentWizard({
           setQuestionConflict(false);
           return questions[0]?.id ?? "";
         });
-        setRegion((old) => ({
-          ...old,
-          page: assignment.paper_version?.pages[0]?.id ?? "",
-        }));
       } catch (e) {
         setError(e instanceof ApiError ? e.message : "无法加载草稿");
       }
@@ -177,6 +167,16 @@ export function AssignmentWizard({
     await load();
   }, [load]);
   useEffect(() => void load(), [load]);
+  useEffect(() => {
+    if (!item?.classes.length) {
+      setClassResources([]);
+      return;
+    }
+    void assignmentsApi
+      .availableClassResources(assignmentId)
+      .then(setClassResources)
+      .catch(() => setClassResources([]));
+  }, [assignmentId, item?.classes]);
   useEffect(() => {
     setDueMode(item?.due_at ? "scheduled" : "none");
     setDueValue(item?.due_at ? toLocalDateTimeInput(item.due_at) : "");
@@ -192,6 +192,13 @@ export function AssignmentWizard({
   useEffect(() => {
     setDeliveryMode(item?.delivery_mode ?? "class_assignment");
   }, [item?.id, item?.delivery_mode]);
+  useEffect(() => {
+    setAssignmentTitle(item?.title ?? "");
+    setAssignmentSubject(item?.subject ?? "");
+    setAssignmentTotalScore(
+      item?.total_score == null ? "" : String(item.total_score),
+    );
+  }, [item?.id, item?.title, item?.subject, item?.total_score]);
   useEffect(() => {
     const pages = item?.paper_version?.pages ?? [];
     if (!pages.length) {
@@ -246,34 +253,35 @@ export function AssignmentWizard({
     }
     return [...files.values()];
   }, [item?.paper_version?.pages]);
-  const loadPreview = useCallback(
-    async (fileId: string) => {
+  const loadPagePreview = useCallback(
+    async (pageId: string) => {
+      if (pagePreviewRequests.current.has(pageId)) return;
+      pagePreviewRequests.current.add(pageId);
       try {
-        const result = await assignmentsApi.preview(assignmentId, fileId);
+        const result = await assignmentsApi.pagePreview(assignmentId, pageId);
         setPagePreviewUrls((current) => ({
           ...current,
-          [fileId]: result.url,
+          [pageId]: result.url,
         }));
-        setPreviewErrors((current) => ({ ...current, [fileId]: false }));
+        setPreviewErrors((current) => ({ ...current, [pageId]: false }));
       } catch {
-        setPreviewErrors((current) => ({ ...current, [fileId]: true }));
+        setPreviewErrors((current) => ({ ...current, [pageId]: true }));
+      } finally {
+        pagePreviewRequests.current.delete(pageId);
       }
     },
     [assignmentId],
   );
   useEffect(() => {
-    if (step !== 3) return;
-    const fileIds = new Set(
-      (item?.paper_version?.pages ?? []).map((page) => page.stored_file_id),
-    );
-    fileIds.forEach((fileId) => {
-      if (!pagePreviewUrls[fileId] && !previewErrors[fileId]) {
-        void loadPreview(fileId);
+    if (step !== 2) return;
+    (item?.paper_version?.pages ?? []).forEach((page) => {
+      if (!pagePreviewUrls[page.id] && !previewErrors[page.id]) {
+        void loadPagePreview(page.id);
       }
     });
   }, [
     item?.paper_version?.pages,
-    loadPreview,
+    loadPagePreview,
     pagePreviewUrls,
     previewErrors,
     step,
@@ -282,6 +290,11 @@ export function AssignmentWizard({
   if (!item) return <Card className="p-8">正在恢复后端草稿…</Card>;
 
   const saveBasics = async (form: FormData) => {
+    const subject = String(form.get("subject") ?? "").trim();
+    if (!subject || subject === "数学") {
+      toast("请填写具体大学课程，例如数学分析或线性代数", "error");
+      return;
+    }
     if (dueMode === "scheduled" && !dueValue) {
       toast("请选择具体的截止日期和时间", "error");
       return;
@@ -297,7 +310,7 @@ export function AssignmentWizard({
         {
           title: String(form.get("title")),
           delivery_mode: deliveryMode,
-          subject: String(form.get("subject")),
+          subject,
           grade: String(form.get("grade")),
           description: String(form.get("description")),
           total_score: Number(form.get("total_score")),
@@ -315,7 +328,9 @@ export function AssignmentWizard({
         );
       }
       setItem(next);
-      setStep(2);
+      document
+        .getElementById("assignment-upload")
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
       toast("基本信息已保存");
     } catch (e) {
       toast(e instanceof ApiError ? e.message : "保存失败", "error");
@@ -324,49 +339,105 @@ export function AssignmentWizard({
     }
   };
 
-  const chooseUpload = (file?: File) => {
-    setUploadResult(undefined);
+  const suggestedAssignmentTitle = (() => {
+    const course =
+      assignmentSubject.trim() ||
+      classes
+        .find((entry) =>
+          item.classes.some((selected) => selected.id === entry.id),
+        )
+        ?.subject?.trim();
+    const date = new Intl.DateTimeFormat("zh-CN", {
+      month: "numeric",
+      day: "numeric",
+    }).format(new Date());
+    return `${course || "课程"} ${date} 作业`;
+  })();
+  const latestFieldSuggestion = (fieldName: string) =>
+    fieldSuggestions.find(
+      (row) =>
+        row.field_name === fieldName &&
+        !["superseded", "stale", "rejected"].includes(row.status),
+    );
+  const specificUniversityCourses = [
+    "数学分析",
+    "线性代数",
+    "高等代数",
+    "概率论",
+    "常微分方程",
+    "复变函数",
+    "实变函数",
+  ];
+  const subjectSuggestion = String(
+    latestFieldSuggestion("subject")?.normalized_value ?? "",
+  ).trim();
+  const subjectSuggestionEvidence = fieldSuggestions
+    .filter((row) => ["subject", "title"].includes(row.field_name))
+    .flatMap((row) => [row.normalized_value, row.suggested_value])
+    .filter((value): value is string => typeof value === "string")
+    .join(" ");
+  const inferredSpecificCourse = specificUniversityCourses.find((course) =>
+    subjectSuggestionEvidence.includes(course),
+  );
+  const subjectSuggestionValue =
+    inferredSpecificCourse ??
+    (subjectSuggestion === "数学" ? "" : subjectSuggestion);
+  const totalScoreSuggestionNumber = Number(
+    latestFieldSuggestion("total_score")?.normalized_value,
+  );
+  const totalScoreSuggestionValue =
+    Number.isFinite(totalScoreSuggestionNumber) &&
+    totalScoreSuggestionNumber > 0
+      ? String(totalScoreSuggestionNumber)
+      : "";
+  const chooseUpload = (files: File[] = []) => {
     setUploadError("");
-    if (!file) {
+    const firstFile = files[0];
+    if (!firstFile) {
       setUploadFile(undefined);
       setUploadState("idle");
       return;
     }
-    const extension = file.name.split(".").pop()?.toLowerCase();
-    if (!["pdf", "png", "jpg", "jpeg"].includes(extension ?? "")) {
-      setUploadFile(file);
-      setUploadState("error");
-      setUploadError("文件格式不支持，请选择 PDF、PNG 或 JPG 文件。");
-      return;
+    for (const file of files) {
+      const extension = file.name.split(".").pop()?.toLowerCase();
+      if (!["pdf", "png", "jpg", "jpeg"].includes(extension ?? "")) {
+        setUploadFile(file);
+        setUploadState("error");
+        setUploadError(
+          `${file.name} 格式不支持，请选择 PDF、PNG 或 JPG 文件。`,
+        );
+        return;
+      }
+      if (file.size === 0) {
+        setUploadFile(file);
+        setUploadState("error");
+        setUploadError(`${file.name} 内容为空，请重新选择完整文件。`);
+        return;
+      }
+      if (file.size > 25 * 1024 * 1024) {
+        setUploadFile(file);
+        setUploadState("error");
+        setUploadError(`${file.name} 超过 25 MB，请压缩后重新上传。`);
+        return;
+      }
     }
-    if (file.size === 0) {
-      setUploadFile(file);
-      setUploadState("error");
-      setUploadError("文件内容为空，请重新选择完整文件。");
-      return;
-    }
-    if (file.size > 25 * 1024 * 1024) {
-      setUploadFile(file);
-      setUploadState("error");
-      setUploadError("文件超过 25 MB，请压缩后重新上传。");
-      return;
-    }
-    setUploadFile(file);
-    setUploadState("ready");
+    setUploadFile(firstFile);
+    void uploadPapers(files);
   };
 
-  const uploadPaper = async () => {
-    if (!uploadFile || busy || uploadState === "error") return;
+  async function uploadPapers(files: File[]) {
+    const firstFile = files[0];
+    if (!firstFile || busy) return;
     setBusy(true);
     setUploadError("");
     setUploadState("uploading");
     try {
-      const result = await assignmentsApi.upload(item.id, uploadFile);
+      for (const file of files) {
+        await assignmentsApi.upload(assignmentId, file);
+      }
       setUploadState("processing");
       await load();
-      setUploadResult({ name: result.name, pages: result.pages_created });
       setUploadState("success");
-      toast("试卷上传成功，页面已经可以整理");
     } catch (err) {
       setUploadState("error");
       setUploadError(
@@ -377,7 +448,30 @@ export function AssignmentWizard({
     } finally {
       setBusy(false);
     }
-  };
+  }
+
+  async function addSelectedResources() {
+    if (!selectedResourceIds.length || busy) return;
+    setBusy(true);
+    try {
+      const result = await assignmentsApi.addClassResources(
+        assignmentId,
+        selectedResourceIds,
+      );
+      await load();
+      setSelectedResourceIds([]);
+      toast(
+        `已加入 ${result.files_created} 份资料，共 ${result.pages_created} 页`,
+      );
+    } catch (error) {
+      toast(
+        error instanceof ApiError ? error.message : "资料加入失败",
+        "error",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
 
   const deleteUploadedFile = async (file: { id: string; name: string }) => {
     if (
@@ -390,16 +484,8 @@ export function AssignmentWizard({
     setDeletingFileId(file.id);
     try {
       await assignmentsApi.removeFile(item.id, file.id);
-      setPagePreviewUrls((current) => {
-        const next = { ...current };
-        delete next[file.id];
-        return next;
-      });
-      setPreviewErrors((current) => {
-        const next = { ...current };
-        delete next[file.id];
-        return next;
-      });
+      setPagePreviewUrls({});
+      setPreviewErrors({});
       await load();
       toast("文件已删除");
     } catch (err) {
@@ -414,37 +500,52 @@ export function AssignmentWizard({
     event.preventDefault();
     setDragging(false);
     if (busy) return;
-    chooseUpload(event.dataTransfer.files[0]);
+    chooseUpload(Array.from(event.dataTransfer.files));
   };
 
   const selectedPage = item.paper_version?.pages.find(
     (page) => page.id === selectedPageId,
   );
   const selectedPreviewUrl = selectedPage
-    ? pagePreviewUrls[selectedPage.stored_file_id]
+    ? pagePreviewUrls[selectedPage.id]
     : undefined;
+  const selectedClasses = classes.filter((entry) =>
+    selectedClassIds.includes(entry.id),
+  );
+  const normalizedClassQuery = classQuery.trim().toLocaleLowerCase();
+  const visibleClasses = classes
+    .filter((entry) =>
+      [
+        entry.name,
+        entry.subject,
+        entry.grade,
+        entry.academic_year,
+        entry.semester,
+      ]
+        .filter(Boolean)
+        .some((value) =>
+          value?.toLocaleLowerCase().includes(normalizedClassQuery),
+        ),
+    )
+    .sort((left, right) => {
+      const selectedDifference =
+        Number(selectedClassIds.includes(right.id)) -
+        Number(selectedClassIds.includes(left.id));
+      return selectedDifference || left.name.localeCompare(right.name, "zh-CN");
+    });
 
   return (
     <div className="space-y-6">
       <PageHeader
         title={item.title}
-        description="六步创建向导；所有已保存内容以后端草稿为准。"
+        description="准备、核对、发布"
         actions={
           <Link href="/assignments">
             <Button variant="outline">返回列表</Button>
           </Link>
         }
       />
-      <AssignmentGenerationPanel
-        assignmentId={item.id}
-        assignment={item}
-        onAssignmentChanged={load}
-        onReviewInputsChanged={refreshReviewInputs}
-      />
-      <ol
-        className="grid grid-cols-2 gap-2 md:grid-cols-6"
-        aria-label="创建步骤"
-      >
+      <ol className="grid grid-cols-3 gap-2" aria-label="创建步骤">
         {steps.map((label, index) => (
           <li key={label}>
             <button
@@ -459,49 +560,133 @@ export function AssignmentWizard({
           </li>
         ))}
       </ol>
+      <div
+        role="status"
+        aria-live="polite"
+        className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm"
+      >
+        <span className="text-slate-600">你现在在：</span>
+        <strong>
+          第 {step} 步 · {steps[step - 1]}
+        </strong>
+        <span className="ml-2 text-slate-600">
+          {step === 1
+            ? "下一步核对题目、答案和评分标准"
+            : step === 2
+              ? "下一步检查并确认发布"
+              : "完成检查后由你确认发布"}
+        </span>
+      </div>
 
       {step === 1 && (
-        <Card className="p-6">
+        <Card id="assignment-basics" className="scroll-mt-4 p-6">
           <form action={saveBasics} className="grid gap-4 md:grid-cols-2">
-            <Input
-              name="title"
-              label="作业名称"
-              required
-              defaultValue={item.title}
-            />
-            <Input name="subject" label="学科" defaultValue={item.subject} />
-            <Input
-              name="grade"
-              label="年级或教学层级"
-              defaultValue={item.grade}
-              placeholder="如：大二、研究生、2026 级"
-            />
-            <Input
-              name="total_score"
-              label="总分"
-              type="number"
-              min="0.01"
-              step="0.01"
-              required
-              defaultValue={item.total_score}
-            />
-            <Select
-              label="布置方式"
-              value={deliveryMode}
-              onChange={(event) =>
-                setDeliveryMode(
-                  event.target.value as "class_assignment" | "joint_exam",
-                )
-              }
-            >
-              <option value="class_assignment">普通作业</option>
-              <option value="joint_exam">联考统批</option>
-            </Select>
-            <p className="self-end pb-2 text-xs text-slate-500">
-              {deliveryMode === "joint_exam"
-                ? "多班共用试卷与评分标准，统一批改进度，按班发布成绩。"
-                : "适合日常作业，可按班建立批改批次。"}
-            </p>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium" htmlFor="assignment-title">
+                作业名称
+              </label>
+              <div
+                className="flex h-10 overflow-hidden rounded-[var(--radius-md)] border border-[var(--border)] bg-white transition focus-within:border-[var(--brand-500)]"
+                data-testid="assignment-title-field"
+              >
+                <input
+                  id="assignment-title"
+                  name="title"
+                  aria-label="作业名称"
+                  className="min-w-0 flex-1 bg-transparent px-3 font-normal outline-none"
+                  required
+                  value={assignmentTitle}
+                  onChange={(event) => setAssignmentTitle(event.target.value)}
+                />
+                <button
+                  type="button"
+                  className="max-w-1/2 shrink-0 truncate border-l border-slate-100 bg-slate-50/70 px-3 text-left text-xs text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                  onClick={() => setAssignmentTitle(suggestedAssignmentTitle)}
+                >
+                  {suggestedAssignmentTitle}
+                </button>
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <label
+                className="text-sm font-medium"
+                htmlFor="assignment-total-score"
+              >
+                总分
+              </label>
+              <div
+                className="flex h-10 overflow-hidden rounded-[var(--radius-md)] border border-[var(--border)] bg-white transition focus-within:border-[var(--brand-500)]"
+                data-testid="assignment-total-score-field"
+              >
+                <input
+                  id="assignment-total-score"
+                  name="total_score"
+                  aria-label="总分"
+                  className="min-w-0 flex-1 bg-transparent px-3 font-normal outline-none"
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  required
+                  value={assignmentTotalScore}
+                  onChange={(event) =>
+                    setAssignmentTotalScore(event.target.value)
+                  }
+                />
+                {totalScoreSuggestionValue && (
+                  <button
+                    type="button"
+                    className="max-w-1/2 shrink-0 truncate border-l border-slate-100 bg-slate-50/70 px-3 text-left text-xs text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                    onClick={() =>
+                      setAssignmentTotalScore(totalScoreSuggestionValue)
+                    }
+                  >
+                    {totalScoreSuggestionValue}
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="space-y-1.5 md:col-span-2">
+              <label
+                className="text-sm font-medium"
+                htmlFor="assignment-subject"
+              >
+                大学课程
+              </label>
+              <div
+                className="flex h-10 overflow-hidden rounded-[var(--radius-md)] border border-[var(--border)] bg-white transition focus-within:border-[var(--brand-500)]"
+                data-testid="assignment-subject-field"
+              >
+                <input
+                  id="assignment-subject"
+                  name="subject"
+                  aria-label="大学课程"
+                  className="min-w-0 flex-1 bg-transparent px-3 font-normal outline-none placeholder:text-slate-400"
+                  list="university-course-options"
+                  required
+                  value={assignmentSubject}
+                  placeholder="如：数学分析、线性代数、概率论"
+                  onChange={(event) => setAssignmentSubject(event.target.value)}
+                />
+                {subjectSuggestionValue && (
+                  <button
+                    type="button"
+                    className="max-w-1/2 shrink-0 truncate border-l border-slate-100 bg-slate-50/70 px-3 text-left text-xs text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                    onClick={() => setAssignmentSubject(subjectSuggestionValue)}
+                  >
+                    {subjectSuggestionValue}
+                  </button>
+                )}
+              </div>
+              <datalist id="university-course-options">
+                <option value="数学分析" />
+                <option value="线性代数" />
+                <option value="高等代数" />
+                <option value="概率论" />
+                <option value="常微分方程" />
+                <option value="复变函数" />
+                <option value="实变函数" />
+              </datalist>
+            </div>
             <fieldset className="space-y-3 rounded-xl border p-4 md:col-span-2">
               <legend className="px-1 text-sm font-semibold">截止时间</legend>
               <label className="flex items-start gap-3">
@@ -552,33 +737,126 @@ export function AssignmentWizard({
             <fieldset className="space-y-3 rounded-xl border p-4 md:col-span-2">
               <legend className="px-1 text-sm font-semibold">发布班级</legend>
               {classes.length ? (
-                <div className="grid gap-2 sm:grid-cols-2">
-                  {classes.map((entry) => (
-                    <label
-                      className="flex items-start gap-2 rounded-lg border p-3 text-sm"
-                      key={entry.id}
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-slate-50 p-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold">
+                        已选择 {selectedClasses.length} 个班级
+                      </p>
+                      {selectedClasses.length ? (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {selectedClasses.slice(0, 3).map((entry) => (
+                            <span
+                              key={entry.id}
+                              className="rounded-full border bg-white px-2.5 py-1 text-xs"
+                            >
+                              {entry.name}
+                            </span>
+                          ))}
+                          {selectedClasses.length > 3 && (
+                            <span className="rounded-full bg-slate-200 px-2.5 py-1 text-xs">
+                              另有 {selectedClasses.length - 3} 个
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="mt-1 text-xs text-amber-700">
+                          尚未选择发布班级
+                        </p>
+                      )}
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      aria-expanded={classPickerOpen}
+                      aria-controls="assignment-class-picker"
+                      onClick={() => setClassPickerOpen((current) => !current)}
                     >
-                      <input
-                        type="checkbox"
-                        checked={selectedClassIds.includes(entry.id)}
-                        onChange={(event) =>
-                          setSelectedClassIds((current) =>
-                            event.target.checked
-                              ? [...current, entry.id]
-                              : current.filter((id) => id !== entry.id),
-                          )
-                        }
+                      {classPickerOpen ? "收起班级选择" : "选择发布班级"}
+                    </Button>
+                  </div>
+                  {classPickerOpen && (
+                    <div
+                      id="assignment-class-picker"
+                      className="space-y-3 rounded-xl border p-3"
+                    >
+                      <Input
+                        label="搜索班级"
+                        value={classQuery}
+                        placeholder="输入班级、学科、年级或学年"
+                        onChange={(event) => setClassQuery(event.target.value)}
                       />
-                      <span>
-                        <strong className="block">{entry.name}</strong>
-                        <span className="text-xs text-slate-500">
-                          {[entry.subject, entry.academic_year, entry.semester]
-                            .filter(Boolean)
-                            .join(" · ") || "未填写课程信息"}
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+                        <span>
+                          显示 {visibleClasses.length} / {classes.length}{" "}
+                          个班级，已选班级置顶
                         </span>
-                      </span>
-                    </label>
-                  ))}
+                        <div className="flex gap-1">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            disabled={!visibleClasses.length}
+                            onClick={() =>
+                              setSelectedClassIds((current) => [
+                                ...new Set([
+                                  ...current,
+                                  ...visibleClasses.map((entry) => entry.id),
+                                ]),
+                              ])
+                            }
+                          >
+                            全选当前结果
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            disabled={!selectedClassIds.length}
+                            onClick={() => setSelectedClassIds([])}
+                          >
+                            清空
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="grid max-h-64 gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
+                        {visibleClasses.map((entry) => (
+                          <label
+                            className="flex items-start gap-2 rounded-lg border p-3 text-sm"
+                            key={entry.id}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={selectedClassIds.includes(entry.id)}
+                              onChange={(event) =>
+                                setSelectedClassIds((current) =>
+                                  event.target.checked
+                                    ? [...new Set([...current, entry.id])]
+                                    : current.filter((id) => id !== entry.id),
+                                )
+                              }
+                            />
+                            <span>
+                              <strong className="block">{entry.name}</strong>
+                              <span className="text-xs text-slate-500">
+                                {[
+                                  entry.subject,
+                                  entry.grade,
+                                  entry.academic_year,
+                                  entry.semester,
+                                ]
+                                  .filter(Boolean)
+                                  .join(" · ") || "未填写课程信息"}
+                              </span>
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                      {!visibleClasses.length && (
+                        <p className="rounded-lg bg-slate-50 p-4 text-center text-sm text-slate-500">
+                          没有匹配的班级
+                        </p>
+                      )}
+                    </div>
+                  )}
                 </div>
               ) : (
                 <Link
@@ -588,20 +866,40 @@ export function AssignmentWizard({
                   没有可用班级，前往班级管理
                 </Link>
               )}
-              <p className="text-xs text-slate-500">
-                {deliveryMode === "joint_exam"
-                  ? "可先选择自己的班级，再邀请其他老师授权其班级；发布前至少两个班级。"
-                  : "发布前可以调整；发布后班级范围将锁定。"}
-              </p>
             </fieldset>
-            <label className="grid gap-1.5 text-sm font-medium md:col-span-2">
-              作业说明
-              <textarea
-                name="description"
-                defaultValue={item.description}
-                className="min-h-24 rounded-xl border p-3 font-normal"
-              />
-            </label>
+            <details className="md:col-span-2 rounded-xl border p-4">
+              <summary className="cursor-pointer font-semibold">
+                更多设置
+              </summary>
+              <div className="mt-4 grid gap-4 md:grid-cols-2">
+                <Input
+                  name="grade"
+                  label="年级或教学层级"
+                  defaultValue={item.grade}
+                  placeholder="如：大二、研究生、2026 级"
+                />
+                <Select
+                  label="布置方式"
+                  value={deliveryMode}
+                  onChange={(event) =>
+                    setDeliveryMode(
+                      event.target.value as "class_assignment" | "joint_exam",
+                    )
+                  }
+                >
+                  <option value="class_assignment">普通作业</option>
+                  <option value="joint_exam">联考统批</option>
+                </Select>
+                <label className="grid gap-1.5 text-sm font-medium md:col-span-2">
+                  作业说明
+                  <textarea
+                    name="description"
+                    defaultValue={item.description}
+                    className="min-h-24 rounded-xl border p-3 font-normal"
+                  />
+                </label>
+              </div>
+            </details>
             <Button loading={busy} className="md:col-span-2">
               保存并继续
             </Button>
@@ -609,22 +907,58 @@ export function AssignmentWizard({
         </Card>
       )}
 
-      {step === 2 && (
-        <Card className="space-y-4 p-6">
-          <h2 className="font-bold">上传试卷</h2>
+      {step === 1 && (
+        <Card id="assignment-upload" className="scroll-mt-4 space-y-4 p-6">
+          <h2 className="font-bold">上传题目与答案</h2>
+          {classResources.length > 0 && (
+            <section className="space-y-3 rounded-xl border border-slate-200 p-4">
+              <div>
+                <h3 className="font-semibold">从班级资料选择</h3>
+                <p className="text-sm text-slate-600">
+                  选择后会复制到此作业，班级原资料保持不变。
+                </p>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {classResources.map((resource) => (
+                  <label
+                    className="flex gap-2 rounded-lg border p-3"
+                    key={resource.id}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedResourceIds.includes(resource.id)}
+                      onChange={(event) =>
+                        setSelectedResourceIds((current) =>
+                          event.target.checked
+                            ? [...current, resource.id]
+                            : current.filter((id) => id !== resource.id),
+                        )
+                      }
+                    />
+                    <span>
+                      <strong>{resource.title}</strong>
+                      <span className="block text-sm text-slate-600">
+                        {resource.file_name} · {resource.page_count} 页
+                      </span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+              <Button
+                variant="outline"
+                disabled={!selectedResourceIds.length || busy}
+                onClick={() => void addSelectedResources()}
+              >
+                加入所选资料
+              </Button>
+            </section>
+          )}
           {uploadedFiles.length > 0 && (
             <section
               aria-label="已上传文件"
               className="rounded-xl border border-emerald-200 bg-emerald-50 p-4"
             >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h3 className="font-semibold text-emerald-900">
-                  已上传到此作业（{uploadedFiles.length} 个文件）
-                </h3>
-                <span className="text-sm text-emerald-800">
-                  继续添加不会删除已有文件
-                </span>
-              </div>
+              <h3 className="font-semibold text-emerald-900">已上传到此作业</h3>
               <ul className="mt-2 space-y-2 text-sm text-emerald-950">
                 {uploadedFiles.map((file, index) => (
                   <li
@@ -632,10 +966,11 @@ export function AssignmentWizard({
                     className="flex flex-wrap items-center justify-between gap-2"
                   >
                     <span>
-                      {index + 1}. {file.name} · {file.pageCount} 页 · 已保留
+                      {index + 1}. {file.name}
                     </span>
                     <Button
                       variant="ghost"
+                      className="text-red-600 hover:bg-red-50 hover:text-red-700"
                       loading={deletingFileId === file.id}
                       disabled={busy && deletingFileId !== file.id}
                       onClick={() => void deleteUploadedFile(file)}
@@ -674,10 +1009,10 @@ export function AssignmentWizard({
           >
             <div>
               <p className="font-semibold">
-                将 PDF、PNG 或 JPG 文件拖到这里，也可以点击选择文件
+                将 PDF、PNG 或 JPG 文件拖到这里，也可以点击选择多个文件
               </p>
               <p className="mt-2 text-sm text-slate-500">
-                支持 PDF、PNG、JPG/JPEG，单个文件不超过 25 MB
+                可一次上传多个文件，单个文件不超过 25 MB
               </p>
             </div>
           </div>
@@ -686,309 +1021,258 @@ export function AssignmentWizard({
             className="sr-only"
             aria-label="选择试卷文件"
             type="file"
+            multiple
             accept=".pdf,.jpg,.jpeg,.png"
             disabled={busy}
             onChange={(event) => {
-              chooseUpload(event.target.files?.[0]);
+              chooseUpload(Array.from(event.target.files ?? []));
               event.currentTarget.value = "";
             }}
           />
-          {uploadFile && (
+          {uploadFile && uploadState === "error" && (
             <div
-              className={`rounded-xl border p-4 ${
-                uploadState === "error"
-                  ? "border-red-300 bg-red-50"
-                  : uploadState === "success"
-                    ? "border-emerald-300 bg-emerald-50"
-                    : "border-slate-200"
-              }`}
+              className="rounded-xl border border-red-300 bg-red-50 p-4"
               aria-live="polite"
             >
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <strong>{uploadResult?.name ?? uploadFile.name}</strong>
-                  <p className="text-sm text-slate-600">
-                    {(uploadFile.size / 1024 / 1024).toFixed(2)} MB
-                    {uploadResult ? ` · 共 ${uploadResult.pages} 页` : ""}
-                  </p>
-                </div>
-                <strong className="text-sm">
-                  {uploadState === "ready" && "等待上传"}
-                  {uploadState === "uploading" && "正在上传"}
-                  {uploadState === "processing" && "正在解析"}
-                  {uploadState === "success" && "上传成功"}
-                  {uploadState === "error" && "上传失败"}
-                </strong>
+                <strong>{uploadFile.name}</strong>
+                <strong className="text-sm text-red-700">上传失败</strong>
               </div>
               {uploadError && (
                 <p className="mt-2 text-sm text-red-700">{uploadError}</p>
               )}
               <div className="mt-3 flex flex-wrap gap-2">
-                {uploadState === "ready" && (
-                  <Button loading={busy} onClick={() => void uploadPaper()}>
-                    开始上传
-                  </Button>
-                )}
-                {uploadState === "error" && (
-                  <Button
-                    variant="outline"
-                    onClick={() => fileInputRef.current?.click()}
-                  >
-                    重新上传
-                  </Button>
-                )}
-                {!["uploading", "processing", "success"].includes(
-                  uploadState,
-                ) && (
-                  <Button variant="ghost" onClick={() => chooseUpload()}>
-                    删除所选文件
-                  </Button>
-                )}
+                <Button
+                  variant="outline"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  重新上传
+                </Button>
+                <Button variant="ghost" onClick={() => chooseUpload([])}>
+                  删除所选文件
+                </Button>
               </div>
             </div>
           )}
-          <p className="text-sm">
-            当前共 {item.paper_version?.pages.length ?? 0}{" "}
-            页。选择新的本地文件只会清空当前待选项，已经上传成功的文件仍保留在此作业中。
-          </p>
-          <Button
-            onClick={() => setStep(3)}
-            disabled={!item.paper_version?.pages.length}
-          >
-            继续整理页面
-          </Button>
         </Card>
       )}
 
-      {step === 3 && (
-        <Card className="space-y-4 p-6">
-          <h2 className="font-bold">整理页面</h2>
-          <div className="grid min-h-[520px] gap-4 lg:grid-cols-[220px_1fr]">
-            <div
-              className="max-h-[620px] space-y-2 overflow-y-auto rounded-xl border bg-slate-50 p-2"
-              aria-label="试卷页面缩略图"
-            >
-              {item.paper_version?.pages.map((page) => {
-                const url = pagePreviewUrls[page.stored_file_id];
-                return (
-                  <button
-                    type="button"
-                    key={page.id}
-                    onClick={() => setSelectedPageId(page.id)}
-                    className={`w-full rounded-xl border-2 bg-white p-2 text-left ${
-                      selectedPageId === page.id
-                        ? "border-[var(--brand-600)] shadow-sm"
-                        : "border-transparent"
-                    }`}
-                    aria-current={
-                      selectedPageId === page.id ? "page" : undefined
-                    }
-                  >
-                    <div className="grid h-28 place-items-center overflow-hidden rounded bg-slate-100">
-                      {url && !previewErrors[page.stored_file_id] ? (
-                        isPdfPreview(url) ? (
-                          <iframe
-                            src={pagePreviewUrl(
-                              url,
-                              page.source_page_number ?? page.page_number,
-                            )}
+      <AssignmentGenerationPanel
+        assignmentId={item.id}
+        assignment={item}
+        onAssignmentChanged={load}
+        onReviewInputsChanged={refreshReviewInputs}
+        onFieldSuggestionsChanged={setFieldSuggestions}
+      />
+
+      {step === 2 && (
+        <Card id="assignment-pages" className="scroll-mt-4 space-y-4 p-6">
+          <details>
+            <summary className="cursor-pointer rounded-lg px-3 py-2 font-bold hover:bg-[var(--neutral-50)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--brand-600)]">
+              整理页面（{item.paper_version?.pages.length ?? 0} 页）
+            </summary>
+            <div className="mt-4 space-y-4">
+              <div
+                className="flex gap-2 overflow-x-auto rounded-xl border bg-slate-50 p-2"
+                aria-label="试卷页面缩略图"
+                data-testid="assignment-page-thumbnails"
+              >
+                {item.paper_version?.pages.map((page) => {
+                  const url = pagePreviewUrls[page.id];
+                  return (
+                    <button
+                      type="button"
+                      key={page.id}
+                      onClick={() => setSelectedPageId(page.id)}
+                      className={`w-36 shrink-0 rounded-xl border-2 bg-white p-2 text-left ${
+                        selectedPageId === page.id
+                          ? "border-[var(--brand-600)] shadow-sm"
+                          : "border-transparent"
+                      }`}
+                      aria-current={
+                        selectedPageId === page.id ? "page" : undefined
+                      }
+                    >
+                      <div className="grid h-24 place-items-center overflow-hidden rounded bg-slate-100">
+                        {url && !previewErrors[page.id] ? (
+                          <img
+                            src={url}
+                            alt={`第 ${page.page_number} 页缩略图`}
                             title={`第 ${page.page_number} 页缩略图`}
-                            className="pointer-events-none h-full w-full border-0"
+                            className="h-full w-full object-contain"
                             loading="lazy"
                             onError={() =>
                               setPreviewErrors((current) => ({
                                 ...current,
-                                [page.stored_file_id]: true,
+                                [page.id]: true,
                               }))
                             }
                           />
                         ) : (
-                          <img
-                            src={url}
-                            alt={`第 ${page.page_number} 页缩略图`}
-                            className="h-full w-full object-contain"
-                            style={{
-                              transform: `rotate(${page.rotation}deg)`,
-                            }}
-                            onError={() =>
-                              setPreviewErrors((current) => ({
-                                ...current,
-                                [page.stored_file_id]: true,
-                              }))
-                            }
-                          />
-                        )
-                      ) : (
-                        <span className="text-xs text-slate-500">页面预览</span>
-                      )}
-                    </div>
-                    <strong className="mt-2 block text-sm">
-                      第 {page.page_number} 页
-                    </strong>
-                    <span className="text-xs text-slate-500">
-                      {page.rotation}° ·{" "}
-                      {page.status === "ready" ? "处理完成" : page.status}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-            {selectedPage ? (
-              <div className="space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <h3 className="font-semibold">
-                      第 {selectedPage.page_number} 页
-                    </h3>
-                    <p className="text-sm text-slate-500">
-                      旋转 {selectedPage.rotation}° · 状态：
-                      {selectedPage.status === "ready"
-                        ? "处理完成"
-                        : selectedPage.status}
-                    </p>
-                  </div>
-                  {selectedPage.status !== "ready" && (
-                    <span className="rounded-full bg-amber-100 px-3 py-1 text-xs text-amber-800">
-                      {selectedPage.status === "excluded"
-                        ? "已排除"
-                        : selectedPage.status === "pending_conversion"
-                          ? "等待转换"
-                          : "需要检查"}
-                    </span>
-                  )}
-                </div>
-                <div className="grid min-h-[400px] place-items-center overflow-hidden rounded-xl border bg-slate-100 p-4">
-                  {selectedPreviewUrl &&
-                  !previewErrors[selectedPage.stored_file_id] ? (
-                    isPdfPreview(selectedPreviewUrl) ? (
-                      <iframe
-                        src={pagePreviewUrl(
-                          selectedPreviewUrl,
-                          selectedPage.source_page_number ??
-                            selectedPage.page_number,
+                          <span className="text-xs text-slate-500">
+                            页面预览
+                          </span>
                         )}
-                        title={`第 ${selectedPage.page_number} 页大图预览`}
-                        className="h-[560px] w-full border-0 bg-white"
-                        onError={() =>
-                          setPreviewErrors((current) => ({
-                            ...current,
-                            [selectedPage.stored_file_id]: true,
-                          }))
-                        }
-                      />
-                    ) : (
+                      </div>
+                      <strong className="mt-2 block text-sm">
+                        第 {page.page_number} 页
+                      </strong>
+                      <span className="text-xs text-slate-500">
+                        {page.rotation}° ·{" "}
+                        {page.status === "ready" ? "处理完成" : page.status}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              {selectedPage ? (
+                <div className="min-w-0 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h3 className="font-semibold">
+                        第 {selectedPage.page_number} 页
+                      </h3>
+                      <p className="text-sm text-slate-500">
+                        旋转 {selectedPage.rotation}° · 状态：
+                        {selectedPage.status === "ready"
+                          ? "处理完成"
+                          : selectedPage.status}
+                      </p>
+                    </div>
+                    {selectedPage.status !== "ready" && (
+                      <span className="rounded-full bg-amber-100 px-3 py-1 text-xs text-amber-800">
+                        {selectedPage.status === "excluded"
+                          ? "已排除"
+                          : selectedPage.status === "pending_conversion"
+                            ? "等待转换"
+                            : "需要检查"}
+                      </span>
+                    )}
+                  </div>
+                  <div className="grid min-h-[400px] place-items-center overflow-hidden rounded-xl border bg-slate-100 p-4">
+                    {selectedPreviewUrl && !previewErrors[selectedPage.id] ? (
                       <img
                         src={selectedPreviewUrl}
                         alt={`第 ${selectedPage.page_number} 页大图预览`}
+                        title={`第 ${selectedPage.page_number} 页大图预览`}
                         className="max-h-[560px] max-w-full object-contain"
-                        style={{
-                          transform: `rotate(${selectedPage.rotation}deg)`,
-                        }}
                         onError={() =>
                           setPreviewErrors((current) => ({
                             ...current,
-                            [selectedPage.stored_file_id]: true,
+                            [selectedPage.id]: true,
                           }))
                         }
                       />
-                    )
-                  ) : previewErrors[selectedPage.stored_file_id] ? (
-                    <div className="text-center">
-                      <p className="font-semibold">页面预览加载失败</p>
-                      <p className="mt-1 text-sm text-slate-500">
-                        文件可能暂时不可用，请重试。
+                    ) : previewErrors[selectedPage.id] ? (
+                      <div className="text-center">
+                        <p className="font-semibold">页面预览加载失败</p>
+                        <p className="mt-1 text-sm text-slate-500">
+                          文件可能暂时不可用，请重试。
+                        </p>
+                        <Button
+                          className="mt-3"
+                          variant="outline"
+                          onClick={() => void loadPagePreview(selectedPage.id)}
+                        >
+                          重试预览
+                        </Button>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-slate-500">
+                        正在加载页面预览…
                       </p>
-                      <Button
-                        className="mt-3"
-                        variant="outline"
-                        onClick={() =>
-                          void loadPreview(selectedPage.stored_file_id)
+                    )}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      loading={busy}
+                      variant="outline"
+                      onClick={async () => {
+                        setBusy(true);
+                        try {
+                          await assignmentsApi.page(item.id, selectedPage.id, {
+                            rotation: (selectedPage.rotation + 90) % 360,
+                          });
+                          await load();
+                          toast("页面已旋转");
+                        } catch (error) {
+                          toast(
+                            error instanceof ApiError
+                              ? error.message
+                              : "页面旋转失败",
+                            "error",
+                          );
+                        } finally {
+                          setBusy(false);
                         }
-                      >
-                        重试预览
-                      </Button>
-                    </div>
-                  ) : (
-                    <p className="text-sm text-slate-500">正在加载页面预览…</p>
-                  )}
-                </div>
-                <div className="flex gap-2">
-                  <Button
-                    loading={busy}
-                    variant="outline"
-                    onClick={async () => {
-                      setBusy(true);
-                      try {
-                        await assignmentsApi.page(item.id, selectedPage.id, {
-                          rotation: (selectedPage.rotation + 90) % 360,
-                        });
-                        await load();
-                        toast("页面已旋转");
-                      } catch (error) {
-                        toast(
-                          error instanceof ApiError
-                            ? error.message
-                            : "页面旋转失败",
-                          "error",
-                        );
-                      } finally {
-                        setBusy(false);
-                      }
+                      }}
+                    >
+                      旋转 90°
+                    </Button>
+                    <Button
+                      disabled={busy}
+                      variant="danger"
+                      onClick={async () => {
+                        if (!confirm("确认排除此页？")) return;
+                        setBusy(true);
+                        try {
+                          await assignmentsApi.page(item.id, selectedPage.id, {
+                            status: "excluded",
+                          });
+                          await load();
+                          toast("页面已排除");
+                        } catch (error) {
+                          toast(
+                            error instanceof ApiError
+                              ? error.message
+                              : "页面排除失败",
+                            "error",
+                          );
+                        } finally {
+                          setBusy(false);
+                        }
+                      }}
+                    >
+                      排除此页
+                    </Button>
+                  </div>
+                  <QuestionPageCutter
+                    assignmentId={item.id}
+                    page={selectedPage}
+                    questions={item.paper_version?.questions ?? []}
+                    selectedQuestionId={selectedQuestion}
+                    onSaved={async (savedQuestion) => {
+                      await load(savedQuestion.id);
+                      setSelectedQuestion(savedQuestion.id);
+                      toast("题目区域已保存");
                     }}
-                  >
-                    旋转 90°
-                  </Button>
-                  <Button
-                    disabled={busy}
-                    variant="danger"
-                    onClick={async () => {
-                      if (!confirm("确认排除此页？")) return;
-                      setBusy(true);
-                      try {
-                        await assignmentsApi.page(item.id, selectedPage.id, {
-                          status: "excluded",
-                        });
-                        await load();
-                        toast("页面已排除");
-                      } catch (error) {
-                        toast(
-                          error instanceof ApiError
-                            ? error.message
-                            : "页面排除失败",
-                          "error",
-                        );
-                      } finally {
-                        setBusy(false);
-                      }
-                    }}
-                  >
-                    排除此页
-                  </Button>
+                  />
                 </div>
-                <QuestionPageCutter
-                  assignmentId={item.id}
-                  page={selectedPage}
-                  questions={item.paper_version?.questions ?? []}
-                  selectedQuestionId={selectedQuestion}
-                  onSaved={async (savedQuestion) => {
-                    await load(savedQuestion.id);
-                    setSelectedQuestion(savedQuestion.id);
-                    toast("题目区域已保存");
-                  }}
-                />
-              </div>
-            ) : (
-              <p className="grid place-items-center text-sm text-slate-500">
-                暂无可预览页面
-              </p>
-            )}
-          </div>
-          <Button onClick={() => setStep(4)}>继续编辑题目</Button>
+              ) : (
+                <p className="grid place-items-center text-sm text-slate-500">
+                  暂无可预览页面
+                </p>
+              )}
+            </div>
+            <Button
+              className="mt-4"
+              onClick={() =>
+                document
+                  .getElementById("assignment-questions")
+                  ?.scrollIntoView({ behavior: "smooth", block: "start" })
+              }
+            >
+              继续核对题目
+            </Button>
+          </details>
         </Card>
       )}
 
-      {step === 4 && (
-        <div className="grid gap-5 lg:grid-cols-[320px_1fr]">
+      {step === 2 && (
+        <div
+          id="assignment-questions"
+          className="scroll-mt-4 grid gap-5 lg:grid-cols-[320px_1fr]"
+        >
           <Card className="p-5">
             <h2 className="font-bold">题目列表</h2>
             <div className="mt-3 grid gap-2">
@@ -1161,9 +1445,6 @@ export function AssignmentWizard({
             </Button>
             {selected && (
               <div className="border-t pt-4">
-                <h3 className="font-bold">
-                  为第 {selected.question_number} 题添加页面区域
-                </h3>
                 {selected.max_score == null && (
                   <div
                     className="my-3 rounded border border-amber-300 bg-amber-50 p-3"
@@ -1215,92 +1496,45 @@ export function AssignmentWizard({
                     </Button>
                   </div>
                 )}
-                <p className="my-2 text-xs text-slate-500">
-                  左上角原点、相对原始页面方向，所有值为
-                  0–1；页面旋转仅影响显示。
-                </p>
-                <div className="grid grid-cols-2 gap-2">
-                  <Select
-                    label="页面"
-                    value={region.page}
-                    onChange={(e) =>
-                      setRegion({ ...region, page: e.target.value })
-                    }
-                  >
-                    {item.paper_version?.pages.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        第 {p.page_number} 页
-                      </option>
-                    ))}
-                  </Select>
-                  {(["x", "y", "width", "height"] as const).map((key) => (
-                    <Input
-                      key={key}
-                      label={key}
-                      type="number"
-                      min="0"
-                      max="1"
-                      step="0.01"
-                      value={region[key]}
-                      onChange={(e) =>
-                        setRegion({ ...region, [key]: e.target.value })
-                      }
-                    />
-                  ))}
-                </div>
-                <Button
-                  className="mt-3"
-                  variant="outline"
-                  onClick={async () => {
-                    try {
-                      await assignmentsApi.region(item.id, selected.id, {
-                        paper_page_id: region.page,
-                        x: Number(region.x),
-                        y: Number(region.y),
-                        width: Number(region.width),
-                        height: Number(region.height),
-                      });
-                      await load();
-                      toast("区域已保存");
-                    } catch (e) {
-                      toast(
-                        e instanceof ApiError ? e.message : "区域无效",
-                        "error",
-                      );
-                    }
-                  }}
-                >
-                  保存区域
-                </Button>
               </div>
             )}
-            <Button onClick={() => setStep(5)}>继续设置评分标准</Button>
+            <Button
+              onClick={() =>
+                document
+                  .getElementById("assignment-rubrics")
+                  ?.scrollIntoView({ behavior: "smooth", block: "start" })
+              }
+            >
+              继续核对评分标准
+            </Button>
           </Card>
         </div>
       )}
 
-      {step === 5 && (
-        <Card className="space-y-4 p-6">
+      {step === 2 && (
+        <Card id="assignment-rubrics" className="scroll-mt-4 space-y-4 p-6">
           <h2 className="font-bold">评分标准</h2>
           <AnswerRubricGenerationReview
             assignmentId={item.id}
             questions={item.paper_version?.questions ?? []}
           />
-          <Button variant="secondary" onClick={() => setStep(6)}>
-            进入发布检查
+          <Button variant="secondary" onClick={() => setStep(3)}>
+            进入确认发布
           </Button>
         </Card>
       )}
 
-      {item.delivery_mode === "joint_exam" && (step === 1 || step === 6) && (
+      {item.delivery_mode === "joint_exam" && (step === 1 || step === 3) && (
         <JointExamTeamPanel assignmentId={item.id} onChanged={load} />
       )}
 
-      {step === 6 && (
+      {step === 3 && (
         <AssignmentCentralReview
           item={item}
           reviewInputsRevision={reviewInputsRevision}
-          onNavigate={setStep}
+          onNavigate={(targetStep) =>
+            setStep(wizardStepForCompleteness(targetStep))
+          }
           onPublished={() => router.push(`/assignments/${item.id}`)}
         />
       )}

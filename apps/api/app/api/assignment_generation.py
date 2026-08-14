@@ -1,3 +1,4 @@
+import hashlib
 import uuid
 from copy import deepcopy
 from datetime import datetime
@@ -7,11 +8,12 @@ from typing import Annotated, Any, Literal, cast
 from app.api.actor import Actor
 from app.api.domain import ApiProblem, audit
 from app.assignment_generation.metadata_analysis import plain_text
-from app.assignment_generation.providers import select_provider
 from app.assignment_generation.question_extraction import eligible, materialize
+from app.assignment_generation.reference_bindings import build_reference_answer_bindings
 from app.assignment_generation.service import (
     ACTIVE_STATUSES,
     STAGES,
+    autofill_total_score_from_draft_questions,
     create_job,
     ensure_current,
     has_retryable_stage,
@@ -28,10 +30,17 @@ from app.assignment_generation.service import (
     update_risk_summary,
 )
 from app.assignment_generation.snapshot import canonical_hash, source_snapshot_hash
+from app.assignment_generation.textbook_sources import (
+    TextbookSourceMatchError,
+    auto_match_available_solutions,
+    binding_solution_text,
+    find_textbook_source_matches,
+)
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.models import (
     Assignment,
+    AssignmentAnswerDraftCandidate,
     AssignmentDraftRevision,
     AssignmentFieldSuggestion,
     AssignmentGenerationJob,
@@ -40,23 +49,32 @@ from app.models import (
     AssignmentQuestionExtractionRegion,
     AssignmentSourceFileAnalysis,
     AssignmentStatus,
+    FileStatus,
     GenerationIssue,
     GenerationStageResult,
     KnowledgePoint,
     PaperPage,
     PaperPageOrganizationSuggestion,
     PaperVersion,
+    Question,
     QuestionKnowledgePoint,
+    QuestionStatus,
     RecognitionJob,
     RecognitionStatus,
+    ReferenceAnswerSourceBinding,
+    ReferenceAnswerSourceRegion,
     StoredFile,
+    TextbookLibrary,
+    TextbookLibraryQuestion,
+    TextbookSourceMatchCandidate,
     VersionStatus,
     now_utc,
 )
 from app.recognition.pipeline import provider_from_settings
+from app.recognition.text_integrity import text_quality_statistics
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, select, update
+from pydantic import BaseModel, Field, field_validator, model_validator
+from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -89,6 +107,11 @@ class RetryStageInput(BaseModel):
     ]
 
 
+class RegenerateQuestionDraftInput(BaseModel):
+    expected_source_snapshot: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expected_draft_revision_edit_version: int = Field(ge=0)
+
+
 class DraftMetadataPatch(BaseModel):
     expected_teacher_edit_version: int = Field(ge=0)
     label: str | None = Field(None, max_length=120)
@@ -114,7 +137,14 @@ class TotalScoreConfirmationInput(BaseModel):
 class FileConfirmationInput(BaseModel):
     expected_teacher_edit_version: int = Field(ge=0)
     confirmed_role: Literal[
-        "question_paper", "reference_answer", "rubric", "instructions", "attachment", "unknown"
+        "question_paper",
+        "reference_answer",
+        "question_and_answer",
+        "textbook",
+        "rubric",
+        "instructions",
+        "attachment",
+        "unknown",
     ]
     confirmed_answer_source: Literal[
         "teacher_official",
@@ -148,6 +178,56 @@ class QuestionExtractionDispositionInput(BaseModel):
     review_note: str | None = Field(None, max_length=2000)
 
 
+class QuestionRegionDraftInput(BaseModel):
+    paper_page_id: uuid.UUID
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    width: float = Field(gt=0, le=1)
+    height: float = Field(gt=0, le=1)
+
+    @model_validator(mode="after")
+    def within_page(self) -> "QuestionRegionDraftInput":
+        if self.x + self.width > 1 or self.y + self.height > 1:
+            raise ValueError("题目区域必须位于页面 0..1 坐标内")
+        return self
+
+
+class QuestionRegionUpdateInput(BaseModel):
+    expected_teacher_edit_version: int = Field(ge=0)
+    expected_draft_revision_edit_version: int = Field(ge=0)
+    expected_paper_version_id: uuid.UUID
+    expected_source_snapshot: str = Field(pattern=r"^[0-9a-f]{64}$")
+    regions: list[QuestionRegionDraftInput] = Field(min_length=1, max_length=50)
+
+
+class ReferenceBindingDispositionInput(BaseModel):
+    action: Literal["confirm", "reject"]
+    expected_edit_version: int = Field(ge=0)
+    expected_draft_revision_edit_version: int = Field(ge=0)
+    expected_paper_version_id: uuid.UUID
+    expected_source_snapshot: str = Field(pattern=r"^[0-9a-f]{64}$")
+    explicit_confirmation: bool = False
+    question_id: uuid.UUID | None = None
+    regions: list[QuestionRegionDraftInput] | None = Field(None, min_length=1, max_length=50)
+
+
+class FindTextbookSourceInput(BaseModel):
+    question_id: uuid.UUID
+    textbook_file_analysis_id: uuid.UUID
+    expected_draft_revision_edit_version: int = Field(ge=0)
+    expected_paper_version_id: uuid.UUID
+    expected_source_snapshot: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class TextbookMatchDispositionInput(BaseModel):
+    action: Literal["confirm", "reject"]
+    expected_edit_version: int = Field(ge=0)
+    expected_draft_revision_edit_version: int = Field(ge=0)
+    expected_paper_version_id: uuid.UUID
+    expected_source_snapshot: str = Field(pattern=r"^[0-9a-f]{64}$")
+    explicit_confirmation: bool = False
+
+
 class AcceptEligibleInput(BaseModel):
     expected_draft_revision_edit_version: int = Field(ge=0)
     expected_paper_version_id: uuid.UUID
@@ -157,15 +237,12 @@ class AcceptEligibleInput(BaseModel):
 @router.get("/api/assignment-generation-capabilities")
 def assignment_generation_capabilities(_actor: Actor) -> dict[str, Any]:
     settings = get_settings()
-    selection = select_provider(settings)
     return {
         "enabled": settings.assignment_generation_enabled,
-        "provider": selection.name,
-        "provider_status": "available" if selection.available else "unavailable",
-        "provider_error_code": selection.error_code,
-        "external_provider_requests": (
-            settings.assignment_generation_allow_external_provider_requests
-        ),
+        "provider": "codex_local",
+        "provider_status": "available",
+        "provider_error_code": None,
+        "external_provider_requests": False,
         "teacher_start_allowed": settings.assignment_generation_allow_teacher_start,
         "suggestion_only": settings.assignment_generation_suggestion_only,
         "real_provider_quality_passed": (
@@ -209,7 +286,25 @@ def dispatch_job(db: Session, job: AssignmentGenerationJob, stage: str | None = 
                     if recognition_job is None:
                         provider = provider_from_settings(get_settings())
                         available, _reason = provider.available()
-                        if available:
+                        page_file_ids = set(
+                            db.scalars(
+                                select(PaperPage.stored_file_id).where(
+                                    PaperPage.paper_version_id == assignment.active_paper_version_id
+                                )
+                            ).all()
+                        )
+                        has_pdf_source = bool(
+                            page_file_ids
+                            and db.scalar(
+                                select(func.count())
+                                .select_from(StoredFile)
+                                .where(
+                                    StoredFile.id.in_(page_file_ids),
+                                    StoredFile.content_type == "application/pdf",
+                                )
+                            )
+                        )
+                        if available or has_pdf_source:
                             recognition_job = RecognitionJob(
                                 owner_id=job.owner_id,
                                 assignment_id=job.assignment_id,
@@ -391,7 +486,19 @@ def retry_stage(job_id: uuid.UUID, data: RetryStageInput, db: Db, actor: Actor) 
             GenerationStageResult.stage == data.stage,
         )
         .order_by(GenerationStageResult.stage_generation.desc())
+        .with_for_update()
     )
+    if (
+        previous is not None
+        and previous.status == "running"
+        and job.status == "failed"
+        and job.error_code == "STAGE_FAILED"
+        and job.current_stage == data.stage
+    ):
+        previous.status = "failed"
+        previous.error_code = "STAGE_FAILED"
+        previous.error_message = "生成阶段执行失败，可由教师选择阶段重试"
+        previous.completed_at = now_utc()
     if previous is None or previous.status not in {"failed", "unavailable", "discarded"}:
         raise ApiProblem(409, "GENERATION_STAGE_NOT_RETRYABLE", "该阶段没有可重试结果")
     if previous.stage_generation >= job.max_attempts:
@@ -585,6 +692,9 @@ def _analysis_json(row: AssignmentSourceFileAnalysis, db: Session | None = None)
         "file_name": stored.original_name if stored else None,
         "file_size": stored.size if stored else None,
         "page_count": row.page_count,
+        "content_mode": row.content_mode,
+        "text_source": row.text_source,
+        "content_mode_confidence": float(row.content_mode_confidence),
         "suggested_role": row.suggested_role,
         "role_confidence": float(row.role_confidence),
         "suggested_answer_source": row.suggested_answer_source,
@@ -610,6 +720,10 @@ def _page_analysis_json(row: AssignmentPageAnalysis) -> dict[str, Any]:
         "paper_page_id": str(row.paper_page_id),
         "source_file_analysis_id": str(row.source_file_analysis_id),
         "status": row.status,
+        "content_mode": row.content_mode,
+        "text_source": row.text_source,
+        "content_mode_confidence": float(row.content_mode_confidence),
+        "text_character_count": row.text_character_count,
         "quality_score": float(row.quality_score) if row.quality_score is not None else None,
         "blank_probability": float(row.blank_probability)
         if row.blank_probability is not None
@@ -888,12 +1002,22 @@ def confirm_total_score(
 
 @router.get("/api/assignment-draft-revisions/{revision_id}/file-analyses")
 def list_file_analyses(revision_id: uuid.UUID, db: Db, actor: Actor) -> list[dict[str, Any]]:
-    owned_revision(db, actor.id, revision_id)
+    revision = owned_revision(db, actor.id, revision_id)
+    assignment = db.get(Assignment, revision.assignment_id)
+    assert assignment is not None
     rows = db.scalars(
         select(AssignmentSourceFileAnalysis)
+        .join(StoredFile, StoredFile.id == AssignmentSourceFileAnalysis.stored_file_id)
         .where(
             AssignmentSourceFileAnalysis.draft_revision_id == revision_id,
             AssignmentSourceFileAnalysis.owner_id == actor.id,
+            StoredFile.status.in_((FileStatus.ready, FileStatus.pending)),
+            exists(
+                select(PaperPage.id).where(
+                    PaperPage.paper_version_id == assignment.active_paper_version_id,
+                    PaperPage.stored_file_id == AssignmentSourceFileAnalysis.stored_file_id,
+                )
+            ),
         )
         .order_by(AssignmentSourceFileAnalysis.created_at)
     ).all()
@@ -947,16 +1071,22 @@ def confirm_file_analysis(
         raise ApiProblem(409, "FILE_ANALYSIS_STALE", "文件分析已失效，请重新分析")
     if (
         row.teacher_edit_version != data.expected_teacher_edit_version
-        or row.analysis_status != "suggested"
+        or row.analysis_status not in {"suggested", "confirmed"}
     ):
-        raise ApiProblem(409, "FILE_ANALYSIS_MODIFIED_BY_TEACHER", "文件分析已确认，请刷新后重试")
+        raise ApiProblem(
+            409,
+            "FILE_ANALYSIS_MODIFIED_BY_TEACHER",
+            "文件用途已被修改，请刷新后重试",
+        )
+    if assignment.status != AssignmentStatus.draft:
+        raise ApiProblem(409, "ASSIGNMENT_LOCKED", "只能修改草稿作业的文件用途")
     if (
-        data.confirmed_role == "reference_answer"
+        data.confirmed_role in {"reference_answer", "question_and_answer"}
         and data.confirmed_answer_source == "not_applicable"
     ):
         raise ApiProblem(422, "ANSWER_SOURCE_REQUIRED", "答案文件必须由教师确认答案来源")
     if (
-        data.confirmed_role != "reference_answer"
+        data.confirmed_role not in {"reference_answer", "question_and_answer"}
         and data.confirmed_answer_source != "not_applicable"
     ):
         raise ApiProblem(422, "ANSWER_SOURCE_NOT_APPLICABLE", "非答案文件的答案来源必须为不适用")
@@ -968,6 +1098,12 @@ def confirm_file_analysis(
         raise ApiProblem(
             422, "UNTRUSTED_ANSWER_CANNOT_BE_OFFICIAL", "AI、第三方或未知来源答案不能标记为官方答案"
         )
+    previous_role = row.teacher_confirmed_role
+    previous_answer_source = row.teacher_confirmed_answer_source
+    role_changed = row.analysis_status == "confirmed" and (
+        previous_role != data.confirmed_role
+        or previous_answer_source != data.confirmed_answer_source
+    )
     row.teacher_confirmed_role = data.confirmed_role
     row.teacher_confirmed_answer_source = data.confirmed_answer_source
     row.analysis_status = "confirmed"
@@ -975,6 +1111,18 @@ def confirm_file_analysis(
     row.confirmed_by = actor.id
     row.confirmed_at = now_utc()
     row.review_note = data.review_note
+    job = db.get(AssignmentGenerationJob, revision.generation_job_id)
+    if role_changed:
+        if job is not None:
+            mark_stale(db, job, revision)
+    elif data.confirmed_role in {"textbook", "reference_answer", "question_and_answer"}:
+        if job is not None:
+            build_reference_answer_bindings(db, job, revision)
+        auto_match_available_solutions(
+            db,
+            assignment=assignment,
+            revision=revision,
+        )
     revision.teacher_edit_version += 1
     _resolve_issues(
         db,
@@ -992,14 +1140,21 @@ def confirm_file_analysis(
     audit(
         db,
         actor.id,
-        "assignment_source_file_analysis.confirm",
+        (
+            "assignment_source_file_analysis.update_confirmation"
+            if role_changed
+            else "assignment_source_file_analysis.confirm"
+        ),
         "assignment_source_file_analysis",
         row.id,
         {
             "suggested_role": row.suggested_role,
             "suggested_answer_source": row.suggested_answer_source,
+            "previous_teacher_role": previous_role,
+            "previous_teacher_answer_source": previous_answer_source,
             "teacher_final_role": data.confirmed_role,
             "teacher_final_answer_source": data.confirmed_answer_source,
+            "requires_regeneration": role_changed,
             "draft_revision_id": str(revision.id),
             "teacher_edit_version": row.teacher_edit_version,
             "reason": data.review_note,
@@ -1145,6 +1300,12 @@ def _candidate_json(
             )
         ).all()
     )
+    quality_stats = text_quality_statistics(
+        [row.content_text, row.content_latex],
+        sources=[row.extraction_method],
+        confidences=[float(row.overall_confidence)],
+        block_types=[region.region_type for region in regions],
+    )
     return {
         "id": str(row.id),
         "assignment_id": str(row.assignment_id),
@@ -1169,6 +1330,7 @@ def _candidate_json(
         "overall_confidence": float(row.overall_confidence),
         "extraction_method": row.extraction_method,
         "evidence": row.evidence,
+        "quality_stats": quality_stats,
         "warning_codes": row.warning_codes,
         "status": row.status,
         "manual_required": row.manual_required,
@@ -1384,6 +1546,472 @@ def list_question_extraction_candidates(
     return [_candidate_json(db, x, variant_unresolved=variant) for x in rows]
 
 
+def _reference_binding_json(db: Session, row: ReferenceAnswerSourceBinding) -> dict[str, Any]:
+    source = db.get(AssignmentSourceFileAnalysis, row.source_file_analysis_id)
+    stored_file = db.get(StoredFile, source.stored_file_id) if source else None
+    question = db.get(Question, row.question_id) if row.question_id else None
+    regions = list(
+        db.scalars(
+            select(ReferenceAnswerSourceRegion)
+            .where(ReferenceAnswerSourceRegion.binding_id == row.id)
+            .order_by(ReferenceAnswerSourceRegion.display_order, ReferenceAnswerSourceRegion.id)
+        )
+    )
+    return {
+        "id": str(row.id),
+        "draft_revision_id": str(row.draft_revision_id),
+        "paper_version_id": str(row.paper_version_id),
+        "source_file_analysis_id": str(row.source_file_analysis_id),
+        "source_file_name": stored_file.original_name if stored_file else None,
+        "source_recognition_block_id": str(row.source_recognition_block_id),
+        "detected_number": row.detected_number,
+        "question_id": str(row.question_id) if row.question_id else None,
+        "question_number": question.question_number if question else None,
+        "binding_version": row.binding_version,
+        "edit_version": row.edit_version,
+        "status": row.status,
+        "confidence": float(row.confidence),
+        "warning_codes": row.warning_codes,
+        "source_snapshot_hash": row.source_snapshot_hash,
+        "regions": [
+            {
+                "id": str(region.id),
+                "paper_page_id": str(region.paper_page_id),
+                "display_order": region.display_order,
+                "x": float(region.x),
+                "y": float(region.y),
+                "width": float(region.width),
+                "height": float(region.height),
+                "source": region.source,
+                "confidence": float(region.confidence),
+                "evidence": region.evidence,
+            }
+            for region in regions
+        ],
+    }
+
+
+@router.get("/api/draft-revisions/{revision_id}/reference-answer-bindings")
+def list_reference_answer_bindings(
+    revision_id: uuid.UUID, db: Db, actor: Actor
+) -> list[dict[str, Any]]:
+    owned_revision(db, actor.id, revision_id)
+    rows = list(
+        db.scalars(
+            select(ReferenceAnswerSourceBinding)
+            .where(
+                ReferenceAnswerSourceBinding.draft_revision_id == revision_id,
+                ReferenceAnswerSourceBinding.status != "superseded",
+            )
+            .order_by(
+                ReferenceAnswerSourceBinding.detected_number,
+                ReferenceAnswerSourceBinding.binding_version,
+                ReferenceAnswerSourceBinding.id,
+            )
+        )
+    )
+    return [_reference_binding_json(db, row) for row in rows]
+
+
+@router.post("/api/reference-answer-bindings/{binding_id}/disposition")
+def disposition_reference_answer_binding(
+    binding_id: uuid.UUID,
+    data: ReferenceBindingDispositionInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    row = db.scalar(
+        select(ReferenceAnswerSourceBinding)
+        .where(
+            ReferenceAnswerSourceBinding.id == binding_id,
+            ReferenceAnswerSourceBinding.owner_id == actor.id,
+        )
+        .with_for_update()
+    )
+    if row is None:
+        raise ApiProblem(404, "REFERENCE_BINDING_NOT_FOUND", "参考答案来源绑定不存在")
+    revision = owned_revision(db, actor.id, row.draft_revision_id, for_update=True)
+    assignment = db.scalar(
+        select(Assignment)
+        .where(Assignment.id == row.assignment_id, Assignment.owner_id == actor.id)
+        .with_for_update()
+    )
+    if assignment is None:
+        raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    if assignment.status != AssignmentStatus.draft:
+        raise ApiProblem(409, "ASSIGNMENT_LOCKED", "只能调整草稿作业的参考答案来源")
+    if row.status != "suggested":
+        raise ApiProblem(409, "REFERENCE_BINDING_ALREADY_REVIEWED", "该来源绑定已经处理")
+    if (
+        row.edit_version != data.expected_edit_version
+        or revision.teacher_edit_version != data.expected_draft_revision_edit_version
+        or row.paper_version_id != data.expected_paper_version_id
+        or assignment.active_paper_version_id != row.paper_version_id
+        or row.source_snapshot_hash != data.expected_source_snapshot
+        or revision.source_snapshot_hash != data.expected_source_snapshot
+    ):
+        raise ApiProblem(409, "REFERENCE_BINDING_STALE", "参考答案来源已变化，请刷新后重试")
+    if data.action == "reject":
+        row.status = "rejected"
+    else:
+        if not data.explicit_confirmation:
+            raise ApiProblem(422, "EXPLICIT_CONFIRMATION_REQUIRED", "必须由教师明确确认来源绑定")
+        question_id = data.question_id or row.question_id
+        question = db.scalar(
+            select(Question).where(
+                Question.id == question_id,
+                Question.paper_version_id == row.paper_version_id,
+                Question.status == QuestionStatus.active,
+            )
+        )
+        if question is None:
+            raise ApiProblem(422, "REFERENCE_BINDING_QUESTION_INVALID", "目标题目不属于当前题卷")
+        duplicate = db.scalar(
+            select(ReferenceAnswerSourceBinding.id).where(
+                ReferenceAnswerSourceBinding.draft_revision_id == row.draft_revision_id,
+                ReferenceAnswerSourceBinding.question_id == question.id,
+                ReferenceAnswerSourceBinding.status == "confirmed",
+                ReferenceAnswerSourceBinding.id != row.id,
+            )
+        )
+        if duplicate is not None:
+            raise ApiProblem(
+                409, "REFERENCE_BINDING_QUESTION_CONFLICT", "该题已有确认的参考答案来源"
+            )
+        if data.regions is not None:
+            source = db.get(AssignmentSourceFileAnalysis, row.source_file_analysis_id)
+            allowed_pages = (
+                set(
+                    db.scalars(
+                        select(PaperPage.id).where(
+                            PaperPage.paper_version_id == row.paper_version_id,
+                            PaperPage.stored_file_id == source.stored_file_id,
+                        )
+                    )
+                )
+                if source is not None
+                else set()
+            )
+            if any(region.paper_page_id not in allowed_pages for region in data.regions):
+                raise ApiProblem(
+                    422, "REFERENCE_BINDING_PAGE_INVALID", "区域页面不属于参考答案文件"
+                )
+            values = [
+                (region.paper_page_id, region.x, region.y, region.width, region.height)
+                for region in data.regions
+            ]
+            if len(values) != len(set(values)):
+                raise ApiProblem(422, "REFERENCE_BINDING_REGION_DUPLICATE", "参考答案区域不能重复")
+            db.execute(
+                delete(ReferenceAnswerSourceRegion).where(
+                    ReferenceAnswerSourceRegion.binding_id == row.id
+                )
+            )
+            for display_order, region in enumerate(data.regions):
+                db.add(
+                    ReferenceAnswerSourceRegion(
+                        binding_id=row.id,
+                        paper_page_id=region.paper_page_id,
+                        display_order=display_order,
+                        x=region.x,
+                        y=region.y,
+                        width=region.width,
+                        height=region.height,
+                        source="teacher_adjusted",
+                        confidence=1,
+                        evidence={"teacher_adjusted": True},
+                    )
+                )
+        existing_regions = int(
+            db.scalar(
+                select(func.count(ReferenceAnswerSourceRegion.id)).where(
+                    ReferenceAnswerSourceRegion.binding_id == row.id
+                )
+            )
+            or 0
+        )
+        if data.regions is None and existing_regions == 0:
+            raise ApiProblem(422, "REFERENCE_BINDING_REGION_REQUIRED", "至少需要一个参考答案区域")
+        row.question_id = question.id
+        row.status = "confirmed"
+        row.confirmed_by = actor.id
+        row.confirmed_at = now_utc()
+    row.edit_version += 1
+    revision.teacher_edit_version += 1
+    audit(
+        db,
+        actor.id,
+        f"reference_answer_source_binding.{data.action}",
+        "reference_answer_source_binding",
+        row.id,
+        {
+            "question_id": str(row.question_id) if row.question_id else None,
+            "binding_version": row.binding_version,
+            "source_snapshot_hash": row.source_snapshot_hash,
+        },
+    )
+    db.commit()
+    return _reference_binding_json(db, row)
+
+
+def _textbook_match_json(db: Session, row: TextbookSourceMatchCandidate) -> dict[str, Any]:
+    source = (
+        db.get(AssignmentSourceFileAnalysis, row.source_file_analysis_id)
+        if row.source_file_analysis_id
+        else None
+    )
+    stored_file = db.get(StoredFile, source.stored_file_id) if source else None
+    library_question = (
+        db.get(TextbookLibraryQuestion, row.library_question_id)
+        if row.library_question_id
+        else None
+    )
+    library = db.get(TextbookLibrary, library_question.library_id) if library_question else None
+    question = db.get(Question, row.question_id) if row.question_id else None
+    source_binding = (
+        db.get(ReferenceAnswerSourceBinding, row.source_reference_binding_id)
+        if row.source_reference_binding_id
+        else None
+    )
+    return {
+        "id": str(row.id),
+        "draft_revision_id": str(row.draft_revision_id),
+        "paper_version_id": str(row.paper_version_id),
+        "question_id": str(row.question_id) if row.question_id else None,
+        "question_number": question.question_number if question else None,
+        "solution_number": source_binding.detected_number if source_binding else None,
+        "answer_candidate_id": str(row.answer_candidate_id) if row.answer_candidate_id else None,
+        "source_reference_binding_id": (
+            str(row.source_reference_binding_id) if row.source_reference_binding_id else None
+        ),
+        "source_file_analysis_id": (
+            str(row.source_file_analysis_id) if row.source_file_analysis_id else None
+        ),
+        "source_file_name": (
+            stored_file.original_name if stored_file else library.title if library else None
+        ),
+        "source_page_id": str(row.source_page_id) if row.source_page_id else None,
+        "library_id": str(library.id) if library else None,
+        "library_question_id": str(library_question.id) if library_question else None,
+        "detected_number": row.detected_number,
+        "chapter_label": row.chapter_label,
+        "section_label": row.section_label,
+        "exercise_label": row.exercise_label,
+        "pdf_page_number": row.pdf_page_number,
+        "printed_page_number": row.printed_page_number,
+        "match_version": row.match_version,
+        "rank": row.rank,
+        "edit_version": row.edit_version,
+        "status": row.status,
+        "confidence": float(row.confidence),
+        "matching_method": row.matching_method,
+        "source_snapshot_hash": row.source_snapshot_hash,
+        "evidence": row.evidence,
+        "warning_codes": row.warning_codes,
+    }
+
+
+@router.get("/api/draft-revisions/{revision_id}/textbook-source-matches")
+def list_textbook_source_matches(
+    revision_id: uuid.UUID, db: Db, actor: Actor
+) -> list[dict[str, Any]]:
+    owned_revision(db, actor.id, revision_id)
+    rows = list(
+        db.scalars(
+            select(TextbookSourceMatchCandidate)
+            .where(
+                TextbookSourceMatchCandidate.draft_revision_id == revision_id,
+                TextbookSourceMatchCandidate.owner_id == actor.id,
+                TextbookSourceMatchCandidate.status != "superseded",
+            )
+            .order_by(
+                TextbookSourceMatchCandidate.question_id,
+                TextbookSourceMatchCandidate.match_version.desc(),
+                TextbookSourceMatchCandidate.rank,
+            )
+        )
+    )
+    return [_textbook_match_json(db, row) for row in rows]
+
+
+@router.post("/api/draft-revisions/{revision_id}/textbook-source-matches/search")
+def search_textbook_source_matches(
+    revision_id: uuid.UUID,
+    data: FindTextbookSourceInput,
+    db: Db,
+    actor: Actor,
+) -> list[dict[str, Any]]:
+    revision = owned_revision(db, actor.id, revision_id, for_update=True)
+    assignment = db.scalar(
+        select(Assignment)
+        .where(Assignment.id == revision.assignment_id, Assignment.owner_id == actor.id)
+        .with_for_update()
+    )
+    if assignment is None:
+        raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    if assignment.status != AssignmentStatus.draft:
+        raise ApiProblem(409, "ASSIGNMENT_LOCKED", "只能为草稿作业查找教材出处")
+    if (
+        revision.teacher_edit_version != data.expected_draft_revision_edit_version
+        or revision.source_snapshot_hash != data.expected_source_snapshot
+        or source_snapshot_hash(db, assignment) != data.expected_source_snapshot
+        or assignment.active_paper_version_id != data.expected_paper_version_id
+    ):
+        raise ApiProblem(409, "TEXTBOOK_MATCH_STALE", "作业内容已变化，请刷新后重试")
+    question = db.scalar(
+        select(Question).where(
+            Question.id == data.question_id,
+            Question.paper_version_id == assignment.active_paper_version_id,
+            Question.status == QuestionStatus.active,
+        )
+    )
+    if question is None:
+        raise ApiProblem(422, "TEXTBOOK_MATCH_QUESTION_INVALID", "题目不属于当前题卷")
+    textbook = db.scalar(
+        select(AssignmentSourceFileAnalysis).where(
+            AssignmentSourceFileAnalysis.id == data.textbook_file_analysis_id,
+            AssignmentSourceFileAnalysis.owner_id == actor.id,
+        )
+    )
+    if textbook is None:
+        raise ApiProblem(404, "TEXTBOOK_SOURCE_NOT_FOUND", "教材来源不存在")
+    try:
+        rows = find_textbook_source_matches(
+            db,
+            assignment=assignment,
+            revision=revision,
+            question=question,
+            textbook=textbook,
+        )
+    except TextbookSourceMatchError as exc:
+        code = str(exc)
+        messages = {
+            "TEXTBOOK_ROLE_NOT_CONFIRMED": "请先把文件用途明确设为教材",
+            "TEXTBOOK_SOURCE_INVALID": "教材不属于当前作业草稿",
+            "SOLUTION_CANDIDATE_REQUIRED": "请先生成或填写该题的解答候选",
+            "TEXTBOOK_RECOGNITION_REQUIRED": "教材尚未完成文字识别",
+            "TEXTBOOK_PAGES_REQUIRED": "教材没有可检索页面",
+            "TEXTBOOK_TRUSTED_TEXT_REQUIRED": "教材没有可信文字层或真实 OCR 结果",
+            "TEXTBOOK_MATCH_NOT_FOUND": "暂未找到可信出处候选，请人工核对教材",
+        }
+        raise ApiProblem(422, code, messages.get(code, "教材出处查找失败")) from exc
+    audit(
+        db,
+        actor.id,
+        "textbook_source_match.search",
+        "question",
+        question.id,
+        {
+            "textbook_file_analysis_id": str(textbook.id),
+            "candidate_count": len(rows),
+            "source_snapshot_hash": revision.source_snapshot_hash,
+        },
+    )
+    db.commit()
+    return [_textbook_match_json(db, row) for row in rows]
+
+
+@router.post("/api/textbook-source-matches/{match_id}/disposition")
+def disposition_textbook_source_match(
+    match_id: uuid.UUID,
+    data: TextbookMatchDispositionInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    row = db.scalar(
+        select(TextbookSourceMatchCandidate)
+        .where(
+            TextbookSourceMatchCandidate.id == match_id,
+            TextbookSourceMatchCandidate.owner_id == actor.id,
+        )
+        .with_for_update()
+    )
+    if row is None:
+        raise ApiProblem(404, "TEXTBOOK_MATCH_NOT_FOUND", "教材出处候选不存在")
+    revision = owned_revision(db, actor.id, row.draft_revision_id, for_update=True)
+    assignment = db.scalar(
+        select(Assignment)
+        .where(Assignment.id == row.assignment_id, Assignment.owner_id == actor.id)
+        .with_for_update()
+    )
+    if assignment is None:
+        raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    answer = (
+        db.get(AssignmentAnswerDraftCandidate, row.answer_candidate_id)
+        if row.answer_candidate_id
+        else None
+    )
+    source_binding = (
+        db.get(ReferenceAnswerSourceBinding, row.source_reference_binding_id)
+        if row.source_reference_binding_id
+        else None
+    )
+    answer_text = (
+        (answer.normalized_content or answer.raw_content or "").strip()
+        if answer is not None
+        else (binding_solution_text(db, source_binding) or "")
+        if source_binding is not None
+        else ""
+    )
+    answer_hash = hashlib.sha256(answer_text.encode("utf-8")).hexdigest()
+    if (
+        assignment.status != AssignmentStatus.draft
+        or row.status != "suggested"
+        or row.edit_version != data.expected_edit_version
+        or revision.teacher_edit_version != data.expected_draft_revision_edit_version
+        or row.paper_version_id != data.expected_paper_version_id
+        or assignment.active_paper_version_id != data.expected_paper_version_id
+        or row.source_snapshot_hash != data.expected_source_snapshot
+        or revision.source_snapshot_hash != data.expected_source_snapshot
+        or source_snapshot_hash(db, assignment) != data.expected_source_snapshot
+        or answer_hash != row.solution_content_hash
+    ):
+        raise ApiProblem(409, "TEXTBOOK_MATCH_STALE", "教材出处候选已变化，请重新查找")
+    if data.action == "reject":
+        row.status = "rejected"
+    else:
+        if not data.explicit_confirmation:
+            raise ApiProblem(422, "EXPLICIT_CONFIRMATION_REQUIRED", "必须由教师明确确认教材出处")
+        row.status = "confirmed"
+        if row.question_id is not None:
+            row.confirmed_question_id = row.question_id
+        elif row.source_reference_binding_id is not None:
+            row.confirmed_source_binding_id = row.source_reference_binding_id
+        else:
+            raise ApiProblem(422, "TEXTBOOK_MATCH_SOLUTION_INVALID", "教材出处缺少有效解答来源")
+        row.confirmed_by = actor.id
+        row.confirmed_at = now_utc()
+    row.edit_version += 1
+    revision.teacher_edit_version += 1
+    audit(
+        db,
+        actor.id,
+        f"textbook_source_match.{data.action}",
+        "textbook_source_match_candidate",
+        row.id,
+        {
+            "question_id": str(row.question_id) if row.question_id else None,
+            "source_reference_binding_id": (
+                str(row.source_reference_binding_id) if row.source_reference_binding_id else None
+            ),
+            "source_file_analysis_id": (
+                str(row.source_file_analysis_id) if row.source_file_analysis_id else None
+            ),
+            "library_question_id": (
+                str(row.library_question_id) if row.library_question_id else None
+            ),
+            "pdf_page_number": row.pdf_page_number,
+            "detected_number": row.detected_number,
+        },
+    )
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise ApiProblem(409, "TEXTBOOK_MATCH_QUESTION_CONFLICT", "该题已有确认的教材出处") from exc
+    return _textbook_match_json(db, row)
+
+
 @router.get("/api/question-extraction-candidates/{candidate_id}")
 def get_question_extraction_candidate(
     candidate_id: uuid.UUID, db: Db, actor: Actor
@@ -1415,7 +2043,7 @@ def get_question_extraction_evidence(
 def _ensure_candidate_current(
     db: Session,
     row: AssignmentQuestionExtractionCandidate,
-    data: QuestionExtractionDispositionInput | AcceptEligibleInput,
+    data: QuestionExtractionDispositionInput | QuestionRegionUpdateInput | AcceptEligibleInput,
 ) -> AssignmentDraftRevision:
     revision = db.scalar(
         select(AssignmentDraftRevision)
@@ -1438,6 +2066,88 @@ def _ensure_candidate_current(
     if assignment.status != AssignmentStatus.draft:
         raise ApiProblem(409, "ASSIGNMENT_LOCKED", "只能物化到草稿作业")
     return revision
+
+
+@router.put("/api/question-extraction-candidates/{candidate_id}/regions")
+def update_question_extraction_regions(
+    candidate_id: uuid.UUID,
+    data: QuestionRegionUpdateInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    row = db.scalar(
+        select(AssignmentQuestionExtractionCandidate)
+        .where(
+            AssignmentQuestionExtractionCandidate.id == candidate_id,
+            AssignmentQuestionExtractionCandidate.owner_id == actor.id,
+        )
+        .with_for_update()
+    )
+    if row is None:
+        raise ApiProblem(404, "QUESTION_CANDIDATE_NOT_FOUND", "题目候选不存在")
+    revision = _ensure_candidate_current(db, row, data)
+    if row.teacher_edit_version != data.expected_teacher_edit_version or row.status != "suggested":
+        raise ApiProblem(409, "QUESTION_CANDIDATE_EDIT_CONFLICT", "题目候选已被处理")
+    page_ids = {region.paper_page_id for region in data.regions}
+    valid_page_ids = set(
+        db.scalars(
+            select(PaperPage.id).where(
+                PaperPage.paper_version_id == row.paper_version_id,
+                PaperPage.id.in_(page_ids),
+            )
+        ).all()
+    )
+    if valid_page_ids != page_ids:
+        raise ApiProblem(422, "QUESTION_REGION_PAGE_INVALID", "题目区域包含其他试卷的页面")
+    signatures = [
+        (item.paper_page_id, item.x, item.y, item.width, item.height) for item in data.regions
+    ]
+    if len(signatures) != len(set(signatures)):
+        raise ApiProblem(422, "QUESTION_REGION_DUPLICATE", "题目区域不能重复")
+    db.execute(
+        delete(AssignmentQuestionExtractionRegion).where(
+            AssignmentQuestionExtractionRegion.candidate_id == row.id
+        )
+    )
+    cross_page_group = str(row.id) if len(page_ids) > 1 else None
+    for display_order, item in enumerate(data.regions):
+        db.add(
+            AssignmentQuestionExtractionRegion(
+                candidate_id=row.id,
+                paper_page_id=item.paper_page_id,
+                display_order=display_order,
+                region_type="stem",
+                x=item.x,
+                y=item.y,
+                width=item.width,
+                height=item.height,
+                confidence=1,
+                evidence={"source": "teacher_adjusted"},
+                source_block_ids=[],
+                cross_page_group=cross_page_group,
+            )
+        )
+    row.teacher_edit_version += 1
+    row.manual_required = True
+    row.warning_codes = sorted({*row.warning_codes, "REGION_TEACHER_ADJUSTED"})
+    revision.teacher_edit_version += 1
+    audit(
+        db,
+        actor.id,
+        "question_extraction_candidate.regions.update",
+        "assignment_question_extraction_candidate",
+        row.id,
+        {"region_count": len(data.regions), "page_count": len(page_ids)},
+    )
+    db.commit()
+    db.refresh(row)
+    return _candidate_json(db, row)
+
+
+def _autofill_total_score_from_confirmed_questions(
+    db: Session, revision: AssignmentDraftRevision, actor_id: uuid.UUID
+) -> None:
+    autofill_total_score_from_draft_questions(db, revision, actor_id)
 
 
 def _derive_draft_paper(
@@ -1668,6 +2378,7 @@ def disposition_question_extraction(
             "reason": data.review_note,
         },
     )
+    _autofill_total_score_from_confirmed_questions(db, revision, actor.id)
     db.commit()
     db.refresh(row)
     return _candidate_json(db, row)
@@ -1746,9 +2457,125 @@ def accept_eligible_question_candidates(
             revision.id,
             {"candidate_ids": accepted},
         )
+        _autofill_total_score_from_confirmed_questions(db, revision, actor.id)
     db.commit()
     return {
         "accepted_candidate_ids": accepted,
         "accepted_count": len(accepted),
         "server_decided": True,
+    }
+
+
+@router.post(
+    "/api/assignment-draft-revisions/{revision_id}/questions/{question_id}/regenerate-answer-rubric",
+    status_code=202,
+)
+def regenerate_question_answer_rubric(
+    revision_id: uuid.UUID,
+    question_id: uuid.UUID,
+    data: RegenerateQuestionDraftInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    revision = owned_revision(db, actor.id, revision_id, for_update=True)
+    owned_assignment(db, actor.id, revision.assignment_id)
+    assignment = db.scalar(
+        select(Assignment).where(Assignment.id == revision.assignment_id).with_for_update()
+    )
+    assert assignment is not None
+    if assignment.status != AssignmentStatus.draft:
+        raise ApiProblem(409, "ASSIGNMENT_NOT_DRAFT", "只有草稿作业可以重新生成建议")
+    if revision.teacher_edit_version != data.expected_draft_revision_edit_version:
+        raise ApiProblem(409, "DRAFT_EDIT_CONFLICT", "草稿内容已变化，请刷新后重试")
+    current_snapshot = source_snapshot_hash(db, assignment)
+    if (
+        revision.source_snapshot_hash != data.expected_source_snapshot
+        or current_snapshot != data.expected_source_snapshot
+    ):
+        raise ApiProblem(409, "GENERATION_SOURCE_CHANGED", "题目或试卷内容已变化，请刷新后重试")
+    question = db.scalar(
+        select(Question)
+        .where(
+            Question.id == question_id,
+            Question.paper_version_id == assignment.active_paper_version_id,
+            Question.status == QuestionStatus.active,
+        )
+        .with_for_update()
+    )
+    if question is None:
+        raise ApiProblem(404, "QUESTION_NOT_FOUND", "当前作业中没有这道有效题目")
+    active_job = db.scalar(
+        select(AssignmentGenerationJob.id).where(
+            AssignmentGenerationJob.assignment_id == assignment.id,
+            AssignmentGenerationJob.status.in_(ACTIVE_STATUSES),
+        )
+    )
+    if active_job is not None:
+        raise ApiProblem(409, "GENERATION_ALREADY_RUNNING", "试卷正在整理，请完成后再重新生成本题")
+    job = db.get(AssignmentGenerationJob, revision.generation_job_id)
+    assert job is not None
+    stage_result = GenerationStageResult(
+        job_id=job.id,
+        stage="generating_rubrics",
+        stage_generation=next_stage_generation(db, job.id, "generating_rubrics"),
+        status="queued",
+        input_hash=canonical_hash(
+            {
+                "source_snapshot_hash": data.expected_source_snapshot,
+                "teacher_edit_version": revision.teacher_edit_version,
+                "question_id": str(question.id),
+                "scope": "single_question",
+            }
+        ),
+        expected_teacher_edit_version=revision.teacher_edit_version,
+        result_payload={
+            "scope": "single_question",
+            "question_id": str(question.id),
+            "draft_only": True,
+        },
+    )
+    db.add(stage_result)
+    db.flush()
+    audit(
+        db,
+        actor.id,
+        "assignment_generation.regenerate_question_requested",
+        "generation_stage_result",
+        stage_result.id,
+        {
+            "assignment_id": str(assignment.id),
+            "revision_id": str(revision.id),
+            "question_id": str(question.id),
+            "draft_only": True,
+        },
+    )
+    db.commit()
+    try:
+        from workers.celery_app import celery_app
+
+        celery_app.send_task(
+            "ahamark.assignment_generation.regenerate_question",
+            args=[
+                str(stage_result.id),
+                str(revision.id),
+                str(question.id),
+                data.expected_source_snapshot,
+                revision.teacher_edit_version,
+            ],
+        )
+    except Exception:
+        failed = db.get(GenerationStageResult, stage_result.id)
+        if failed is not None:
+            failed.status = "failed"
+            failed.error_code = "WORKER_UNAVAILABLE"
+            failed.error_message = "生成 Worker 当前不可用"
+            failed.completed_at = now_utc()
+            db.commit()
+        raise ApiProblem(503, "WORKER_UNAVAILABLE", "生成服务暂时不可用，请稍后重试") from None
+    return {
+        "request_id": str(stage_result.id),
+        "question_id": str(question.id),
+        "status": "queued",
+        "draft_only": True,
+        "replaces_confirmed_content": False,
     }

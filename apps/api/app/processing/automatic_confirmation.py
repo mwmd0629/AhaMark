@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
+from itertools import pairwise
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -28,7 +29,7 @@ from app.models import (
 )
 from app.recognition.answer_evidence import next_revision
 
-AUTOMATIC_CONFIRMATION_VERSION = "strict-auto-confirm-v2"
+AUTOMATIC_CONFIRMATION_VERSION = "strict-auto-confirm-v3"
 REGION_MIN_CONFIDENCE = Decimal("0.95")
 
 
@@ -44,6 +45,28 @@ def _blocked(code: str, message: str) -> AutomaticConfirmationDecision:
     return AutomaticConfirmationDecision(False, code, message)
 
 
+def _anchored_regions_are_disjoint(
+    candidates: list[
+        tuple[
+            StudentAnswer,
+            StudentAnswerRegion,
+            SubmissionQuestionAnchor,
+            SubmissionPage,
+        ]
+    ],
+) -> bool:
+    ordered = sorted(
+        candidates,
+        key=lambda item: (item[3].page_number, item[1].y, item[1].x),
+    )
+    for left, right in pairwise(ordered):
+        left_region, left_page = left[1], left[3]
+        right_region, right_page = right[1], right[3]
+        if left_page.id == right_page.id and (left_region.y + left_region.height > right_region.y):
+            return False
+    return True
+
+
 def auto_confirm_deterministic_regions(
     db: Session,
     *,
@@ -52,11 +75,7 @@ def auto_confirm_deterministic_regions(
     processing_job_id: uuid.UUID,
     processing_run_id: uuid.UUID | None,
 ) -> AutomaticConfirmationDecision:
-    """Confirm only a complete, uniquely mapped template segmentation.
-
-    This deliberately excludes OCR-anchor candidates until they carry a
-    durable source-anchor foreign key.
-    """
+    """Confirm only complete, uniquely mapped and non-overlapping regions."""
 
     submission = db.scalar(
         select(Submission)
@@ -137,8 +156,7 @@ def auto_confirm_deterministic_regions(
         teacher_regions = [
             region
             for region in current
-            if region.status == "confirmed"
-            and region.confirmation_origin == "teacher_explicit"
+            if region.status == "confirmed" and region.confirmation_origin == "teacher_explicit"
         ]
         if len(current) <= 1 or not teacher_regions:
             continue
@@ -304,6 +322,11 @@ def auto_confirm_deterministic_regions(
             return _blocked(
                 "SEGMENTATION_ANCHOR_ORDER_AMBIGUOUS",
                 "Question anchors do not form the complete active-question order",
+            )
+        if not _anchored_regions_are_disjoint(anchored_candidates):
+            return _blocked(
+                "SEGMENTATION_REGION_OVERLAP",
+                "Question regions overlap and require teacher review",
             )
 
     timestamp = now_utc()

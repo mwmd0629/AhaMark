@@ -9,6 +9,7 @@ from typing import Annotated, Any, Literal
 from app.api.actor import Actor
 from app.api.assignment_central_review import PublishInput
 from app.api.domain import ApiProblem, audit
+from app.assignment_generation.service import mark_stale
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.math_validation.stale import stale_for_question
@@ -16,8 +17,11 @@ from app.models import (
     ArchiveStatus,
     Assignment,
     AssignmentClass,
+    AssignmentDraftRevision,
+    AssignmentGenerationJob,
     AssignmentParticipantSnapshot,
     AssignmentReviewSession,
+    AssignmentSourceFileAnalysis,
     AssignmentStatus,
     ClassStudent,
     FileStatus,
@@ -1715,6 +1719,26 @@ def delete_file(
     db.execute(delete(PaperPage).where(PaperPage.id.in_(page_ids)))
     sf.status = FileStatus.deleted
     db.flush()
+    revisions = list(
+        db.scalars(
+            select(AssignmentDraftRevision).where(
+                AssignmentDraftRevision.assignment_id == item.id,
+                AssignmentDraftRevision.status.not_in(("stale", "superseded")),
+            )
+        )
+    )
+    for revision in revisions:
+        job = db.get(AssignmentGenerationJob, revision.generation_job_id)
+        if job is not None and job.status not in {"stale", "cancelled"}:
+            mark_stale(db, job, revision)
+    for analysis in db.scalars(
+        select(AssignmentSourceFileAnalysis).where(
+            AssignmentSourceFileAnalysis.assignment_id == item.id,
+            AssignmentSourceFileAnalysis.stored_file_id == sf.id,
+            AssignmentSourceFileAnalysis.analysis_status != "superseded",
+        )
+    ):
+        analysis.analysis_status = "superseded"
     remaining = db.scalars(
         select(PaperPage)
         .where(PaperPage.paper_version_id == pv.id)
@@ -1728,7 +1752,11 @@ def delete_file(
         "assignment.file.delete",
         "assignment",
         item.id,
-        {"stored_file_id": str(sf.id), "pages_deleted": len(page_ids)},
+        {
+            "stored_file_id": str(sf.id),
+            "pages_deleted": len(page_ids),
+            "generation_invalidated": bool(revisions),
+        },
     )
     try:
         db.commit()
@@ -1957,9 +1985,7 @@ def patch_question(
         raise ApiProblem(404, "QUESTION_NOT_FOUND", "题目不存在")
     if data.question_type not in QUESTION_TYPES:
         raise ApiProblem(422, "QUESTION_TYPE_INVALID", "题型无效")
-    values = data.model_dump(
-        exclude={"knowledge_points", "parent_question_id", "question_number"}
-    )
+    values = data.model_dump(exclude={"knowledge_points", "parent_question_id", "question_number"})
     values["question_number"] = ensure_question_number_available(
         db, q.paper_version_id, data.question_number, exclude_question_id=q.id
     )

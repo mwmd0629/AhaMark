@@ -8,10 +8,12 @@ import {
   type ConfirmResultsReadiness,
   type ConfirmResultsResult,
   type ReviewWorkspace,
+  type SafeAcceptPreview,
 } from "@/lib/api";
 import { AnswerRecognitionWorkspace } from "@/components/answer-recognition-workspace";
+import { useSmartRefresh } from "@/lib/use-smart-refresh";
 
-type Decision = "modified" | "manual_scored";
+type Decision = "accepted" | "modified" | "manual_scored";
 
 const statusLabels: Record<string, string> = {
   pending: "待复核",
@@ -68,13 +70,19 @@ function resultSummary(result: ConfirmResultsResult) {
   return `更新 ${created} 份，保留 ${reused} 份`;
 }
 
-type ReviewFilter = "all" | "suggested" | "needs_review" | "reviewed" | "stale";
+type ReviewFilter = "pending" | "completed" | "all" | "needs_review" | "stale";
 
 function statusLabel(value?: string) {
   return value ? (statusLabels[value] ?? value) : "未提供";
 }
 
 type ReviewAnswer = ReviewWorkspace["items"][number]["answers"][number];
+type ReviewDraft = {
+  score: string;
+  feedback: string;
+  criteria: Record<string, string>;
+  decision: "modified" | "manual_scored";
+};
 
 function hasManualOrIncompleteCriteria(answer: ReviewAnswer) {
   return answer.criteria.some((criterion) =>
@@ -95,6 +103,24 @@ function needsTeacherReview(answer: ReviewAnswer) {
   );
 }
 
+function isCompleted(answer: ReviewAnswer) {
+  return Boolean(
+    answer.review?.final_score != null &&
+    answer.review.decision !== "reopened" &&
+    answer.status !== "stale" &&
+    answer.result?.status !== "stale",
+  );
+}
+
+function isAnomaly(answer: ReviewAnswer) {
+  return (
+    needsTeacherReview(answer) ||
+    Number(answer.confidence ?? 0) < 0.9 ||
+    (answer.regions ?? []).length === 0 ||
+    Boolean(answer.result?.quality_flags?.length)
+  );
+}
+
 type ReviewTarget = {
   submissionIndex: number;
   answerIndex: number;
@@ -105,13 +131,22 @@ function reviewTargets(
   data: ReviewWorkspace,
   filter: ReviewFilter,
 ): ReviewTarget[] {
-  return data.items.flatMap((submission, submissionIndex) =>
+  const targets = data.items.flatMap((submission, submissionIndex) =>
     submission.answers.flatMap((answer, answerIndex) =>
       matchesReviewFilter(answer, filter)
         ? [{ submissionIndex, answerIndex, answerId: answer.id }]
         : [],
     ),
   );
+  return filter === "pending"
+    ? targets.sort((left, right) => {
+        const leftAnswer =
+          data.items[left.submissionIndex].answers[left.answerIndex];
+        const rightAnswer =
+          data.items[right.submissionIndex].answers[right.answerIndex];
+        return Number(isAnomaly(rightAnswer)) - Number(isAnomaly(leftAnswer));
+      })
+    : targets;
 }
 
 function nextReviewTarget(
@@ -137,9 +172,9 @@ function nextReviewTarget(
 function matchesReviewFilter(answer: ReviewAnswer, filter: ReviewFilter) {
   return (
     filter === "all" ||
-    (filter === "suggested" && answer.result?.status === "suggested") ||
+    (filter === "pending" && !isCompleted(answer)) ||
+    (filter === "completed" && isCompleted(answer)) ||
     (filter === "needs_review" && needsTeacherReview(answer)) ||
-    (filter === "reviewed" && Boolean(answer.review)) ||
     (filter === "stale" &&
       (answer.status === "stale" || answer.result?.status === "stale"))
   );
@@ -180,7 +215,21 @@ export default function ReviewPage() {
       }
     | undefined
   >(undefined);
-  const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("all");
+  const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("pending");
+  const [safeAcceptPreview, setSafeAcceptPreview] =
+    useState<SafeAcceptPreview>();
+  const [showSafeAccept, setShowSafeAccept] = useState(false);
+  const safeAcceptCommand = useRef<
+    { reviewHash: string; idempotencyKey: string } | undefined
+  >(undefined);
+  const [lastAccepted, setLastAccepted] = useState<{
+    answerId: string;
+    questionNumber: string;
+    reviewVersion: number;
+    until: number;
+  }>();
+  const [draftOwnerAnswerId, setDraftOwnerAnswerId] = useState<string>();
+  const keyboardActionRef = useRef<(key: string) => void>(() => undefined);
   const fetchWorkspace = () =>
     jointQuestionId
       ? gradingApi.reviewWorkspace(batchId, jointQuestionId)
@@ -188,15 +237,27 @@ export default function ReviewPage() {
 
   const load = async () => {
     const next = await fetchWorkspace();
-    const nextReadiness =
-      next.collaboration?.can_confirm_results === false
-        ? undefined
-        : await gradingApi.confirmResultsReadiness(batchId);
     setData(next);
-    setReadiness(nextReadiness);
-    setConfirmedResult((current) => nextReadiness?.confirmed_result ?? current);
+    if (next.collaboration?.can_confirm_results === false) {
+      setReadiness(undefined);
+    } else {
+      try {
+        const nextReadiness = await gradingApi.confirmResultsReadiness(batchId);
+        setReadiness(nextReadiness);
+        setConfirmedResult(
+          (current) => nextReadiness.confirmed_result ?? current,
+        );
+      } catch {
+        // The saved review and refreshed workspace are authoritative. A temporary
+        // readiness failure must not strand the teacher on the completed answer.
+      }
+    }
     return next;
   };
+  useSmartRefresh(load, {
+    enabled: !saving && scoringDecision === null,
+    intervalMs: 45_000,
+  });
   useEffect(() => {
     setConfirmedResult(undefined);
     confirmCommand.current = undefined;
@@ -207,9 +268,9 @@ export default function ReviewPage() {
           workspace.collaboration?.can_confirm_results === false
             ? undefined
             : await gradingApi.confirmResultsReadiness(batchId);
-        const preferredFilter = reviewTargets(workspace, "needs_review").length
-          ? "needs_review"
-          : "all";
+        const preferredFilter = reviewTargets(workspace, "pending").length
+          ? "pending"
+          : "completed";
         const firstTarget = reviewTargets(workspace, preferredFilter)[0];
         setData(workspace);
         setReadiness(nextReadiness);
@@ -246,21 +307,36 @@ export default function ReviewPage() {
     () => answer?.evidence.find((item) => item.id === activeEvidence),
     [answer, activeEvidence],
   );
+  const draftKey =
+    answer && submission
+      ? `ahamark:review-draft:${batchId}:${submission.submission_id}:${answer.id}:${answer.result?.id ?? "manual"}:${answer.result?.structured_rubric_version_id ?? "none"}`
+      : undefined;
 
   useEffect(() => {
     if (!answer) return;
-    setScoreDraft(answer.review?.final_score ?? answer.result?.score ?? "");
-    setFeedbackDraft(answer.review?.feedback ?? "");
-    setCriterionDrafts(
-      Object.fromEntries(
-        answer.criteria.map((criterion) => [
-          criterion.criterion_id,
-          criterion.awarded_points ?? "",
-        ]),
-      ),
+    const fallbackCriteria = Object.fromEntries(
+      answer.criteria.map((criterion) => [
+        criterion.criterion_id,
+        criterion.awarded_points ?? "",
+      ]),
     );
-    setScoringDecision(null);
-  }, [answer]);
+    let saved: ReviewDraft | undefined;
+    if (draftKey) {
+      try {
+        saved =
+          JSON.parse(localStorage.getItem(draftKey) ?? "null") ?? undefined;
+      } catch {
+        localStorage.removeItem(draftKey);
+      }
+    }
+    setScoreDraft(
+      saved?.score ?? answer.review?.final_score ?? answer.result?.score ?? "",
+    );
+    setFeedbackDraft(saved?.feedback ?? answer.review?.feedback ?? "");
+    setCriterionDrafts(saved?.criteria ?? fallbackCriteria);
+    setScoringDecision(saved?.decision ?? null);
+    setDraftOwnerAnswerId(answer.id);
+  }, [answer, draftKey]);
 
   useEffect(() => {
     if (!data || answer) return;
@@ -268,7 +344,6 @@ export default function ReviewPage() {
     if (firstTarget) {
       setSubmissionIndex(firstTarget.submissionIndex);
       setAnswerIndex(firstTarget.answerIndex);
-      setPageIndex(0);
       setActiveEvidence(undefined);
     }
   }, [answer, data, reviewFilter]);
@@ -292,6 +367,95 @@ export default function ReviewPage() {
       );
     }),
   );
+  const canAcceptSuggestion = Boolean(
+    answer?.result?.status === "suggested" &&
+    answer.result.score != null &&
+    answer.status !== "stale" &&
+    !answer.result.quality_flags?.length &&
+    answer.recognized_text !== undefined &&
+    (answer.regions ?? []).length > 0 &&
+    !hasManualOrIncompleteCriteria(answer),
+  );
+  const draftDirty = Boolean(
+    answer &&
+    scoringDecision &&
+    draftOwnerAnswerId === answer.id &&
+    (scoreDraft !==
+      (answer.review?.final_score ?? answer.result?.score ?? "") ||
+      feedbackDraft !== (answer.review?.feedback ?? "") ||
+      answer.criteria.some(
+        (criterion) =>
+          (criterionDrafts[criterion.criterion_id] ?? "") !==
+          (criterion.awarded_points ?? ""),
+      )),
+  );
+  const remainingCount = data ? reviewTargets(data, "pending").length : 0;
+
+  useEffect(() => {
+    if (!draftKey || draftOwnerAnswerId !== answer?.id || !scoringDecision)
+      return;
+    const draft: ReviewDraft = {
+      score: scoreDraft,
+      feedback: feedbackDraft,
+      criteria: criterionDrafts,
+      decision: scoringDecision,
+    };
+    localStorage.setItem(draftKey, JSON.stringify(draft));
+  }, [
+    answer?.id,
+    criterionDrafts,
+    draftKey,
+    draftOwnerAnswerId,
+    feedbackDraft,
+    scoreDraft,
+    scoringDecision,
+  ]);
+
+  useEffect(() => {
+    const protect = (event: BeforeUnloadEvent) => {
+      if (!draftDirty) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", protect);
+    return () => window.removeEventListener("beforeunload", protect);
+  }, [draftDirty]);
+
+  useEffect(() => {
+    setShowSafeAccept(false);
+    safeAcceptCommand.current = undefined;
+    if (!submission) {
+      setSafeAcceptPreview(undefined);
+      return;
+    }
+    gradingApi
+      .safeAcceptPreview(batchId, submission.submission_id)
+      .then(setSafeAcceptPreview)
+      .catch(() => setSafeAcceptPreview(undefined));
+  }, [batchId, submission]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.shiftKey ||
+        target?.isContentEditable ||
+        ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(
+          target?.tagName ?? "",
+        )
+      ) {
+        return;
+      }
+      if (!["a", "e", "ArrowLeft", "ArrowRight"].includes(event.key)) return;
+      event.preventDefault();
+      keyboardActionRef.current(event.key);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
   const readinessNewSnapshotCount =
     readiness?.new_snapshot_count ??
     readiness?.plan?.filter((item) => item.action === "create_snapshot")
@@ -317,6 +481,42 @@ export default function ReviewPage() {
       ) ?? [],
     ),
   );
+
+  function clearCurrentDraft() {
+    if (draftKey) localStorage.removeItem(draftKey);
+    setScoringDecision(null);
+  }
+
+  function canLeaveCurrentEdit() {
+    if (!draftDirty) return true;
+    if (
+      !window.confirm("当前评分还未保存，离开本题将清除这份草稿。确定离开吗？")
+    ) {
+      return false;
+    }
+    clearCurrentDraft();
+    return true;
+  }
+
+  function selectTarget(target: ReviewTarget) {
+    if (!canLeaveCurrentEdit()) return;
+    setSubmissionIndex(target.submissionIndex);
+    setAnswerIndex(target.answerIndex);
+    setActiveEvidence(undefined);
+  }
+
+  function changeReviewFilter(filter: ReviewFilter) {
+    if (!canLeaveCurrentEdit()) return;
+    setReviewFilter(filter);
+  }
+
+  function moveReviewTarget(offset: number) {
+    if (!data || !answer) return;
+    const targets = reviewTargets(data, reviewFilter);
+    const index = targets.findIndex((target) => target.answerId === answer.id);
+    const target = targets[index + offset];
+    if (target) selectTarget(target);
+  }
 
   async function submitReview(decision: Decision) {
     if (!answer || saving) return;
@@ -357,19 +557,28 @@ export default function ReviewPage() {
     setMessage("");
     try {
       const currentAnswerId = answer.id;
-      await gradingApi.review(currentAnswerId, payload);
+      const savedReview = await gradingApi.review(currentAnswerId, payload);
+      clearCurrentDraft();
+      if (decision === "accepted") {
+        setLastAccepted({
+          answerId: currentAnswerId,
+          questionNumber: answer.question.number,
+          reviewVersion: savedReview.review_version,
+          until: Date.now() + 5 * 60 * 1000,
+        });
+      }
       const next = await load();
       const target = nextReviewTarget(
         next,
-        reviewFilter,
+        "pending",
         submissionIndex,
         answerIndex,
         currentAnswerId,
       );
       if (target) {
+        setReviewFilter("pending");
         setSubmissionIndex(target.submissionIndex);
         setAnswerIndex(target.answerIndex);
-        setPageIndex(0);
         setActiveEvidence(undefined);
       }
       const batches = next.joint_navigation?.batches ?? [];
@@ -412,6 +621,64 @@ export default function ReviewPage() {
           ? `保存失败：${reason.message}`
           : "保存失败，请检查分数范围后重试",
       );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function reopenLastAccepted() {
+    if (!lastAccepted || saving || Date.now() > lastAccepted.until) return;
+    setSaving(true);
+    try {
+      await gradingApi.reopenReview(lastAccepted.answerId, {
+        expected_review_version: lastAccepted.reviewVersion,
+        reason: "教师撤回刚确认的建议分",
+      });
+      const next = await load();
+      const target = reviewTargets(next, "pending").find(
+        (item) => item.answerId === lastAccepted.answerId,
+      );
+      setReviewFilter("pending");
+      if (target) selectTarget(target);
+      setLastAccepted(undefined);
+      setMessage("已撤回本题确认，题目已回到待处理；没有发布或释放成绩");
+    } catch {
+      await load().catch(() => undefined);
+      setMessage("无法撤回：题目已变化或撤回时间已过，请检查最新状态");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function confirmSafeSubmission() {
+    if (!submission || !safeAcceptPreview?.eligible_count || saving) return;
+    if (
+      safeAcceptCommand.current?.reviewHash !== safeAcceptPreview.review_hash
+    ) {
+      safeAcceptCommand.current = {
+        reviewHash: safeAcceptPreview.review_hash,
+        idempotencyKey: crypto.randomUUID(),
+      };
+    }
+    setSaving(true);
+    try {
+      const result = await gradingApi.safeAcceptSubmission(
+        batchId,
+        submission.submission_id,
+        {
+          answer_ids: safeAcceptPreview.answer_ids,
+          expected_review_hash: safeAcceptPreview.review_hash,
+          idempotency_key: safeAcceptCommand.current.idempotencyKey,
+        },
+      );
+      await load();
+      setShowSafeAccept(false);
+      setMessage(
+        `已确认本份作业 ${result.accepted_count} 道无异常建议，共 ${result.suggested_total} 分；未发布成绩`,
+      );
+    } catch {
+      await load().catch(() => undefined);
+      setMessage("无法批量确认：内容已变化或出现异常，已刷新，请重新检查");
     } finally {
       setSaving(false);
     }
@@ -584,46 +851,18 @@ export default function ReviewPage() {
     }
   }
 
-  async function addRegion() {
-    if (!answer || !page || saving) return;
-    const raw = window.prompt(
-      "输入答题区域 x,y,width,height（0–1 坐标）",
-      "0,0,1,1",
-    );
-    if (raw === null) return;
-    const values = raw.split(",").map(Number);
-    if (
-      values.length !== 4 ||
-      values.some((value) => Number.isNaN(value)) ||
-      values[0] < 0 ||
-      values[1] < 0 ||
-      values[2] <= 0 ||
-      values[3] <= 0 ||
-      values[0] + values[2] > 1 ||
-      values[1] + values[3] > 1
-    ) {
-      setMessage("区域坐标无效");
-      return;
+  keyboardActionRef.current = (key) => {
+    if (saving) return;
+    if (key === "a" && canAcceptSuggestion && answer && !isCompleted(answer)) {
+      void submitReview("accepted");
+    } else if (key === "e" && answer && !answer.review) {
+      setScoringDecision(answer.result ? "modified" : "manual_scored");
+    } else if (key === "ArrowLeft") {
+      moveReviewTarget(-1);
+    } else if (key === "ArrowRight") {
+      moveReviewTarget(1);
     }
-    setSaving(true);
-    try {
-      await gradingApi.createAnswerRegion(answer.id, {
-        submission_page_id: page.id,
-        x: values[0],
-        y: values[1],
-        width: values[2],
-        height: values[3],
-        source: "manual",
-        confirmed: true,
-      });
-      await load();
-      setMessage("答题区域已更新，请重新识别");
-    } catch {
-      setMessage("答题区域保存失败");
-    } finally {
-      setSaving(false);
-    }
-  }
+  };
 
   if (error)
     return (
@@ -643,23 +882,45 @@ export default function ReviewPage() {
           <span>
             已检查 {data.progress.reviewed}/{data.progress.total}
           </span>
+          <span className="rounded-full bg-amber-100 px-3 py-1 text-amber-900">
+            还剩 {remainingCount} 题
+          </span>
           {data.collaboration?.can_confirm_results !== false && (
             <button
               className="rounded bg-indigo-700 px-3 py-2 text-white disabled:opacity-50"
               disabled={saving || !readiness?.ready || Boolean(confirmedResult)}
               onClick={() => void confirmResults()}
             >
-              {confirmedResult ? "结果已确认" : "确认结果"}
+              {confirmedResult
+                ? "结果已确认"
+                : saving
+                  ? "正在确认…"
+                  : "确认结果"}
             </button>
           )}
           <Link
             className="rounded border px-3 py-2"
             href={`/grading/${batchId}`}
+            onClick={(event) => {
+              if (!canLeaveCurrentEdit()) event.preventDefault();
+            }}
           >
             返回批次工作台
           </Link>
         </div>
       </header>
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-600">
+        <span>快捷键：A 确认建议 · E 修改分数 · ← 上一题 · → 下一题</span>
+        {lastAccepted && Date.now() <= lastAccepted.until && (
+          <button
+            className="rounded border bg-white px-3 py-1 font-medium text-slate-900"
+            disabled={saving}
+            onClick={() => void reopenLastAccepted()}
+          >
+            撤回第 {lastAccepted.questionNumber} 题确认
+          </button>
+        )}
+      </div>
       {data.collaboration && (
         <section
           className="rounded-xl border bg-white p-4"
@@ -803,11 +1064,8 @@ export default function ReviewPage() {
         <div className="mt-3 flex flex-wrap gap-2" aria-label="答案筛选">
           {(
             [
-              ["all", "全部"],
-              ["suggested", "待确认"],
-              ["needs_review", "需检查"],
-              ["reviewed", "已复核"],
-              ["stale", "已失效"],
+              ["pending", "待处理"],
+              ["completed", "已完成"],
             ] as Array<[ReviewFilter, string]>
           ).map(([value, label]) => (
             <button
@@ -816,12 +1074,78 @@ export default function ReviewPage() {
               className={`rounded border px-3 py-1 text-sm ${
                 reviewFilter === value ? "bg-indigo-700 text-white" : ""
               }`}
-              onClick={() => setReviewFilter(value)}
+              onClick={() => changeReviewFilter(value)}
             >
               {label}
             </button>
           ))}
+          <details className="relative">
+            <summary className="cursor-pointer rounded border px-3 py-1 text-sm">
+              更多筛选
+            </summary>
+            <div className="absolute right-0 z-10 mt-1 grid min-w-32 gap-1 rounded border bg-white p-2 shadow">
+              {(
+                [
+                  ["all", "全部"],
+                  ["needs_review", "需检查"],
+                  ["stale", "已失效"],
+                ] as Array<[ReviewFilter, string]>
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  className="rounded px-3 py-1 text-left text-sm hover:bg-slate-100"
+                  onClick={() => changeReviewFilter(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </details>
         </div>
+        {safeAcceptPreview && safeAcceptPreview.eligible_count > 0 && (
+          <div className="mt-3 rounded border border-emerald-200 bg-emerald-50 p-3 text-sm">
+            {!showSafeAccept ? (
+              <button
+                className="rounded bg-emerald-700 px-3 py-2 font-medium text-white"
+                disabled={saving}
+                onClick={() => setShowSafeAccept(true)}
+              >
+                确认本份作业的无异常建议
+              </button>
+            ) : (
+              <div
+                className="space-y-2"
+                role="dialog"
+                aria-label="批量确认预览"
+              >
+                <p className="font-medium">
+                  将确认 {safeAcceptPreview.eligible_count} 题，建议总分{" "}
+                  {safeAcceptPreview.suggested_total}
+                  分。
+                </p>
+                <p className="text-slate-600">
+                  异常题不会包含在内；本操作只保存教师复核，不发布或释放成绩。
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    className="rounded bg-emerald-700 px-3 py-2 text-white"
+                    disabled={saving}
+                    onClick={() => void confirmSafeSubmission()}
+                  >
+                    确认这 {safeAcceptPreview.eligible_count} 题
+                  </button>
+                  <button
+                    className="rounded border bg-white px-3 py-2"
+                    disabled={saving}
+                    onClick={() => setShowSafeAccept(false)}
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </section>
       {confirmedResult && (
         <div
@@ -913,10 +1237,12 @@ export default function ReviewPage() {
                   const firstVisibleAnswer = item.answers.findIndex((answer) =>
                     matchesReviewFilter(answer, reviewFilter),
                   );
-                  setSubmissionIndex(index);
-                  setAnswerIndex(Math.max(firstVisibleAnswer, 0));
-                  setPageIndex(0);
-                  setActiveEvidence(undefined);
+                  selectTarget({
+                    submissionIndex: index,
+                    answerIndex: Math.max(firstVisibleAnswer, 0),
+                    answerId:
+                      item.answers[Math.max(firstVisibleAnswer, 0)]?.id ?? "",
+                  });
                 }}
                 className={`mb-2 block w-full rounded-lg p-2 text-left text-sm ${index === submissionIndex ? "bg-indigo-50 text-indigo-700" : "hover:bg-slate-50"}`}
               >
@@ -931,7 +1257,13 @@ export default function ReviewPage() {
               <button
                 key={item.id}
                 data-answer-id={item.id}
-                onClick={() => setAnswerIndex(index)}
+                onClick={() =>
+                  selectTarget({
+                    submissionIndex,
+                    answerIndex: index,
+                    answerId: item.id,
+                  })
+                }
                 className={`mb-1 block w-full rounded p-2 text-left text-sm ${index === answerIndex ? "bg-amber-50" : ""}`}
               >
                 第 {item.question.number} 题
@@ -972,14 +1304,26 @@ export default function ReviewPage() {
                 </h2>
                 <p>{answer.question.content}</p>
               </div>
+              <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-4">
+                <span className="text-sm text-indigo-800">AI 建议得分</span>
+                <div className="mt-1 flex items-end gap-2">
+                  <strong className="text-3xl text-indigo-950">
+                    {answer.result?.score ?? "—"}
+                  </strong>
+                  <span className="pb-1 text-slate-600">
+                    / {answer.question.max_score ?? "—"} 分
+                  </span>
+                </div>
+                {!answer.review && canAcceptSuggestion && (
+                  <p className="mt-1 text-sm text-slate-600">
+                    核对原卷后，可直接确认或修改。
+                  </p>
+                )}
+              </div>
               <div className="grid gap-3 sm:grid-cols-2">
                 <Info
                   label="学生答案"
                   value={answer.corrected_text ?? answer.recognized_text}
-                />
-                <Info
-                  label="建议分 / 满分"
-                  value={`${answer.result?.score ?? "—"} / ${answer.question.max_score ?? "—"}`}
                 />
                 <Info label="教师最终分" value={answer.review?.final_score} />
               </div>
@@ -989,7 +1333,27 @@ export default function ReviewPage() {
                   <p className="mt-1 whitespace-pre-wrap">
                     {answer.result.reasoning}
                   </p>
-                  <p className="mt-2 text-xs text-slate-600">仅供参考。</p>
+                </div>
+              )}
+              {!isCompleted(answer) && (
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {canAcceptSuggestion && (
+                    <Action
+                      label="确认建议分"
+                      primary
+                      onClick={() => void submitReview("accepted")}
+                      disabled={saving}
+                    />
+                  )}
+                  <Action
+                    label={answer.result ? "修改分数" : "手动评分"}
+                    onClick={() =>
+                      setScoringDecision(
+                        answer.result ? "modified" : "manual_scored",
+                      )
+                    }
+                    disabled={saving}
+                  />
                 </div>
               )}
               {answer.result?.quality_flags?.includes(
@@ -999,7 +1363,21 @@ export default function ReviewPage() {
                   role="alert"
                   className="rounded border border-amber-300 bg-amber-50 p-3 text-sm"
                 >
-                  相同答案出现不同评分，请检查。
+                  <p>相同答案出现不同评分，请先查看差异再决定。</p>
+                  <div className="mt-2 flex gap-2">
+                    <Link
+                      className="rounded border bg-white px-3 py-1"
+                      href={`/grading/${batchId}/review/${answer.id}/validation`}
+                    >
+                      查看差异
+                    </Link>
+                    <button
+                      className="rounded border bg-white px-3 py-1"
+                      onClick={() => setScoringDecision("modified")}
+                    >
+                      修改分数
+                    </button>
+                  </div>
                 </div>
               )}
               {answer.result?.quality_flags?.includes(
@@ -1009,7 +1387,21 @@ export default function ReviewPage() {
                   role="alert"
                   className="rounded border border-amber-300 bg-amber-50 p-3 text-sm"
                 >
-                  两次评分结果不同，请教师判断。
+                  <p>两次评分结果不同，请查看差异或直接修改分数。</p>
+                  <div className="mt-2 flex gap-2">
+                    <Link
+                      className="rounded border bg-white px-3 py-1"
+                      href={`/grading/${batchId}/review/${answer.id}/validation`}
+                    >
+                      查看差异
+                    </Link>
+                    <button
+                      className="rounded border bg-white px-3 py-1"
+                      onClick={() => setScoringDecision("modified")}
+                    >
+                      修改分数
+                    </button>
+                  </div>
                 </div>
               )}
               <details className="rounded border p-3 text-sm">
@@ -1020,7 +1412,7 @@ export default function ReviewPage() {
                   href={`/grading/${batchId}/review/${answer.id}/validation`}
                   className="mt-2 inline-flex rounded border px-3 py-2 font-medium"
                 >
-                  查看验证
+                  查看详细依据
                 </Link>
               </details>
               <div id="answer-recognition-workspace">
@@ -1029,6 +1421,10 @@ export default function ReviewPage() {
                   answerId={answer.id}
                   regionIds={(answer.regions ?? []).map((region) => region.id)}
                   readOnly={submission.status === "finalized"}
+                  attentionRequired={
+                    answer.recognized_text === undefined ||
+                    Number(answer.confidence ?? 0) < 0.9
+                  }
                 />
               </div>
               {(answer.status === "stale" ||
@@ -1038,7 +1434,14 @@ export default function ReviewPage() {
                   className="rounded border border-amber-300 bg-amber-50 p-3 text-sm"
                   data-testid="regrade-required"
                 >
-                  内容已变化，请重新批改。
+                  <p>内容已变化，旧建议不能继续使用。</p>
+                  <button
+                    className="mt-2 rounded border bg-white px-3 py-1"
+                    disabled={saving}
+                    onClick={() => void regradeCurrentAnswer()}
+                  >
+                    重新批改
+                  </button>
                 </div>
               )}
               {(answer.status === "manual_segmentation_required" ||
@@ -1047,26 +1450,73 @@ export default function ReviewPage() {
                   role="alert"
                   className="rounded border border-red-300 bg-red-50 p-3 text-sm"
                 >
-                  未找到答题区域，请手动标记。
+                  <p>未找到清晰的答题区域。</p>
+                  <Link
+                    className="mt-2 inline-flex rounded border bg-white px-3 py-1"
+                    href={`/grading/${batchId}#submission-${submission.submission_id}`}
+                  >
+                    重新框选答案
+                  </Link>
                 </div>
               )}
               {(answer.recognized_text === undefined ||
                 Number(answer.confidence ?? 0) < 0.9) && (
                 <div className="rounded border border-amber-300 bg-amber-50 p-3 text-sm">
-                  答案识别不清，请检查。
+                  <p>答案识别不清，请先修正识别文字或重新框选答案。</p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <button
+                      className="rounded border bg-white px-3 py-1"
+                      onClick={() => {
+                        const details =
+                          document.querySelector<HTMLDetailsElement>(
+                            "[data-testid='answer-recognition-details']",
+                          );
+                        if (details) {
+                          details.open = true;
+                          details.scrollIntoView({
+                            behavior: "smooth",
+                            block: "start",
+                          });
+                        }
+                      }}
+                    >
+                      修正识别文字
+                    </button>
+                    <Link
+                      className="rounded border bg-white px-3 py-1"
+                      href={`/grading/${batchId}#submission-${submission.submission_id}`}
+                    >
+                      重新框选答案
+                    </Link>
+                  </div>
+                </div>
+              )}
+              {(answer.result?.score == null ||
+                hasManualOrIncompleteCriteria(answer)) && (
+                <div
+                  role="alert"
+                  className="rounded border border-amber-300 bg-amber-50 p-3 text-sm"
+                >
+                  <p>建议分缺失或包含需要教师判断的评分项。</p>
+                  <button
+                    className="mt-2 rounded border bg-white px-3 py-1"
+                    disabled={saving}
+                    onClick={() => setScoringDecision("manual_scored")}
+                  >
+                    手动评分
+                  </button>
                 </div>
               )}
               <details className="rounded border p-3 text-sm">
                 <summary className="cursor-pointer font-semibold">
                   识别调整
                 </summary>
-                <button
-                  className="mt-2 rounded border px-3 py-2 text-sm"
-                  disabled={saving || !page}
-                  onClick={() => void addRegion()}
+                <Link
+                  className="mt-2 inline-flex rounded border px-3 py-2 text-sm"
+                  href={`/grading/${batchId}#submission-${submission.submission_id}`}
                 >
-                  在当前页增加区域
-                </button>
+                  重新框选答案
+                </Link>
                 <div className="mt-2">
                   {(answer.regions ?? []).map((region) => (
                     <div
@@ -1074,11 +1524,7 @@ export default function ReviewPage() {
                       id={`answer-region-${region.id}`}
                       className="mt-2 flex items-center gap-2 text-sm"
                     >
-                      <span>
-                        {statusLabel(region.source)} /{" "}
-                        {statusLabel(region.status)} · 坐标 {region.x},
-                        {region.y},{region.width},{region.height}
-                      </span>
+                      <span>已标记答题区域 · {statusLabel(region.status)}</span>
                       <button
                         className="text-red-700 underline"
                         disabled={saving}
@@ -1106,8 +1552,18 @@ export default function ReviewPage() {
                   ))}
                 </div>
               </details>
-              <div>
-                <h3 className="font-semibold">评分依据</h3>
+              <details
+                className="rounded border p-3"
+                open={hasManualOrIncompleteCriteria(answer) || undefined}
+              >
+                <summary className="cursor-pointer font-semibold">
+                  评分项 · {answer.criteria.length} 项 · 建议合计{" "}
+                  {answer.criteria.reduce(
+                    (total, item) => total + Number(item.awarded_points ?? 0),
+                    0,
+                  )}
+                  /{answer.question.max_score ?? "—"}
+                </summary>
                 {answer.criteria.map((item) => (
                   <div
                     key={item.criterion_id}
@@ -1124,6 +1580,9 @@ export default function ReviewPage() {
                     {item.reason && (
                       <p className="mt-1 text-slate-700">{item.reason}</p>
                     )}
+                    {item.description && (
+                      <p className="mt-1 text-slate-500">{item.description}</p>
+                    )}
                     {item.evidence_quotes?.[0] && (
                       <p className="mt-1 text-slate-500">
                         依据：{item.evidence_quotes[0]}
@@ -1131,7 +1590,7 @@ export default function ReviewPage() {
                     )}
                   </div>
                 ))}
-              </div>
+              </details>
               {answer.evidence.length > 0 && (
                 <details className="rounded border p-3 text-sm">
                   <summary className="cursor-pointer font-semibold">
@@ -1189,9 +1648,10 @@ export default function ReviewPage() {
                     <div className="mt-3 grid gap-2 sm:grid-cols-2">
                       {answer.criteria.map((criterion, index) => (
                         <label key={criterion.criterion_id} className="text-sm">
-                          评分项 {index + 1}（满分 {criterion.max_points}）
+                          {criterion.title || `评分项 ${index + 1}`}（满分{" "}
+                          {criterion.max_points}）
                           <input
-                            aria-label={`评分项 ${index + 1} 得分`}
+                            aria-label={`${criterion.title || `评分项 ${index + 1}`} 得分`}
                             type="number"
                             min="0"
                             max={criterion.max_points}
@@ -1230,33 +1690,35 @@ export default function ReviewPage() {
                     <Action
                       label="取消"
                       disabled={saving}
-                      onClick={() => setScoringDecision(null)}
+                      onClick={clearCurrentDraft}
                     />
                   </div>
                 </section>
               )}
-              <div className="grid grid-cols-2 gap-2">
-                <Action
-                  label="修正答案"
-                  onClick={() => void correctCurrentAnswer()}
-                  disabled={saving}
-                />
-                <Action
-                  label="重新批改"
-                  onClick={() => void regradeCurrentAnswer()}
-                  disabled={saving}
-                />
-                <Action
-                  label="修改"
-                  onClick={() => setScoringDecision("modified")}
-                  disabled={saving}
-                />
-                <Action
-                  label="手动评分"
-                  onClick={() => setScoringDecision("manual_scored")}
-                  disabled={saving}
-                />
-              </div>
+              <details className="rounded border p-3 text-sm">
+                <summary className="cursor-pointer font-semibold">
+                  更多操作
+                </summary>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <Action
+                    label="修正答案"
+                    onClick={() => void correctCurrentAnswer()}
+                    disabled={saving}
+                  />
+                  <Action
+                    label="重新批改"
+                    onClick={() => void regradeCurrentAnswer()}
+                    disabled={saving}
+                  />
+                  {canAcceptSuggestion && !isCompleted(answer) && (
+                    <Action
+                      label="手动评分"
+                      onClick={() => setScoringDecision("manual_scored")}
+                      disabled={saving}
+                    />
+                  )}
+                </div>
+              </details>
               {message && (
                 <p role="status" className="text-sm text-slate-600">
                   {message}
@@ -1266,17 +1728,20 @@ export default function ReviewPage() {
           ) : (
             <div className="space-y-3 text-slate-500">
               <p>
-                {reviewFilter === "needs_review"
-                  ? "当前没有需要检查的答案"
-                  : "请选择答案"}
+                {reviewFilter === "pending"
+                  ? "本轮题目已处理完。请检查“已完成”，确认无误后再由主责教师确认结果；系统不会自动发布。"
+                  : reviewFilter === "needs_review"
+                    ? "当前没有需要检查的答案"
+                    : "当前筛选下没有题目"}
               </p>
               {message && <p role="status">{message}</p>}
-              {reviewFilter === "needs_review" && (
+              {(reviewFilter === "needs_review" ||
+                reviewFilter === "stale") && (
                 <button
                   className="rounded border px-3 py-2 text-sm text-slate-900"
-                  onClick={() => setReviewFilter("all")}
+                  onClick={() => changeReviewFilter("pending")}
                 >
-                  查看全部
+                  返回待处理
                 </button>
               )}
             </div>

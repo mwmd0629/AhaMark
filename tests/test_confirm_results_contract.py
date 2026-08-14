@@ -226,12 +226,29 @@ def test_confirm_results_materializes_review_complete_snapshot_and_one_release()
         assert readiness["previous_grade_release_id"] is None
         assert _formal_counts(case.db) == (0, 0, 0)
 
-        response = _confirm(
-            case,
-            key=f"success-{uuid.uuid4()}",
-            review_hash=str(readiness["review_hash"]),
-        )
+        item_flushes = 0
+
+        def assert_release_dependencies_are_persisted(
+            session: Session, _flush_context: object, _instances: object
+        ) -> None:
+            nonlocal item_flushes
+            if not any(isinstance(row, GradeReleaseItem) for row in session.new):
+                return
+            item_flushes += 1
+            assert not any(isinstance(row, SubmissionScoreSnapshot) for row in session.new)
+            assert not any(isinstance(row, GradeRelease) for row in session.new)
+
+        event.listen(Session, "before_flush", assert_release_dependencies_are_persisted)
+        try:
+            response = _confirm(
+                case,
+                key=f"success-{uuid.uuid4()}",
+                review_hash=str(readiness["review_hash"]),
+            )
+        finally:
+            event.remove(Session, "before_flush", assert_release_dependencies_are_persisted)
         assert response.status_code == 201, response.text
+        assert item_flushes == 1
         payload = response.json()
         assert payload["status"] == "released"
         assert payload["review_hash"] == readiness["review_hash"]

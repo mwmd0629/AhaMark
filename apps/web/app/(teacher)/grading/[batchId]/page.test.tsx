@@ -29,6 +29,7 @@ const mocks = vi.hoisted(() => ({
   reports: vi.fn(),
   retryReport: vi.fn(),
   continueProcessing: vi.fn(),
+  latestProcessingRun: vi.fn(),
   retryProcessing: vi.fn(),
   reconcileProcessing: vi.fn(),
   publishToStudents: vi.fn(),
@@ -75,6 +76,7 @@ vi.mock("@/lib/api", () => ({
     grade: mocks.grade,
     regrade: vi.fn(),
     continueProcessing: mocks.continueProcessing,
+    latestProcessingRun: mocks.latestProcessingRun,
     retryProcessing: mocks.retryProcessing,
     reconcileProcessing: mocks.reconcileProcessing,
   },
@@ -142,6 +144,13 @@ it("confirms an ambiguous match and keeps historical release snapshots selectabl
           method: "ambiguous",
           reason: "MULTIPLE_CANDIDATES",
         },
+        {
+          id: "m2",
+          filename: "001-已匹配.pdf",
+          status: "confirmed",
+          method: "student_number",
+          reason: null,
+        },
       ],
       student_options: [
         { id: "s1", student_number: "001", name: "合成学生甲" },
@@ -196,6 +205,16 @@ it("confirms an ambiguous match and keeps historical release snapshots selectabl
     screen.getByRole("button", { name: "上传并自动匹配" }),
   );
   expect(screen.getByRole("heading", { name: "学生作业" })).toBeInTheDocument();
+  expect(screen.getByTestId("submission-upload-section")).toHaveAttribute(
+    "data-section-kind",
+    "upload",
+  );
+  expect(screen.getByTestId("submission-upload-section")).toContainElement(
+    screen.getByTestId("matched-upload-section"),
+  );
+  expect(screen.getByTestId("submission-upload-section")).toHaveTextContent(
+    /已匹配\s*1\s*个文件/,
+  );
   expect(screen.queryByText("未选择任何文件")).not.toBeInTheDocument();
   const selectedFiles = [
     new File(["first"], "001-张三.pdf", { type: "application/pdf" }),
@@ -408,11 +427,24 @@ it("shows the batch progress, blocker reason, and each submission next action", 
   expect(
     screen.getByRole("heading", { name: "合成学生甲" }),
   ).toBeInTheDocument();
+  expect(screen.getByTestId("submission-details")).not.toHaveAttribute("open");
+  expect(screen.getByTestId("submission")).toHaveAttribute(
+    "data-section-kind",
+    "student-submission",
+  );
+  expect(screen.getByTestId("submission")).toHaveClass("border-l-amber-400");
+  expect(screen.getByTestId("submission-compact-status")).toHaveTextContent(
+    "待批改",
+  );
   expect(screen.getByText("学号 S001 · 1 页")).toBeInTheDocument();
   expect(screen.getByTestId("submission-ocr-start")).toBeEnabled();
   expect(
     screen.getByText("高级处理工具").closest("details"),
   ).not.toHaveAttribute("open");
+  expect(screen.getByTestId("advanced-processing-section")).toHaveAttribute(
+    "data-section-kind",
+    "advanced-tools",
+  );
   expect(
     screen.getByText("页面与高级操作").closest("details"),
   ).not.toHaveAttribute("open");
@@ -451,7 +483,12 @@ it("prepares grading inputs once and exposes a stable teacher-review entry", asy
         submission_id: "submission-1",
         status: "recognized",
         pages: [],
-        answers: [{ id: "answer-1" }],
+        answers: [
+          {
+            id: "answer-1",
+            review: { final_score: "18.50" },
+          },
+        ],
       },
     ],
   });
@@ -467,6 +504,9 @@ it("prepares grading inputs once and exposes a stable teacher-review entry", asy
 
   const prepare = await screen.findByTestId("prepare-grading-inputs");
   await waitFor(() => expect(prepare).toBeEnabled());
+  expect(screen.getByTestId("submission-compact-status")).toHaveTextContent(
+    "18.50 分",
+  );
   expect(screen.getByTestId("open-teacher-review")).toBeEnabled();
   fireEvent.click(prepare);
 
@@ -591,7 +631,10 @@ it("allows processing only for active submissions and skips every terminal statu
   }
 });
 
-function setupProcessingPage() {
+function setupProcessingPage(
+  latestRun: ReturnType<typeof processingRun> | null = null,
+) {
+  mocks.latestProcessingRun.mockResolvedValue(latestRun);
   mocks.getBatch.mockResolvedValue({
     id: "b1",
     assignment_id: "a1",
@@ -638,6 +681,27 @@ function setupProcessingPage() {
     </Suspense>,
   );
 }
+
+it("restores the latest completed run and exposes review after a page reload", async () => {
+  setupProcessingPage(
+    processingRun({
+      status: "awaiting_teacher_review",
+      completed_step_count: 1,
+      pending_codex_count: 0,
+    }),
+  );
+
+  const reviewButton = await screen.findByTestId("open-teacher-review");
+  expect(reviewButton).toHaveTextContent("检查结果");
+  expect(reviewButton.closest("a")).toHaveAttribute(
+    "href",
+    "/grading/b1/review",
+  );
+  expect(
+    screen.queryByTestId("continue-processing-to-teacher-review"),
+  ).not.toBeInTheDocument();
+  expect(mocks.latestProcessingRun).toHaveBeenCalledWith("b1");
+});
 
 it("starts one server-side plan and labels Codex output as suggestion-only", async () => {
   mocks.continueProcessing.mockResolvedValue(processingRun());

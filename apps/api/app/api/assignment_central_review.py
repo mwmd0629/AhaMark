@@ -532,10 +532,7 @@ def _rubric_lifecycle(
         "candidate_history": [_rubric_candidate_json(item) for item in candidates],
         "materialized": _rubric_bundle_json(db, materialized),
         "selected": _rubric_bundle_json(db, row["rubric"]),
-        "history": [
-            _rubric_bundle_json(db, item)
-            for item in row["structured_rubric_versions"]
-        ],
+        "history": [_rubric_bundle_json(db, item) for item in row["structured_rubric_versions"]],
         "visibility": "teacher",
     }
 
@@ -1022,7 +1019,10 @@ def confirmation_fingerprint(
 
 def _structured_set_entries(db: Session, session: AssignmentReviewSession) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
-    for row in selected_versions(db, session.paper_version_id):
+    # Historical extraction drafts may contain duplicate Question.display_order values.
+    # A release set requires a unique, contiguous order, so snapshot the already
+    # deterministic selected_versions order instead of copying unsafe legacy values.
+    for display_order, row in enumerate(selected_versions(db, session.paper_version_id), start=1):
         question = row["question"]
         answer = row["answer"]
         rubric = row["rubric"]
@@ -1043,7 +1043,7 @@ def _structured_set_entries(db: Session, session: AssignmentReviewSession) -> li
                 "answer_content_hash": semantic_hash(_answer_content_payload(answer)),
                 "rubric_content_hash": semantic_hash(_rubric_content_payload(db, rubric)),
                 "criteria_hash": semantic_hash([_criterion_payload(item) for item in criteria]),
-                "display_order": question.display_order,
+                "display_order": display_order,
                 "max_points": str(question.max_score),
             }
         )

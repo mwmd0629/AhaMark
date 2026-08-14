@@ -1,6 +1,5 @@
 import io
 import math
-import re
 import uuid
 from collections import Counter
 from decimal import Decimal
@@ -34,32 +33,63 @@ from app.recognition.pipeline import (
     read_all,
     store_artifact,
 )
+from app.recognition.question_numbers import normalize_question_number
 from app.storage.base import ObjectStorage
 
-PROCESSING_VERSION = "submission-processing-v2"
-SEGMENTATION_VERSION = "submission-seg-v2"
+PROCESSING_VERSION = "submission-processing-v3"
+SEGMENTATION_VERSION = "submission-seg-v3"
 CONTENT_PIXEL_CUTOFF = 245
 CONTENT_BRIGHTNESS_LIMIT = 210.0
-ANCHOR_RE = re.compile(
-    r"^\s*(?:第\s*)?[（(]?\s*(\d+(?:\.\d+)?(?:[a-zA-Z])?)\s*[）)]?"
-    r"(?:\s*题)?(?:[.、:：)\s]|$)",
-    re.IGNORECASE,
-)
-
-
-# Override the compatibility pattern above with an encoding-independent expression.
-ANCHOR_RE = re.compile(
-    r"^\s*(?:(?:\u7b2c|\u9898|[Qq])\s*)?[\uff08(]?\s*(\d+(?:\.\d+)?)"
-    r"(?:[\uff08(]?\s*([a-zA-Z])\s*[\uff09)]?)?\s*[\uff09)]?"
-    r"(?:\s*\u9898)?(?:[.\u3001:\uff1a)\s]|$)",
-    re.IGNORECASE,
-)
+ANCHOR_TOP_PADDING = Decimal("0.01")
+ANCHOR_BOTTOM_PADDING = Decimal("0.015")
+ANCHOR_CONTENT_BOTTOM_LIMIT = Decimal("0.92")
 
 
 def _artifact(image: Image.Image) -> PageArtifact:
     output = io.BytesIO()
     image.save(output, "PNG", optimize=True)
     return PageArtifact(output.getvalue(), image.width, image.height)
+
+
+def _anchor_region_candidate(
+    block: ProviderBlock,
+    next_anchor: ProviderBlock | None,
+    page_blocks: list[ProviderBlock],
+    fallback_span: Decimal,
+) -> tuple[Decimal, Decimal, Decimal, Decimal]:
+    """Keep the answer area when the PDF text layer exposes headings only."""
+    x, y, _width, _height = (Decimal(str(value)) for value in block.region)
+    top = max(Decimal(0), y - ANCHOR_TOP_PADDING)
+    next_top = Decimal(str(next_anchor.region[1])) if next_anchor is not None else Decimal(1)
+    content_bottoms: list[Decimal] = []
+    for page_block in page_blocks:
+        _block_x, block_y, _block_width, block_height = (
+            Decimal(str(value)) for value in page_block.region
+        )
+        if (
+            page_block is not block
+            and block_y > y + Decimal("0.001")
+            and block_y < next_top
+            and block_y < ANCHOR_CONTENT_BOTTOM_LIMIT
+        ):
+            content_bottoms.append(block_y + block_height)
+    if next_anchor is not None:
+        # Some PDFs expose only question headings. In that case, ending at the
+        # next heading is the only safe way to retain the unseen answer text.
+        bottom = next_top - ANCHOR_TOP_PADDING
+    elif content_bottoms:
+        bottom = min(
+            ANCHOR_CONTENT_BOTTOM_LIMIT,
+            max(content_bottoms) + ANCHOR_BOTTOM_PADDING,
+        )
+    else:
+        # For the final question, use the page's typical question spacing
+        # instead of extending to the page footer or collapsing to the title.
+        bottom = min(ANCHOR_CONTENT_BOTTOM_LIMIT, top + fallback_span)
+    bottom = max(top + Decimal("0.02"), bottom)
+    left = max(Decimal(0), x - Decimal("0.02"))
+    right = Decimal("0.98")
+    return left, top, right - left, min(bottom, Decimal(1)) - top
 
 
 def _average_hash(image: Image.Image) -> str:
@@ -122,6 +152,7 @@ def preprocess_page(rendered: PageArtifact) -> tuple[PageArtifact, dict[str, obj
         image = image.rotate(90, expand=True, fillcolor="white")
         detected_rotation = 90
         orientation_confidence = 0.75
+    coordinate_space_size = image.size
     gray = ImageOps.grayscale(image)
     source_metrics = _page_metrics(gray)
     # RMS edge energy is deterministic, cheap, and useful as a blur warning signal.
@@ -162,6 +193,10 @@ def preprocess_page(rendered: PageArtifact) -> tuple[PageArtifact, dict[str, obj
         processing_gray = ImageOps.autocontrast(processing_gray)
     processed = ImageEnhance.Contrast(processing_gray).enhance(1.12)
     processed = processed.filter(ImageFilter.MedianFilter(3)).convert("RGB")
+    if crop:
+        restored = Image.new("RGB", coordinate_space_size, "white")
+        restored.paste(processed, (crop["left"], crop["top"]))
+        processed = restored
     processed_metrics = _page_metrics(processed)
     if processed_metrics["brightness"] is not None and processed_metrics["brightness"] < 55:
         warnings.append("TOO_DARK")
@@ -192,10 +227,7 @@ def preprocess_page(rendered: PageArtifact) -> tuple[PageArtifact, dict[str, obj
 
 
 def _normalize_question_number(text: str) -> str | None:
-    match = ANCHOR_RE.match(text)
-    if not match:
-        return None
-    return f"{match.group(1)}{match.group(2) or ''}".lower()
+    return normalize_question_number(text)
 
 
 def _pdf_text_blocks(content: bytes, source_page: int) -> list[ProviderBlock]:
@@ -316,11 +348,14 @@ def _segment(
         )
     )
     _ensure_answers(db, submission, questions)
-    number_counts = Counter(question.question_number.strip().lower() for question in questions)
+    normalized_questions = [
+        (question, normalize_question_number(question.question_number)) for question in questions
+    ]
+    number_counts = Counter(number for _question, number in normalized_questions if number)
     by_number = {
-        question.question_number.strip().lower(): question
-        for question in questions
-        if number_counts[question.question_number.strip().lower()] == 1
+        number: question
+        for question, number in normalized_questions
+        if number is not None and number_counts[number] == 1
     }
     question_order = {question.id: index for index, question in enumerate(questions)}
     answers = {
@@ -475,24 +510,21 @@ def _segment(
         by_page.setdefault(item[0].id, []).append(item)
     for page in pages:
         anchors = by_page.get(page.id, [])
+        anchor_tops = [Decimal(str(item[1].region[1])) for item in anchors]
+        anchor_gaps = [
+            right - left for left, right in zip(anchor_tops, anchor_tops[1:], strict=False)
+        ]
+        fallback_span = (
+            sorted(anchor_gaps)[len(anchor_gaps) // 2] if anchor_gaps else Decimal("0.15")
+        )
+        fallback_span = max(Decimal("0.05"), min(Decimal("0.25"), fallback_span))
         for index, (_page, block, anchor, question, confidence) in enumerate(anchors):
-            x, y, _width, _height = (Decimal(str(value)) for value in block.region)
-            next_y = (
-                Decimal(str(anchors[index + 1][1].region[1]))
-                if index + 1 < len(anchors)
-                else Decimal(1)
-            )
-            candidate = (
-                max(Decimal(0), x - Decimal("0.02")),
-                max(Decimal(0), y - Decimal("0.01")),
-                min(
-                    Decimal(1),
-                    Decimal("0.98") - max(Decimal(0), x - Decimal("0.02")),
-                ),
-                max(
-                    Decimal("0.02"),
-                    min(Decimal(1), next_y) - max(Decimal(0), y - Decimal("0.01")),
-                ),
+            next_anchor = anchors[index + 1][1] if index + 1 < len(anchors) else None
+            candidate = _anchor_region_candidate(
+                block,
+                next_anchor,
+                blocks_by_page.get(page.id, []),
+                fallback_span,
             )
             answer = answers[question.id]
             if answer.id in teacher_confirmed_answer_ids:

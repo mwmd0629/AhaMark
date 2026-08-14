@@ -208,9 +208,7 @@ def submitted_item(
     )
     raw_response = _valid_response()
     raw_response["criteria"][0]["evidence_refs"] = [str(region.id)]  # type: ignore[index]
-    response = canonicalize(
-        AIGradingOutput.model_validate(raw_response).model_dump(mode="json")
-    )
+    response = canonicalize(AIGradingOutput.model_validate(raw_response).model_dump(mode="json"))
     item = CodexWorkItem(
         processing_step_id=step.id,
         owner_id=run.owner_id,
@@ -285,6 +283,7 @@ def test_apply_is_atomic_suggestion_only_and_replays_once(
         result.status,
         result.requires_review,
     ) == ("codex_local", "local", "codex_assisted", "suggested", True)
+    assert result.confidence == Decimal("0.8")
     assert db.scalar(select(func.count()).select_from(GradingJob)) == 1
     assert db.scalar(select(func.count()).select_from(GradingResult)) == 1
     assert db.scalar(select(func.count()).select_from(GradingCriterionResult)) == 1
@@ -401,9 +400,7 @@ def test_applied_replay_requires_complete_untampered_strict_child(
         response_hash=item.response_hash or "",
     )
     strict_job = db.scalar(
-        select(AIScoringJob).where(
-            AIScoringJob.student_answer_id == item.student_answer_id
-        )
+        select(AIScoringJob).where(AIScoringJob.student_answer_id == item.student_answer_id)
     )
     assert strict_job is not None
     feedback = db.scalar(
@@ -485,9 +482,7 @@ def test_reconcile_current_drift_never_advances_to_teacher_review(
         )
     else:
         strict_job = db.scalar(
-            select(AIScoringJob).where(
-                AIScoringJob.student_answer_id == answer.id
-            )
+            select(AIScoringJob).where(AIScoringJob.student_answer_id == answer.id)
         )
         assert strict_job is not None
         strict_job.response_hash = "0" * 64

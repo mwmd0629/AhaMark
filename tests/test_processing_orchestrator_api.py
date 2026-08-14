@@ -177,6 +177,10 @@ def test_continue_get_serializer_and_active_plan_alias(
 ) -> None:
     db, actor, batch, client = processing_case
 
+    empty_latest = client.get(f"/api/grading-batches/{batch.id}/processing-runs/latest")
+    assert empty_latest.status_code == 200
+    assert empty_latest.json() is None
+
     created = _post_continue(client, batch, "continue-1")
     assert created.status_code == 201, created.text
     payload = created.json()
@@ -190,6 +194,9 @@ def test_continue_get_serializer_and_active_plan_alias(
     fetched = client.get(f"/api/grading-batches/{batch.id}/processing-runs/{payload['id']}")
     assert fetched.status_code == 200, fetched.text
     assert fetched.json() == payload
+    latest = client.get(f"/api/grading-batches/{batch.id}/processing-runs/latest")
+    assert latest.status_code == 200, latest.text
+    assert latest.json() == payload
 
     replay = _post_continue(client, batch, "continue-1")
     alias = _post_continue(client, batch, "continue-2")
@@ -888,9 +895,7 @@ def test_recognition_job_materialization_is_durable_and_idempotent(
     monkeypatch.setattr(
         orchestrator,
         "_recognition_input",
-        lambda _db, submission_id: ([], [region])
-        if submission_id == eligible_submission
-        else None,
+        lambda _db, submission_id: ([], [region]) if submission_id == eligible_submission else None,
     )
 
     created = orchestrator._materialize_recognition_jobs(db, run=run, steps=steps)
@@ -925,9 +930,7 @@ def test_continue_reaggregates_after_durable_recognition_and_replay_does_not_red
 ) -> None:
     db, _actor, batch, client = processing_case
     submission = db.scalar(
-        select(Submission)
-        .where(Submission.grading_batch_id == batch.id)
-        .order_by(Submission.id)
+        select(Submission).where(Submission.grading_batch_id == batch.id).order_by(Submission.id)
     )
     assert submission is not None
     answer_id = uuid.uuid4()
@@ -1062,9 +1065,7 @@ def test_retry_replaces_selected_recognition_job_and_preserves_unselected_link(
         step.status = "retryable_failed" if index == 0 else "blocked_review"
         step.retryable = index == 0
         step.error_code = (
-            "OCR_PROVIDER_ERROR"
-            if index == 0
-            else "RECOGNITION_CONFIRMATION_REQUIRED"
+            "OCR_PROVIDER_ERROR" if index == 0 else "RECOGNITION_CONFIRMATION_REQUIRED"
         )
         jobs.append(job)
     db.commit()
@@ -1085,9 +1086,7 @@ def test_retry_replaces_selected_recognition_job_and_preserves_unselected_link(
         },
     )
     assert response.status_code == 201, response.text
-    new_steps = {
-        item["submission_id"]: item for item in response.json()["steps"]
-    }
+    new_steps = {item["submission_id"]: item for item in response.json()["steps"]}
     selected = new_steps[str(steps[0].submission_id)]
     unselected = new_steps[str(steps[1].submission_id)]
     selected_row = db.get(ProcessingStep, uuid.UUID(selected["id"]))
@@ -1154,20 +1153,13 @@ def test_submission_processing_materialization_is_idempotent(
     db, actor, batch, _ = processing_case
     run, steps = _recognition_run_and_steps(db, actor, batch)
 
-    first = orchestrator._materialize_submission_processing_jobs(
-        db, run=run, steps=steps
-    )
-    second = orchestrator._materialize_submission_processing_jobs(
-        db, run=run, steps=steps
-    )
+    first = orchestrator._materialize_submission_processing_jobs(db, run=run, steps=steps)
+    second = orchestrator._materialize_submission_processing_jobs(db, run=run, steps=steps)
     db.flush()
 
     assert len(first) == len(steps)
     assert second == []
-    assert (
-        db.scalar(select(func.count()).select_from(SubmissionProcessingJob))
-        == len(steps)
-    )
+    assert db.scalar(select(func.count()).select_from(SubmissionProcessingJob)) == len(steps)
     assert all(step.stage == "submission_processing" for step in steps)
     assert _formal_counts(db) == (0, 0, 0)
 
@@ -1178,9 +1170,7 @@ def test_ambiguous_segmentation_stays_waiting_input_without_formal_writes(
 ) -> None:
     db, actor, batch, _ = processing_case
     run, steps = _recognition_run_and_steps(db, actor, batch)
-    job_ids = orchestrator._materialize_submission_processing_jobs(
-        db, run=run, steps=[steps[0]]
-    )
+    job_ids = orchestrator._materialize_submission_processing_jobs(db, run=run, steps=[steps[0]])
     job = db.get(SubmissionProcessingJob, job_ids[0])
     assert job is not None
     job.status = "completed"
@@ -1194,9 +1184,7 @@ def test_ambiguous_segmentation_stays_waiting_input_without_formal_writes(
         ),
     )
 
-    orchestrator._reconcile_submission_processing_children(
-        db, run=run, steps=[steps[0]]
-    )
+    orchestrator._reconcile_submission_processing_children(db, run=run, steps=[steps[0]])
 
     assert steps[0].status == "blocked_review"
     assert steps[0].stage == "segmentation_confirmation"
@@ -1252,16 +1240,10 @@ def test_no_answer_submission_scope_expands_to_one_codex_step_per_answer(
         lambda *_args, **_kwargs: SimpleNamespace(input_version="9" * 64),
     )
 
-    created = orchestrator._materialize_codex_steps_after_recognition(
-        db, run=run, steps=steps
-    )
-    replay = orchestrator._materialize_codex_steps_after_recognition(
-        db, run=run, steps=steps
-    )
+    created = orchestrator._materialize_codex_steps_after_recognition(db, run=run, steps=steps)
+    replay = orchestrator._materialize_codex_steps_after_recognition(db, run=run, steps=steps)
 
-    assert {step.student_answer_id for step in created} == {
-        answer.id for answer in answers
-    }
+    assert {step.student_answer_id for step in created} == {answer.id for answer in answers}
     assert all(step.kind == step.stage == "codex_suggestion" for step in created)
     assert replay == []
     assert run.step_count == len(steps)

@@ -242,6 +242,21 @@ def test_question_scoped_collaboration_conflict_and_release_boundary() -> None:
         )
         assert forbidden_review.status_code == 403
         assert forbidden_review.json()["code"] == "GRADING_SCOPE_FORBIDDEN"
+        scoped_preview = client.get(
+            f"/api/grading-batches/{batch_id}/submissions/{submission_id}/safe-accept-preview"
+        )
+        assert scoped_preview.status_code == 200, scoped_preview.text
+        assert str(unassigned_answer.id) not in scoped_preview.json()["answer_ids"]
+        assert all(
+            item["answer_id"] != str(unassigned_answer.id)
+            for item in scoped_preview.json()["excluded"]
+        )
+        forbidden_reopen = client.post(
+            f"/api/student-answers/{unassigned_answer.id}/review/reopen",
+            json={"expected_review_version": 1, "reason": "越权撤回测试"},
+        )
+        assert forbidden_reopen.status_code == 403
+        assert forbidden_reopen.json()["code"] == "GRADING_SCOPE_FORBIDDEN"
 
         saved = client.put(
             f"/api/student-answers/{answer.id}/review",

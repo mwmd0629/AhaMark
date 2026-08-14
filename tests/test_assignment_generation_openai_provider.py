@@ -94,6 +94,60 @@ def test_strict_schema_rejects_extra_privileged_or_incomplete_output(monkeypatch
     assert result.error == "provider_schema_invalid"
 
 
+def test_question_extraction_preserves_character_corruption_error_code(monkeypatch) -> None:
+    raw = {
+        "candidates": [
+            {
+                "ref": "1",
+                "question_number": "1",
+                "question_type": "calculation",
+                "content_text": "???? x?+xy+y?=7",
+                "content_latex": None,
+                "max_score": "5",
+                "difficulty": None,
+                "knowledge_points": [],
+                "field_confidences": {
+                    key: "0.9"
+                    for key in (
+                        "question_number",
+                        "parent_relation",
+                        "question_type",
+                        "content_text",
+                        "content_latex",
+                        "max_score",
+                        "difficulty",
+                        "knowledge_points",
+                        "regions",
+                    )
+                },
+                "overall_confidence": "0.9",
+                "evidence": {},
+                "warning_codes": [],
+                "manual_required": True,
+                "regions": [
+                    {
+                        "page_id": "00000000-0000-0000-0000-000000000001",
+                        "display_order": 0,
+                        "region_type": "stem",
+                        "x": "0",
+                        "y": "0",
+                        "width": "1",
+                        "height": "1",
+                        "confidence": "0.9",
+                    }
+                ],
+            }
+        ]
+    }
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_a, **_k: Response(envelope(raw)))
+    result = OpenAICompatibleAssignmentGenerationProvider(configured()).generate(
+        "question_extraction", {}
+    )
+    assert result.output is None
+    assert result.error == "CHARACTER_ENCODING_CORRUPTION_DETECTED"
+    assert raw["candidates"][0]["content_text"] not in repr(result)
+
+
 @pytest.mark.parametrize("body", [b"not-json", json.dumps({"output": []}).encode()])
 def test_invalid_or_empty_response_is_stable_and_does_not_leak(monkeypatch, body) -> None:
     monkeypatch.setattr("urllib.request.urlopen", lambda *_a, **_k: Response(body))

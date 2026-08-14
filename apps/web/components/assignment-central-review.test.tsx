@@ -541,10 +541,10 @@ describe("AssignmentCentralReview preserved behavior", () => {
       }),
     );
     renderReview();
-    expect(await screen.findByText("开始集中审查")).toBeInTheDocument();
+    expect(await screen.findByText("开始检查")).toBeInTheDocument();
     expect(reviewApi.create).not.toHaveBeenCalled();
     expect(reviewApi.publish).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "开始集中审查" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始检查" }));
     await waitFor(() => expect(reviewApi.create).toHaveBeenCalledOnce());
   });
 
@@ -648,7 +648,7 @@ describe("AssignmentCentralReview preserved behavior", () => {
     renderReview();
     fireEvent.click(
       await screen.findByRole("button", {
-        name: "基于最新内容重新开始审查",
+        name: "检查最新内容",
       }),
     );
     await waitFor(() =>
@@ -860,9 +860,7 @@ describe("AssignmentCentralReview preserved behavior", () => {
       await vi.advanceTimersByTimeAsync(assignmentPreparationPolling.timeoutMs);
     });
 
-    expect(
-      screen.getByText(/已达到本次自动等待上限.*重新扫描最新状态/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/检查用时较长，可以重新检查/)).toBeInTheDocument();
     expect(screen.getByText(/generating_rubrics：55%/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "确认并发布" })).toBeDisabled();
     expect(reviewApi.prepareAssignment).toHaveBeenCalledTimes(
@@ -1029,7 +1027,7 @@ describe("AssignmentCentralReview Bundle authority and races", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "确认并发布" })).toBeEnabled(),
     );
-    fireEvent.click(screen.getByRole("button", { name: "重新扫描最新状态" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新检查" }));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "确认并发布" })).toBeDisabled(),
     );
@@ -1045,7 +1043,7 @@ describe("AssignmentCentralReview Bundle authority and races", () => {
       expect(screen.getByRole("button", { name: "确认并发布" })).toBeEnabled(),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "重新扫描最新状态" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新检查" }));
 
     expect(
       await screen.findByText("暂时无法确认当前发布条件"),
@@ -1061,7 +1059,7 @@ describe("AssignmentCentralReview Bundle authority and races", () => {
     reviewApi.items.mockReturnValueOnce(oldItems.promise);
     reviewApi.bundle.mockReturnValueOnce(oldBundle.promise);
     renderReview();
-    await screen.findByRole("button", { name: "重新扫描最新状态" });
+    await screen.findByRole("button", { name: "重新检查" });
 
     reviewApi.get.mockResolvedValueOnce(session());
     reviewApi.items.mockResolvedValueOnce({ items: [] });
@@ -1071,7 +1069,7 @@ describe("AssignmentCentralReview Bundle authority and races", () => {
         blockers: [blocker("NEW_STATE", "最新状态")],
       }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "重新扫描最新状态" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新检查" }));
     expect(
       await screen.findByText(
         "系统发现一项需要确认的问题，请查看说明并完成处理。",
@@ -1200,7 +1198,7 @@ describe("AssignmentCentralReview semantic confirmations and structured set", ()
       ),
     );
     const rescan = screen.getByRole("button", {
-      name: "重新扫描最新状态",
+      name: "重新检查",
     });
     expect(rescan).toBeEnabled();
     expect(reviewApi.autoConfirm).toHaveBeenCalledOnce();
@@ -1249,7 +1247,7 @@ describe("AssignmentCentralReview semantic confirmations and structured set", ()
       ),
     );
     const rescan = screen.getByRole("button", {
-      name: "重新扫描最新状态",
+      name: "重新检查",
     });
     expect(rescan).toBeEnabled();
     expect(reviewApi.createStructuredRubricSet).toHaveBeenCalledOnce();
@@ -1314,7 +1312,7 @@ describe("AssignmentCentralReview semantic confirmations and structured set", ()
     );
     expect(
       await screen.findByTestId("structured-rubric-set-summary"),
-    ).toHaveTextContent("待发布评分标准集合 v1");
+    ).toHaveTextContent("评分标准已准备");
 
     await testingAct(async () => {
       oldConfirmation.reject(new Error("late assignment A failure"));
@@ -1323,9 +1321,7 @@ describe("AssignmentCentralReview semantic confirmations and structured set", ()
     });
 
     expect(toast).not.toHaveBeenCalled();
-    expect(
-      screen.getByRole("button", { name: "重新扫描最新状态" }),
-    ).toBeEnabled();
+    expect(screen.getByRole("button", { name: "重新检查" })).toBeEnabled();
   });
 
   it.each(["resolve", "reject"] as const)(
@@ -1442,7 +1438,7 @@ describe("AssignmentCentralReview semantic confirmations and structured set", ()
 
     expect(
       await screen.findByTestId("structured-rubric-set-summary"),
-    ).toHaveTextContent("待发布评分标准集合 v1");
+    ).toHaveTextContent("评分标准已准备");
     expect(screen.queryByText(/兼容版本/)).not.toBeInTheDocument();
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "确认并发布" })).toBeEnabled(),
@@ -1595,7 +1591,7 @@ describe("AssignmentCentralReview assignment epoch", () => {
       />,
     );
 
-    expect(await screen.findByText("开始集中审查")).toBeInTheDocument();
+    expect(await screen.findByText("开始检查")).toBeInTheDocument();
     expect(reviewApi.bundle).toHaveBeenCalledTimes(2);
   });
 
@@ -1630,13 +1626,13 @@ describe("AssignmentCentralReview assignment epoch", () => {
         onPublished={vi.fn()}
       />,
     );
-    expect(await screen.findByText("开始集中审查")).toBeInTheDocument();
+    expect(await screen.findByText("开始检查")).toBeInTheDocument();
 
     await testingAct(async () => {
       oldBundle.reject(new Error("GENERATION_REQUIRED"));
       await Promise.resolve();
     });
-    expect(screen.getByText("开始集中审查")).toBeInTheDocument();
+    expect(screen.getByText("开始检查")).toBeInTheDocument();
     expect(
       screen.queryByText("无法取得当前审查内容，请重试后再继续发布。"),
     ).not.toBeInTheDocument();

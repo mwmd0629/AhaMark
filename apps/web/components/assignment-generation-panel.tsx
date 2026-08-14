@@ -3,17 +3,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Card } from "@/components/ui";
 import { QuestionExtractionReview } from "@/components/question-extraction-review";
+import { QuestionStructureReviewPanel } from "@/components/question-structure-review";
 import {
   ApiError,
   assignmentGenerationApi,
+  assignmentsApi,
   type AssignmentFieldSuggestion,
   type AssignmentGenerationCapabilities,
   type AssignmentFileAnalysis,
-  type AssignmentPageAnalysis,
   type AssignmentRecord,
   type AssignmentDraftRevision,
   type AssignmentGenerationJob,
   type AssignmentGenerationStage,
+  type TextbookLibrary,
 } from "@/lib/api";
 
 const ACTIVE = new Set([
@@ -38,16 +40,16 @@ const TERMINAL = new Set([
 const STAGES: { key: AssignmentGenerationStage; label: string }[] = [
   { key: "analyzing", label: "分析输入" },
   { key: "processing_pages", label: "检查页面" },
-  { key: "extracting_questions", label: "页面整理与题目抽取" },
-  { key: "generating_rubrics", label: "生成答案与评分标准" },
+  { key: "extracting_questions", label: "Codex 页面整理与题目抽取" },
+  { key: "generating_rubrics", label: "Codex 生成答案与评分标准" },
   { key: "validating", label: "结构验证" },
 ];
 const STATUS_LABEL: Record<string, string> = {
-  queued: "等待 Worker",
+  queued: "等待处理",
   analyzing: "正在分析",
   processing_pages: "正在检查页面",
-  extracting_questions: "正在编排题目抽取",
-  generating_rubrics: "正在编排 Rubric",
+  extracting_questions: "正在生成题目",
+  generating_rubrics: "正在生成答案与评分标准",
   validating: "正在验证",
   review_required: "需要教师复核",
   ready: "草稿就绪",
@@ -60,8 +62,10 @@ const STATUS_LABEL: Record<string, string> = {
   discarded: "结果已丢弃",
 };
 const FILE_ROLE_LABEL: Record<string, string> = {
-  question_paper: "试卷",
-  reference_answer: "参考答案",
+  question_paper: "题目",
+  reference_answer: "答案",
+  question_and_answer: "题目和答案",
+  textbook: "教材",
   rubric: "评分标准",
   instructions: "作业说明",
   attachment: "其他附件",
@@ -72,47 +76,64 @@ export function AssignmentGenerationPanel({
   assignment,
   onAssignmentChanged,
   onReviewInputsChanged,
+  onFieldSuggestionsChanged,
 }: {
   assignmentId: string;
   assignment?: AssignmentRecord;
   onAssignmentChanged?: () => Promise<void> | void;
   onReviewInputsChanged?: () => Promise<void> | void;
+  onFieldSuggestionsChanged?: (
+    suggestions: AssignmentFieldSuggestion[],
+  ) => void;
 }) {
   const [jobs, setJobs] = useState<AssignmentGenerationJob[]>([]);
   const [capabilities, setCapabilities] =
     useState<AssignmentGenerationCapabilities | null>(null);
   const [revisions, setRevisions] = useState<AssignmentDraftRevision[]>([]);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
-  const [suggestions, setSuggestions] = useState<AssignmentFieldSuggestion[]>(
-    [],
-  );
+  const [deletingFileId, setDeletingFileId] = useState("");
   const [fileAnalyses, setFileAnalyses] = useState<AssignmentFileAnalysis[]>(
     [],
   );
-  const [pageAnalyses, setPageAnalyses] = useState<
-    Record<string, AssignmentPageAnalysis[]>
-  >({});
   const [fileChoices, setFileChoices] = useState<
     Record<string, { role: string; source: string }>
   >({});
+  const [textbookLibraries, setTextbookLibraries] = useState<TextbookLibrary[]>(
+    [],
+  );
+  const [selectedTextbookLibraryIds, setSelectedTextbookLibraryIds] = useState<
+    string[]
+  >([]);
   const observedJobStatus = useRef<{ id: string; status: string } | null>(null);
   const mountedRef = useRef(false);
   const current = jobs[0];
+  const hasConfirmedTotalScore = Number(assignment?.total_score ?? 0) > 0;
+  const visibleIssues = (current?.issues ?? []).filter((item) => {
+    if (item.resolution_status !== "open") return false;
+    if (["PROVIDER_UNAVAILABLE", "CODEX_DRAFT_PENDING"].includes(item.code))
+      return false;
+    if (
+      hasConfirmedTotalScore &&
+      ["TOTAL_SCORE_UNCONFIRMED", "TOTAL_SCORE_CONFLICT"].includes(item.code)
+    )
+      return false;
+    if (
+      item.code === "MANUAL_REVIEW_REQUIRED" &&
+      item.message === "教师必须检查并确认所有草稿内容；Worker 不能发布作业"
+    )
+      return false;
+    return item.code !== "BASIC_INFO_LOW_CONFIDENCE";
+  });
   const activeFileAnalyses = fileAnalyses.filter(
     (row) => row.analysis_status !== "superseded",
   );
   const needsRoleReview = (row: AssignmentFileAnalysis) =>
-    row.analysis_status === "suggested" &&
-    (row.suggested_role === "unknown" ||
-      row.role_confidence < 0.7 ||
-      row.warning_codes.includes("FILE_ROLE_CONFLICT_REVIEW_REQUIRED"));
+    row.analysis_status === "suggested";
   const fileAnalysisCounts = {
     confirmed: activeFileAnalyses.filter(
       (row) => row.analysis_status === "confirmed",
-    ).length,
-    automatic: activeFileAnalyses.filter(
-      (row) => row.analysis_status === "suggested" && !needsRoleReview(row),
     ).length,
     needsReview: activeFileAnalyses.filter((row) => needsRoleReview(row))
       .length,
@@ -122,15 +143,25 @@ export function AssignmentGenerationPanel({
 
   const load = useCallback(async () => {
     try {
-      const [nextCapabilities, nextJobs, nextRevisions] = await Promise.all([
+      const [
+        nextCapabilities,
+        nextJobs,
+        nextRevisions,
+        nextTextbookLibraries,
+        nextTextbookSelections,
+      ] = await Promise.all([
         assignmentGenerationApi.capabilities(),
         assignmentGenerationApi.listJobs(assignmentId),
         assignmentGenerationApi.listRevisions(assignmentId),
+        assignmentGenerationApi.listTextbookLibraries(),
+        assignmentGenerationApi.listTextbookLibrarySelections(assignmentId),
       ]);
       if (!mountedRef.current) return [];
       setCapabilities(nextCapabilities);
       setJobs(nextJobs);
       setRevisions(nextRevisions);
+      setTextbookLibraries(nextTextbookLibraries);
+      setSelectedTextbookLibraryIds(nextTextbookSelections);
       const revisionId = nextJobs[0]?.revision?.id ?? nextRevisions[0]?.id;
       if (revisionId) {
         const [nextSuggestions, nextFiles] = await Promise.all([
@@ -138,7 +169,11 @@ export function AssignmentGenerationPanel({
           assignmentGenerationApi.listFileAnalyses(revisionId),
         ]);
         if (!mountedRef.current) return [];
-        setSuggestions(nextSuggestions);
+        onFieldSuggestionsChanged?.(
+          hasConfirmedTotalScore
+            ? nextSuggestions.filter((row) => row.field_name !== "total_score")
+            : nextSuggestions,
+        );
         setFileAnalyses(nextFiles);
         setFileChoices((old) => {
           const next = { ...old };
@@ -147,41 +182,29 @@ export function AssignmentGenerationPanel({
               role: file.teacher_confirmed_role ?? file.suggested_role,
               source:
                 file.teacher_confirmed_answer_source ??
-                (file.suggested_role === "reference_answer"
+                (["reference_answer", "question_and_answer"].includes(
+                  file.suggested_role,
+                )
                   ? file.suggested_answer_source
                   : "not_applicable"),
             };
           }
           return next;
         });
-        const pages = await Promise.all(
-          nextFiles.map(
-            async (file) =>
-              [
-                file.id,
-                await assignmentGenerationApi.listPageAnalyses(file.id),
-              ] as const,
-          ),
-        );
-        if (!mountedRef.current) return [];
-        setPageAnalyses(Object.fromEntries(pages));
       } else {
-        setSuggestions([]);
+        onFieldSuggestionsChanged?.([]);
         setFileAnalyses([]);
-        setPageAnalyses({});
       }
       setError("");
       return nextJobs;
     } catch (reason) {
       if (!mountedRef.current) return [];
       setError(
-        reason instanceof ApiError
-          ? reason.message
-          : "无法恢复 Codex 草稿生成任务",
+        reason instanceof ApiError ? reason.message : "无法恢复草稿生成任务",
       );
       return [];
     }
-  }, [assignmentId]);
+  }, [assignmentId, hasConfirmedTotalScore, onFieldSuggestionsChanged]);
 
   const notifyReviewInputsChanged = useCallback(async () => {
     if (onReviewInputsChanged) await onReviewInputsChanged();
@@ -235,6 +258,18 @@ export function AssignmentGenerationPanel({
   const codexQuestionDraftReady =
     latestStages.get("extracting_questions")?.result_payload?.capability ===
     "codex_local";
+  const codexStageStatus = (
+    stage: AssignmentGenerationStage,
+    row: AssignmentGenerationJob["stages"][number] | undefined,
+  ) => {
+    if (!row) return "未开始";
+    if (
+      ["extracting_questions", "generating_rubrics"].includes(stage) &&
+      row.status === "unavailable"
+    )
+      return "等待 Codex";
+    return STATUS_LABEL[row.status] ?? row.status;
+  };
 
   const act = async (
     operation: () => Promise<AssignmentGenerationJob>,
@@ -242,6 +277,7 @@ export function AssignmentGenerationPanel({
   ) => {
     setBusy(true);
     setError("");
+    setNotice("");
     try {
       await operation();
       if (notifyReviewInputs) await notifyReviewInputsChanged();
@@ -269,11 +305,6 @@ export function AssignmentGenerationPanel({
     }
   };
 
-  const valueText = (value: unknown) => {
-    if (value == null) return "无法判断";
-    return typeof value === "string" ? value : JSON.stringify(value);
-  };
-
   const start = () =>
     act(
       () =>
@@ -285,61 +316,97 @@ export function AssignmentGenerationPanel({
       true,
     );
 
-  const risk = current?.revision?.risk_summary ?? {
-    info: 0,
-    warning: 0,
-    blocking: 0,
+  const saveTextbookLibraries = async () => {
+    const revision = current?.revision ?? revisions[0];
+    if (!revision) return;
+    await review(() =>
+      assignmentGenerationApi.replaceTextbookLibrarySelections(assignmentId, {
+        draft_revision_id: revision.id,
+        expected_draft_revision_edit_version: revision.teacher_edit_version,
+        expected_source_snapshot: revision.source_snapshot_hash,
+        library_ids: selectedTextbookLibraryIds,
+      }),
+    );
+  };
+
+  const deleteSourceFile = async (file: AssignmentFileAnalysis) => {
+    const name = file.file_name ?? "此文件";
+    if (
+      busy ||
+      !window.confirm(
+        `确定删除“${name}”吗？对应页面也会删除，之后需要重新整理。`,
+      )
+    )
+      return;
+    setBusy(true);
+    setDeletingFileId(file.stored_file_id);
+    setError("");
+    setNotice("");
+    try {
+      await assignmentsApi.removeFile(assignmentId, file.stored_file_id);
+      await notifyReviewInputsChanged();
+      await load();
+      setNotice("文件已删除，请重新整理。");
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason.message : "文件删除失败");
+    } finally {
+      setDeletingFileId("");
+      setBusy(false);
+    }
   };
 
   return (
-    <Card className="space-y-4 border-[var(--brand-200)] p-5">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="font-bold">Codex 草稿生成</h2>
-          <p className="mt-1 text-sm text-[var(--neutral-600)]">
-            由 Codex
-            一次生成题目、参考答案和评分标准草稿，不会直接发布。系统自动核对完整性，仅在异常时提示处理。
-          </p>
-        </div>
-        <Button
-          onClick={start}
-          disabled={
-            busy ||
-            capabilities === null ||
-            !capabilities.enabled ||
-            !capabilities.teacher_start_allowed ||
-            !capabilities.suggestion_only ||
-            Boolean(current && ACTIVE.has(current.status))
-          }
-        >
-          {current ? "重新生成完整草稿" : "生成完整草稿"}
-        </Button>
+    <Card className="space-y-3 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="font-bold">整理试卷</h2>
+        {current ? (
+          ACTIVE.has(current.status) ? (
+            <Button
+              variant="danger"
+              disabled={busy}
+              onClick={() =>
+                act(() => assignmentGenerationApi.cancel(current.id))
+              }
+            >
+              停止整理
+            </Button>
+          ) : (
+            <Button
+              variant="outline"
+              onClick={start}
+              disabled={
+                busy ||
+                capabilities === null ||
+                !capabilities.enabled ||
+                !capabilities.teacher_start_allowed ||
+                !capabilities.suggestion_only
+              }
+            >
+              重新整理
+            </Button>
+          )
+        ) : (
+          <Button
+            onClick={start}
+            disabled={
+              busy ||
+              capabilities === null ||
+              !capabilities.enabled ||
+              !capabilities.teacher_start_allowed ||
+              !capabilities.suggestion_only
+            }
+          >
+            开始整理
+          </Button>
+        )}
       </div>
-
-      {capabilities && (
-        <div
-          role="status"
-          className="rounded-lg border border-[var(--neutral-200)] bg-[var(--neutral-50)] p-3 text-sm"
-        >
-          <div className="font-medium">
-            当前草稿生成方式：Codex（由当前 Codex 任务执行）
-          </div>
-          <div className="mt-1 text-[var(--neutral-600)]">
-            外部
-            Provider：不使用；系统会先完成识别，再连续生成题目、答案和评分标准，不会自动发布。
-          </div>
-          <div className="mt-1 text-amber-700">
-            教师只需处理异常并在最后确认发布；页面不会把未完成阶段显示为成功。
-          </div>
-        </div>
-      )}
 
       {error && (
         <div
           role="alert"
           className="rounded-lg bg-red-50 p-3 text-sm text-red-700"
         >
-          {error}（轮询已停止，可点击重试）
+          {error}
           <Button
             className="ml-3"
             variant="outline"
@@ -349,281 +416,163 @@ export function AssignmentGenerationPanel({
           </Button>
         </div>
       )}
+      {notice && (
+        <div
+          role="status"
+          className="rounded-lg bg-emerald-50 p-3 text-sm text-emerald-800"
+        >
+          {notice}
+        </div>
+      )}
 
       {current ? (
         <>
-          <div className="grid gap-3 text-sm sm:grid-cols-4">
-            <div>
-              <span className="block text-[var(--neutral-500)]">
-                Generation
-              </span>
-              {current.generation}
-            </div>
-            <div>
-              <span className="block text-[var(--neutral-500)]">
-                草稿 Revision
-              </span>
-              {current.revision?.revision ?? "—"}
-            </div>
-            <div aria-label="生成状态">
-              <span className="block text-[var(--neutral-500)]">
-                状态 / 进度
-              </span>
-              {STATUS_LABEL[current.status] ?? current.status} ·{" "}
-              {current.progress}%
-            </div>
-            <div>
-              <span className="block text-[var(--neutral-500)]">输入快照</span>
-              <code>{current.source_snapshot_hash.slice(0, 12)}</code>
-            </div>
-          </div>
-          <div
-            aria-label="Codex 草稿生成进度"
-            className="h-2 overflow-hidden rounded bg-[var(--neutral-100)]"
-          >
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-sm">
+            <strong>
+              {codexQuestionDraftReady
+                ? "题目已整理，等待核对"
+                : current.status === "partial" &&
+                    current.stages.some(
+                      (row) =>
+                        ["extracting_questions", "generating_rubrics"].includes(
+                          row.stage,
+                        ) && row.status === "unavailable",
+                    )
+                  ? "等待 Codex 完成"
+                  : (STATUS_LABEL[current.status] ?? current.status)}
+            </strong>
             <div
-              className="h-full bg-[var(--brand-600)]"
-              style={{ width: `${current.progress}%` }}
-            />
+              aria-label="草稿生成进度"
+              className="h-1.5 min-w-28 flex-1 overflow-hidden rounded bg-[var(--neutral-100)]"
+            >
+              <div
+                className="h-full bg-[var(--brand-600)]"
+                style={{ width: `${current.progress}%` }}
+              />
+            </div>
+            <span className="text-xs text-[var(--neutral-600)]">
+              {current.progress}%
+            </span>
           </div>
-          <div className="grid gap-2 md:grid-cols-5">
-            {STAGES.map(({ key, label }) => {
-              const row = latestStages.get(key);
-              const canRetry =
-                ["failed", "partial"].includes(current.status) &&
-                Boolean(
-                  row &&
-                  ["failed", "unavailable", "discarded"].includes(row.status),
-                );
-              return (
-                <div key={key} className="rounded-lg border p-3 text-sm">
-                  <strong className="block">{label}</strong>
-                  <span>
-                    {row ? (STATUS_LABEL[row.status] ?? row.status) : "未开始"}
-                  </span>
-                  {row && (
-                    <small className="block">尝试 {row.stage_generation}</small>
-                  )}
-                  {canRetry && (
-                    <Button
-                      className="mt-2"
-                      variant="outline"
-                      disabled={busy}
-                      onClick={() =>
-                        act(() =>
-                          assignmentGenerationApi.retryStage(current.id, key),
-                        )
-                      }
-                    >
-                      重试此阶段
-                    </Button>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          <div className="flex flex-wrap items-center gap-3 text-sm">
-            {current.provider_mode === "unavailable" &&
-              (codexQuestionDraftReady ? (
-                <strong className="text-emerald-700">
-                  Codex 题目草稿已生成，等待教师确认
-                </strong>
-              ) : (
-                <strong className="text-amber-700">等待 Codex 代生成</strong>
-              ))}
-            {ACTIVE.has(current.status) && (
-              <Button
-                variant="danger"
-                disabled={busy}
-                onClick={() =>
-                  act(() => assignmentGenerationApi.cancel(current.id))
-                }
-              >
-                请求取消
-              </Button>
-            )}
-          </div>
-          {current.issues.length > 0 && (
+          <section aria-label="处理详情" className="text-sm">
+            <span className="sr-only">
+              {STATUS_LABEL[current.status] ?? current.status}
+            </span>
+            <div className="rounded-lg border border-[var(--neutral-300)] bg-[var(--neutral-50)] p-3">
+              <div className="grid gap-2 md:grid-cols-5">
+                {STAGES.map(({ key, label }) => {
+                  const row = latestStages.get(key);
+                  const canRetry =
+                    ["failed", "partial"].includes(current.status) &&
+                    Boolean(
+                      row &&
+                      ["failed", "unavailable", "discarded"].includes(
+                        row.status,
+                      ),
+                    );
+                  return (
+                    <div key={key} className="rounded-lg border p-2 text-sm">
+                      <strong className="block">{label}</strong>
+                      <span>{codexStageStatus(key, row)}</span>
+                      {canRetry && (
+                        <Button
+                          className="mt-2"
+                          variant="outline"
+                          disabled={busy}
+                          onClick={() =>
+                            act(() =>
+                              assignmentGenerationApi.retryStage(
+                                current.id,
+                                key,
+                              ),
+                            )
+                          }
+                        >
+                          重试此阶段
+                        </Button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </section>
+          {visibleIssues.length > 0 && (
             <details className="rounded-lg border text-sm">
-              <summary className="cursor-pointer rounded-lg px-3 py-3 font-medium hover:bg-[var(--neutral-50)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--brand-600)]">
-                生成记录/技术详情（{current.issues.length}）
+              <summary className="cursor-pointer rounded-lg px-3 py-2 font-medium hover:bg-[var(--neutral-50)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--brand-600)]">
+                需要处理的问题（{visibleIssues.length}）
               </summary>
-              <p className="px-3 pb-2 text-[var(--neutral-600)]">
-                历史记录：信息 {risk.info} · 警告 {risk.warning} · 阻断{" "}
-                {risk.blocking}。这些数量不代表当前发布待办。
-              </p>
               <ul className="grid gap-1 px-3 pb-3">
-                {current.issues.map((item) => (
+                {visibleIssues.map((item) => (
                   <li key={item.id}>
-                    [{item.severity}] {item.code}：{item.message}
+                    {item.code === "TOTAL_SCORE_UNCONFIRMED"
+                      ? "请确认作业总分"
+                      : item.message}
                   </li>
                 ))}
               </ul>
             </details>
           )}
 
-          <details
-            className="space-y-3 border-t pt-4"
-            aria-label="基本信息建议"
-          >
-            <summary className="cursor-pointer rounded-lg px-3 py-3 font-semibold hover:bg-[var(--neutral-50)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--brand-600)]">
-              第一步 · 基本信息建议（
-              {suggestions.filter((row) => row.status !== "superseded").length}
-              ）
-            </summary>
-            <div className="mt-3">
-              <p className="text-sm text-[var(--neutral-600)]">
-                AI 建议不会自动覆盖教师内容；不会推荐班级，也不会设置截止时间。
-              </p>
-            </div>
-            {suggestions.filter((row) => row.status !== "superseded").length ? (
-              <div className="grid gap-3">
-                {suggestions
-                  .filter((row) => row.status !== "superseded")
-                  .map((row) => (
-                    <article
-                      key={row.id}
-                      className="rounded-lg border p-3 text-sm"
-                    >
-                      <div className="flex flex-wrap justify-between gap-2">
-                        <strong>{row.field_name}</strong>
-                        <span>
-                          {Math.round(row.confidence * 100)}% · {row.status}
-                        </span>
-                      </div>
-                      <p className="mt-1 whitespace-pre-wrap break-words">
-                        AI 建议：{valueText(row.suggested_value)}
-                      </p>
-                      <ul className="mt-1 text-xs text-[var(--neutral-600)]">
-                        {row.evidence.map((evidence, index) => (
-                          <li key={`${evidence.reference_id}-${index}`}>
-                            {evidence.summary}
-                          </li>
-                        ))}
-                      </ul>
-                      {row.status === "suggested" && (
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          {row.field_name === "total_score" ? (
-                            <Button
-                              variant="outline"
-                              disabled={busy || !assignment}
-                              onClick={() => {
-                                const raw = window.prompt(
-                                  "请核对证据并输入确认后的总分",
-                                  valueText(row.normalized_value),
-                                );
-                                if (raw == null) return;
-                                const score = Number(raw);
-                                if (!Number.isFinite(score) || score <= 0)
-                                  return;
-                                if (!window.confirm("确认将该值写入草稿总分？"))
-                                  return;
-                                void review(() =>
-                                  assignmentGenerationApi.confirmTotalScore(
-                                    row.id,
-                                    {
-                                      expected_teacher_edit_version:
-                                        row.teacher_edit_version,
-                                      expected_assignment_updated_at:
-                                        assignment!.updated_at,
-                                      confirmed_value: score,
-                                      explicit_confirmation: true,
-                                    },
-                                  ),
-                                );
-                              }}
-                            >
-                              确认总分
-                            </Button>
-                          ) : (
-                            <Button
-                              variant="outline"
-                              disabled={busy || row.normalized_value == null}
-                              onClick={() =>
-                                void review(() =>
-                                  assignmentGenerationApi.dispositionField(
-                                    row.id,
-                                    {
-                                      action: "accept",
-                                      expected_teacher_edit_version:
-                                        row.teacher_edit_version,
-                                      expected_assignment_updated_at:
-                                        assignment?.updated_at,
-                                    },
-                                  ),
-                                )
-                              }
-                            >
-                              接受
-                            </Button>
-                          )}
-                          {row.field_name !== "total_score" && (
-                            <Button
-                              variant="outline"
-                              disabled={busy}
-                              onClick={() => {
-                                const value = window.prompt(
-                                  "请输入教师修改值",
-                                  valueText(row.normalized_value),
-                                );
-                                if (value == null) return;
-                                void review(() =>
-                                  assignmentGenerationApi.dispositionField(
-                                    row.id,
-                                    {
-                                      action: "modify",
-                                      expected_teacher_edit_version:
-                                        row.teacher_edit_version,
-                                      expected_assignment_updated_at:
-                                        assignment?.updated_at,
-                                      teacher_value: value,
-                                    },
-                                  ),
-                                );
-                              }}
-                            >
-                              修改
-                            </Button>
-                          )}
-                          <Button
-                            variant="outline"
-                            disabled={busy}
-                            onClick={() =>
-                              void review(() =>
-                                assignmentGenerationApi.dispositionField(
-                                  row.id,
-                                  {
-                                    action: "reject",
-                                    expected_teacher_edit_version:
-                                      row.teacher_edit_version,
-                                  },
-                                ),
-                              )
-                            }
-                          >
-                            拒绝
-                          </Button>
-                        </div>
-                      )}
-                    </article>
+          {textbookLibraries.length > 0 && (
+            <details className="border-t pt-3">
+              <summary className="cursor-pointer font-semibold">
+                教材来源
+                {selectedTextbookLibraryIds.length > 0
+                  ? `（已选 ${selectedTextbookLibraryIds.length} 册）`
+                  : ""}
+              </summary>
+              <div className="mt-3 space-y-3 rounded-lg bg-[var(--neutral-50)] p-3">
+                <div className="space-y-2">
+                  {textbookLibraries.map((library) => (
+                    <label key={library.id} className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={selectedTextbookLibraryIds.includes(
+                          library.id,
+                        )}
+                        onChange={(event) =>
+                          setSelectedTextbookLibraryIds((old) =>
+                            event.target.checked
+                              ? [...old, library.id]
+                              : old.filter((id) => id !== library.id),
+                          )
+                        }
+                      />
+                      <span>
+                        {library.title}
+                        {library.volume_label ? ` ${library.volume_label}` : ""}
+                      </span>
+                    </label>
                   ))}
+                </div>
+                <Button
+                  variant="outline"
+                  disabled={busy || !(current?.revision ?? revisions[0])}
+                  onClick={() => void saveTextbookLibraries()}
+                >
+                  保存教材来源
+                </Button>
+                <p className="text-xs text-[var(--neutral-600)]">
+                  系统会在解答可用时自动给出最可信的一处，仍需教师确认。
+                </p>
               </div>
-            ) : (
-              <p className="text-sm">当前没有可用字段建议，请由教师填写。</p>
-            )}
-          </details>
+            </details>
+          )}
 
           <details
             id="generation-file-analysis"
-            className="scroll-mt-6 space-y-3 border-t pt-4"
+            className="scroll-mt-6 space-y-3 border-t pt-1 open:pt-3"
             aria-label="文件分析"
+            open={
+              fileAnalysisCounts.needsReview > 0 || fileAnalysisCounts.stale > 0
+            }
           >
-            <summary className="cursor-pointer rounded-lg px-3 py-3 font-semibold hover:bg-[var(--neutral-50)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--brand-600)]">
-              文件与页面（{activeFileAnalyses.length} 个文件：自动识别{" "}
-              {fileAnalysisCounts.automatic}，需要选择{" "}
+            <summary className="cursor-pointer rounded-lg py-2 font-semibold hover:bg-[var(--neutral-50)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--brand-600)]">
+              上传文件用途确认（{activeFileAnalyses.length} 个文件：需要确认{" "}
               {fileAnalysisCounts.needsReview}
               {fileAnalysisCounts.confirmed > 0
-                ? `，已修改 ${fileAnalysisCounts.confirmed}`
+                ? `，已确认 ${fileAnalysisCounts.confirmed}`
                 : ""}
               {fileAnalysisCounts.stale > 0
                 ? `，已过期 ${fileAnalysisCounts.stale}`
@@ -632,7 +581,7 @@ export function AssignmentGenerationPanel({
             </summary>
             <div className="mt-3">
               <p className="text-sm text-[var(--neutral-600)]">
-                系统会自动识别文件用途并直接生成。仅在无法判断或用途冲突时需要选择；识别结果仍可修改。
+                每个文件只需确认是题目还是答案。系统建议仅供参考，未经教师确认不会用于生成题目。
               </p>
               {fileAnalysisCounts.stale > 0 && (
                 <div
@@ -665,12 +614,18 @@ export function AssignmentGenerationPanel({
               )}
             </div>
             {activeFileAnalyses.map((file) => {
+              const suggestedRole = [
+                "question_paper",
+                "reference_answer",
+                "question_and_answer",
+              ].includes(file.suggested_role)
+                ? file.suggested_role
+                : "";
               const choice = fileChoices[file.id] ?? {
-                role: file.suggested_role,
+                role: suggestedRole,
                 source: "not_applicable",
               };
               const requiresRoleReview = needsRoleReview(file);
-              const pages = pageAnalyses[file.id] ?? [];
               const visibleWarningCodes = file.warning_codes.filter(
                 (code) =>
                   !code.includes("ANSWER_SOURCE") &&
@@ -684,33 +639,40 @@ export function AssignmentGenerationPanel({
                 >
                   <div className="flex flex-wrap justify-between gap-2">
                     <strong>{file.file_name ?? file.stored_file_id}</strong>
-                    <span>
-                      {file.detected_mime_type} · {file.file_size ?? "—"} bytes
-                      · {file.page_count ?? "—"} 页
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span>{file.page_count ?? "—"} 页</span>
+                      {file.analysis_status !== "stale" && (
+                        <Button
+                          variant="danger"
+                          className="min-h-8 px-3 py-1 text-xs"
+                          loading={deletingFileId === file.stored_file_id}
+                          disabled={busy}
+                          aria-label={`删除 ${file.file_name ?? "文件"}`}
+                          onClick={() => void deleteSourceFile(file)}
+                        >
+                          删除文件
+                        </Button>
+                      )}
+                    </div>
                   </div>
-                  <p>
-                    checksum：<code>{file.checksum.slice(0, 12)}</code> · 状态{" "}
-                    {file.analysis_status === "suggested"
-                      ? requiresRoleReview
-                        ? "需要选择用途"
-                        : "已自动识别"
-                      : file.analysis_status === "confirmed"
-                        ? "已确认"
-                        : file.analysis_status === "stale"
-                          ? "已过期"
-                          : file.analysis_status}
-                  </p>
+                  {file.analysis_status === "stale" && (
+                    <p>内容已变化，请重新处理</p>
+                  )}
                   {file.analysis_status === "stale" && (
                     <p className="rounded-lg bg-red-50 p-2 text-red-800">
                       此文件的旧分析已过期。请点击上方“重新分析最新内容”，生成最新分析后再确认。
                     </p>
                   )}
                   <p>
-                    文件用途：
-                    {FILE_ROLE_LABEL[file.suggested_role] ??
+                    {requiresRoleReview && "需要选择文件用途 · "}
+                    用途：
+                    {FILE_ROLE_LABEL[
+                      file.teacher_confirmed_role ?? file.suggested_role
+                    ] ??
+                      file.teacher_confirmed_role ??
                       file.suggested_role}
-                    （{Math.round(file.role_confidence * 100)}%）
+                    {requiresRoleReview &&
+                      `（${Math.round(file.role_confidence * 100)}%）`}
                   </p>
                   {file.analysis_status !== "suggested" &&
                     file.teacher_confirmed_role && (
@@ -721,27 +683,14 @@ export function AssignmentGenerationPanel({
                       </p>
                     )}
                   {file.duplicate_of_file_id && (
-                    <p className="text-amber-700">
-                      重复关系：{file.duplicate_of_file_id}
-                    </p>
+                    <p className="text-amber-700">检测到重复文件</p>
                   )}
                   {!!visibleWarningCodes.length && (
                     <p className="text-amber-700">
-                      风险：{visibleWarningCodes.join("、")}
+                      发现 {visibleWarningCodes.length} 项需要核对的问题
                     </p>
                   )}
-                  {!!pages.length && (
-                    <p>
-                      页面：
-                      {pages
-                        .map(
-                          (page) =>
-                            `#${page.paper_page_id.slice(0, 6)} ${page.warning_codes.join("/") || page.status}`,
-                        )
-                        .join("；")}
-                    </p>
-                  )}
-                  {file.analysis_status === "suggested" &&
+                  {file.analysis_status !== "stale" &&
                     (requiresRoleReview ? (
                       <div className="grid gap-2 rounded-lg bg-amber-50 p-3 sm:grid-cols-2">
                         <label>
@@ -756,26 +705,28 @@ export function AssignmentGenerationPanel({
                                 [file.id]: {
                                   ...choice,
                                   role: event.target.value,
-                                  source:
-                                    event.target.value === "reference_answer"
-                                      ? choice.source === "not_applicable"
-                                        ? file.suggested_answer_source ===
-                                          "not_applicable"
-                                          ? "unknown"
-                                          : file.suggested_answer_source
-                                        : choice.source
-                                      : "not_applicable",
+                                  source: [
+                                    "reference_answer",
+                                    "question_and_answer",
+                                  ].includes(event.target.value)
+                                    ? choice.source === "not_applicable"
+                                      ? file.suggested_answer_source ===
+                                        "not_applicable"
+                                        ? "unknown"
+                                        : file.suggested_answer_source
+                                      : choice.source
+                                    : "not_applicable",
                                 },
                               }))
                             }
                           >
+                            <option value="" disabled>
+                              请选择题目、答案或二者都有
+                            </option>
                             {[
                               "question_paper",
                               "reference_answer",
-                              "rubric",
-                              "instructions",
-                              "attachment",
-                              "unknown",
+                              "question_and_answer",
                             ].map((role) => (
                               <option key={role} value={role}>
                                 {FILE_ROLE_LABEL[role]}
@@ -786,7 +737,7 @@ export function AssignmentGenerationPanel({
                         <Button
                           className="self-end"
                           variant="outline"
-                          disabled={busy}
+                          disabled={busy || !choice.role}
                           onClick={() =>
                             void review(() =>
                               assignmentGenerationApi.confirmFileAnalysis(
@@ -809,6 +760,9 @@ export function AssignmentGenerationPanel({
                         <summary className="cursor-pointer text-sm text-[var(--brand-700)]">
                           修改用途
                         </summary>
+                        <p className="mt-2 text-xs text-[var(--neutral-600)]">
+                          如用途选错，可在这里更正；更正后需重新整理，旧结果不会继续使用。
+                        </p>
                         <div className="mt-2 grid gap-2 sm:grid-cols-2">
                           <label>
                             文件用途
@@ -822,13 +776,15 @@ export function AssignmentGenerationPanel({
                                   [file.id]: {
                                     ...choice,
                                     role: event.target.value,
-                                    source:
-                                      event.target.value === "reference_answer"
-                                        ? file.suggested_answer_source ===
-                                          "not_applicable"
-                                          ? "unknown"
-                                          : file.suggested_answer_source
-                                        : "not_applicable",
+                                    source: [
+                                      "reference_answer",
+                                      "question_and_answer",
+                                    ].includes(event.target.value)
+                                      ? file.suggested_answer_source ===
+                                        "not_applicable"
+                                        ? "unknown"
+                                        : file.suggested_answer_source
+                                      : "not_applicable",
                                   },
                                 }))
                               }
@@ -836,10 +792,7 @@ export function AssignmentGenerationPanel({
                               {[
                                 "question_paper",
                                 "reference_answer",
-                                "rubric",
-                                "instructions",
-                                "attachment",
-                                "unknown",
+                                "question_and_answer",
                               ].map((role) => (
                                 <option key={role} value={role}>
                                   {FILE_ROLE_LABEL[role]}
@@ -875,32 +828,32 @@ export function AssignmentGenerationPanel({
             })}
           </details>
         </>
-      ) : (
-        <p className="text-sm text-[var(--neutral-600)]">尚未创建生成任务。</p>
-      )}
+      ) : null}
 
       {current?.revision && (
-        <QuestionExtractionReview
-          revision={current.revision}
-          onChanged={() =>
-            void (async () => {
-              await notifyReviewInputsChanged();
-              await load();
-            })()
-          }
-        />
+        <>
+          <QuestionExtractionReview
+            revision={current.revision}
+            onChanged={() =>
+              void (async () => {
+                await notifyReviewInputsChanged();
+                await load();
+              })()
+            }
+          />
+          <QuestionStructureReviewPanel assignmentId={assignmentId} />
+        </>
       )}
 
-      <details>
-        <summary className="cursor-pointer rounded-lg px-3 py-3 font-semibold hover:bg-[var(--neutral-50)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--brand-600)]">
-          草稿历史版本（{revisions.length}）
+      <details className="border-t pt-1 open:pt-3">
+        <summary className="cursor-pointer rounded-lg px-3 py-2 font-semibold hover:bg-[var(--neutral-50)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--brand-600)]">
+          历史记录（{revisions.length}）
         </summary>
         <ol className="mt-2 grid gap-2 text-sm">
           {revisions.map((revision) => (
             <li key={revision.id} className="rounded-lg border p-3">
-              Revision {revision.revision} · {revision.status} · Generation{" "}
-              {String(revision.draft_payload.generation ?? "—")} · 快照{" "}
-              <code>{revision.source_snapshot_hash.slice(0, 12)}</code>
+              版本 {revision.revision} ·
+              {STATUS_LABEL[revision.status] ?? revision.status}
             </li>
           ))}
         </ol>

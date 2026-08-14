@@ -109,6 +109,13 @@ def _as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value
 
 
+def _output_confidence(output: AIGradingOutput) -> Decimal | None:
+    scored = [row for row in output.criteria if row.suggested_points is not None]
+    if not scored or any(row.confidence is None for row in scored):
+        return None
+    return min(row.confidence for row in scored if row.confidence is not None)
+
+
 def verify_internal_token(authorization: str | None, expected: str) -> None:
     scheme, _, supplied = (authorization or "").partition(" ")
     if (
@@ -274,7 +281,10 @@ def _request_components(
         item.stable_key
         for item in criteria
         if bool((item.manual_review_policy or {}).get("manual_only"))
-        or item.validation_mode == "manual"
+        or item.validation_mode in {"manual", "manual_only"}
+    }
+    score_required = {
+        item.stable_key for item in criteria if item.validation_mode == "ai_suggestion"
     }
     step_sizes: dict[str, Decimal] = {}
     for item in criteria:
@@ -285,6 +295,7 @@ def _request_components(
         criterion_maxima={item.stable_key: Decimal(str(item.max_points)) for item in criteria},
         evidence_ids=set(evidence_refs),
         manual_only=manual_only,
+        score_required=score_required,
         step_sizes=step_sizes,
         question_max_points=Decimal(str(question.max_score)),
         criterion_keys={item.stable_key for item in criteria},
@@ -527,6 +538,7 @@ def claim_work_items(
     worker_id: str,
     limit: int,
     lease_seconds: int,
+    grading_batch_id: uuid.UUID | None = None,
 ) -> list[dict[str, Any]]:
     now = now_utc()
     expired_ids = list(
@@ -571,15 +583,15 @@ def claim_work_items(
                 },
             )
         )
+    candidate_query = select(CodexWorkItem.id).where(
+        CodexWorkItem.status == "queued",
+        (CodexWorkItem.available_at.is_(None) | (CodexWorkItem.available_at <= now)),
+    )
+    if grading_batch_id is not None:
+        candidate_query = candidate_query.where(CodexWorkItem.grading_batch_id == grading_batch_id)
     candidate_ids = list(
         db.scalars(
-            select(CodexWorkItem.id)
-            .where(
-                CodexWorkItem.status == "queued",
-                (CodexWorkItem.available_at.is_(None) | (CodexWorkItem.available_at <= now)),
-            )
-            .order_by(CodexWorkItem.created_at, CodexWorkItem.id)
-            .limit(limit)
+            candidate_query.order_by(CodexWorkItem.created_at, CodexWorkItem.id).limit(limit)
         )
     )
     claimed: list[dict[str, Any]] = []
@@ -1607,7 +1619,7 @@ def apply_work_item(
             prompt_version=PROMPT_VERSION,
             score=output.total_suggested_points,
             max_score=question.max_score,
-            confidence=None,
+            confidence=_output_confidence(output),
             recognized_answer_snapshot=(
                 answer.corrected_text
                 if answer.corrected_text is not None

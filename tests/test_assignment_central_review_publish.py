@@ -21,6 +21,7 @@ from app.api.assignment_central_review import (
 )
 from app.api.domain import ApiProblem
 from app.api.structured_rubrics import (
+    _confirm_question_package_against_bundle,
     confirm_question_package,
     confirm_rubric,
     update_reference,
@@ -41,6 +42,7 @@ from app.models import (
     ReferenceAnswerVersion,
     RubricCriterion,
     SchoolClass,
+    StructuredRubricSetItem,
     StructuredRubricVersion,
     User,
     now_utc,
@@ -173,14 +175,16 @@ def test_structured_set_write_lock_order_is_postgresql_safe() -> None:
         < disposition_source.index("item = db.scalar(")
     )
     assert "execution_options(populate_existing=True)" in disposition_source
-    package_source = pyinspect.getsource(confirm_question_package)
+    package_route_source = pyinspect.getsource(confirm_question_package)
+    assert package_route_source.index("owned_assignment(") < package_route_source.index(
+        "current_bundle = review_bundle("
+    )
+    package_source = pyinspect.getsource(_confirm_question_package_against_bundle)
     assert (
-        package_source.index("owned_assignment(")
-        < package_source.index("select(Question)")
+        package_source.index("select(Question)")
         < package_source.index("select(ReferenceAnswerVersion)")
         < package_source.index("select(StructuredRubricVersion)")
         < package_source.index("select(RubricCriterion)")
-        < package_source.index("current_bundle = review_bundle(")
     )
     assert package_source.count(".with_for_update()") >= 4
     assert ".with_for_update()" in pyinspect.getsource(update_reference)
@@ -478,6 +482,97 @@ def _structured_publication_fixture() -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
         return assignment.id, rubric.id, criterion.id
 
 
+def _bulk_confirmation_payload(assignment_id: uuid.UUID) -> tuple[dict, dict]:
+    bundle_response = client.get(f"/api/assignments/{assignment_id}/review-bundle")
+    assert bundle_response.status_code == 200, bundle_response.text
+    bundle = bundle_response.json()
+    packages = []
+    for question in bundle["questions"]:
+        answer = question["answer"]["materialized"] or question["answer"]["selected"]
+        rubric = question["rubric"]["materialized"] or question["rubric"]["selected"]
+        assert answer is not None and rubric is not None
+        packages.append(
+            {
+                "question_id": question["id"],
+                "expected_question_content_hash": question["content_hash"],
+                "reference_answer_version_id": answer["id"],
+                "expected_reference_answer_content_hash": answer["content_hash"],
+                "structured_rubric_version_id": rubric["id"],
+                "expected_structured_rubric_content_hash": rubric["content_hash"],
+            }
+        )
+    return bundle, {
+        "expected_bundle_hash": bundle["version"]["bundle_hash"],
+        "packages": packages,
+        "explicit_confirmation": True,
+    }
+
+
+def test_teacher_can_confirm_the_complete_current_bundle_with_one_request() -> None:
+    assignment_id, rubric_id, criterion_id = _structured_publication_fixture()
+    with SessionLocal() as db:
+        rubric = db.get(StructuredRubricVersion, rubric_id)
+        assert rubric is not None
+        answer = db.get(ReferenceAnswerVersion, rubric.reference_answer_version_id)
+        assert answer is not None
+        answer.status = "draft"
+        answer.teacher_confirmed_at = None
+        rubric.status = "draft"
+        rubric.confirmed_by = None
+        rubric.confirmed_at = None
+        criterion = db.get(RubricCriterion, criterion_id)
+        assert criterion is not None
+        criterion.criterion_type = "final_answer"
+        criterion.validation_mode = "manual_only"
+        criterion.validation_rule = {}
+        db.commit()
+
+    _, payload = _bulk_confirmation_payload(assignment_id)
+    response = client.post(
+        f"/api/assignments/{assignment_id}/confirm-all-answer-rubrics", json=payload
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["confirmed_count"] == 1
+    with SessionLocal() as db:
+        rubric = db.get(StructuredRubricVersion, rubric_id)
+        assert rubric is not None and rubric.status == "confirmed"
+        answer = db.get(ReferenceAnswerVersion, rubric.reference_answer_version_id)
+        assert answer is not None and answer.status == "confirmed"
+
+
+def test_bulk_confirmation_rejects_stale_content_without_writing() -> None:
+    assignment_id, rubric_id, criterion_id = _structured_publication_fixture()
+    with SessionLocal() as db:
+        rubric = db.get(StructuredRubricVersion, rubric_id)
+        assert rubric is not None
+        answer = db.get(ReferenceAnswerVersion, rubric.reference_answer_version_id)
+        assert answer is not None
+        answer.status = "draft"
+        answer.teacher_confirmed_at = None
+        rubric.status = "draft"
+        rubric.confirmed_by = None
+        rubric.confirmed_at = None
+        criterion = db.get(RubricCriterion, criterion_id)
+        assert criterion is not None
+        criterion.criterion_type = "final_answer"
+        criterion.validation_mode = "manual_only"
+        criterion.validation_rule = {}
+        db.commit()
+
+    _, payload = _bulk_confirmation_payload(assignment_id)
+    payload["packages"][0]["expected_structured_rubric_content_hash"] = "0" * 64
+    response = client.post(
+        f"/api/assignments/{assignment_id}/confirm-all-answer-rubrics", json=payload
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "QUESTION_PACKAGE_STALE"
+    with SessionLocal() as db:
+        rubric = db.get(StructuredRubricVersion, rubric_id)
+        assert rubric is not None and rubric.status == "draft"
+        answer = db.get(ReferenceAnswerVersion, rubric.reference_answer_version_id)
+        assert answer is not None and answer.status == "draft"
+
+
 def _prepare_structured_publication(assignment_id: uuid.UUID) -> dict[str, object]:
     created = client.post(f"/api/assignments/{assignment_id}/review-sessions")
     assert created.status_code == 201, created.text
@@ -522,6 +617,84 @@ def test_structured_set_is_the_only_publication_authority() -> None:
         assert assignment is not None
         assert assignment.status == "published"
         assert assignment.active_structured_rubric_set_id is not None
+
+
+def test_structured_set_normalizes_duplicate_question_display_order() -> None:
+    assignment_id, _, _ = _structured_publication_fixture()
+    with SessionLocal() as db:
+        assignment = db.get(Assignment, assignment_id)
+        assert assignment is not None and assignment.active_paper_version_id is not None
+        actor = db.get(User, assignment.owner_id)
+        assert actor is not None
+        assignment.total_score = 20
+        question = Question(
+            paper_version_id=assignment.active_paper_version_id,
+            question_number="2",
+            display_order=1,
+            question_type="calculation",
+            content_text="2+2",
+            max_score=10,
+        )
+        db.add(question)
+        db.flush()
+        answer = ReferenceAnswerVersion(
+            question_id=question.id,
+            source_type="teacher_official",
+            raw_content="4",
+            normalized_content="4",
+            structured_content={},
+            content_hash="5" * 64,
+            version=1,
+            provenance={"teacher": str(actor.id)},
+            created_by=actor.id,
+            status="confirmed",
+            teacher_confirmed_at=now_utc(),
+        )
+        db.add(answer)
+        db.flush()
+        rubric = StructuredRubricVersion(
+            question_id=question.id,
+            question_version=question_version_token(question),
+            reference_answer_version_id=answer.id,
+            rubric_version=1,
+            title="计算正确",
+            total_points=10,
+            status="confirmed",
+            content_hash="6" * 64,
+            created_by=actor.id,
+            confirmed_by=actor.id,
+            confirmed_at=now_utc(),
+        )
+        db.add(rubric)
+        db.flush()
+        db.add(
+            RubricCriterion(
+                rubric_version_id=rubric.id,
+                stable_key="answer",
+                title="答案正确",
+                max_points=10,
+                display_order=1,
+                criterion_type="answer",
+                required=True,
+                validation_mode="manual",
+                validation_rule={"answer_type": "exact_scalar"},
+            )
+        )
+        db.commit()
+
+    readiness = _prepare_structured_publication(assignment_id)
+    with SessionLocal() as db:
+        items = list(
+            db.scalars(
+                select(StructuredRubricSetItem)
+                .where(
+                    StructuredRubricSetItem.rubric_set_id
+                    == uuid.UUID(str(readiness["structured_rubric_set_id"]))
+                )
+                .order_by(StructuredRubricSetItem.display_order)
+            )
+        )
+        assert [item.display_order for item in items] == [1, 2]
 
 
 def test_structured_set_content_drift_fails_publish_with_409() -> None:

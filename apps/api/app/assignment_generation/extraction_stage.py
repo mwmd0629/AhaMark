@@ -26,6 +26,7 @@ from app.models import (
     RecognitionJob,
     RecognitionStatus,
 )
+from app.recognition.text_integrity import text_quality_statistics
 
 
 def build_page_suggestions(
@@ -35,14 +36,9 @@ def build_page_suggestions(
         db.scalars(
             select(AssignmentSourceFileAnalysis).where(
                 AssignmentSourceFileAnalysis.draft_revision_id == revision.id,
-                (
-                    (AssignmentSourceFileAnalysis.analysis_status == "confirmed")
-                    & (AssignmentSourceFileAnalysis.teacher_confirmed_role == "question_paper")
-                )
-                | (
-                    (AssignmentSourceFileAnalysis.analysis_status == "suggested")
-                    & (AssignmentSourceFileAnalysis.suggested_role == "question_paper")
-                    & (AssignmentSourceFileAnalysis.role_confidence >= 0.7)
+                AssignmentSourceFileAnalysis.analysis_status == "confirmed",
+                AssignmentSourceFileAnalysis.teacher_confirmed_role.in_(
+                    ["question_paper", "question_and_answer"]
                 ),
             )
         ).all()
@@ -131,7 +127,7 @@ def build_page_suggestions(
     return created
 
 
-def build_fake_candidates(
+def build_local_candidates(
     db: Session, job: AssignmentGenerationJob, revision: AssignmentDraftRevision
 ) -> dict[str, Any]:
     sources = list(
@@ -144,12 +140,8 @@ def build_fake_candidates(
     questions = {
         x.stored_file_id
         for x in sources
-        if (x.analysis_status == "confirmed" and x.teacher_confirmed_role == "question_paper")
-        or (
-            x.analysis_status == "suggested"
-            and x.suggested_role == "question_paper"
-            and float(x.role_confidence or 0) >= 0.7
-        )
+        if x.analysis_status == "confirmed"
+        and x.teacher_confirmed_role in {"question_paper", "question_and_answer"}
     }
     if not questions:
         return {"created": 0, "blocked": "QUESTION_PAPER_ROLE_UNCONFIRMED"}
@@ -173,36 +165,68 @@ def build_fake_candidates(
     if {page.id for page in pages if page.status != "ready" and page.id not in processed_page_ids}:
         return {"created": 0, "blocked": "PAGE_PROCESSING_INCOMPLETE"}
     version_ids = {x.paper_version_id for x in pages}
-    recognition = db.scalar(
-        select(RecognitionJob)
-        .where(
-            RecognitionJob.paper_version_id.in_(version_ids),
-            RecognitionJob.status.in_(
-                [RecognitionStatus.completed, RecognitionStatus.partially_completed]
-            ),
-        )
-        .order_by(RecognitionJob.created_at.desc())
+    recognition_rows = list(
+        db.scalars(
+            select(RecognitionJob)
+            .where(
+                RecognitionJob.paper_version_id.in_(version_ids),
+                RecognitionJob.status.in_(
+                    [RecognitionStatus.completed, RecognitionStatus.partially_completed]
+                ),
+            )
+            .order_by(RecognitionJob.created_at.desc())
+        ).all()
     )
-    if recognition is None:
+    recognitions: dict[uuid.UUID, RecognitionJob] = {}
+    for item in recognition_rows:
+        recognitions.setdefault(item.paper_version_id, item)
+    if set(recognitions) != version_ids:
         return {"created": 0, "blocked": "OCR_UNAVAILABLE"}
+    recognition_ids = {item.id for item in recognitions.values()}
     page_ids = {x.id for x in pages}
     candidates = list(
         db.scalars(
             select(QuestionCandidate)
             .where(
-                QuestionCandidate.recognition_job_id == recognition.id,
+                QuestionCandidate.recognition_job_id.in_(recognition_ids),
                 QuestionCandidate.paper_version_id.in_(version_ids),
             )
             .order_by(QuestionCandidate.created_at, QuestionCandidate.temporary_number)
         ).all()
     )
-    for old in db.scalars(
-        select(AssignmentQuestionExtractionCandidate).where(
-            AssignmentQuestionExtractionCandidate.draft_revision_id == revision.id,
-            AssignmentQuestionExtractionCandidate.status == "suggested",
-        )
-    ).all():
+    trusted_candidates = [
+        item
+        for item in candidates
+        if item.source.startswith("pdf_text:") or item.source.startswith("rapidocr:")
+    ]
+    if not trusted_candidates:
+        return {"created": 0, "blocked": "TRUSTED_TEXT_SOURCE_UNAVAILABLE"}
+    existing_rows = list(
+        db.scalars(
+            select(AssignmentQuestionExtractionCandidate).where(
+                AssignmentQuestionExtractionCandidate.draft_revision_id == revision.id
+            )
+        ).all()
+    )
+    protected_source_ids = {
+        row.source_question_candidate_id
+        for row in existing_rows
+        if row.source_question_candidate_id is not None
+        and (row.materialized_question_id is not None or row.status in {"accepted", "modified"})
+    }
+    candidates = [item for item in trusted_candidates if item.id not in protected_source_ids]
+    for old in (
+        row
+        for row in existing_rows
+        if row.status == "suggested" and row.materialized_question_id is None
+    ):
         old.status = "superseded"
+    if not candidates:
+        return {
+            "created": 0,
+            "preserved": len(protected_source_ids),
+            "recognition_job_ids": sorted(str(value) for value in recognition_ids),
+        }
     version = (
         int(
             db.scalar(
@@ -220,6 +244,7 @@ def build_fake_candidates(
     injection = False
     number_counts = Counter((item.temporary_number or "").strip() for item in candidates)
     for source in candidates:
+        source_recognition_id = source.recognition_job_id
         source_regions = list(
             db.scalars(
                 select(QuestionCandidateRegion).where(
@@ -237,7 +262,7 @@ def build_fake_candidates(
                 str(x)
                 for x in db.scalars(
                     select(RecognitionBlock.id).where(
-                        RecognitionBlock.recognition_job_id == recognition.id,
+                        RecognitionBlock.recognition_job_id == source_recognition_id,
                         RecognitionBlock.paper_page_id == region.paper_page_id,
                         RecognitionBlock.x >= region.x,
                         RecognitionBlock.y >= region.y,
@@ -253,6 +278,9 @@ def build_fake_candidates(
         latex = source.content_latex
         if not (source.temporary_number or "").strip():
             warnings.append("QUESTION_NUMBER_MISSING")
+        elif "[重复 " in source.temporary_number:
+            warnings.append("QUESTION_NUMBER_CONFLICT")
+            manual = True
         elif number_counts[(source.temporary_number or "").strip()] > 1:
             warnings.append("QUESTION_NUMBER_CONFLICT")
             manual = True
@@ -266,6 +294,18 @@ def build_fake_candidates(
             for value in block_ids
             if (block := db.get(RecognitionBlock, uuid.UUID(value))) is not None
         ]
+        quality_stats = text_quality_statistics(
+            [source.content_text, source.content_latex],
+            sources=[source.source],
+            confidences=[
+                float(block.confidence) if block.confidence is not None else None
+                for block in referenced_blocks
+            ],
+            block_types=[block.block_type for block in referenced_blocks],
+        )
+        if quality_stats["suspicious_character_count"]:
+            warnings.append("CHARACTER_ENCODING_CORRUPTION_DETECTED")
+            manual = True
         if any(block.block_type in {"formula", "figure", "table"} for block in referenced_blocks):
             kinds = {block.block_type for block in referenced_blocks}
             for kind in kinds & {"formula", "figure", "table"}:
@@ -302,7 +342,7 @@ def build_fake_candidates(
             generation_job_id=job.id,
             draft_revision_id=revision.id,
             paper_version_id=source.paper_version_id,
-            source_recognition_job_id=recognition.id,
+            source_recognition_job_id=source_recognition_id,
             source_question_candidate_id=source.id,
             candidate_version=version,
             question_number=source.temporary_number,
@@ -314,11 +354,16 @@ def build_fake_candidates(
             knowledge_point_suggestions=[],
             field_confidences=field_conf,
             overall_confidence=confidence,
-            extraction_method="recognition_bridge_fake",
+            extraction_method=(
+                "pdf_text_anchor"
+                if source.source.startswith("pdf_text:")
+                else "printed_text_ocr_anchor"
+            ),
             evidence={
                 "untrusted_document_content": True,
                 "source_candidate_id": str(source.id),
                 "recognition_block_ids": block_ids,
+                "quality_stats": quality_stats,
             },
             warning_codes=warnings,
             status="suggested",
@@ -373,10 +418,17 @@ def build_fake_candidates(
         created += 1
     return {
         "created": created,
-        "recognition_job_id": str(recognition.id),
+        "recognition_job_ids": sorted(str(value) for value in recognition_ids),
         "prompt_injection_detected": injection,
         "question_number_conflict": any(value > 1 for key, value in number_counts.items() if key),
     }
+
+
+def build_fake_candidates(
+    db: Session, job: AssignmentGenerationJob, revision: AssignmentDraftRevision
+) -> dict[str, Any]:
+    """Compatibility wrapper; fake recognition output is intentionally rejected."""
+    return build_local_candidates(db, job, revision)
 
 
 def materialize_draft_questions(

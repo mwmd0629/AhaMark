@@ -11,13 +11,6 @@ const blockTypeLabels: Record<string, string> = {
   diagram: "图示",
   unknown: "未知内容",
 };
-const providerLabels: Record<string, string> = {
-  fake: "本地占位服务",
-  printed_text: "本地印刷体识别",
-  handwriting_text: "手写识别建议",
-  math_formula: "公式识别建议",
-  unavailable: "未配置识别服务",
-};
 const warningLabels: Record<string, string> = {
   LOW_CONFIDENCE: "置信度较低",
   FORMULA_UNAVAILABLE: "公式识别不可用",
@@ -30,11 +23,13 @@ export function AnswerRecognitionWorkspace({
   answerId,
   regionIds,
   readOnly = false,
+  attentionRequired = false,
 }: {
   submissionId: string;
   answerId: string;
   regionIds: string[];
   readOnly?: boolean;
+  attentionRequired?: boolean;
 }) {
   const [blocks, setBlocks] = useState<AnswerRecognitionBlock[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
@@ -108,6 +103,7 @@ export function AnswerRecognitionWorkspace({
 
   return (
     <details
+      open={attentionRequired || undefined}
       data-testid="answer-recognition-details"
       className="rounded-lg border p-3"
       aria-label="答案识别证据复核"
@@ -164,15 +160,10 @@ export function AnswerRecognitionWorkspace({
               <strong>
                 {blockTypeLabels[block.block_type] ?? block.block_type}
               </strong>
-              <span>
-                {providerLabels[block.provider] ?? block.provider} / 版本{" "}
-                {block.provider_version}
-              </span>
-              <span>置信度 {block.confidence ?? "不可用"}</span>
               {block.stale && <span className="text-amber-800">已失效</span>}
               {block.warning_codes.map((warning) => (
                 <span key={warning} className="rounded bg-amber-100 px-1">
-                  {warningLabels[warning] ?? warning}
+                  {warningLabels[warning] ?? "需要教师检查"}
                 </span>
               ))}
             </div>

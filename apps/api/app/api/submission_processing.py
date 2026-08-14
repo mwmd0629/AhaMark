@@ -367,9 +367,7 @@ def add_region(
             select(StudentAnswerRegion)
             .where(
                 StudentAnswerRegion.student_answer_id == answer.id,
-                StudentAnswerRegion.status.in_(
-                    ["candidate", "confirmed", "manual_required"]
-                ),
+                StudentAnswerRegion.status.in_(["candidate", "confirmed", "manual_required"]),
             )
             .with_for_update()
         )
@@ -504,21 +502,22 @@ def confirm_high_confidence(submission_id: uuid.UUID, db: Db, actor: Actor) -> d
 def segmentation_incomplete(submission_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
     submission = _submission(db, actor.id, submission_id)
     assignment = db.get(Assignment, submission.assignment_id)
-    answers = (
-        db.scalars(
-            select(StudentAnswer)
+    answer_rows = (
+        db.execute(
+            select(StudentAnswer, Question)
             .join(Question, Question.id == StudentAnswer.question_id)
             .where(
                 StudentAnswer.submission_id == submission.id,
                 Question.paper_version_id == assignment.active_paper_version_id,
                 Question.status == "active",
             )
+            .order_by(Question.display_order, Question.question_number, Question.id)
         ).all()
         if assignment and assignment.active_paper_version_id
         else []
     )
     incomplete: list[str] = []
-    for answer in answers:
+    for answer, _question in answer_rows:
         confirmed = db.scalar(
             select(StudentAnswerRegion.id).where(
                 StudentAnswerRegion.student_answer_id == answer.id,
@@ -527,7 +526,18 @@ def segmentation_incomplete(submission_id: uuid.UUID, db: Db, actor: Actor) -> d
         )
         if confirmed is None:
             incomplete.append(str(answer.question_id))
-    return {"complete": not incomplete, "question_ids": incomplete}
+    return {
+        "complete": not incomplete,
+        "question_ids": incomplete,
+        "questions": [
+            {
+                "id": str(question.id),
+                "question_number": question.question_number,
+                "display_order": question.display_order,
+            }
+            for _answer, question in answer_rows
+        ],
+    }
 
 
 @router.post("/submissions/{submission_id}/processing-jobs/{job_id}/pages/{page_id}/retry")

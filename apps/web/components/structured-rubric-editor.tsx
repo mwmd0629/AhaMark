@@ -95,7 +95,7 @@ export function StructuredRubricEditor({
           criterion_type: "computation",
           required: true,
           dependencies: [],
-          validation_mode: "manual_only",
+          validation_mode: "ai_suggestion",
           validation_rule: {},
         },
       ],
@@ -126,7 +126,7 @@ export function StructuredRubricEditor({
               结构化 Rubric · v{rubric.rubric_version}
             </h2>
             <p className="text-sm text-slate-600">
-              确定性验证只生成建议分；教师录分与正式成绩不会被自动修改。
+              自动评分只生成建议分；教师录分与正式成绩不会被自动修改。
             </p>
           </div>
           <span className="rounded bg-slate-100 px-2 py-1 text-sm">
@@ -184,11 +184,11 @@ export function StructuredRubricEditor({
                     value={criterion.validation_mode}
                     onChange={(event) => {
                       const mode = event.target.value as
-                        "deterministic" | "manual_only";
+                        "deterministic" | "ai_suggestion" | "manual_only";
                       changeCriterion(index, {
                         validation_mode: mode,
                         validation_rule:
-                          mode === "manual_only"
+                          mode !== "deterministic"
                             ? {}
                             : {
                                 answer_type: "exact_scalar",
@@ -200,6 +200,7 @@ export function StructuredRubricEditor({
                     className="rounded border p-2"
                   >
                     <option value="deterministic">确定性验证</option>
+                    <option value="ai_suggestion">AI 建议评分</option>
                     <option value="manual_only">仅人工判断</option>
                   </select>
                 </div>

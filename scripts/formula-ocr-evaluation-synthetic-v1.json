@@ -1,0 +1,38 @@
+{
+  "schema_version": "formula-ocr-eval-v1",
+  "cases": [
+    {
+      "id": "synthetic-inline-001",
+      "modality": "synthetic",
+      "expected_latex": "f'(x)=2x",
+      "predictions": [
+        {
+          "latex": "f' ( x ) = 2 x",
+          "confidence": 0.98,
+          "provider": "synthetic-fixture",
+          "provider_version": "1"
+        }
+      ]
+    },
+    {
+      "id": "synthetic-fraction-002",
+      "modality": "synthetic",
+      "expected_latex": "\\frac{1}{x^2}",
+      "predictions": [
+        {
+          "latex": "\\frac{1}{x^3}",
+          "confidence": 0.62,
+          "provider": "synthetic-fixture",
+          "provider_version": "1",
+          "warning_codes": ["LOW_CONFIDENCE"]
+        }
+      ]
+    },
+    {
+      "id": "synthetic-empty-003",
+      "modality": "synthetic",
+      "expected_latex": "\\int_0^1 x\\,dx",
+      "predictions": []
+    }
+  ]
+}

@@ -10,13 +10,20 @@ from app.recognition.pipeline import (
     DefaultDocumentConverter,
     PageArtifact,
     PillowPreprocessor,
+    ProviderBlock,
+    QuestionAnchor,
     RapidOcrProvider,
     RecognitionError,
+    derive_question_regions,
+    extract_pdf_text_layer,
+    parse_hierarchical_question_number,
+    text_for_question_region,
 )
 from app.storage.dependencies import get_storage
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 from pypdf import PdfWriter
+from reportlab.pdfgen import canvas
 from test_assignments import FakeStorage, active_class, actor_and_db, create
 
 client = TestClient(app)
@@ -25,6 +32,32 @@ client = TestClient(app)
 def image_bytes(format_: str = "PNG") -> bytes:
     output = io.BytesIO()
     Image.new("RGB", (320, 240), "white").save(output, format_)
+    return output.getvalue()
+
+
+def text_pdf_bytes(text: str) -> bytes:
+    output = io.BytesIO()
+    document = canvas.Canvas(output, pagesize=(300, 200))
+    document.drawString(24, 120, text)
+    document.save()
+    return output.getvalue()
+
+
+def image_pdf_bytes() -> bytes:
+    output = io.BytesIO()
+    document = canvas.Canvas(output, pagesize=(320, 240))
+    document.drawInlineImage(Image.open(io.BytesIO(image_bytes())), 0, 0, 320, 240)
+    document.save()
+    return output.getvalue()
+
+
+def structured_text_pdf_bytes() -> bytes:
+    output = io.BytesIO()
+    document = canvas.Canvas(output, pagesize=(300, 220))
+    document.drawString(24, 185, "Synthetic mathematics assignment")
+    document.drawString(24, 145, "2(3) Compute the derivative")
+    document.drawString(24, 105, "12(2) Prove the limit")
+    document.save()
     return output.getvalue()
 
 
@@ -62,6 +95,247 @@ def test_image_and_pdf_conversion_and_preprocessing() -> None:
         assert exc.code == "PDF_INVALID"
     else:
         raise AssertionError("损坏 PDF 应失败")
+
+
+def test_embedded_pdf_text_layer_has_explicit_source() -> None:
+    blocks = extract_pdf_text_layer(
+        text_pdf_bytes("Synthetic mathematics assignment question 1 2 3"), 1
+    )
+    assert len(blocks) == 1
+    assert blocks[0].source == "pdf_text:pypdfium2"
+    assert "mathematics assignment" in (blocks[0].text or "")
+    assert blocks[0].confidence == 1.0
+
+
+def test_embedded_pdf_text_is_split_into_coordinate_line_blocks_and_anchors() -> None:
+    blocks = extract_pdf_text_layer(structured_text_pdf_bytes(), 1)
+    assert [block.block_type for block in blocks] == ["text", "question_number", "question_number"]
+    assert [parse_hierarchical_question_number(block.text or "") for block in blocks] == [
+        None,
+        "2(3)",
+        "12(2)",
+    ]
+    assert all(block.source == "pdf_text:pypdfium2" for block in blocks)
+    assert all(0 <= value <= 1 for block in blocks for value in block.region)
+    assert all(block.region[2] < 1 and block.region[3] < 0.2 for block in blocks)
+    assert blocks[0].region[1] < blocks[1].region[1] < blocks[2].region[1]
+    assert all(block.character_boxes for block in blocks)
+    assert all(
+        0 <= float(character_box[key]) <= 1
+        for block in blocks
+        for character_box in block.character_boxes
+        for key in ("x", "y", "width", "height")
+    )
+    assert "".join(
+        str(character_box["text"]) for character_box in blocks[1].character_boxes
+    ).startswith("2(3)")
+
+
+def test_hierarchical_question_number_parser_is_bounded_to_line_start() -> None:
+    assert parse_hierarchical_question_number("1. First") == "1"
+    assert parse_hierarchical_question_number(" 2 ( 3 ) Second") == "2(3)"
+    assert parse_hierarchical_question_number("11(2)：Third") == "11(2)"
+    assert parse_hierarchical_question_number("12（2） Fourth") == "12(2)"
+    assert parse_hierarchical_question_number("一、求极限") == "1"
+    assert parse_hierarchical_question_number("（十）证明") == "10"
+    assert parse_hierarchical_question_number("二十一、计算") == "21"
+    assert parse_hierarchical_question_number("⑫ 选择正确结论") == "12"
+    assert parse_hierarchical_question_number("Answer for 2(3)") is None
+    assert parse_hierarchical_question_number("2026 academic year") is None
+
+
+def test_question_regions_partition_same_page_and_cross_page_boundaries() -> None:
+    page_1, page_2, page_3 = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    anchor_1, anchor_2, anchor_3 = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    regions = derive_question_regions(
+        [page_1, page_2, page_3],
+        [
+            QuestionAnchor(anchor_1, page_1, 0.7),
+            QuestionAnchor(anchor_2, page_3, 0.2),
+            QuestionAnchor(anchor_3, page_3, 0.6),
+        ],
+    )
+    assert [row.paper_page_id for row in regions[anchor_1]] == [page_1, page_2, page_3]
+    assert [row.y for row in regions[anchor_1]] == pytest.approx([0.7, 0.0, 0.0])
+    assert [row.height for row in regions[anchor_1]] == pytest.approx([0.3, 1.0, 0.2])
+    assert [row.paper_page_id for row in regions[anchor_2]] == [page_3]
+    assert [row.y for row in regions[anchor_2]] == pytest.approx([0.2])
+    assert [row.height for row in regions[anchor_2]] == pytest.approx([0.4])
+    assert [row.paper_page_id for row in regions[anchor_3]] == [page_3]
+    assert [row.y for row in regions[anchor_3]] == pytest.approx([0.6])
+    assert [row.height for row in regions[anchor_3]] == pytest.approx([0.4])
+    assert all(row.x == 0 and row.width == 1 for rows in regions.values() for row in rows)
+
+
+def test_question_region_text_joins_trusted_lines_and_rejects_fake_blocks() -> None:
+    page = uuid.uuid4()
+    region = derive_question_regions([page], [QuestionAnchor(uuid.uuid4(), page, 0.2)]).popitem()[1]
+    blocks = [
+        (
+            page,
+            ProviderBlock(
+                "question_number",
+                "1. 求极限",
+                None,
+                1,
+                (0.1, 0.2, 0.4, 0.05),
+                source="pdf_text:pypdfium2",
+            ),
+        ),
+        (
+            page,
+            ProviderBlock(
+                "text",
+                "并说明理由。",
+                None,
+                1,
+                (0.1, 0.3, 0.4, 0.05),
+                source="pdf_text:pypdfium2",
+            ),
+        ),
+        (page, ProviderBlock("text", "测试题", None, 0.95, (0.1, 0.4, 0.4, 0.05), source="fake:1")),
+    ]
+
+    assert text_for_question_region(blocks, region) == "1. 求极限\n并说明理由。"
+
+
+def test_pdf_text_anchors_create_hierarchical_question_candidates() -> None:
+    actor, db = actor_and_db()
+    fake = FakeStorage()
+    app.dependency_overrides[get_storage] = lambda: fake
+    settings = get_settings()
+    previous = settings.recognition_provider
+    settings.recognition_provider = "unavailable"
+    try:
+        assignment = create(client, active_class(db, actor.id).id)
+        aid = assignment["id"]
+        upload = client.post(
+            f"/api/assignments/{aid}/files",
+            files={
+                "file": (
+                    "synthetic-structured-text.pdf",
+                    structured_text_pdf_bytes(),
+                    "application/pdf",
+                )
+            },
+        )
+        assert upload.status_code == 201
+        version_id = client.get(f"/api/assignments/{aid}").json()["paper_version"]["id"]
+        job = client.post(
+            f"/api/assignments/{aid}/recognition/jobs?run_now=true",
+            json={"paper_version_id": version_id, "idempotency_key": "pdf-text-anchors"},
+        ).json()
+        assert job["status"] == "completed"
+        candidates = client.get(
+            f"/api/assignments/{aid}/recognition/jobs/{job['id']}/candidates"
+        ).json()
+        assert [candidate["temporary_number"] for candidate in candidates] == ["2(3)", "12(2)"]
+        assert candidates[0]["content_text"] == "2(3) Compute the derivative"
+        assert all(candidate["source"] == "pdf_text:pypdfium2" for candidate in candidates)
+        assert all(
+            candidate["quality_stats"]["text_source"] == "pdf_text" for candidate in candidates
+        )
+        assert all(
+            candidate["quality_stats"]["suspicious_character_count"] == 0
+            for candidate in candidates
+        )
+        assert all(candidate["regions"] for candidate in candidates)
+        assert all(
+            float(region["x"]) == 0 and float(region["width"]) == 1
+            for candidate in candidates
+            for region in candidate["regions"]
+        )
+        assert len(candidates[0]["regions"]) == 1
+        assert float(candidates[0]["regions"][0]["height"]) < 0.3
+        assert float(candidates[1]["regions"][0]["height"]) > 0.4
+        pages = client.get(f"/api/assignments/{aid}/recognition/jobs/{job['id']}/pages").json()
+        page_quality = pages[0]["processing_parameters"]["text_quality"]
+        assert page_quality["text_source"] == "pdf_text"
+        assert page_quality["character_count"] > 0
+        assert page_quality["low_confidence_block_count"] == 0
+        assert page_quality["suspicious_character_count"] == 0
+        recognition_blocks = client.get(
+            f"/api/assignments/{aid}/recognition/jobs/{job['id']}/blocks"
+        ).json()
+        anchor_blocks = [
+            block for block in recognition_blocks if block["block_type"] == "question_number"
+        ]
+        assert anchor_blocks and all(block["character_boxes"] for block in anchor_blocks)
+        confirmed = client.post(
+            f"/api/assignments/{aid}/recognition/jobs/{job['id']}/confirm",
+            json={"candidate_ids": [candidate["id"] for candidate in candidates]},
+        ).json()
+        questions = [
+            db.get(Question, uuid.UUID(item)) for item in confirmed["created_question_ids"]
+        ]
+        assert questions and all(
+            question is not None and question.source == "pdf_text" for question in questions
+        )
+    finally:
+        settings.recognition_provider = previous
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_text_pdf_completes_without_ocr_provider() -> None:
+    actor, db = actor_and_db()
+    fake = FakeStorage()
+    app.dependency_overrides[get_storage] = lambda: fake
+    settings = get_settings()
+    previous = settings.recognition_provider
+    settings.recognition_provider = "unavailable"
+    try:
+        assignment = create(client, active_class(db, actor.id).id)
+        aid = assignment["id"]
+        upload = client.post(
+            f"/api/assignments/{aid}/files",
+            files={
+                "file": (
+                    "synthetic-text.pdf",
+                    text_pdf_bytes("Synthetic mathematics assignment question 1 2 3"),
+                    "application/pdf",
+                )
+            },
+        )
+        assert upload.status_code == 201
+        version_id = client.get(f"/api/assignments/{aid}").json()["paper_version"]["id"]
+        job = client.post(
+            f"/api/assignments/{aid}/recognition/jobs?run_now=true",
+            json={"paper_version_id": version_id, "idempotency_key": "pdf-text-no-ocr"},
+        ).json()
+        assert job["status"] == "completed"
+        blocks = client.get(f"/api/assignments/{aid}/recognition/jobs/{job['id']}/blocks").json()
+        assert blocks and all(block["source"] == "pdf_text:pypdfium2" for block in blocks)
+    finally:
+        settings.recognition_provider = previous
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_scanned_or_blank_pdf_fails_explicitly_without_ocr_provider() -> None:
+    actor, db = actor_and_db()
+    fake = FakeStorage()
+    app.dependency_overrides[get_storage] = lambda: fake
+    settings = get_settings()
+    previous = settings.recognition_provider
+    settings.recognition_provider = "unavailable"
+    try:
+        assignment = create(client, active_class(db, actor.id).id)
+        aid = assignment["id"]
+        upload = client.post(
+            f"/api/assignments/{aid}/files",
+            files={"file": ("synthetic-scan.pdf", image_pdf_bytes(), "application/pdf")},
+        )
+        assert upload.status_code == 201
+        version_id = client.get(f"/api/assignments/{aid}").json()["paper_version"]["id"]
+        job = client.post(
+            f"/api/assignments/{aid}/recognition/jobs?run_now=true",
+            json={"paper_version_id": version_id, "idempotency_key": "scan-no-ocr"},
+        ).json()
+        assert job["status"] == "failed"
+        pages = client.get(f"/api/assignments/{aid}/recognition/jobs/{job['id']}/pages").json()
+        assert pages[0]["error_code"] == "RECOGNITION_PROVIDER_UNAVAILABLE"
+    finally:
+        settings.recognition_provider = previous
+        app.dependency_overrides.pop(get_storage, None)
 
 
 def test_fake_job_candidates_corrections_confirmation_and_idempotency() -> None:

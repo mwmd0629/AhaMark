@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
+from types import SimpleNamespace
 
 import pytest
 from app.db.base import Base
@@ -38,6 +39,17 @@ def isolated_session() -> Iterator[Session]:
 
 def _id(value: int) -> uuid.UUID:
     return uuid.UUID(f"aaaaaaaa-aaaa-4aaa-8aaa-{value:012x}")
+
+
+def test_run_with_succeeded_and_stale_steps_is_ready_for_teacher_review() -> None:
+    status, completed, failed = orchestrator._aggregate_run_state(
+        [SimpleNamespace(status="stale"), SimpleNamespace(status="succeeded")],
+        pending_codex_count=0,
+    )
+
+    assert status == "awaiting_teacher_review"
+    assert completed == 1
+    assert failed == 0
 
 
 def _seed_mixed_batch(

@@ -846,6 +846,41 @@ def materialize_reference(
     return item
 
 
+def _criterion_validation_mode(
+    candidate: AssignmentRubricDraftCandidate,
+    criterion: AssignmentRubricCriterionDraft,
+) -> str:
+    if candidate.scoring_mode == "manual_only" or criterion.manual_required:
+        return "manual_only"
+    if candidate.scoring_mode == "ai_suggestion":
+        return "ai_suggestion"
+    return "deterministic"
+
+
+def _formal_criterion_type(candidate_type: str) -> str:
+    formal_types = {
+        "result": "final_answer",
+        "method": "method",
+        "step": "intermediate_result",
+        "reasoning": "justification",
+        "proof": "proof_step",
+        "format": "presentation",
+        "unit": "presentation",
+        "precision": "presentation",
+        "other": "method",
+        # Imported or older draft rows can already use the formal vocabulary.
+        "final_answer": "final_answer",
+        "intermediate_result": "intermediate_result",
+        "justification": "justification",
+        "proof_step": "proof_step",
+        "presentation": "presentation",
+    }
+    try:
+        return formal_types[candidate_type]
+    except KeyError:
+        raise ValueError("RUBRIC_CRITERION_TYPE_INVALID") from None
+
+
 def materialize_rubric(
     db: Session, candidate: AssignmentRubricDraftCandidate, actor_id: uuid.UUID
 ) -> StructuredRubricVersion:
@@ -919,17 +954,6 @@ def materialize_rubric(
         origin_rubric_candidate_id=candidate.id,
         materialization_key=materialization_key,
     )
-    formal_types = {
-        "result": "final_answer",
-        "method": "method",
-        "step": "intermediate_result",
-        "reasoning": "justification",
-        "proof": "proof_step",
-        "format": "presentation",
-        "unit": "presentation",
-        "precision": "presentation",
-        "other": "method",
-    }
     try:
         with db.begin_nested():
             db.add(item)
@@ -943,13 +967,11 @@ def materialize_rubric(
                         description=criterion.description,
                         max_points=criterion.points or Decimal("0"),
                         display_order=criterion.display_order,
-                        criterion_type=formal_types[criterion.criterion_type],
+                        criterion_type=_formal_criterion_type(criterion.criterion_type),
                         required=criterion.required,
                         dependencies=criterion.dependency_keys,
                         expected_evidence={"candidate_evidence": criterion.evidence},
-                        validation_mode="manual_only"
-                        if candidate.scoring_mode == "manual_only" or criterion.manual_required
-                        else "deterministic",
+                        validation_mode=_criterion_validation_mode(candidate, criterion),
                         manual_review_policy={
                             "required": candidate.manual_required or criterion.manual_required
                         },

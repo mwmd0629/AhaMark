@@ -1085,8 +1085,7 @@ export function AssignmentCentralReview({
     }
     return (
       <Card className="space-y-4 p-6">
-        <h2 className="font-bold">集中审查中心</h2>
-        <p>创建会话会固定当前生成与版本输入，不会自动发布。</p>
+        <h2 className="font-bold">发布检查</h2>
         <Button
           loading={busy}
           onClick={() =>
@@ -1097,7 +1096,7 @@ export function AssignmentCentralReview({
             )
           }
         >
-          开始集中审查
+          开始检查
         </Button>
       </Card>
     );
@@ -1106,10 +1105,7 @@ export function AssignmentCentralReview({
   return (
     <Card className="space-y-5 p-6">
       <div>
-        <h2 className="font-bold">集中审查中心</h2>
-        <p className="text-sm text-slate-600">
-          系统会自动核对常规内容；这里只需处理真正影响发布的问题。
-        </p>
+        <h2 className="font-bold">发布检查</h2>
       </div>
       {bundleError ? (
         <section
@@ -1246,9 +1242,6 @@ export function AssignmentCentralReview({
             {preparationExceptions.map((exception, index) => (
               <li key={`${exception.code}:${exception.entity_id ?? index}`}>
                 {exception.message}
-                <span className="ml-2 text-xs text-red-700">
-                  ({exception.code})
-                </span>
               </li>
             ))}
           </ul>
@@ -1264,8 +1257,8 @@ export function AssignmentCentralReview({
             {preparationProgress.stage}：
             {preparationProgressPercent(preparationProgress.progress)}%。
             {preparationWaitExhausted
-              ? "系统仍在准备，已达到本次自动等待上限；可点击“重新扫描最新状态”继续检查。"
-              : "系统会在两分钟内持续检查，无需手动刷新。"}
+              ? "检查用时较长，可以重新检查。"
+              : "请稍候。"}
           </p>
         </section>
       ) : teacherVisibleBlockers.length > 0 ? (
@@ -1283,11 +1276,9 @@ export function AssignmentCentralReview({
             <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-300 bg-white p-3">
               <div>
                 <strong className="text-sm text-red-900">
-                  当前审查仍绑定旧版草稿
+                  内容已经发生变化
                 </strong>
-                <p className="text-xs text-red-700">
-                  最新文件分析已经生成，必须创建一份绑定最新草稿的审查，旧审查不会自动变绿。
-                </p>
+                <p className="text-xs text-red-700">请重新检查最新内容。</p>
               </div>
               <Button
                 disabled={busy}
@@ -1299,7 +1290,7 @@ export function AssignmentCentralReview({
                   )
                 }
               >
-                基于最新内容重新开始审查
+                检查最新内容
               </Button>
             </div>
           )}
@@ -1405,42 +1396,42 @@ export function AssignmentCentralReview({
           className="rounded-xl border border-emerald-200 bg-emerald-50 p-4"
           aria-label="可以发布说明"
         >
-          <h3 className="font-semibold text-emerald-900">✓ 已满足发布条件</h3>
-          <p className="mt-1 text-sm text-emerald-800">
-            所有影响发布的问题和需要确认的项目均已处理。剩余提示仅供留档，不会阻止发布。
-          </p>
-          <p className="mt-2 text-sm text-emerald-900">
-            {readiness?.status === "ready"
-              ? "系统已完成发布状态核对。请核对班级、截止时间和总分，然后点击“确认发布”。"
-              : "系统正在自动核对发布状态；完成后只需由教师确认发布。"}
-          </p>
+          <h3 className="font-semibold text-emerald-900">
+            {readiness?.status === "ready" ? "✓ 可以发布" : "正在完成检查…"}
+          </h3>
         </section>
       )}
-      <div className="flex justify-end">
-        <Button
-          variant="outline"
-          disabled={busy || automating}
-          onClick={() => {
-            autoConfirmationAttempt.current = "";
-            autoStructuredSetAttempt.current = "";
-            preparationAttempt.current = "";
-            preparationPollCancel.current();
-            preparationRequest.current += 1;
-            preparationInFlight.current = false;
-            setPreparingReadiness(false);
-            setPreparationProgress(undefined);
-            setPreparationWaitExhausted(false);
-            setPreparationExceptions([]);
-            void act(
-              () =>
-                assignmentReviewApi.refresh(session.id, session.review_version),
-              "审查已刷新",
-            );
-          }}
-        >
-          重新扫描最新状态
-        </Button>
-      </div>
+      <details className="text-right text-sm">
+        <summary className="cursor-pointer text-slate-600">更多操作</summary>
+        <div className="mt-2 flex justify-end">
+          <Button
+            variant="outline"
+            disabled={busy || automating}
+            onClick={() => {
+              autoConfirmationAttempt.current = "";
+              autoStructuredSetAttempt.current = "";
+              preparationAttempt.current = "";
+              preparationPollCancel.current();
+              preparationRequest.current += 1;
+              preparationInFlight.current = false;
+              setPreparingReadiness(false);
+              setPreparationProgress(undefined);
+              setPreparationWaitExhausted(false);
+              setPreparationExceptions([]);
+              void act(
+                () =>
+                  assignmentReviewApi.refresh(
+                    session.id,
+                    session.review_version,
+                  ),
+                "审查已刷新",
+              );
+            }}
+          >
+            重新检查
+          </Button>
+        </div>
+      </details>
       {(visible.length > 0 || teacherVisibleBlockers.length > 0) && (
         <details id="review-audit" className="rounded-xl border">
           <summary className="cursor-pointer rounded-xl p-4 font-semibold hover:bg-slate-50">
@@ -1517,7 +1508,7 @@ export function AssignmentCentralReview({
             {teacherVisibleBlockers.length > 0 && (
               <details className="rounded-xl border p-3 text-sm">
                 <summary className="cursor-pointer text-slate-600">
-                  查看发布检查技术详情
+                  详细信息
                 </summary>
                 <pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap rounded bg-slate-950 p-3 text-xs text-slate-100">
                   {JSON.stringify(teacherVisibleBlockers, null, 2)}
@@ -1527,33 +1518,19 @@ export function AssignmentCentralReview({
           </div>
         </details>
       )}
-      <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
-        <strong>
-          {automating
-            ? "正在自动核对…"
-            : requiredConfirmationsComplete
-              ? "常规内容已自动核对"
-              : "仍有内容需要处理"}
-        </strong>
-        <p className="mt-1">
-          班级、时间、分值、文件和版本由系统核对；只有内容不完整或存在冲突时才需要处理。
-        </p>
-      </div>
       {bundle?.structured_rubric_set && (
-        <div
+        <details
           className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm"
           data-testid="structured-rubric-set-summary"
         >
-          <strong>
-            待发布评分标准集合 v{bundle.structured_rubric_set.version}
-          </strong>
-          <p className="mt-1 text-slate-600">
-            系统已固定当前试卷、标准答案、评分标准和分值。最终发布时会在同一事务内重新核对指纹。
-          </p>
-        </div>
+          <summary className="cursor-pointer font-semibold">
+            评分标准已准备
+          </summary>
+          <p className="mt-2 text-slate-600">当前题目、答案和分值已核对。</p>
+        </details>
       )}
       <div className="rounded-xl border p-4">
-        <h3 className="font-semibold">发布门禁</h3>
+        <h3 className="font-semibold">发布信息</h3>
         <p>
           班级 {item.classes.length} · 截止时间 {item.due_at ?? "无截止时间"} ·
           总分 {item.total_score ?? "未设置"}

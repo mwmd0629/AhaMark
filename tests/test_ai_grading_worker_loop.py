@@ -173,7 +173,33 @@ def test_migration_head_matches_strict_audit_models() -> None:
     joint_exam_revision = script.get_revision("0032_joint_exam_roster")
     structured_only_revision = script.get_revision("0034_structured_rubric_authority")
     question_anchor_revision = script.get_revision("0035_question_anchor_segmentation")
-    assert script.get_current_head() == question_anchor_revision.revision
+    grading_review_revision = script.get_revision("0036_grading_review_commands")
+    rubric_templates_revision = script.get_revision("0037_rubric_templates")
+    question_structure_revision = script.get_revision("0038_question_structure_reviews")
+    pdf_content_revision = script.get_revision("0039_pdf_content_sources")
+    assert pdf_content_revision.down_revision == question_structure_revision.revision
+    character_boxes_revision = script.get_revision("0040_recognition_character_boxes")
+    assert character_boxes_revision.down_revision == pdf_content_revision.revision
+    reference_binding_revision = script.get_revision("0041_reference_answer_source_bindings")
+    assert reference_binding_revision.down_revision == character_boxes_revision.revision
+    answer_binding_revision = script.get_revision("0042_answer_candidate_source_binding")
+    assert answer_binding_revision.down_revision == reference_binding_revision.revision
+    textbook_matches_revision = script.get_revision("0043_textbook_source_matches")
+    assert textbook_matches_revision.down_revision == answer_binding_revision.revision
+    textbook_indexes_revision = script.get_revision("0044_textbook_content_indexes")
+    assert textbook_indexes_revision.down_revision == textbook_matches_revision.revision
+    textbook_question_indexes_revision = script.get_revision("0045_textbook_question_only_indexes")
+    assert textbook_question_indexes_revision.down_revision == textbook_indexes_revision.revision
+    textbook_libraries_revision = script.get_revision("0046_textbook_libraries")
+    assert textbook_libraries_revision.down_revision == textbook_question_indexes_revision.revision
+    formula_recognition_revision = script.get_revision("0047_formula_recognition_candidates")
+    assert formula_recognition_revision.down_revision == textbook_libraries_revision.revision
+    class_resources_revision = script.get_revision("0048_class_resources")
+    assert class_resources_revision.down_revision == formula_recognition_revision.revision
+    assert script.get_current_head() == class_resources_revision.revision
+    assert question_structure_revision.down_revision == rubric_templates_revision.revision
+    assert rubric_templates_revision.down_revision == grading_review_revision.revision
+    assert grading_review_revision.down_revision == question_anchor_revision.revision
     assert question_anchor_revision.down_revision == structured_only_revision.revision
     assert structured_only_revision.down_revision == "0033_joint_exam_class_authorization"
     assert joint_exam_revision.down_revision == student_portal_revision.revision
