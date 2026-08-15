@@ -1,11 +1,12 @@
 import hashlib
 import io
+import math
 import re
 import unicodedata
 import uuid
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
-from importlib.metadata import PackageNotFoundError, version
-from typing import Any, BinaryIO, Protocol, cast
+from typing import Any, BinaryIO, Protocol
 
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps, UnidentifiedImageError
 
@@ -360,6 +361,16 @@ class RecognitionProvider(Protocol):
     def recognize(self, page: PageArtifact) -> list[ProviderBlock]: ...
 
 
+def safe_provider_readiness(provider: RecognitionProvider) -> tuple[bool, str | None]:
+    try:
+        available, reason = provider.available()
+        if not isinstance(available, bool) or (reason is not None and not isinstance(reason, str)):
+            raise TypeError("invalid provider readiness response")
+        return available, reason
+    except Exception:
+        return False, "文字识别器状态暂不可用"
+
+
 class DefaultDocumentConverter:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -443,8 +454,11 @@ class UnavailableProvider:
     version = "none"
     is_demo = False
 
+    def __init__(self, reason: str | None = None) -> None:
+        self.reason = reason or "未配置可运行的文字 OCR；普通转换与预处理仍可使用"
+
     def available(self) -> tuple[bool, str | None]:
-        return False, "未配置可运行的文字 OCR；普通转换与预处理仍可使用"
+        return False, self.reason
 
     def recognize(self, page: PageArtifact) -> list[ProviderBlock]:
         raise RecognitionError("RECOGNITION_PROVIDER_UNAVAILABLE", self.available()[1] or "不可用")
@@ -462,72 +476,194 @@ class FakeProvider:
         return [ProviderBlock("question_number", "1. 测试题", None, 0.95, (0.08, 0.10, 0.84, 0.12))]
 
 
+RAPIDOCR_MAX_INPUT_BYTES = 20 * 1024 * 1024
+RAPIDOCR_MAX_INPUT_PIXELS = 40_000_000
+RAPIDOCR_MAX_BLOCKS = 2_000
+RAPIDOCR_MAX_TEXT_CHARS = 4_000
+RAPIDOCR_MAX_TOTAL_TEXT_CHARS = 200_000
+
+
+def _output_invalid(message: str) -> RecognitionError:
+    return RecognitionError("OCR_PROVIDER_OUTPUT_INVALID", message)
+
+
+def validate_rapidocr_input(page: PageArtifact) -> None:
+    if type(page.content) is not bytes or not page.content:
+        raise RecognitionError("OCR_PROVIDER_INPUT_INVALID", "OCR 输入必须是非空 bytes")
+    if len(page.content) > RAPIDOCR_MAX_INPUT_BYTES:
+        raise RecognitionError("OCR_PROVIDER_INPUT_INVALID", "OCR 输入字节数超过限制")
+    if page.content_type not in {"image/png", "image/jpeg"}:
+        raise RecognitionError("OCR_PROVIDER_INPUT_INVALID", "OCR 输入图片格式不受支持")
+    if (
+        isinstance(page.width, bool)
+        or isinstance(page.height, bool)
+        or not isinstance(page.width, int)
+        or not isinstance(page.height, int)
+        or page.width <= 0
+        or page.height <= 0
+        or page.width * page.height > RAPIDOCR_MAX_INPUT_PIXELS
+    ):
+        raise RecognitionError("OCR_PROVIDER_INPUT_INVALID", "OCR 输入尺寸无效或超过限制")
+
+
+def _raw_sequence(value: object, label: str) -> Sequence[object]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise _output_invalid(f"RapidOCR {label} 必须是序列")
+    return value
+
+
+def _finite_number(value: object, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _output_invalid(f"RapidOCR {label} 必须是有限数值")
+    normalized = float(value)
+    if not math.isfinite(normalized):
+        raise _output_invalid(f"RapidOCR {label} 必须是有限数值")
+    return normalized
+
+
+def _has_unsafe_unicode(value: str) -> bool:
+    for character in value:
+        codepoint = ord(character)
+        if (
+            codepoint == 0x061C
+            or 0x200E <= codepoint <= 0x200F
+            or 0x202A <= codepoint <= 0x202E
+            or 0x2066 <= codepoint <= 0x206F
+            or 0xD800 <= codepoint <= 0xDFFF
+            or 0xFDD0 <= codepoint <= 0xFDEF
+            or codepoint & 0xFFFF in {0xFFFE, 0xFFFF}
+        ):
+            return True
+    return False
+
+
+def parse_rapidocr_output(output: object, page: PageArtifact) -> list[ProviderBlock]:
+    try:
+        raw_boxes = output.boxes  # type: ignore[attr-defined]
+        raw_texts = output.txts  # type: ignore[attr-defined]
+        raw_scores = output.scores  # type: ignore[attr-defined]
+    except AttributeError as exc:
+        raise _output_invalid("RapidOCR 输出缺少 boxes/txts/scores") from exc
+    if raw_boxes is None and raw_texts is None and raw_scores is None:
+        return []
+    if raw_boxes is None or raw_texts is None or raw_scores is None:
+        raise _output_invalid("RapidOCR 输出字段不能部分为空")
+    boxes = _raw_sequence(raw_boxes, "boxes")
+    texts = _raw_sequence(raw_texts, "txts")
+    scores = _raw_sequence(raw_scores, "scores")
+    if len(boxes) != len(texts) or len(texts) != len(scores):
+        raise _output_invalid("RapidOCR 输出字段长度不一致")
+    if len(boxes) > RAPIDOCR_MAX_BLOCKS:
+        raise _output_invalid("RapidOCR 输出块数量超过限制")
+
+    blocks: list[ProviderBlock] = []
+    total_text_chars = 0
+    for index, (raw_box, raw_text, raw_score) in enumerate(zip(boxes, texts, scores, strict=True)):
+        if (
+            not isinstance(raw_text, str)
+            or not raw_text.strip()
+            or len(raw_text) > RAPIDOCR_MAX_TEXT_CHARS
+            or _has_unsafe_unicode(raw_text)
+        ):
+            raise _output_invalid(f"RapidOCR 文本块 {index} 类型无效或过长")
+        total_text_chars += len(raw_text)
+        if total_text_chars > RAPIDOCR_MAX_TOTAL_TEXT_CHARS:
+            raise _output_invalid("RapidOCR 输出文本总长度超过限制")
+        score = _finite_number(raw_score, f"scores[{index}]")
+        if not 0 <= score <= 1:
+            raise _output_invalid(f"RapidOCR scores[{index}] 必须位于 0..1")
+        box = _raw_sequence(raw_box, f"boxes[{index}]")
+        if len(box) != 4:
+            raise _output_invalid(f"RapidOCR boxes[{index}] 必须包含四个点")
+        points: list[tuple[float, float]] = []
+        for point_index, raw_point in enumerate(box):
+            point = _raw_sequence(raw_point, f"boxes[{index}][{point_index}]")
+            if len(point) != 2:
+                raise _output_invalid(f"RapidOCR boxes[{index}][{point_index}] 必须包含 x/y")
+            x = _finite_number(point[0], f"boxes[{index}][{point_index}].x")
+            y = _finite_number(point[1], f"boxes[{index}][{point_index}].y")
+            if not 0 <= x <= page.width or not 0 <= y <= page.height:
+                raise _output_invalid(f"RapidOCR boxes[{index}] 超出页面范围")
+            points.append((x, y))
+        left = min(point[0] for point in points)
+        right = max(point[0] for point in points)
+        top = min(point[1] for point in points)
+        bottom = max(point[1] for point in points)
+        if right <= left or bottom <= top:
+            raise _output_invalid(f"RapidOCR boxes[{index}] 必须为正面积")
+        blocks.append(
+            ProviderBlock(
+                block_type="text",
+                text=raw_text,
+                latex=None,
+                confidence=score,
+                region=(
+                    left / page.width,
+                    top / page.height,
+                    (right - left) / page.width,
+                    (bottom - top) / page.height,
+                ),
+                status="low_confidence" if score < 0.70 else "recognized",
+            )
+        )
+    return sorted(
+        blocks,
+        key=lambda block: (
+            block.region[1],
+            block.region[0],
+            block.region[2],
+            block.region[3],
+            block.text or "",
+            -(block.confidence or 0.0),
+        ),
+    )
+
+
 class RapidOcrProvider:
     """Local printed-text OCR. It never claims formula/LaTeX recognition."""
 
     name = "rapidocr"
     is_demo = False
 
-    def __init__(self) -> None:
-        try:
-            self.version = version("rapidocr")
-        except PackageNotFoundError:
-            self.version = "unavailable"
+    def __init__(
+        self,
+        *,
+        engine_factory: Callable[[], Any] | None = None,
+        version: str = "unavailable",
+    ) -> None:
+        self.version = version if engine_factory is not None else "unavailable"
+        self._engine_factory = engine_factory
         self._engine: Any | None = None
 
     def available(self) -> tuple[bool, str | None]:
-        try:
-            import onnxruntime  # noqa: F401
-            from rapidocr import RapidOCR  # noqa: F401
-        except ImportError as exc:
-            return False, f"RapidOCR 运行依赖不可用：{exc.name or type(exc).__name__}"
-        return True, "本地 ONNX 文字 OCR；不支持可靠手写或公式识别"
+        if self._engine_factory is None:
+            return False, "RapidOCR 真实运行时尚未授权；不会导入或下载模型"
+        return True, "仅测试注入的本地 OCR engine；不支持可靠手写或公式识别"
 
     def recognize(self, page: PageArtifact) -> list[ProviderBlock]:
+        validate_rapidocr_input(page)
         available, reason = self.available()
         if not available:
             raise RecognitionError("RECOGNITION_PROVIDER_UNAVAILABLE", reason or "RapidOCR 不可用")
         try:
             if self._engine is None:
-                from rapidocr import RapidOCR
-
-                self._engine = RapidOCR()
-            output = cast(Any, self._engine(page.content))
-            boxes = output.boxes
-            texts = output.txts
-            scores = output.scores
+                assert self._engine_factory is not None
+                self._engine = self._engine_factory()
+            output = self._engine(page.content)
         except Exception as exc:
-            raise RecognitionError("OCR_FAILED", "RapidOCR 无法识别该图片") from exc
-        if boxes is None or texts is None or scores is None:
-            return []
-        blocks: list[ProviderBlock] = []
-        for box, text, score in zip(boxes, texts, scores, strict=True):
-            xs = [float(point[0]) for point in box]
-            ys = [float(point[1]) for point in box]
-            left, right = max(0.0, min(xs)), min(float(page.width), max(xs))
-            top, bottom = max(0.0, min(ys)), min(float(page.height), max(ys))
-            blocks.append(
-                ProviderBlock(
-                    block_type="text",
-                    text=str(text),
-                    latex=None,
-                    confidence=float(score),
-                    region=(
-                        left / page.width,
-                        top / page.height,
-                        max(0.0, right - left) / page.width,
-                        max(0.0, bottom - top) / page.height,
-                    ),
-                    status=("low_confidence" if float(score) < 0.70 else "recognized"),
-                )
-            )
-        return blocks
+            raise RecognitionError("OCR_INFERENCE_FAILED", "本地文字 OCR 推理失败") from exc
+        return parse_rapidocr_output(output, page)
 
 
 def provider_from_settings(settings: Settings) -> RecognitionProvider:
     if settings.recognition_provider == "fake" and settings.app_env.lower() != "production":
         return FakeProvider()
     if settings.recognition_provider == "rapidocr":
+        if (
+            not settings.recognition_rapidocr_runtime_enabled
+            or settings.recognition_rapidocr_model_download_allowed
+        ):
+            return UnavailableProvider("RapidOCR 运行时未授权，且禁止在服务进程中下载模型")
         return RapidOcrProvider()
     return UnavailableProvider()
 

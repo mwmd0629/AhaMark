@@ -170,7 +170,7 @@ export function RecognitionWorkspace({
         </div>
         <Button
           disabled={
-            !provider?.available ||
+            !provider?.can_start ||
             (!!job && ["queued", "running"].includes(job.status))
           }
           onClick={async () => {

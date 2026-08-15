@@ -83,6 +83,7 @@ beforeEach(() => {
     provider: "fake",
     version: "1",
     available: true,
+    can_start: true,
     demo: true,
     formula: { provider: "fake", available: true },
   });
@@ -114,6 +115,52 @@ beforeEach(() => {
     candidates: [],
     unreadable_reason: "subscript_ambiguous",
   });
+});
+
+it("uses the public can-start capability without showing readiness details", async () => {
+  api.providers.mockResolvedValue({
+    provider: "internal-provider",
+    version: "internal-version",
+    available: false,
+    can_start: false,
+    demo: false,
+    reason: "internal readiness detail",
+    formula: { provider: "unavailable", available: false },
+  });
+
+  render(
+    <RecognitionWorkspace
+      assignmentId="assignment-1"
+      paperVersionId="paper-1"
+    />,
+  );
+
+  expect(
+    await screen.findByRole("button", { name: "开始识别" }),
+  ).toBeDisabled();
+  expect(
+    screen.queryByText(/internal readiness detail/),
+  ).not.toBeInTheDocument();
+});
+
+it("allows a PDF-capable assignment to start when OCR itself is unavailable", async () => {
+  api.providers.mockResolvedValue({
+    provider: "unavailable",
+    version: "none",
+    available: false,
+    can_start: true,
+    demo: false,
+    formula: { provider: "unavailable", available: false },
+  });
+
+  render(
+    <RecognitionWorkspace
+      assignmentId="assignment-1"
+      paperVersionId="paper-1"
+    />,
+  );
+
+  expect(await screen.findByRole("button", { name: "开始识别" })).toBeEnabled();
 });
 
 it("offers a concise redraw or explicitly confirmed unreadable path", async () => {

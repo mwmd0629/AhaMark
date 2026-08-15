@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     recognition_low_confidence: float = 0.70
     recognition_high_confidence: float = 0.90
     recognition_config_version: str = "2026-07-22"
+    recognition_rapidocr_runtime_enabled: bool = False
+    recognition_rapidocr_model_download_allowed: bool = False
     formula_recognition_provider: str = "unavailable"
     formula_recognition_base_url: str | None = None
     formula_recognition_api_key: SecretStr | None = None
@@ -185,6 +187,19 @@ class Settings(BaseSettings):
                 "formula region detection configuration rejected: "
                 + "; ".join(formula_region_errors)
             )
+        rapidocr_errors = []
+        if self.recognition_rapidocr_runtime_enabled:
+            rapidocr_errors.append(
+                "RECOGNITION_RAPIDOCR_RUNTIME_ENABLED must remain false until an audited "
+                "explicit-model adapter exists"
+            )
+        if self.recognition_rapidocr_model_download_allowed:
+            rapidocr_errors.append(
+                "RECOGNITION_RAPIDOCR_MODEL_DOWNLOAD_ALLOWED must remain false; "
+                "runtime model downloads are prohibited"
+            )
+        if rapidocr_errors:
+            raise ValueError("RapidOCR configuration rejected: " + "; ".join(rapidocr_errors))
         if self.app_env.lower() != "production":
             return self
         errors: list[str] = []

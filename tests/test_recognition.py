@@ -492,13 +492,14 @@ def test_pdf_text_anchors_create_hierarchical_question_candidates() -> None:
         app.dependency_overrides.pop(get_storage, None)
 
 
-def test_text_pdf_completes_without_ocr_provider() -> None:
+@pytest.mark.parametrize("provider_name", ["unavailable", "rapidocr"])
+def test_text_pdf_completes_without_ocr_provider(provider_name: str) -> None:
     actor, db = actor_and_db()
     fake = FakeStorage()
     app.dependency_overrides[get_storage] = lambda: fake
     settings = get_settings()
     previous = settings.recognition_provider
-    settings.recognition_provider = "unavailable"
+    settings.recognition_provider = provider_name
     try:
         assignment = create(client, active_class(db, actor.id).id)
         aid = assignment["id"]
@@ -516,7 +517,10 @@ def test_text_pdf_completes_without_ocr_provider() -> None:
         version_id = client.get(f"/api/assignments/{aid}").json()["paper_version"]["id"]
         job = client.post(
             f"/api/assignments/{aid}/recognition/jobs?run_now=true",
-            json={"paper_version_id": version_id, "idempotency_key": "pdf-text-no-ocr"},
+            json={
+                "paper_version_id": version_id,
+                "idempotency_key": f"pdf-text-no-ocr-{provider_name}",
+            },
         ).json()
         assert job["status"] == "completed"
         blocks = client.get(f"/api/assignments/{aid}/recognition/jobs/{job['id']}/blocks").json()
@@ -620,17 +624,148 @@ def test_fake_job_candidates_corrections_confirmation_and_idempotency() -> None:
         app.dependency_overrides.pop(get_storage, None)
 
 
-def test_unavailable_provider_is_explicit() -> None:
+def test_unavailable_provider_can_still_start_current_pdf(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     actor, db = actor_and_db()
     settings = get_settings()
     previous = settings.recognition_provider
     settings.recognition_provider = "unavailable"
+    storage = FakeStorage()
+    app.dependency_overrides[get_storage] = lambda: storage
     try:
         assignment = create(client, active_class(db, actor.id).id)
         response = client.get(f"/api/assignments/{assignment['id']}/recognition/providers")
         assert response.json()["available"] is False
+        assert response.json()["can_start"] is False
+
+        upload = client.post(
+            f"/api/assignments/{assignment['id']}/files",
+            files={"file": ("scanned.pdf", image_pdf_bytes(), "application/pdf")},
+        )
+        assert upload.status_code == 201
+        response = client.get(f"/api/assignments/{assignment['id']}/recognition/providers")
+        assert response.json()["available"] is False
+        assert response.json()["can_start"] is True
+
+        class BrokenReadinessProvider:
+            name = "internal-provider"
+            version = "internal-version"
+            is_demo = False
+
+            def available(self) -> tuple[bool, str | None]:
+                raise RuntimeError("internal readiness detail")
+
+        monkeypatch.setattr(
+            "app.api.recognition.provider_from_settings",
+            lambda _settings: BrokenReadinessProvider(),
+        )
+        response = client.get(f"/api/assignments/{assignment['id']}/recognition/providers")
+        assert response.status_code == 200
+        assert response.json()["available"] is False
+        assert response.json()["can_start"] is True
+        assert response.json()["reason"] == "文字识别器状态暂不可用"
+        assert "internal readiness detail" not in response.text
     finally:
         settings.recognition_provider = previous
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_broken_provider_readiness_allows_reliable_pdf_without_leaking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BrokenReadinessProvider:
+        name = "broken-readiness"
+        version = "internal-version"
+        is_demo = False
+
+        def available(self) -> tuple[bool, str | None]:
+            raise RuntimeError("private readiness detail C:\\secret\\model")
+
+        def recognize(self, _page: PageArtifact) -> list[ProviderBlock]:
+            raise AssertionError("unavailable provider must not run for reliable PDF text")
+
+    monkeypatch.setattr(
+        "app.api.recognition.provider_from_settings", lambda _settings: BrokenReadinessProvider()
+    )
+    actor, db = actor_and_db()
+    storage = FakeStorage()
+    app.dependency_overrides[get_storage] = lambda: storage
+    try:
+        assignment = create(client, active_class(db, actor.id).id)
+        assignment_id = assignment["id"]
+        upload = client.post(
+            f"/api/assignments/{assignment_id}/files",
+            files={
+                "file": (
+                    "reliable.pdf",
+                    text_pdf_bytes("Synthetic reliable PDF question with enough embedded text 123"),
+                    "application/pdf",
+                )
+            },
+        )
+        assert upload.status_code == 201
+        version_id = client.get(f"/api/assignments/{assignment_id}").json()["paper_version"]["id"]
+
+        capability = client.get(f"/api/assignments/{assignment_id}/recognition/providers")
+        assert capability.status_code == 200
+        assert capability.json()["available"] is False
+        assert capability.json()["can_start"] is True
+        assert capability.json()["reason"] == "文字识别器状态暂不可用"
+        assert "private readiness detail" not in capability.text
+
+        response = client.post(
+            f"/api/assignments/{assignment_id}/recognition/jobs?run_now=true",
+            json={"paper_version_id": version_id, "idempotency_key": "broken-ready-pdf"},
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["status"] == "completed"
+        blocks = client.get(
+            f"/api/assignments/{assignment_id}/recognition/jobs/{response.json()['id']}/blocks"
+        ).json()
+        assert blocks and all(block["source"] == "pdf_text:pypdfium2" for block in blocks)
+        assert "private readiness detail" not in response.text
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_broken_provider_readiness_rejects_image_only_without_leaking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BrokenReadinessProvider:
+        name = "broken-readiness"
+        version = "internal-version"
+        is_demo = False
+
+        def available(self) -> tuple[bool, str | None]:
+            raise RuntimeError("private readiness detail C:\\secret\\model")
+
+    monkeypatch.setattr(
+        "app.api.recognition.provider_from_settings", lambda _settings: BrokenReadinessProvider()
+    )
+    actor, db = actor_and_db()
+    storage = FakeStorage()
+    app.dependency_overrides[get_storage] = lambda: storage
+    try:
+        assignment = create(client, active_class(db, actor.id).id)
+        assignment_id = assignment["id"]
+        upload = client.post(
+            f"/api/assignments/{assignment_id}/files",
+            files={"file": ("image.png", image_bytes(), "image/png")},
+        )
+        assert upload.status_code == 201
+        version_id = client.get(f"/api/assignments/{assignment_id}").json()["paper_version"]["id"]
+
+        response = client.post(
+            f"/api/assignments/{assignment_id}/recognition/jobs?run_now=true",
+            json={"paper_version_id": version_id, "idempotency_key": "broken-ready-image"},
+        )
+        assert response.status_code == 503
+        assert response.json()["code"] == "RECOGNITION_PROVIDER_UNAVAILABLE"
+        assert response.json()["message"] == "文字识别器状态暂不可用"
+        assert "private readiness detail" not in response.text
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
 
 
 def test_real_rapidocr_printed_text_blank_coordinates_and_failure() -> None:

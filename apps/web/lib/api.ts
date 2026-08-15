@@ -920,6 +920,7 @@ export type RecognitionProviderStatus = {
   provider: string;
   version: string;
   available: boolean;
+  can_start: boolean;
   demo: boolean;
   reason?: string;
   formula: { provider: string; available: boolean; reason?: string };

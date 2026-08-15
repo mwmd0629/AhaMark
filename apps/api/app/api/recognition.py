@@ -47,6 +47,7 @@ from app.recognition.pipeline import (
     parse_hierarchical_question_number,
     provider_from_settings,
     read_all,
+    safe_provider_readiness,
     store_artifact,
     text_for_question_region,
 )
@@ -706,7 +707,7 @@ def run_recognition_job(
             recovery_fault_checkpoint("recognition-running")
         settings = get_settings()
         provider = provider_from_settings(settings)
-        available, reason = provider.available()
+        available, reason = safe_provider_readiness(provider)
         converter = DefaultDocumentConverter(settings)
         preprocessor = PillowPreprocessor()
         pages = list(
@@ -898,13 +899,26 @@ def providers(assignment_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
         raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     settings = get_settings()
     provider = provider_from_settings(settings)
-    available, reason = provider.available()
+    available, reason = safe_provider_readiness(provider)
+    has_pdf_source = bool(
+        assignment.active_paper_version_id
+        and db.scalar(
+            select(func.count())
+            .select_from(PaperPage)
+            .join(StoredFile, StoredFile.id == PaperPage.stored_file_id)
+            .where(
+                PaperPage.paper_version_id == assignment.active_paper_version_id,
+                StoredFile.content_type == "application/pdf",
+            )
+        )
+    )
     formula_provider = formula_provider_from_settings(settings)
     formula_available, formula_reason = formula_provider.available()
     return {
         "provider": provider.name,
         "version": provider.version,
         "available": available,
+        "can_start": available or has_pdf_source,
         "demo": provider.is_demo,
         "reason": reason,
         "pdf_text": {
@@ -944,7 +958,7 @@ def create_job(
     if existing:
         return job_json(db, existing)
     provider = provider_from_settings(get_settings())
-    available, reason = provider.available()
+    available, reason = safe_provider_readiness(provider)
     page_file_ids = set(
         db.scalars(
             select(PaperPage.stored_file_id).where(PaperPage.paper_version_id == version.id)
