@@ -957,6 +957,13 @@ export type RecognitionPage = {
   rendered_url?: string;
   processed_url?: string;
   thumbnail_url?: string;
+  processing_parameters?: {
+    source_conflict_count?: number;
+    math_symbol_conflict_count?: number;
+    missing_region_count?: number;
+    source_agreement_ratio?: number | null;
+    [key: string]: unknown;
+  };
 };
 export type RecognitionCandidate = {
   id: string;

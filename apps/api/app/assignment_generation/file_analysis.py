@@ -45,6 +45,12 @@ def _role(name: str, text: str) -> tuple[str, float, str, float]:
 def _content_evidence(
     blocks: list[RecognitionBlock], job: RecognitionJob | None
 ) -> tuple[str, str, float, int]:
+    blocks = [
+        block
+        for block in blocks
+        if getattr(block, "status", "recognized")
+        in {"adopted", "manual_required", "recognized", "low_confidence"}
+    ]
     pdf_blocks = [block for block in blocks if block.source.startswith("pdf_text:")]
     provider_is_test_or_unavailable = job is None or job.provider in {"fake", "unavailable"}
     ocr_blocks = (
@@ -145,7 +151,10 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
     for file_id, file_pages in grouped.items():
         stored = files[file_id]
         text = " ".join(
-            (block.text or "") for page in file_pages for block in blocks_by_page.get(page.id, [])
+            (block.text or "")
+            for page in file_pages
+            for block in blocks_by_page.get(page.id, [])
+            if block.status in {"adopted", "manual_required", "recognized", "low_confidence"}
         )[:8000]
         role, role_conf, answer_source, source_conf = _role(stored.original_name, text)
         content_mode, text_source, content_confidence = _file_content_evidence(

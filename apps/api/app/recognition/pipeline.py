@@ -1,7 +1,9 @@
 import hashlib
 import io
+import re
+import unicodedata
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, BinaryIO, Protocol, cast
 
@@ -9,6 +11,7 @@ from PIL import Image, ImageEnhance, ImageFilter, ImageOps, UnidentifiedImageErr
 
 from app.core.config import Settings
 from app.recognition.question_numbers import normalize_question_number
+from app.recognition.text_integrity import inspect_text_integrity
 from app.storage.base import ObjectStorage
 
 
@@ -36,6 +39,134 @@ class ProviderBlock:
     status: str = "recognized"
     source: str | None = None
     character_boxes: list[dict[str, int | float | str]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class TextFusionResult:
+    blocks: list[ProviderBlock]
+    source_conflict_count: int
+    math_symbol_conflict_count: int
+    missing_region_count: int
+    source_agreement_ratio: float | None
+
+    @property
+    def adopted_blocks(self) -> list[ProviderBlock]:
+        return [block for block in self.blocks if block.status in {"adopted", "manual_required"}]
+
+    @property
+    def metrics(self) -> dict[str, int | float | None]:
+        return {
+            "source_conflict_count": self.source_conflict_count,
+            "math_symbol_conflict_count": self.math_symbol_conflict_count,
+            "missing_region_count": self.missing_region_count,
+            "source_agreement_ratio": self.source_agreement_ratio,
+        }
+
+
+_MATH_SENSITIVE = set("=<>+-*/^_|±×÷≤≥≠≈√∑∏∫∂∞∈∉⊂⊆∪∩→⇒⇔")
+_SUPERSCRIPT_OR_SUBSCRIPT = re.compile(r"[\u00b2\u00b3\u00b9\u2070-\u209f]")
+
+
+def _normalized_source_text(text: str | None) -> str:
+    return " ".join((text or "").split()).casefold()
+
+
+def _nonspace_source_text(text: str | None) -> str:
+    return "".join((text or "").split()).casefold()
+
+
+def _overlap_coverage(left: ProviderBlock, right: ProviderBlock) -> float:
+    lx, ly, lw, lh = left.region
+    rx, ry, rw, rh = right.region
+    intersection = max(0.0, min(lx + lw, rx + rw) - max(lx, rx)) * max(
+        0.0, min(ly + lh, ry + rh) - max(ly, ry)
+    )
+    return intersection / max(min(lw * lh, rw * rh), 1e-12)
+
+
+def _math_signature(text: str | None) -> tuple[str, ...]:
+    return tuple(
+        character
+        for character in _normalized_source_text(text)
+        if character in _MATH_SENSITIVE
+        or _SUPERSCRIPT_OR_SUBSCRIPT.fullmatch(character)
+        or unicodedata.category(character) == "Sm"
+        or "GREEK" in unicodedata.name(character, "")
+    )
+
+
+def _reliable_pdf_text(blocks: list[ProviderBlock]) -> bool:
+    text = "".join(_nonspace_source_text(block.text) for block in blocks)
+    return (
+        len(text) >= 20
+        and all(
+            width > 0 and height > 0 and x >= 0 and y >= 0 and x + width <= 1 and y + height <= 1
+            for block in blocks
+            for x, y, width, height in [block.region]
+        )
+        and not any(
+            inspect_text_integrity(block.text, field_path=f"pdf_text[{index}]")
+            for index, block in enumerate(blocks)
+        )
+    )
+
+
+def fuse_text_sources(
+    pdf_blocks: list[ProviderBlock], ocr_blocks: list[ProviderBlock]
+) -> TextFusionResult:
+    """Preserve both sources while adopting only conservative, non-duplicated text."""
+
+    reliable_pdf = _reliable_pdf_text(pdf_blocks)
+    fused = [
+        replace(block, status="adopted" if reliable_pdf else "unreliable_source")
+        for block in pdf_blocks
+    ]
+    comparable_pdf_blocks = list(enumerate(fused)) if reliable_pdf else []
+    agreements = 0
+    conflicts = 0
+    math_conflicts = 0
+    missing = 0
+    for ocr_block in ocr_blocks:
+        overlaps = [
+            (index, block)
+            for index, block in comparable_pdf_blocks
+            if _overlap_coverage(block, ocr_block) >= 0.5
+        ]
+        if not reliable_pdf or not overlaps:
+            fused.append(replace(ocr_block, status="adopted"))
+            if reliable_pdf:
+                missing += 1
+            continue
+        best_index, best = max(
+            overlaps,
+            key=lambda indexed_block: _overlap_coverage(indexed_block[1], ocr_block),
+        )
+        if _normalized_source_text(best.text) == _normalized_source_text(ocr_block.text):
+            agreements += 1
+            fused.append(replace(ocr_block, status="source_agreement"))
+            continue
+        conflicts += 1
+        whitespace_topology_conflict = (
+            _nonspace_source_text(best.text) == _nonspace_source_text(ocr_block.text)
+            and _normalized_source_text(best.text) != _normalized_source_text(ocr_block.text)
+            and any(character.isdigit() for character in _nonspace_source_text(best.text))
+        )
+        is_math_conflict = whitespace_topology_conflict or (
+            _math_signature(best.text) != _math_signature(ocr_block.text)
+            and bool(_math_signature(best.text) or _math_signature(ocr_block.text))
+        )
+        if is_math_conflict:
+            math_conflicts += 1
+            fused[best_index] = replace(fused[best_index], status="manual_required")
+        fused.append(replace(ocr_block, status="source_conflict"))
+    compared = agreements + conflicts
+    return TextFusionResult(
+        blocks=fused,
+        source_conflict_count=conflicts,
+        math_symbol_conflict_count=math_conflicts,
+        missing_region_count=missing,
+        source_agreement_ratio=agreements / compared if compared else None,
+    )
 
 
 @dataclass(frozen=True)
@@ -108,6 +239,7 @@ def text_for_question_region(
         if (
             not text
             or block.source is None
+            or block.status not in {"adopted", "manual_required", "recognized", "low_confidence"}
             or not (block.source.startswith("pdf_text:") or block.source.startswith("rapidocr:"))
         ):
             continue

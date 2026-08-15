@@ -80,6 +80,7 @@ export function RecognitionWorkspace({
   const page =
     pages.find((item) => item.paper_page_id === region?.paper_page_id) ??
     pages[0];
+  const sourceMetrics = page?.processing_parameters;
   const currentFormula = formulaRegions.find(
     (item) => item.id === selectedFormula,
   );
@@ -115,11 +116,7 @@ export function RecognitionWorkspace({
     setFormulaLatex(selectedItem?.candidates[0]?.latex ?? "");
   };
   return (
-    <Card
-      className="space-y-4 p-6"
-      data-testid="recognition-workspace"
-      data-provider={provider?.provider}
-    >
+    <Card className="space-y-4 p-6" data-testid="recognition-workspace">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="font-bold">图片处理与 OCR</h2>
@@ -163,16 +160,11 @@ export function RecognitionWorkspace({
         </Button>
       </div>
       <div className="rounded-xl border p-3 text-sm">
-        文字识别：{provider?.provider ?? "检查中"}{" "}
-        {provider?.demo ? "（测试 provider）" : ""} ·{" "}
-        {provider?.available
-          ? "可用"
-          : `不可用：${provider?.reason ?? "未知原因"}`}
+        文字识别：
+        {provider?.available ? "可用" : "暂不可用，请稍后重试或人工录入"}
         <br />
         公式识别：
-        {provider?.formula.available
-          ? "可用"
-          : `不可用：${provider?.formula.reason ?? "未配置"}`}
+        {provider?.formula.available ? "可用" : "暂不可用，请人工核对公式"}
       </div>
       {error && (
         <p
@@ -186,13 +178,18 @@ export function RecognitionWorkspace({
         <div
           aria-label="识别任务进度"
           data-testid="recognition-job"
-          data-job-id={job.id}
           data-status={job.status}
           className="space-y-2 rounded-xl bg-slate-50 p-3"
         >
           <div className="flex justify-between">
             <span>
-              <Badge status={job.status} /> · {job.stage}
+              {job.status === "completed"
+                ? "识别完成"
+                : job.status === "partially_completed"
+                  ? "部分页面需要重新识别"
+                  : job.status === "failed"
+                    ? "识别失败，请按页面提示处理"
+                    : "正在识别"}
             </span>
             <span>{job.progress}%</span>
           </div>
@@ -201,10 +198,33 @@ export function RecognitionWorkspace({
             成功 {job.page_summary.completed} · 失败 {job.page_summary.failed} ·
             待重新识别 {job.page_summary.stale}
           </p>
-          {job.error_message && (
-            <p className="text-red-700">{job.error_message}</p>
+          {job.error_code && (
+            <p className="text-red-700">
+              {job.error_code === "CHARACTER_ENCODING_CORRUPTION_DETECTED"
+                ? "当前结果不能安全生成题目，请重新识别或人工录入。"
+                : job.error_code === "RECOGNITION_PROVIDER_UNAVAILABLE" ||
+                    job.error_code === "TRUSTED_TEXT_SOURCE_UNAVAILABLE"
+                  ? "当前页面没有可靠文字，请重新扫描或人工录入。"
+                  : "页面识别失败，请重试或人工录入。"}
+            </p>
           )}
         </div>
+      )}
+      {!!sourceMetrics?.math_symbol_conflict_count && (
+        <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-900">
+          这一页的数学符号在不同文字来源中不一致，请对照原页核对后再确认。
+        </p>
+      )}
+      {!sourceMetrics?.math_symbol_conflict_count &&
+        !!sourceMetrics?.source_conflict_count && (
+          <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-900">
+            这一页有文字识别不一致，请对照原页核对后再确认。
+          </p>
+        )}
+      {!!sourceMetrics?.missing_region_count && (
+        <p className="rounded-xl bg-blue-50 p-3 text-sm text-blue-900">
+          这一页有补充识别的文字区域，请重点核对补充内容。
+        </p>
       )}
       {!!pages.length && (
         <div className="grid gap-4 lg:grid-cols-[10rem_1fr_20rem]">
@@ -663,7 +683,7 @@ export function RecognitionWorkspace({
                   }
                 />
                 <Input
-                  label="LaTeX（公式 provider 不可用时为空）"
+                  label="LaTeX（公式识别不可用时为空）"
                   value={current.content_latex ?? ""}
                   onChange={(event) =>
                     setCandidates((old) =>

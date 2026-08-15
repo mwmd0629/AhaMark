@@ -3,6 +3,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from app.api.recognition import question_source_kind
 from app.core.config import get_settings
 from app.main import app
 from app.models import Question
@@ -16,6 +17,7 @@ from app.recognition.pipeline import (
     RecognitionError,
     derive_question_regions,
     extract_pdf_text_layer,
+    fuse_text_sources,
     parse_hierarchical_question_number,
     text_for_question_region,
 )
@@ -105,6 +107,189 @@ def test_embedded_pdf_text_layer_has_explicit_source() -> None:
     assert blocks[0].source == "pdf_text:pypdfium2"
     assert "mathematics assignment" in (blocks[0].text or "")
     assert blocks[0].confidence == 1.0
+
+
+def test_conservative_text_source_fusion_preserves_evidence_and_safe_metrics() -> None:
+    pdf = ProviderBlock(
+        "text",
+        "Synthetic mathematics question x² with enough embedded text",
+        None,
+        1.0,
+        (0.1, 0.1, 0.7, 0.1),
+        source="pdf_text:pypdfium2",
+    )
+    conflicting_ocr = ProviderBlock(
+        "text",
+        "Synthetic mathematics question x2 with enough embedded text",
+        None,
+        0.9,
+        (0.1, 0.1, 0.7, 0.1),
+        source="rapidocr:synthetic",
+    )
+    missing_ocr = ProviderBlock(
+        "text",
+        "Supplemental line",
+        None,
+        0.85,
+        (0.1, 0.4, 0.5, 0.08),
+        source="rapidocr:synthetic",
+    )
+
+    fusion = fuse_text_sources([pdf], [conflicting_ocr, missing_ocr])
+
+    assert [block.status for block in fusion.blocks] == [
+        "manual_required",
+        "source_conflict",
+        "adopted",
+    ]
+    assert fusion.metrics == {
+        "source_conflict_count": 1,
+        "math_symbol_conflict_count": 1,
+        "missing_region_count": 1,
+        "source_agreement_ratio": 0.0,
+    }
+    assert all(isinstance(value, (int, float, type(None))) for value in fusion.metrics.values())
+
+
+def test_conservative_text_source_fusion_marks_agreement_and_unreliable_layers() -> None:
+    reliable = ProviderBlock(
+        "text",
+        "A sufficiently long embedded text line for reliable evidence",
+        None,
+        1.0,
+        (0.1, 0.1, 0.7, 0.1),
+        source="pdf_text:pypdfium2",
+    )
+    agreement = ProviderBlock(
+        "text",
+        "A sufficiently long embedded text line for reliable evidence",
+        None,
+        0.9,
+        (0.1, 0.1, 0.7, 0.1),
+        source="rapidocr:synthetic",
+    )
+    agreed = fuse_text_sources([reliable], [agreement])
+    assert [block.status for block in agreed.blocks] == ["adopted", "source_agreement"]
+    assert agreed.source_agreement_ratio == 1.0
+
+    short = ProviderBlock(
+        "text",
+        "short",
+        None,
+        1.0,
+        (0.1, 0.1, 0.2, 0.1),
+        source="pdf_text:pypdfium2",
+    )
+    replacement = ProviderBlock(
+        "text",
+        "OCR replacement",
+        None,
+        0.8,
+        (0.1, 0.1, 0.2, 0.1),
+        source="rapidocr:synthetic",
+    )
+    replaced = fuse_text_sources([short], [replacement])
+    assert [block.status for block in replaced.blocks] == ["unreliable_source", "adopted"]
+    assert replaced.source_agreement_ratio is None
+    assert question_source_kind("mixed:conservative_fusion") == "mixed"
+
+
+def test_non_pdf_ocr_regions_do_not_suppress_each_other_and_are_order_independent() -> None:
+    pdf = ProviderBlock(
+        "text",
+        "A sufficiently long embedded heading used as reliable PDF evidence",
+        None,
+        1.0,
+        (0.05, 0.05, 0.8, 0.08),
+        source="pdf_text:pypdfium2",
+    )
+    first = ProviderBlock(
+        "text",
+        "first missing line",
+        None,
+        0.9,
+        (0.1, 0.5, 0.6, 0.08),
+        source="rapidocr:synthetic",
+    )
+    second = ProviderBlock(
+        "text",
+        "second overlapping missing line",
+        None,
+        0.85,
+        (0.12, 0.51, 0.6, 0.08),
+        source="rapidocr:synthetic",
+    )
+
+    forward = fuse_text_sources([pdf], [first, second])
+    reverse = fuse_text_sources([pdf], [second, first])
+
+    assert forward.missing_region_count == reverse.missing_region_count == 2
+    assert sorted((block.text, block.status) for block in forward.blocks[1:]) == sorted(
+        (block.text, block.status) for block in reverse.blocks[1:]
+    )
+    assert all(block.status == "adopted" for block in forward.blocks[1:])
+
+
+def test_math_whitespace_topology_is_not_normalized_into_false_agreement() -> None:
+    pdf = ProviderBlock(
+        "text",
+        "Synthetic matrix row: 1 2 with enough reliable embedded text",
+        None,
+        1.0,
+        (0.1, 0.1, 0.7, 0.1),
+        source="pdf_text:pypdfium2",
+    )
+    ocr = ProviderBlock(
+        "text",
+        "Synthetic matrix row: 12 with enough reliable embedded text",
+        None,
+        0.9,
+        (0.1, 0.1, 0.7, 0.1),
+        source="rapidocr:synthetic",
+    )
+
+    fusion = fuse_text_sources([pdf], [ocr])
+
+    assert [block.status for block in fusion.blocks] == ["manual_required", "source_conflict"]
+    assert fusion.math_symbol_conflict_count == 1
+
+
+def test_multiple_math_conflicts_for_one_pdf_block_are_idempotent_and_order_independent() -> None:
+    pdf = ProviderBlock(
+        "text",
+        "Synthetic formula x² + α with enough reliable embedded text",
+        None,
+        1.0,
+        (0.1, 0.1, 0.7, 0.1),
+        source="pdf_text:pypdfium2",
+    )
+    first = ProviderBlock(
+        "text",
+        "Synthetic formula x2 + α with enough reliable embedded text",
+        None,
+        0.9,
+        (0.1, 0.1, 0.35, 0.1),
+        source="rapidocr:synthetic",
+    )
+    second = ProviderBlock(
+        "text",
+        "formula x² + a with enough reliable embedded text",
+        None,
+        0.85,
+        (0.4, 0.1, 0.4, 0.1),
+        source="rapidocr:synthetic",
+    )
+
+    forward = fuse_text_sources([pdf], [first, second])
+    reverse = fuse_text_sources([pdf], [second, first])
+
+    assert forward.math_symbol_conflict_count == reverse.math_symbol_conflict_count == 2
+    assert forward.source_conflict_count == reverse.source_conflict_count == 2
+    assert forward.blocks[0].status == reverse.blocks[0].status == "manual_required"
+    assert sorted((block.text, block.status) for block in forward.blocks[1:]) == sorted(
+        (block.text, block.status) for block in reverse.blocks[1:]
+    )
+    assert all(block.status == "source_conflict" for block in forward.blocks[1:])
 
 
 def test_embedded_pdf_text_is_split_into_coordinate_line_blocks_and_anchors() -> None:

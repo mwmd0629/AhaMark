@@ -197,7 +197,9 @@ def build_local_candidates(
     trusted_candidates = [
         item
         for item in candidates
-        if item.source.startswith("pdf_text:") or item.source.startswith("rapidocr:")
+        if item.source.startswith("pdf_text:")
+        or item.source.startswith("rapidocr:")
+        or item.source.startswith("mixed:")
     ]
     if not trusted_candidates:
         return {"created": 0, "blocked": "TRUSTED_TEXT_SOURCE_UNAVAILABLE"}
@@ -256,6 +258,7 @@ def build_local_candidates(
         if not source_regions:
             continue
         block_ids: list[str] = []
+        conflict_block_ids: list[str] = []
         blocks_by_region: dict[uuid.UUID, list[str]] = {}
         for region in source_regions:
             region_blocks = [
@@ -264,13 +267,32 @@ def build_local_candidates(
                     select(RecognitionBlock.id).where(
                         RecognitionBlock.recognition_job_id == source_recognition_id,
                         RecognitionBlock.paper_page_id == region.paper_page_id,
-                        RecognitionBlock.x >= region.x,
-                        RecognitionBlock.y >= region.y,
-                        RecognitionBlock.x + RecognitionBlock.width <= region.x + region.width,
-                        RecognitionBlock.y + RecognitionBlock.height <= region.y + region.height,
+                        RecognitionBlock.x + RecognitionBlock.width / 2 >= region.x,
+                        RecognitionBlock.y + RecognitionBlock.height / 2 >= region.y,
+                        RecognitionBlock.x + RecognitionBlock.width / 2 <= region.x + region.width,
+                        RecognitionBlock.y + RecognitionBlock.height / 2
+                        <= region.y + region.height,
+                        RecognitionBlock.status.in_(
+                            ["adopted", "manual_required", "recognized", "low_confidence"]
+                        ),
                     )
                 ).all()
             ]
+            conflict_block_ids.extend(
+                str(x)
+                for x in db.scalars(
+                    select(RecognitionBlock.id).where(
+                        RecognitionBlock.recognition_job_id == source_recognition_id,
+                        RecognitionBlock.paper_page_id == region.paper_page_id,
+                        RecognitionBlock.x + RecognitionBlock.width / 2 >= region.x,
+                        RecognitionBlock.y + RecognitionBlock.height / 2 >= region.y,
+                        RecognitionBlock.x + RecognitionBlock.width / 2 <= region.x + region.width,
+                        RecognitionBlock.y + RecognitionBlock.height / 2
+                        <= region.y + region.height,
+                        RecognitionBlock.status == "source_conflict",
+                    )
+                ).all()
+            )
             blocks_by_region[region.id] = region_blocks
             block_ids.extend(region_blocks)
         warnings = []
@@ -294,6 +316,15 @@ def build_local_candidates(
             for value in block_ids
             if (block := db.get(RecognitionBlock, uuid.UUID(value))) is not None
         ]
+        if conflict_block_ids:
+            warnings.append("SOURCE_TEXT_CONFLICT_REVIEW_REQUIRED")
+            manual = True
+        if source.source.startswith("mixed:"):
+            warnings.append("MIXED_TEXT_SOURCE_REVIEW_REQUIRED")
+            manual = True
+        if any(block.status == "manual_required" for block in referenced_blocks):
+            warnings.append("MATH_SYMBOL_SOURCE_CONFLICT")
+            manual = True
         quality_stats = text_quality_statistics(
             [source.content_text, source.content_latex],
             sources=[source.source],
@@ -357,12 +388,17 @@ def build_local_candidates(
             extraction_method=(
                 "pdf_text_anchor"
                 if source.source.startswith("pdf_text:")
-                else "printed_text_ocr_anchor"
+                else (
+                    "mixed_text_anchor"
+                    if source.source.startswith("mixed:")
+                    else "printed_text_ocr_anchor"
+                )
             ),
             evidence={
                 "untrusted_document_content": True,
                 "source_candidate_id": str(source.id),
                 "recognition_block_ids": block_ids,
+                "source_conflict_block_ids": conflict_block_ids,
                 "quality_stats": quality_stats,
             },
             warning_codes=warnings,

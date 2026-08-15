@@ -3,8 +3,10 @@ from types import SimpleNamespace
 from app.assignment_generation.file_analysis import _content_evidence, _file_content_evidence
 
 
-def block(source: str, text: str, confidence: float = 0.9) -> SimpleNamespace:
-    return SimpleNamespace(source=source, text=text, confidence=confidence)
+def block(
+    source: str, text: str, confidence: float = 0.9, status: str = "recognized"
+) -> SimpleNamespace:
+    return SimpleNamespace(source=source, text=text, confidence=confidence, status=status)
 
 
 def job(provider: str) -> SimpleNamespace:
@@ -19,6 +21,10 @@ def test_page_content_sources_are_conservative() -> None:
 
     ocr = _content_evidence([block("rapidocr:3.9.2", "printed text", 0.82)], job("rapidocr"))
     assert ocr == ("scanned", "ocr", 0.82, 11)
+    legacy_low_confidence = _content_evidence(
+        [block("rapidocr:3.9.2", "legacy text", 0.65, "low_confidence")], job("rapidocr")
+    )
+    assert legacy_low_confidence == ("scanned", "ocr", 0.65, 10)
 
     mixed = _content_evidence(
         [

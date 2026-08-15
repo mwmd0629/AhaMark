@@ -164,12 +164,18 @@ def text_quality_statistics(
             or (character == "?" and any("QUESTION_MARK" in reason for reason in reasons))
             for character in text
         )
-    if any(
+    has_ocr = any(
         source.startswith("rapidocr:") or source == "printed_text_ocr_anchor"
         for source in source_values
-    ):
+    )
+    has_pdf_text = any(
+        source.startswith("pdf_text:") or source == "pdf_text_anchor" for source in source_values
+    )
+    if has_ocr and has_pdf_text:
+        text_source = "mixed"
+    elif has_ocr:
         text_source = "rapidocr"
-    elif source_values and all(
+    elif has_pdf_text and all(
         source.startswith("pdf_text:") or source == "pdf_text_anchor" for source in source_values
     ):
         text_source = "pdf_text"

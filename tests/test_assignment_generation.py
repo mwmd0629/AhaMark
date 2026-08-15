@@ -32,6 +32,8 @@ from app.models import (
     PaperPage,
     PaperVersion,
     Question,
+    QuestionCandidate,
+    QuestionCandidateRegion,
     RecognitionBlock,
     RecognitionJob,
     RecognitionStatus,
@@ -158,6 +160,167 @@ def test_question_extraction_requires_teacher_confirmed_question_role() -> None:
             "created": 0,
             "blocked": "QUESTION_PAPER_ROLE_UNCONFIRMED",
         }
+
+
+def test_local_extraction_accepts_legacy_blocks_and_requires_review_for_source_conflict() -> None:
+    actor, assignment = actor_and_assignment()
+    with SessionLocal() as db:
+        stored = StoredFile(
+            owner_id=actor.id,
+            storage_key=f"tests/{uuid.uuid4()}.pdf",
+            original_name="synthetic-mixed-source.pdf",
+            content_type="application/pdf",
+            size=10,
+            checksum="b" * 64,
+            status="ready",
+        )
+        paper = PaperVersion(
+            assignment_id=assignment.id,
+            version=1,
+            status="draft",
+            source_type="manual",
+            created_by=actor.id,
+        )
+        db.add_all([stored, paper])
+        db.flush()
+        page = PaperPage(
+            paper_version_id=paper.id,
+            stored_file_id=stored.id,
+            page_number=1,
+            source_page_number=1,
+            status="ready",
+        )
+        db.add(page)
+        assignment_row = db.get(Assignment, assignment.id)
+        assert assignment_row is not None
+        assignment_row.active_paper_version_id = paper.id
+        job, revision, _ = create_job(
+            db,
+            actor.id,
+            assignment.id,
+            f"legacy-mixed-{uuid.uuid4()}",
+            "unavailable",
+            None,
+        )
+        db.add(
+            AssignmentSourceFileAnalysis(
+                owner_id=actor.id,
+                assignment_id=assignment.id,
+                generation_job_id=job.id,
+                draft_revision_id=revision.id,
+                stored_file_id=stored.id,
+                detected_mime_type="application/pdf",
+                checksum=stored.checksum,
+                page_count=1,
+                content_mode="mixed",
+                text_source="mixed",
+                content_mode_confidence=0.8,
+                suggested_role="question_paper",
+                role_confidence=1,
+                suggested_answer_source="not_applicable",
+                answer_source_confidence=1,
+                analysis_status="confirmed",
+                teacher_confirmed_role="question_paper",
+                source_snapshot_hash=job.source_snapshot_hash,
+            )
+        )
+        recognition = RecognitionJob(
+            owner_id=actor.id,
+            paper_version_id=paper.id,
+            assignment_id=assignment.id,
+            status=RecognitionStatus.completed,
+            stage="completed",
+            progress=100,
+            provider="rapidocr",
+            provider_version="synthetic",
+            config_version="test",
+            idempotency_key=f"legacy-recognition-{uuid.uuid4()}",
+        )
+        db.add(recognition)
+        db.flush()
+        candidate = QuestionCandidate(
+            recognition_job_id=recognition.id,
+            paper_version_id=paper.id,
+            temporary_number="1",
+            content_text="1. Synthetic mixed source question",
+            confidence=0.9,
+            source="mixed:conservative_fusion",
+        )
+        db.add(candidate)
+        db.flush()
+        db.add(
+            QuestionCandidateRegion(
+                question_candidate_id=candidate.id,
+                paper_page_id=page.id,
+                x=0,
+                y=0,
+                width=1,
+                height=0.5,
+                confidence=0.9,
+            )
+        )
+        db.add_all(
+            [
+                RecognitionBlock(
+                    recognition_job_id=recognition.id,
+                    paper_page_id=page.id,
+                    block_type="question_number",
+                    display_order=1,
+                    text="1.",
+                    confidence=1,
+                    x=0.1,
+                    y=0.1,
+                    width=0.1,
+                    height=0.05,
+                    source="pdf_text:pypdfium2",
+                    status="recognized",
+                ),
+                RecognitionBlock(
+                    recognition_job_id=recognition.id,
+                    paper_page_id=page.id,
+                    block_type="text",
+                    display_order=2,
+                    text="legacy adopted text",
+                    confidence=0.65,
+                    x=0.1,
+                    y=0.45,
+                    width=0.5,
+                    height=0.1,
+                    source="rapidocr:synthetic",
+                    status="low_confidence",
+                ),
+                RecognitionBlock(
+                    recognition_job_id=recognition.id,
+                    paper_page_id=page.id,
+                    block_type="text",
+                    display_order=3,
+                    text="conflicting evidence",
+                    confidence=0.8,
+                    x=0.1,
+                    y=0.2,
+                    width=0.5,
+                    height=0.05,
+                    source="rapidocr:synthetic",
+                    status="source_conflict",
+                ),
+            ]
+        )
+        db.flush()
+
+        result = build_fake_candidates(db, job, revision)
+        assert result["created"] == 1
+        extracted = db.scalar(
+            select(AssignmentQuestionExtractionCandidate).where(
+                AssignmentQuestionExtractionCandidate.source_question_candidate_id == candidate.id
+            )
+        )
+        assert extracted is not None
+        assert extracted.extraction_method == "mixed_text_anchor"
+        assert extracted.manual_required is True
+        assert "SOURCE_TEXT_CONFLICT_REVIEW_REQUIRED" in extracted.warning_codes
+        assert "MIXED_TEXT_SOURCE_REVIEW_REQUIRED" in extracted.warning_codes
+        assert len(extracted.evidence["recognition_block_ids"]) == 2
+        assert len(extracted.evidence["source_conflict_block_ids"]) == 1
 
 
 def start(aid: uuid.UUID, key: str = "generation-key-0001"):

@@ -213,3 +213,56 @@ it("requires explicit formula drawing, shows the top result and confirms teacher
     ),
   );
 });
+
+it("shows concise actions for source conflicts and supplemented regions", async () => {
+  api.pages.mockResolvedValue([
+    {
+      ...page,
+      processing_parameters: {
+        source_conflict_count: 2,
+        math_symbol_conflict_count: 1,
+        missing_region_count: 1,
+        source_agreement_ratio: 0.5,
+      },
+    },
+  ]);
+  render(
+    <RecognitionWorkspace
+      assignmentId="assignment-1"
+      paperVersionId="paper-1"
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "开始识别" }));
+  expect(
+    await screen.findByText(/数学符号在不同文字来源中不一致/),
+  ).toBeInTheDocument();
+  expect(screen.getByText(/补充识别的文字区域/)).toBeInTheDocument();
+  expect(screen.queryByText(/source_conflict_count/)).not.toBeInTheDocument();
+});
+
+it("replaces internal recognition errors with an actionable message", async () => {
+  api.start.mockResolvedValue({
+    id: "job-1",
+    paper_version_id: "paper-1",
+    status: "failed",
+    stage: "failed",
+    progress: 100,
+    provider: "rapidocr",
+    error_code: "RECOGNITION_PROVIDER_UNAVAILABLE",
+    error_message: "RapidOCR internal dependency detail",
+    page_summary: { total: 1, completed: 0, failed: 1, stale: 0 },
+  });
+  render(
+    <RecognitionWorkspace
+      assignmentId="assignment-1"
+      paperVersionId="paper-1"
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "开始识别" }));
+  expect(
+    await screen.findByText("当前页面没有可靠文字，请重新扫描或人工录入。"),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByText(/RapidOCR internal dependency detail/),
+  ).not.toBeInTheDocument();
+});

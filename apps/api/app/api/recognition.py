@@ -38,13 +38,18 @@ from app.recognition.pipeline import (
     derivative_key,
     derive_question_regions,
     extract_pdf_text_layer,
+    fuse_text_sources,
     parse_hierarchical_question_number,
     provider_from_settings,
     read_all,
     store_artifact,
     text_for_question_region,
 )
-from app.recognition.text_integrity import text_quality_statistics
+from app.recognition.text_integrity import (
+    CharacterEncodingCorruptionError,
+    ensure_text_fields_integrity,
+    text_quality_statistics,
+)
 from app.storage.base import ObjectStorage
 from app.storage.dependencies import get_storage
 from fastapi import APIRouter, Depends, Query
@@ -53,6 +58,16 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/api/assignments/{assignment_id}/recognition", tags=["recognition"])
+
+
+def question_source_kind(source: str) -> str:
+    if source.startswith("pdf_text:"):
+        return "pdf_text"
+    if source.startswith("mixed:"):
+        return "mixed"
+    return "ocr"
+
+
 Db = Annotated[Session, Depends(get_db)]
 Storage = Annotated[ObjectStorage, Depends(get_storage)]
 
@@ -284,24 +299,41 @@ def run_recognition_job(
                 len("".join((block.text or "").split())) for block in text_layer_blocks
             )
             text_layer_sufficient = text_character_count >= 20
-            if text_layer_sufficient:
-                blocks = text_layer_blocks
-            elif available:
-                blocks = [*text_layer_blocks, *provider.recognize(processed)]
-            elif text_layer_blocks:
-                blocks = text_layer_blocks
-            else:
-                raise RecognitionError(
-                    "RECOGNITION_PROVIDER_UNAVAILABLE", reason or "文字 OCR 不可用"
+            provider_blocks = (
+                provider.recognize(processed)
+                if available and (not text_layer_sufficient or provider.name == "rapidocr")
+                else []
+            )
+            fusion = fuse_text_sources(text_layer_blocks, provider_blocks)
+            blocks = fusion.blocks
+            adopted_blocks = fusion.adopted_blocks
+            if not adopted_blocks:
+                unavailable_code = (
+                    "RECOGNITION_PROVIDER_UNAVAILABLE"
+                    if not available and not text_layer_blocks
+                    else "TRUSTED_TEXT_SOURCE_UNAVAILABLE"
                 )
+                raise RecognitionError(unavailable_code, reason or "没有可可靠采用的文字来源")
+            try:
+                ensure_text_fields_integrity(
+                    [
+                        (f"recognition_blocks[{order}]", block.text)
+                        for order, block in enumerate(adopted_blocks)
+                    ]
+                )
+            except CharacterEncodingCorruptionError as exc:
+                raise RecognitionError(exc.code, "识别文字存在损坏，请重新识别或人工核对") from exc
             sources = sorted(
                 {block.source or f"{provider.name}:{provider.version}" for block in blocks}
             )
             quality_stats = text_quality_statistics(
-                [block.text for block in blocks],
-                sources=[block.source or f"{provider.name}:{provider.version}" for block in blocks],
-                confidences=[block.confidence for block in blocks],
-                block_types=[block.block_type for block in blocks],
+                [block.text for block in adopted_blocks],
+                sources=[
+                    block.source or f"{provider.name}:{provider.version}"
+                    for block in adopted_blocks
+                ],
+                confidences=[block.confidence for block in adopted_blocks],
+                block_types=[block.block_type for block in adopted_blocks],
             )
             result.processing_parameters = {
                 **params,
@@ -310,6 +342,7 @@ def run_recognition_job(
                 "recognition_sources": sources,
                 "text_layer_error": text_layer_error,
                 "text_quality": quality_stats,
+                **fusion.metrics,
             }
             for order, recognized_block in enumerate(blocks, 1):
                 x, y, width, height = recognized_block.region
@@ -356,6 +389,7 @@ def run_recognition_job(
             .where(
                 RecognitionBlock.recognition_job_id == job.id,
                 RecognitionBlock.block_type == "question_number",
+                RecognitionBlock.status.in_(["adopted", "manual_required"]),
             )
             .order_by(PaperPage.page_number, RecognitionBlock.y, RecognitionBlock.display_order)
         ).all()
@@ -382,7 +416,33 @@ def run_recognition_job(
         for item in db.scalars(
             select(RecognitionBlock)
             .join(PaperPage, PaperPage.id == RecognitionBlock.paper_page_id)
-            .where(RecognitionBlock.recognition_job_id == job.id)
+            .where(
+                RecognitionBlock.recognition_job_id == job.id,
+                RecognitionBlock.status.in_(["adopted", "manual_required"]),
+            )
+            .order_by(PaperPage.page_number, RecognitionBlock.y, RecognitionBlock.display_order)
+        ).all()
+    ]
+    source_evidence_blocks = [
+        (
+            item.paper_page_id,
+            ProviderBlock(
+                item.block_type,
+                item.text,
+                item.latex,
+                float(item.confidence) if item.confidence is not None else None,
+                (float(item.x), float(item.y), float(item.width), float(item.height)),
+                status=item.status,
+                source=item.source,
+            ),
+        )
+        for item in db.scalars(
+            select(RecognitionBlock)
+            .join(PaperPage, PaperPage.id == RecognitionBlock.paper_page_id)
+            .where(
+                RecognitionBlock.recognition_job_id == job.id,
+                RecognitionBlock.status.in_(["adopted", "manual_required", "source_conflict"]),
+            )
             .order_by(PaperPage.page_number, RecognitionBlock.y, RecognitionBlock.display_order)
         ).all()
     ]
@@ -397,6 +457,22 @@ def run_recognition_job(
             detected_number if occurrence == 1 else f"{detected_number} [重复 {occurrence}]"
         )
         candidate_regions = derived_regions.get(block.id, [])
+        region_sources = {
+            item.source
+            for paper_page_id, item in source_evidence_blocks
+            for region in candidate_regions
+            if item.source
+            and paper_page_id == region.paper_page_id
+            and region.x <= item.region[0] + item.region[2] / 2 <= region.x + region.width
+            and region.y <= item.region[1] + item.region[3] / 2 <= region.y + region.height
+        }
+        has_pdf_text = any(source.startswith("pdf_text:") for source in region_sources)
+        has_ocr = any(source.startswith("rapidocr:") for source in region_sources)
+        candidate_source = (
+            "mixed:conservative_fusion"
+            if has_pdf_text and has_ocr
+            else (sorted(region_sources)[0] if region_sources else block.source)
+        )
         candidate = QuestionCandidate(
             recognition_job_id=job.id,
             paper_version_id=job.paper_version_id,
@@ -404,7 +480,7 @@ def run_recognition_job(
             question_type="other",
             content_text=text_for_question_region(content_blocks, candidate_regions) or block.text,
             confidence=block.confidence,
-            source=block.source,
+            source=candidate_source,
         )
         db.add(candidate)
         db.flush()
@@ -721,7 +797,7 @@ def confirm(
             continue
         if candidate.status == CandidateStatus.rejected:
             continue
-        source_kind = "pdf_text" if candidate.source.startswith("pdf_text:") else "ocr"
+        source_kind = question_source_kind(candidate.source)
         question = Question(
             paper_version_id=job.paper_version_id,
             question_number=candidate.temporary_number,
