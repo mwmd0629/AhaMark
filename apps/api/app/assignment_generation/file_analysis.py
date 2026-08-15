@@ -11,7 +11,14 @@ from app.assignment_generation.schemas import (
     FileAnalysisOutput,
     PageAnalysisCandidate,
 )
-from app.models import PageProcessingResult, PaperPage, RecognitionBlock, RecognitionJob, StoredFile
+from app.models import (
+    PageProcessingResult,
+    PaperPage,
+    RecognitionBlock,
+    RecognitionJob,
+    RecognitionStatus,
+    StoredFile,
+)
 
 _INJECTION = re.compile(
     r"(?:ignore\s+(?:all\s+)?previous|忽略(?:之前|以上|系统)|自动发布|选择.{0,12}班级|调用.{0,8}工具|system\s*prompt)",
@@ -109,7 +116,10 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
     for page in pages:
         job = db.scalar(
             select(RecognitionJob)
-            .where(RecognitionJob.paper_version_id == page.paper_version_id)
+            .where(
+                RecognitionJob.paper_version_id == page.paper_version_id,
+                RecognitionJob.status == RecognitionStatus.completed,
+            )
             .order_by(RecognitionJob.created_at.desc())
             .limit(1)
         )

@@ -29,6 +29,25 @@ from app.models import (
 from app.recognition.text_integrity import text_quality_statistics
 
 
+def _completed_recognitions_by_version(
+    db: Session, version_ids: set[uuid.UUID]
+) -> dict[uuid.UUID, RecognitionJob]:
+    rows = list(
+        db.scalars(
+            select(RecognitionJob)
+            .where(
+                RecognitionJob.paper_version_id.in_(version_ids),
+                RecognitionJob.status == RecognitionStatus.completed,
+            )
+            .order_by(RecognitionJob.created_at.desc())
+        ).all()
+    )
+    selected: dict[uuid.UUID, RecognitionJob] = {}
+    for row in rows:
+        selected.setdefault(row.paper_version_id, row)
+    return selected
+
+
 def build_page_suggestions(
     db: Session, job: AssignmentGenerationJob, revision: AssignmentDraftRevision
 ) -> int:
@@ -55,6 +74,7 @@ def build_page_suggestions(
         if file_ids
         else []
     )
+    recognitions = _completed_recognitions_by_version(db, {page.paper_version_id for page in pages})
     created = 0
     for page in pages:
         old = db.scalar(
@@ -75,13 +95,17 @@ def build_page_suggestions(
                 AssignmentPageAnalysis.paper_page_id == page.id,
             )
         )
-        processing = db.scalar(
-            select(PageProcessingResult)
-            .where(
-                PageProcessingResult.paper_page_id == page.id,
-                PageProcessingResult.status.in_(["completed", "ready"]),
+        recognition = recognitions.get(page.paper_version_id)
+        processing = (
+            db.scalar(
+                select(PageProcessingResult).where(
+                    PageProcessingResult.recognition_job_id == recognition.id,
+                    PageProcessingResult.paper_page_id == page.id,
+                    PageProcessingResult.status.in_(["completed", "ready"]),
+                )
             )
-            .order_by(PageProcessingResult.created_at.desc())
+            if recognition is not None
+            else None
         )
         reasons = []
         suggested_status = page.status
@@ -154,35 +178,28 @@ def build_local_candidates(
     )
     if not pages:
         return {"created": 0, "blocked": "PAGE_PROCESSING_INCOMPLETE"}
-    processed_page_ids = set(
+    version_ids = {x.paper_version_id for x in pages}
+    recognitions = _completed_recognitions_by_version(db, version_ids)
+    if set(recognitions) != version_ids:
+        return {"created": 0, "blocked": "OCR_UNAVAILABLE"}
+    recognition_ids = {item.id for item in recognitions.values()}
+    page_versions = {page.id: page.paper_version_id for page in pages}
+    processed_rows = list(
         db.scalars(
-            select(PageProcessingResult.paper_page_id).where(
-                PageProcessingResult.paper_page_id.in_({page.id for page in pages}),
+            select(PageProcessingResult).where(
+                PageProcessingResult.recognition_job_id.in_(recognition_ids),
+                PageProcessingResult.paper_page_id.in_(page_versions),
                 PageProcessingResult.status.in_(["completed", "ready"]),
             )
         ).all()
     )
+    processed_page_ids = {
+        row.paper_page_id
+        for row in processed_rows
+        if row.recognition_job_id == recognitions[page_versions[row.paper_page_id]].id
+    }
     if {page.id for page in pages if page.status != "ready" and page.id not in processed_page_ids}:
         return {"created": 0, "blocked": "PAGE_PROCESSING_INCOMPLETE"}
-    version_ids = {x.paper_version_id for x in pages}
-    recognition_rows = list(
-        db.scalars(
-            select(RecognitionJob)
-            .where(
-                RecognitionJob.paper_version_id.in_(version_ids),
-                RecognitionJob.status.in_(
-                    [RecognitionStatus.completed, RecognitionStatus.partially_completed]
-                ),
-            )
-            .order_by(RecognitionJob.created_at.desc())
-        ).all()
-    )
-    recognitions: dict[uuid.UUID, RecognitionJob] = {}
-    for item in recognition_rows:
-        recognitions.setdefault(item.paper_version_id, item)
-    if set(recognitions) != version_ids:
-        return {"created": 0, "blocked": "OCR_UNAVAILABLE"}
-    recognition_ids = {item.id for item in recognitions.values()}
     page_ids = {x.id for x in pages}
     candidates = list(
         db.scalars(

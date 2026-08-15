@@ -57,6 +57,25 @@ const formula = {
     },
   ],
 };
+const candidate = {
+  id: "question-candidate-1",
+  temporary_number: "1",
+  question_type: "other",
+  content_text: "旧候选文字",
+  suggested_score: undefined,
+  confidence: "0.9",
+  status: "suggested",
+  source: "pdf_text:pypdfium2",
+  regions: [
+    {
+      paper_page_id: "page-1",
+      x: "0",
+      y: "0",
+      width: "1",
+      height: "1",
+    },
+  ],
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -265,4 +284,41 @@ it("replaces internal recognition errors with an actionable message", async () =
   expect(
     screen.queryByText(/RapidOCR internal dependency detail/),
   ).not.toBeInTheDocument();
+  expect(api.candidates).not.toHaveBeenCalled();
+  expect(api.formulaRegions).not.toHaveBeenCalled();
+  expect(screen.queryByDisplayValue("旧候选文字")).not.toBeInTheDocument();
+});
+
+it("clears actionable results immediately when a failed page is retried", async () => {
+  api.pages.mockResolvedValue([{ ...page, status: "failed" }]);
+  api.candidates.mockResolvedValue([candidate]);
+  api.formulaRegions.mockResolvedValue([formula]);
+  api.retryPage.mockResolvedValue({
+    id: "job-1",
+    paper_version_id: "paper-1",
+    status: "queued",
+    stage: "queued",
+    progress: 0,
+    provider: "fake",
+    page_summary: { total: 1, completed: 0, failed: 0, stale: 0 },
+  });
+  render(
+    <RecognitionWorkspace
+      assignmentId="assignment-1"
+      paperVersionId="paper-1"
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "开始识别" }));
+  expect(await screen.findByDisplayValue("旧候选文字")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "重试" }));
+
+  await waitFor(() =>
+    expect(screen.queryByDisplayValue("旧候选文字")).not.toBeInTheDocument(),
+  );
+  expect(screen.queryByAltText("处理后页面")).not.toBeInTheDocument();
+  expect(screen.getByTestId("recognition-job")).toHaveAttribute(
+    "data-status",
+    "queued",
+  );
 });

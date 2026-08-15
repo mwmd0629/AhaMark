@@ -13,6 +13,7 @@ from app.models import (
     PageProcessingResult,
     PaperPage,
     RecognitionJob,
+    RecognitionStatus,
     now_utc,
 )
 from app.recognition.formula import (
@@ -120,6 +121,8 @@ def _context(
         raise ApiProblem(409, "ASSIGNMENT_LOCKED", "只能处理草稿作业中的公式")
     if assignment.active_paper_version_id != job.paper_version_id:
         raise ApiProblem(409, "FORMULA_SOURCE_STALE", "公式识别任务不是当前试卷版本")
+    if job.status != RecognitionStatus.completed:
+        raise ApiProblem(409, "RECOGNITION_RESULTS_NOT_READY", "识别结果尚未完整就绪")
     return assignment, job
 
 

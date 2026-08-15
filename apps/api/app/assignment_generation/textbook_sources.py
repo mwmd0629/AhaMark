@@ -214,9 +214,7 @@ def _trusted_blocks(
         select(RecognitionJob)
         .where(
             RecognitionJob.paper_version_id == assignment.active_paper_version_id,
-            RecognitionJob.status.in_(
-                [RecognitionStatus.completed, RecognitionStatus.partially_completed]
-            ),
+            RecognitionJob.status == RecognitionStatus.completed,
         )
         .order_by(RecognitionJob.created_at.desc(), RecognitionJob.id.desc())
     )

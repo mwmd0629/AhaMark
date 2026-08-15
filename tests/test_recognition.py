@@ -3,10 +3,18 @@ import uuid
 from pathlib import Path
 
 import pytest
-from app.api.recognition import question_source_kind
+from app.api.recognition import question_source_kind, run_recognition_job
 from app.core.config import get_settings
 from app.main import app
-from app.models import Question
+from app.models import (
+    PageProcessingResult,
+    PageRecognitionStatus,
+    Question,
+    QuestionCandidate,
+    RecognitionBlock,
+    RecognitionJob,
+    RecognitionStatus,
+)
 from app.recognition.pipeline import (
     DefaultDocumentConverter,
     PageArtifact,
@@ -26,6 +34,7 @@ from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 from pypdf import PdfWriter
 from reportlab.pdfgen import canvas
+from sqlalchemy import select
 from test_assignments import FakeStorage, active_class, actor_and_db, create
 
 client = TestClient(app)
@@ -59,6 +68,21 @@ def structured_text_pdf_bytes() -> bytes:
     document.drawString(24, 185, "Synthetic mathematics assignment")
     document.drawString(24, 145, "2(3) Compute the derivative")
     document.drawString(24, 105, "12(2) Prove the limit")
+    document.save()
+    return output.getvalue()
+
+
+def two_page_pdf_bytes(*, include_text: bool = False) -> bytes:
+    output = io.BytesIO()
+    document = canvas.Canvas(output, pagesize=(320, 240))
+    for page_number in (1, 2):
+        if include_text:
+            document.drawString(
+                24,
+                160,
+                f"{page_number}. Synthetic atomic recognition page with reliable embedded text",
+            )
+        document.showPage()
     document.save()
     return output.getvalue()
 
@@ -516,8 +540,9 @@ def test_scanned_or_blank_pdf_fails_explicitly_without_ocr_provider() -> None:
             json={"paper_version_id": version_id, "idempotency_key": "scan-no-ocr"},
         ).json()
         assert job["status"] == "failed"
+        assert job["error_code"] == "RECOGNITION_PROVIDER_UNAVAILABLE"
         pages = client.get(f"/api/assignments/{aid}/recognition/jobs/{job['id']}/pages").json()
-        assert pages[0]["error_code"] == "RECOGNITION_PROVIDER_UNAVAILABLE"
+        assert pages == []
     finally:
         settings.recognition_provider = previous
         app.dependency_overrides.pop(get_storage, None)
@@ -656,6 +681,614 @@ def test_real_rapidocr_blocks_are_persisted() -> None:
         assert blocks and any("AhaMark" in (block["text"] or "") for block in blocks)
         assert all(block["source"].startswith("rapidocr:3.9.2") for block in blocks)
         assert all(block["latex"] is None for block in blocks)
+    finally:
+        settings.recognition_provider = previous
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def _upload_two_page_recognition_fixture(
+    db: object,
+    actor: object,
+    storage: FakeStorage,
+    *,
+    include_text: bool = False,
+) -> tuple[str, str, set[str]]:
+    app.dependency_overrides[get_storage] = lambda: storage
+    assignment = create(client, active_class(db, actor.id).id)  # type: ignore[attr-defined]
+    assignment_id = assignment["id"]
+    upload = client.post(
+        f"/api/assignments/{assignment_id}/files",
+        files={
+            "file": (
+                "synthetic-atomic-two-page.pdf",
+                two_page_pdf_bytes(include_text=include_text),
+                "application/pdf",
+            )
+        },
+    )
+    assert upload.status_code == 201, upload.text
+    version_id = client.get(f"/api/assignments/{assignment_id}").json()["paper_version"]["id"]
+    return assignment_id, version_id, set(storage.objects)
+
+
+def test_atomic_batch_discards_first_page_when_second_page_is_damaged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor, db = actor_and_db()
+    storage = FakeStorage()
+    settings = get_settings()
+    previous = settings.recognition_provider
+    settings.recognition_provider = "fake"
+    original_convert = DefaultDocumentConverter.convert
+
+    def fail_second_page(
+        converter: DefaultDocumentConverter,
+        content: bytes,
+        content_type: str,
+        source_page: int,
+    ) -> PageArtifact:
+        if source_page == 2:
+            raise RecognitionError("PDF_INVALID", "synthetic damaged second page")
+        return original_convert(converter, content, content_type, source_page)
+
+    monkeypatch.setattr(DefaultDocumentConverter, "convert", fail_second_page)
+    try:
+        assignment_id, version_id, original_keys = _upload_two_page_recognition_fixture(
+            db, actor, storage, include_text=True
+        )
+        job = client.post(
+            f"/api/assignments/{assignment_id}/recognition/jobs?run_now=true",
+            json={"paper_version_id": version_id, "idempotency_key": "atomic-damaged-page"},
+        ).json()
+
+        assert job["status"] == "failed"
+        assert (
+            list(
+                db.scalars(
+                    select(RecognitionBlock).where(
+                        RecognitionBlock.recognition_job_id == uuid.UUID(job["id"])
+                    )
+                ).all()
+            )
+            == []
+        )
+        assert (
+            list(
+                db.scalars(
+                    select(QuestionCandidate).where(
+                        QuestionCandidate.recognition_job_id == uuid.UUID(job["id"])
+                    )
+                ).all()
+            )
+            == []
+        )
+        page_results = list(
+            db.scalars(
+                select(PageProcessingResult).where(
+                    PageProcessingResult.recognition_job_id == uuid.UUID(job["id"])
+                )
+            ).all()
+        )
+        assert not any(row.status == PageRecognitionStatus.completed for row in page_results)
+        assert set(storage.objects) == original_keys
+    finally:
+        settings.recognition_provider = previous
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_atomic_batch_discards_first_page_when_provider_fails_on_second_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SecondPageFailureProvider:
+        name = "synthetic-atomic"
+        version = "1"
+        is_demo = True
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def available(self) -> tuple[bool, str | None]:
+            return True, None
+
+        def recognize(self, page: PageArtifact) -> list[ProviderBlock]:
+            self.calls += 1
+            if self.calls == 2:
+                raise RecognitionError("OCR_FAILED", "synthetic second-page provider failure")
+            return [
+                ProviderBlock(
+                    "question_number",
+                    "1. synthetic provider output",
+                    None,
+                    0.95,
+                    (0.08, 0.1, 0.84, 0.12),
+                )
+            ]
+
+    actor, db = actor_and_db()
+    storage = FakeStorage()
+    provider = SecondPageFailureProvider()
+    monkeypatch.setattr("app.api.recognition.provider_from_settings", lambda _settings: provider)
+    try:
+        assignment_id, version_id, original_keys = _upload_two_page_recognition_fixture(
+            db, actor, storage
+        )
+        job = client.post(
+            f"/api/assignments/{assignment_id}/recognition/jobs?run_now=true",
+            json={"paper_version_id": version_id, "idempotency_key": "atomic-provider-failure"},
+        ).json()
+
+        assert provider.calls == 2
+        assert job["status"] == "failed"
+        assert (
+            list(
+                db.scalars(
+                    select(RecognitionBlock).where(
+                        RecognitionBlock.recognition_job_id == uuid.UUID(job["id"])
+                    )
+                ).all()
+            )
+            == []
+        )
+        assert (
+            list(
+                db.scalars(
+                    select(QuestionCandidate).where(
+                        QuestionCandidate.recognition_job_id == uuid.UUID(job["id"])
+                    )
+                ).all()
+            )
+            == []
+        )
+        assert set(storage.objects) == original_keys
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_atomic_batch_final_commit_failure_restores_old_rows_and_deletes_new_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor, db = actor_and_db()
+    storage = FakeStorage()
+    settings = get_settings()
+    previous = settings.recognition_provider
+    settings.recognition_provider = "fake"
+    try:
+        assignment_id, version_id, _original_keys = _upload_two_page_recognition_fixture(
+            db, actor, storage
+        )
+        created = client.post(
+            f"/api/assignments/{assignment_id}/recognition/jobs?run_now=true",
+            json={"paper_version_id": version_id, "idempotency_key": "atomic-commit-rollback"},
+        ).json()
+        assert created["status"] == "completed"
+        job_id = uuid.UUID(created["id"])
+        old_block_ids = set(
+            db.scalars(
+                select(RecognitionBlock.id).where(RecognitionBlock.recognition_job_id == job_id)
+            ).all()
+        )
+        old_candidate_ids = set(
+            db.scalars(
+                select(QuestionCandidate.id).where(QuestionCandidate.recognition_job_id == job_id)
+            ).all()
+        )
+        old_page_keys = {
+            key
+            for row in db.scalars(
+                select(PageProcessingResult).where(
+                    PageProcessingResult.recognition_job_id == job_id
+                )
+            ).all()
+            for key in (
+                row.rendered_storage_key,
+                row.processed_storage_key,
+                row.thumbnail_storage_key,
+            )
+            if key
+        }
+        old_object_keys = set(storage.objects)
+        job_record = db.get(RecognitionJob, job_id)
+        assert job_record is not None
+        job_record.status = RecognitionStatus.queued
+        db.commit()
+
+        original_commit = db.commit
+        commit_calls = 0
+
+        def fail_publish_commit() -> None:
+            nonlocal commit_calls
+            commit_calls += 1
+            if commit_calls == 2:
+                raise RuntimeError("synthetic final recognition commit failure")
+            original_commit()
+
+        db.commit = fail_publish_commit  # type: ignore[method-assign]
+        try:
+            run_recognition_job(db, storage, job_id)
+        finally:
+            db.commit = original_commit  # type: ignore[method-assign]
+
+        assert (
+            set(
+                db.scalars(
+                    select(RecognitionBlock.id).where(RecognitionBlock.recognition_job_id == job_id)
+                ).all()
+            )
+            == old_block_ids
+        )
+        assert (
+            set(
+                db.scalars(
+                    select(QuestionCandidate.id).where(
+                        QuestionCandidate.recognition_job_id == job_id
+                    )
+                ).all()
+            )
+            == old_candidate_ids
+        )
+        current_page_keys = {
+            key
+            for row in db.scalars(
+                select(PageProcessingResult).where(
+                    PageProcessingResult.recognition_job_id == job_id
+                )
+            ).all()
+            for key in (
+                row.rendered_storage_key,
+                row.processed_storage_key,
+                row.thumbnail_storage_key,
+            )
+            if key
+        }
+        assert current_page_keys == old_page_keys
+        assert set(storage.objects) == old_object_keys
+        assert set(storage.delete_calls).isdisjoint(old_page_keys)
+        assert db.get(RecognitionJob, job_id).status == RecognitionStatus.failed
+    finally:
+        settings.recognition_provider = previous
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_two_page_success_publishes_complete_batch() -> None:
+    actor, db = actor_and_db()
+    storage = FakeStorage()
+    settings = get_settings()
+    previous = settings.recognition_provider
+    settings.recognition_provider = "fake"
+    try:
+        assignment_id, version_id, original_keys = _upload_two_page_recognition_fixture(
+            db, actor, storage
+        )
+        job = client.post(
+            f"/api/assignments/{assignment_id}/recognition/jobs?run_now=true",
+            json={"paper_version_id": version_id, "idempotency_key": "atomic-two-page-success"},
+        ).json()
+        job_id = uuid.UUID(job["id"])
+
+        assert job["status"] == "completed"
+        assert job["page_summary"] == {"total": 2, "completed": 2, "failed": 0, "stale": 0}
+        assert (
+            len(
+                db.scalars(
+                    select(PageProcessingResult).where(
+                        PageProcessingResult.recognition_job_id == job_id,
+                        PageProcessingResult.status == PageRecognitionStatus.completed,
+                    )
+                ).all()
+            )
+            == 2
+        )
+        assert (
+            len(
+                db.scalars(
+                    select(RecognitionBlock).where(RecognitionBlock.recognition_job_id == job_id)
+                ).all()
+            )
+            == 2
+        )
+        assert (
+            len(
+                db.scalars(
+                    select(QuestionCandidate).where(QuestionCandidate.recognition_job_id == job_id)
+                ).all()
+            )
+            == 2
+        )
+        assert len(set(storage.objects) - original_keys) == 6
+    finally:
+        settings.recognition_provider = previous
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_retry_page_queues_whole_batch_without_mutating_committed_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor, db = actor_and_db()
+    storage = FakeStorage()
+    settings = get_settings()
+    previous = settings.recognition_provider
+    settings.recognition_provider = "fake"
+    monkeypatch.setattr("app.api.recognition.dispatch_recognition_job", lambda _db, _job: None)
+    try:
+        assignment_id, version_id, _original_keys = _upload_two_page_recognition_fixture(
+            db, actor, storage
+        )
+        job = client.post(
+            f"/api/assignments/{assignment_id}/recognition/jobs?run_now=true",
+            json={"paper_version_id": version_id, "idempotency_key": "atomic-page-retry"},
+        ).json()
+        job_id = uuid.UUID(job["id"])
+        page_results = list(
+            db.scalars(
+                select(PageProcessingResult).where(
+                    PageProcessingResult.recognition_job_id == job_id
+                )
+            ).all()
+        )
+        old_keys = {
+            key
+            for row in page_results
+            for key in (
+                row.rendered_storage_key,
+                row.processed_storage_key,
+                row.thumbnail_storage_key,
+            )
+            if key
+        }
+
+        response = client.post(
+            f"/api/assignments/{assignment_id}/recognition/jobs/{job['id']}"
+            f"/pages/{page_results[0].paper_page_id}/retry"
+        )
+
+        assert response.status_code == 200, response.text
+        db.expire_all()
+        assert db.get(RecognitionJob, job_id).status == RecognitionStatus.queued
+        assert (
+            client.get(
+                f"/api/assignments/{assignment_id}/recognition/jobs/{job['id']}/blocks"
+            ).status_code
+            == 409
+        )
+        assert (
+            client.get(
+                f"/api/assignments/{assignment_id}/recognition/jobs/{job['id']}/candidates"
+            ).status_code
+            == 409
+        )
+        assert (
+            client.get(
+                f"/api/assignments/{assignment_id}/recognition/jobs/{job['id']}/pages"
+            ).json()
+            == []
+        )
+        current_results = list(
+            db.scalars(
+                select(PageProcessingResult).where(
+                    PageProcessingResult.recognition_job_id == job_id
+                )
+            ).all()
+        )
+        assert all(row.status == PageRecognitionStatus.completed for row in current_results)
+        assert {
+            key
+            for row in current_results
+            for key in (
+                row.rendered_storage_key,
+                row.processed_storage_key,
+                row.thumbnail_storage_key,
+            )
+            if key
+        } == old_keys
+    finally:
+        settings.recognition_provider = previous
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_stale_attempt_failure_does_not_overwrite_newer_running_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor, db = actor_and_db()
+    storage = FakeStorage()
+    settings = get_settings()
+    previous = settings.recognition_provider
+    settings.recognition_provider = "fake"
+    try:
+        assignment_id, version_id, _original_keys = _upload_two_page_recognition_fixture(
+            db, actor, storage
+        )
+        created = client.post(
+            f"/api/assignments/{assignment_id}/recognition/jobs?run_now=true",
+            json={"paper_version_id": version_id, "idempotency_key": "stale-attempt-owner"},
+        ).json()
+        job_id = uuid.UUID(created["id"])
+        job = db.get(RecognitionJob, job_id)
+        assert job is not None
+        job.status = RecognitionStatus.queued
+        job.completed_at = None
+        db.commit()
+        old_objects = set(storage.objects)
+        old_block_ids = set(
+            db.scalars(
+                select(RecognitionBlock.id).where(RecognitionBlock.recognition_job_id == job_id)
+            ).all()
+        )
+
+        def supersede_attempt(*_args: object, **_kwargs: object) -> object:
+            current = db.get(RecognitionJob, job_id)
+            assert current is not None
+            current.attempt += 1
+            current.status = RecognitionStatus.running
+            db.commit()
+            raise RecognitionError("OCR_FAILED", "synthetic stale attempt failure")
+
+        monkeypatch.setattr("app.api.recognition._preflight_recognition_page", supersede_attempt)
+        run_recognition_job(db, storage, job_id)
+
+        db.expire_all()
+        current = db.get(RecognitionJob, job_id)
+        assert current is not None
+        assert current.status == RecognitionStatus.running
+        assert current.attempt == created["attempt"] + 2
+        assert current.error_code is None
+        assert set(storage.objects) == old_objects
+        assert (
+            set(
+                db.scalars(
+                    select(RecognitionBlock.id).where(RecognitionBlock.recognition_job_id == job_id)
+                ).all()
+            )
+            == old_block_ids
+        )
+    finally:
+        settings.recognition_provider = previous
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_retry_rejects_teacher_edited_results_without_hiding_completed_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor, db = actor_and_db()
+    storage = FakeStorage()
+    settings = get_settings()
+    previous = settings.recognition_provider
+    settings.recognition_provider = "fake"
+    monkeypatch.setattr("app.api.recognition.dispatch_recognition_job", lambda _db, _job: None)
+    try:
+        assignment_id, version_id, _original_keys = _upload_two_page_recognition_fixture(
+            db, actor, storage
+        )
+        created = client.post(
+            f"/api/assignments/{assignment_id}/recognition/jobs?run_now=true",
+            json={"paper_version_id": version_id, "idempotency_key": "protected-retry"},
+        ).json()
+        candidates_url = (
+            f"/api/assignments/{assignment_id}/recognition/jobs/{created['id']}/candidates"
+        )
+        candidates = client.get(candidates_url).json()
+        edited = client.patch(
+            f"{candidates_url}/{candidates[0]['id']}", json={"content_text": "教师保留内容"}
+        )
+        assert edited.status_code == 200
+        pages = client.get(
+            f"/api/assignments/{assignment_id}/recognition/jobs/{created['id']}/pages"
+        ).json()
+
+        retry = client.post(
+            f"/api/assignments/{assignment_id}/recognition/jobs/{created['id']}/retry"
+        )
+        page_retry = client.post(
+            f"/api/assignments/{assignment_id}/recognition/jobs/{created['id']}"
+            f"/pages/{pages[0]['paper_page_id']}/retry"
+        )
+
+        assert retry.status_code == 409
+        assert retry.json()["code"] == "RECOGNITION_RETRY_REQUIRES_NEW_JOB"
+        assert page_retry.status_code == 409
+        assert page_retry.json()["code"] == "RECOGNITION_RETRY_REQUIRES_NEW_JOB"
+        db.expire_all()
+        assert (
+            db.get(RecognitionJob, uuid.UUID(created["id"])).status == RecognitionStatus.completed
+        )
+        assert client.get(candidates_url).status_code == 200
+        assert (
+            client.get(
+                f"/api/assignments/{assignment_id}/recognition/jobs/{created['id']}/blocks"
+            ).status_code
+            == 200
+        )
+    finally:
+        settings.recognition_provider = previous
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_worker_storage_failure_marks_claimed_queued_job_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from workers.tasks.ocr import run_recognition
+
+    actor, db = actor_and_db()
+    storage = FakeStorage()
+    settings = get_settings()
+    previous = settings.recognition_provider
+    settings.recognition_provider = "fake"
+    try:
+        assignment_id, version_id, _original_keys = _upload_two_page_recognition_fixture(
+            db, actor, storage
+        )
+        created = client.post(
+            f"/api/assignments/{assignment_id}/recognition/jobs?run_now=true",
+            json={"paper_version_id": version_id, "idempotency_key": "worker-storage-failure"},
+        ).json()
+        job_id = uuid.UUID(created["id"])
+        job = db.get(RecognitionJob, job_id)
+        assert job is not None
+        job.status = RecognitionStatus.queued
+        job.completed_at = None
+        db.commit()
+
+        def fail_storage() -> object:
+            raise RuntimeError("synthetic storage dependency failure")
+
+        monkeypatch.setattr("workers.tasks.ocr.get_storage", fail_storage)
+        with pytest.raises(RuntimeError, match="storage dependency"):
+            run_recognition.run(str(job_id))
+
+        db.expire_all()
+        current = db.get(RecognitionJob, job_id)
+        assert current is not None
+        assert current.status == RecognitionStatus.failed
+        assert current.attempt == created["attempt"] + 1
+        assert current.error_code == "RECOGNITION_FAILED"
+    finally:
+        settings.recognition_provider = previous
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_worker_storage_failure_does_not_overwrite_new_attempt_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from workers.tasks.ocr import run_recognition
+
+    actor, db = actor_and_db()
+    storage = FakeStorage()
+    settings = get_settings()
+    previous = settings.recognition_provider
+    settings.recognition_provider = "fake"
+    try:
+        assignment_id, version_id, _original_keys = _upload_two_page_recognition_fixture(
+            db, actor, storage
+        )
+        created = client.post(
+            f"/api/assignments/{assignment_id}/recognition/jobs?run_now=true",
+            json={"paper_version_id": version_id, "idempotency_key": "worker-storage-takeover"},
+        ).json()
+        job_id = uuid.UUID(created["id"])
+        job = db.get(RecognitionJob, job_id)
+        assert job is not None
+        job.status = RecognitionStatus.queued
+        job.completed_at = None
+        db.commit()
+
+        def supersede_then_fail_storage() -> object:
+            db.expire_all()
+            newer = db.get(RecognitionJob, job_id)
+            assert newer is not None
+            newer.attempt += 1
+            newer.status = RecognitionStatus.running
+            db.commit()
+            raise RuntimeError("synthetic stale worker storage failure")
+
+        monkeypatch.setattr("workers.tasks.ocr.get_storage", supersede_then_fail_storage)
+        with pytest.raises(RuntimeError, match="stale worker"):
+            run_recognition.run(str(job_id))
+
+        db.expire_all()
+        current = db.get(RecognitionJob, job_id)
+        assert current is not None
+        assert current.status == RecognitionStatus.running
+        assert current.attempt == created["attempt"] + 2
+        assert current.error_code is None
     finally:
         settings.recognition_provider = previous
         app.dependency_overrides.pop(get_storage, None)

@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { type PointerEvent, useEffect, useState } from "react";
+import { type PointerEvent, useCallback, useEffect, useState } from "react";
 import {
   ApiError,
   recognitionApi,
@@ -47,6 +47,37 @@ export function RecognitionWorkspace({
   const [unreadableReason, setUnreadableReason] =
     useState<FormulaUnreadableReason>("severe_overwriting_or_occlusion");
   const [error, setError] = useState("");
+  const clearRecognitionResults = useCallback(() => {
+    setPages([]);
+    setCandidates([]);
+    setSelected("");
+    setFormulaRegions([]);
+    setSelectedFormula("");
+    setFormulaLatex("");
+  }, []);
+  const loadFinishedJob = useCallback(
+    async (next: RecognitionJob) => {
+      setPages(await recognitionApi.pages(assignmentId, next.id));
+      if (next.status !== "completed") {
+        setCandidates([]);
+        setSelected("");
+        setFormulaRegions([]);
+        setSelectedFormula("");
+        setFormulaLatex("");
+        return;
+      }
+      const nextCandidates = await recognitionApi.candidates(
+        assignmentId,
+        next.id,
+      );
+      setCandidates(nextCandidates);
+      setSelected(nextCandidates[0]?.id ?? "");
+      setFormulaRegions(
+        await recognitionApi.formulaRegions(assignmentId, next.id),
+      );
+    },
+    [assignmentId],
+  );
   useEffect(
     () =>
       void recognitionApi
@@ -61,20 +92,11 @@ export function RecognitionWorkspace({
       const next = await recognitionApi.job(assignmentId, job.id);
       setJob(next);
       if (!["queued", "running"].includes(next.status)) {
-        setPages(await recognitionApi.pages(assignmentId, next.id));
-        const nextCandidates = await recognitionApi.candidates(
-          assignmentId,
-          next.id,
-        );
-        setCandidates(nextCandidates);
-        setSelected(nextCandidates[0]?.id ?? "");
-        setFormulaRegions(
-          await recognitionApi.formulaRegions(assignmentId, next.id),
-        );
+        await loadFinishedJob(next);
       }
     }, 2000);
     return () => window.clearInterval(timer);
-  }, [assignmentId, job]);
+  }, [assignmentId, job, loadFinishedJob]);
   const current = candidates.find((candidate) => candidate.id === selected);
   const region = current?.regions[0];
   const page =
@@ -132,22 +154,14 @@ export function RecognitionWorkspace({
           onClick={async () => {
             try {
               setError("");
+              clearRecognitionResults();
               const next = await recognitionApi.start(
                 assignmentId,
                 paperVersionId,
               );
               setJob(next);
               if (!["queued", "running"].includes(next.status)) {
-                setPages(await recognitionApi.pages(assignmentId, next.id));
-                const nextCandidates = await recognitionApi.candidates(
-                  assignmentId,
-                  next.id,
-                );
-                setCandidates(nextCandidates);
-                setSelected(nextCandidates[0]?.id ?? "");
-                setFormulaRegions(
-                  await recognitionApi.formulaRegions(assignmentId, next.id),
-                );
+                await loadFinishedJob(next);
               }
             } catch (reason) {
               setError(
@@ -230,45 +244,61 @@ export function RecognitionWorkspace({
         <div className="grid gap-4 lg:grid-cols-[10rem_1fr_20rem]">
           <nav aria-label="页面缩略图" className="space-y-2">
             {pages.map((item, index) => (
-              <button
-                key={item.id}
-                onClick={() =>
-                  setSelected(
-                    candidates.find((candidate) =>
-                      candidate.regions.some(
-                        (r) => r.paper_page_id === item.paper_page_id,
-                      ),
-                    )?.id ?? "",
-                  )
-                }
-                className="w-full rounded-xl border p-2 text-left text-xs"
-              >
-                第 {index + 1} 页 · {item.status}
-                {item.thumbnail_url && (
-                  <Image
-                    unoptimized
-                    width={160}
-                    height={220}
-                    alt={`第 ${index + 1} 页缩略图`}
-                    className="mt-2 h-auto w-full"
-                    src={item.thumbnail_url}
-                  />
-                )}
+              <div key={item.id} className="rounded-xl border p-2 text-xs">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setSelected(
+                      candidates.find((candidate) =>
+                        candidate.regions.some(
+                          (r) => r.paper_page_id === item.paper_page_id,
+                        ),
+                      )?.id ?? "",
+                    )
+                  }
+                  className="w-full text-left"
+                >
+                  第 {index + 1} 页 · {item.status}
+                  {item.thumbnail_url && (
+                    <Image
+                      unoptimized
+                      width={160}
+                      height={220}
+                      alt={`第 ${index + 1} 页缩略图`}
+                      className="mt-2 h-auto w-full"
+                      src={item.thumbnail_url}
+                    />
+                  )}
+                </button>
                 {item.status === "failed" && (
                   <Button
                     variant="outline"
-                    onClick={() =>
-                      recognitionApi.retryPage(
-                        assignmentId,
-                        job!.id,
-                        item.paper_page_id,
-                      )
-                    }
+                    onClick={async () => {
+                      setError("");
+                      clearRecognitionResults();
+                      try {
+                        const next = await recognitionApi.retryPage(
+                          assignmentId,
+                          job!.id,
+                          item.paper_page_id,
+                        );
+                        setJob(next);
+                        if (!["queued", "running"].includes(next.status)) {
+                          await loadFinishedJob(next);
+                        }
+                      } catch (reason) {
+                        setError(
+                          reason instanceof ApiError
+                            ? reason.message
+                            : "无法重新识别当前页面",
+                        );
+                      }
+                    }}
                   >
                     重试
                   </Button>
                 )}
-              </button>
+              </div>
             ))}
           </nav>
           <section>
