@@ -447,7 +447,7 @@ def test_pdf_text_anchors_create_hierarchical_question_candidates() -> None:
         ).json()
         assert [candidate["temporary_number"] for candidate in candidates] == ["2(3)", "12(2)"]
         assert candidates[0]["content_text"] == "2(3) Compute the derivative"
-        assert all(candidate["source"] == "pdf_text:pypdfium2" for candidate in candidates)
+        assert all(candidate["source"] == "pdf_text" for candidate in candidates)
         assert all(
             candidate["quality_stats"]["text_source"] == "pdf_text" for candidate in candidates
         )
@@ -465,11 +465,11 @@ def test_pdf_text_anchors_create_hierarchical_question_candidates() -> None:
         assert float(candidates[0]["regions"][0]["height"]) < 0.3
         assert float(candidates[1]["regions"][0]["height"]) > 0.4
         pages = client.get(f"/api/assignments/{aid}/recognition/jobs/{job['id']}/pages").json()
-        page_quality = pages[0]["processing_parameters"]["text_quality"]
-        assert page_quality["text_source"] == "pdf_text"
-        assert page_quality["character_count"] > 0
-        assert page_quality["low_confidence_block_count"] == 0
-        assert page_quality["suspicious_character_count"] == 0
+        assert set(pages[0]["processing_parameters"]) == {
+            "page_quality",
+            "math_structure",
+            "source_review",
+        }
         recognition_blocks = client.get(
             f"/api/assignments/{aid}/recognition/jobs/{job['id']}/blocks"
         ).json()
@@ -524,7 +524,7 @@ def test_text_pdf_completes_without_ocr_provider(provider_name: str) -> None:
         ).json()
         assert job["status"] == "completed"
         blocks = client.get(f"/api/assignments/{aid}/recognition/jobs/{job['id']}/blocks").json()
-        assert blocks and all(block["source"] == "pdf_text:pypdfium2" for block in blocks)
+        assert blocks and all(block["source"] == "pdf_text" for block in blocks)
     finally:
         settings.recognition_provider = previous
         app.dependency_overrides.pop(get_storage, None)
@@ -664,7 +664,7 @@ def test_unavailable_provider_can_still_start_current_pdf(
         assert response.status_code == 200
         assert response.json()["available"] is False
         assert response.json()["can_start"] is True
-        assert response.json()["reason"] == "文字识别器状态暂不可用"
+        assert response.json()["reason"] == "文字识别器暂不可用"
         assert "internal readiness detail" not in response.text
     finally:
         settings.recognition_provider = previous
@@ -711,7 +711,7 @@ def test_broken_provider_readiness_allows_reliable_pdf_without_leaking(
         assert capability.status_code == 200
         assert capability.json()["available"] is False
         assert capability.json()["can_start"] is True
-        assert capability.json()["reason"] == "文字识别器状态暂不可用"
+        assert capability.json()["reason"] == "文字识别器暂不可用"
         assert "private readiness detail" not in capability.text
 
         response = client.post(
@@ -723,7 +723,7 @@ def test_broken_provider_readiness_allows_reliable_pdf_without_leaking(
         blocks = client.get(
             f"/api/assignments/{assignment_id}/recognition/jobs/{response.json()['id']}/blocks"
         ).json()
-        assert blocks and all(block["source"] == "pdf_text:pypdfium2" for block in blocks)
+        assert blocks and all(block["source"] == "pdf_text" for block in blocks)
         assert "private readiness detail" not in response.text
     finally:
         app.dependency_overrides.pop(get_storage, None)
@@ -762,7 +762,7 @@ def test_broken_provider_readiness_rejects_image_only_without_leaking(
         )
         assert response.status_code == 503
         assert response.json()["code"] == "RECOGNITION_PROVIDER_UNAVAILABLE"
-        assert response.json()["message"] == "文字识别器状态暂不可用"
+        assert response.json()["message"] == "文字识别器暂不可用"
         assert "private readiness detail" not in response.text
     finally:
         app.dependency_overrides.pop(get_storage, None)
@@ -821,7 +821,7 @@ def test_real_rapidocr_blocks_are_persisted() -> None:
         assert job["status"] == "completed"
         blocks = client.get(f"/api/assignments/{aid}/recognition/jobs/{job['id']}/blocks").json()
         assert blocks and any("AhaMark" in (block["text"] or "") for block in blocks)
-        assert all(block["source"].startswith("rapidocr:3.9.2") for block in blocks)
+        assert all(block["source"] == "ocr" for block in blocks)
         assert all(block["latex"] is None for block in blocks)
     finally:
         settings.recognition_provider = previous

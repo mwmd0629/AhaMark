@@ -150,12 +150,13 @@ def test_quality_is_persisted_privately_and_review_blocks_require_manual_action(
         ).json()
         assert len(pages) == 1
         page = pages[0]
-        assert set(page["quality"]) == {"level", "issues"}
+        assert set(page["quality"]) == {"version", "level", "issues"}
+        assert page["quality"]["version"] == "pil-page-quality-v1"
         assert page["quality"]["level"] == expected_level
         assert page["quality"]["issues"]
         public_quality = page["processing_parameters"]["page_quality"]
         assert set(public_quality) == {"version", "level", "issues"}
-        assert public_quality == {"version": "pil-page-quality-v1", **page["quality"]}
+        assert public_quality == page["quality"]
         assert "metrics" not in public_quality
 
         result = db.scalar(
@@ -321,7 +322,7 @@ def test_pdf_header_does_not_exempt_severely_degraded_ocr_body(
         blocks = client.get(
             f"/api/assignments/{assignment_id}/recognition/jobs/{job['id']}/blocks"
         ).json()
-        assert any(block["source"].startswith("rapidocr:") for block in blocks)
+        assert any(block["source"] == "ocr" for block in blocks)
         assert all(
             block["status"] == "manual_required"
             for block in blocks

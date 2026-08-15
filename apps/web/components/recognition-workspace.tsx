@@ -111,7 +111,7 @@ export function RecognitionWorkspace({
   const page =
     pages.find((item) => item.paper_page_id === region?.paper_page_id) ??
     pages[0];
-  const sourceMetrics = page?.processing_parameters;
+  const sourceMetrics = page?.processing_parameters?.source_review;
   const qualityIssues = (page?.quality?.issues ?? [])
     .map((issue) => QUALITY_ISSUE_LABELS[issue])
     .filter(Boolean);
@@ -197,7 +197,12 @@ export function RecognitionWorkspace({
       </div>
       <div className="rounded-xl border p-3 text-sm">
         文字识别：
-        {provider?.available ? "可用" : "暂不可用，请稍后重试或人工录入"}
+        {provider?.text_readiness.action_code === "START_AND_REVIEW"
+          ? "可以开始，完成后请核对识别内容"
+          : provider?.text_readiness.action_code ===
+              "PDF_TEXT_MAY_REQUIRE_RESCAN_OR_MANUAL"
+            ? "可尝试读取 PDF 文字；扫描页或图片页可能需要重新扫描或人工录入"
+            : "当前图片需要文字识别，请稍后重试或人工录入"}
         <br />
         公式识别：
         {provider?.formula.available ? "可用" : "暂不可用，请人工核对公式"}

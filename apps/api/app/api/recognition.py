@@ -74,10 +74,83 @@ def question_source_kind(source: str) -> str:
     return "ocr"
 
 
+def _public_provider_name(name: str) -> str:
+    if name == "unavailable":
+        return "unavailable"
+    if name == "fake":
+        return "test_only"
+    return "local_ocr"
+
+
+def _public_error_code(code: str | None) -> str | None:
+    allowed = {
+        "ARTIFACT_STORAGE_FAILED",
+        "CHARACTER_ENCODING_CORRUPTION_DETECTED",
+        "OCR_INFERENCE_FAILED",
+        "OCR_PROVIDER_INPUT_INVALID",
+        "OCR_PROVIDER_OUTPUT_INVALID",
+        "PAGE_CONVERSION_FAILED",
+        "PAGE_RENDER_FAILED",
+        "RECOGNITION_FAILED",
+        "RECOGNITION_PERSISTENCE_FAILED",
+        "RECOGNITION_PROVIDER_UNAVAILABLE",
+        "RECOGNITION_RETRY_REQUIRES_NEW_JOB",
+        "TRUSTED_TEXT_SOURCE_UNAVAILABLE",
+        "WORKER_UNAVAILABLE",
+    }
+    if code is None:
+        return None
+    return code if code in allowed else "RECOGNITION_FAILED"
+
+
+def _public_error_message(code: str | None) -> str | None:
+    public_code = _public_error_code(code)
+    if public_code is None:
+        return None
+    if public_code == "CHARACTER_ENCODING_CORRUPTION_DETECTED":
+        return "当前结果不能安全生成题目，请重新识别或人工录入"
+    if public_code in {"RECOGNITION_PROVIDER_UNAVAILABLE", "TRUSTED_TEXT_SOURCE_UNAVAILABLE"}:
+        return "当前页面没有可靠文字，请重新扫描或人工录入"
+    if public_code == "WORKER_UNAVAILABLE":
+        return "识别任务暂时无法启动，请稍后重试"
+    return "页面识别失败，请重试或人工录入"
+
+
+def _text_readiness(available: bool, has_pdf_source: bool) -> dict[str, Any]:
+    if available:
+        return {"mode": "ready", "action_code": "START_AND_REVIEW", "limitations": []}
+    if has_pdf_source:
+        return {
+            "mode": "pdf_fallback_only",
+            "action_code": "PDF_TEXT_MAY_REQUIRE_RESCAN_OR_MANUAL",
+            "limitations": ["SCANNED_PDF_MAY_REQUIRE_OCR", "IMAGE_PAGES_REQUIRE_OCR"],
+        }
+    return {
+        "mode": "blocked",
+        "action_code": "OCR_REQUIRED",
+        "limitations": ["IMAGE_PAGES_REQUIRE_OCR"],
+    }
+
+
+def _version_has_only_pdf_pages(db: Session, paper_version_id: uuid.UUID | None) -> bool:
+    if paper_version_id is None:
+        return False
+    source_types = list(
+        db.scalars(
+            select(StoredFile.content_type)
+            .select_from(PaperPage)
+            .outerjoin(StoredFile, StoredFile.id == PaperPage.stored_file_id)
+            .where(PaperPage.paper_version_id == paper_version_id)
+        ).all()
+    )
+    return bool(source_types) and all(value == "application/pdf" for value in source_types)
+
+
 def _page_quality(parameters: dict[str, Any]) -> dict[str, Any]:
     raw = parameters.get("page_quality")
     if not isinstance(raw, dict):
-        return {"level": "review_required", "issues": []}
+        return {"version": None, "level": "review_required", "issues": []}
+    version = "pil-page-quality-v1" if raw.get("version") == "pil-page-quality-v1" else None
     level = raw.get("level")
     if level not in {"good", "review_required", "rescan_required"}:
         level = "review_required"
@@ -95,7 +168,7 @@ def _page_quality(parameters: dict[str, Any]) -> dict[str, Any]:
         if isinstance(issues, list)
         else []
     )
-    return {"level": level, "issues": public_issues}
+    return {"version": version, "level": level, "issues": public_issues}
 
 
 def _quality_score(parameters: dict[str, Any], field: str) -> Decimal:
@@ -108,15 +181,25 @@ def _quality_score(parameters: dict[str, Any], field: str) -> Decimal:
 
 
 def _public_processing_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
-    output = dict(parameters)
-    raw_quality = parameters.get("page_quality")
-    public_quality = _page_quality(parameters)
-    output["page_quality"] = {
-        "version": raw_quality.get("version") if isinstance(raw_quality, dict) else None,
-        **public_quality,
+    counts: dict[str, int | float | None] = {}
+    for key in ("source_conflict_count", "math_symbol_conflict_count", "missing_region_count"):
+        value = parameters.get(key)
+        counts[key] = (
+            value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+        )
+    ratio = parameters.get("source_agreement_ratio")
+    counts["source_agreement_ratio"] = (
+        float(ratio)
+        if isinstance(ratio, (int, float))
+        and not isinstance(ratio, bool)
+        and 0 <= float(ratio) <= 1
+        else None
+    )
+    return {
+        "page_quality": _page_quality(parameters),
+        "math_structure": _math_structure_risks(parameters),
+        "source_review": counts,
     }
-    output["math_structure"] = _math_structure_risks(parameters)
-    return output
 
 
 def _math_structure_risks(parameters: dict[str, Any]) -> dict[str, Any]:
@@ -128,6 +211,7 @@ def _math_structure_risks(parameters: dict[str, Any]) -> dict[str, Any]:
     }
     if not isinstance(raw, dict):
         return {"version": None, "risk_codes": [], "evidence": []}
+    version = "math-structure-risk-v1" if raw.get("version") == "math-structure-risk-v1" else None
     risk_codes = raw.get("risk_codes")
     evidence = raw.get("evidence")
     public_codes: list[str] = []
@@ -166,11 +250,7 @@ def _math_structure_risks(parameters: dict[str, Any]) -> dict[str, Any]:
             public_evidence.append(
                 {"block_indexes": [int(index) for index in indexes], "region": normalized_region}
             )
-    return {
-        "version": raw.get("version") if isinstance(raw.get("version"), str) else None,
-        "risk_codes": public_codes,
-        "evidence": public_evidence,
-    }
+    return {"version": version, "risk_codes": public_codes, "evidence": public_evidence}
 
 
 Db = Annotated[Session, Depends(get_db)]
@@ -286,12 +366,12 @@ def job_json(db: Session, job: RecognitionJob) -> dict[str, Any]:
         "status": job.status,
         "stage": job.stage,
         "progress": job.progress,
-        "provider": job.provider,
-        "provider_version": job.provider_version,
-        "config_version": job.config_version,
+        "provider": _public_provider_name(job.provider),
+        "provider_version": "redacted",
+        "config_version": "redacted",
         "attempt": job.attempt,
-        "error_code": job.error_code,
-        "error_message": job.error_message,
+        "error_code": _public_error_code(job.error_code),
+        "error_message": _public_error_message(job.error_code),
         "started_at": job.started_at,
         "completed_at": job.completed_at,
         "page_summary": {
@@ -707,7 +787,8 @@ def run_recognition_job(
             recovery_fault_checkpoint("recognition-running")
         settings = get_settings()
         provider = provider_from_settings(settings)
-        available, reason = safe_provider_readiness(provider)
+        available, _internal_reason = safe_provider_readiness(provider)
+        reason = None if available else "文字识别器暂不可用"
         converter = DefaultDocumentConverter(settings)
         preprocessor = PillowPreprocessor()
         pages = list(
@@ -899,36 +980,33 @@ def providers(assignment_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
         raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
     settings = get_settings()
     provider = provider_from_settings(settings)
-    available, reason = safe_provider_readiness(provider)
-    has_pdf_source = bool(
-        assignment.active_paper_version_id
-        and db.scalar(
-            select(func.count())
-            .select_from(PaperPage)
-            .join(StoredFile, StoredFile.id == PaperPage.stored_file_id)
-            .where(
-                PaperPage.paper_version_id == assignment.active_paper_version_id,
-                StoredFile.content_type == "application/pdf",
-            )
-        )
-    )
+    available, _internal_reason = safe_provider_readiness(provider)
+    reason = None if available else "文字识别器暂不可用"
+    has_pdf_source = _version_has_only_pdf_pages(db, assignment.active_paper_version_id)
     formula_provider = formula_provider_from_settings(settings)
-    formula_available, formula_reason = formula_provider.available()
+    try:
+        formula_available, _formula_reason = formula_provider.available()
+        if not isinstance(formula_available, bool):
+            raise TypeError("invalid formula provider readiness response")
+    except Exception:
+        formula_available = False
+    readiness = _text_readiness(available, has_pdf_source)
     return {
-        "provider": provider.name,
-        "version": provider.version,
+        "provider": _public_provider_name(provider.name),
+        "version": "redacted",
         "available": available,
         "can_start": available or has_pdf_source,
         "demo": provider.is_demo,
         "reason": reason,
+        "text_readiness": readiness,
         "pdf_text": {
             "available": True,
             "reason": "PDF 优先读取内嵌文字层；无文字层的页面才需要 OCR",
         },
         "formula": {
-            "provider": formula_provider.name,
+            "provider": "formula_recognition" if formula_available else "unavailable",
             "available": formula_available,
-            "reason": formula_reason,
+            "reason": None if formula_available else "公式识别暂不可用，请人工核对",
         },
     }
 
@@ -958,20 +1036,9 @@ def create_job(
     if existing:
         return job_json(db, existing)
     provider = provider_from_settings(get_settings())
-    available, reason = safe_provider_readiness(provider)
-    page_file_ids = set(
-        db.scalars(
-            select(PaperPage.stored_file_id).where(PaperPage.paper_version_id == version.id)
-        ).all()
-    )
-    has_pdf_source = bool(
-        page_file_ids
-        and db.scalar(
-            select(func.count())
-            .select_from(StoredFile)
-            .where(StoredFile.id.in_(page_file_ids), StoredFile.content_type == "application/pdf")
-        )
-    )
+    available, _internal_reason = safe_provider_readiness(provider)
+    reason = None if available else "文字识别器暂不可用"
+    has_pdf_source = _version_has_only_pdf_pages(db, version.id)
     if not available and not has_pdf_source:
         raise ApiProblem(503, "RECOGNITION_PROVIDER_UNAVAILABLE", reason or "识别器不可用")
     job = RecognitionJob(
@@ -1017,13 +1084,10 @@ def get_pages(
             "progress": x.progress,
             "width": x.width,
             "height": x.height,
-            "quality_score": str(x.quality_score) if x.quality_score is not None else None,
-            "blur_score": str(x.blur_score) if x.blur_score is not None else None,
-            "shadow_score": str(x.shadow_score) if x.shadow_score is not None else None,
             "quality": _page_quality(x.processing_parameters),
             "math_structure": _math_structure_risks(x.processing_parameters),
-            "error_code": x.error_code,
-            "error_message": x.error_message,
+            "error_code": _public_error_code(x.error_code),
+            "error_message": _public_error_message(x.error_code),
             "rendered_url": storage.presigned_get(x.rendered_storage_key, 300)
             if x.rendered_storage_key
             else None,
@@ -1066,8 +1130,12 @@ def get_blocks(
                 "width": str(x.width),
                 "height": str(x.height),
             },
-            "source": x.source,
-            "character_boxes": x.character_boxes,
+            "source": question_source_kind(x.source),
+            "character_boxes": [
+                {key: box[key] for key in ("text", "x", "y", "width", "height") if key in box}
+                for box in x.character_boxes
+                if isinstance(box, dict)
+            ],
             "status": x.status,
         }
         for x in db.scalars(query.order_by(RecognitionBlock.display_order)).all()
@@ -1093,7 +1161,7 @@ def candidate_json(db: Session, x: QuestionCandidate) -> dict[str, Any]:
         "suggested_score": str(x.suggested_score) if x.suggested_score is not None else None,
         "confidence": str(x.confidence) if x.confidence is not None else None,
         "status": x.status,
-        "source": x.source,
+        "source": question_source_kind(x.source),
         "quality_stats": quality_stats,
         "confirmed_question_id": str(x.confirmed_question_id) if x.confirmed_question_id else None,
         "regions": [

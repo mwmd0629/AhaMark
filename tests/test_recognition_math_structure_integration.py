@@ -210,7 +210,7 @@ def test_structure_signals_are_persisted_and_only_evidence_blocks_become_manual(
         assert "structure_risks" not in page
         assert public == page["processing_parameters"]["math_structure"]
         assert set(public) == {"version", "risk_codes", "evidence"}
-        assert public["version"] == VERSION
+        assert public["version"] == "math-structure-risk-v1"
         assert expected_code in public["risk_codes"]
         matching = public["evidence"][public["risk_codes"].index(expected_code)]
         assert matching["block_indexes"] == expected_indexes
@@ -277,7 +277,7 @@ def test_plain_stems_and_table_or_geometry_labels_do_not_create_structure_risks(
         )
         page = _page_payload(assignment_id, job["id"])
         assert page["math_structure"] == {
-            "version": VERSION,
+            "version": "math-structure-risk-v1",
             "risk_codes": [],
             "evidence": [],
         }
@@ -319,8 +319,9 @@ def test_quality_manual_status_is_not_a_math_source_conflict(
         page = _page_payload(assignment_id, job["id"])
         assert page["quality"]["level"] == "review_required"
         assert page["math_structure"]["risk_codes"] == []
-        assert page["processing_parameters"]["source_conflict_count"] == 0
-        assert page["processing_parameters"]["math_symbol_conflict_count"] == 0
+        source_review = page["processing_parameters"]["source_review"]
+        assert source_review["source_conflict_count"] == 0
+        assert source_review["math_symbol_conflict_count"] == 0
         blocks = client.get(
             f"/api/assignments/{assignment_id}/recognition/jobs/{job['id']}/blocks"
         ).json()
@@ -370,8 +371,9 @@ def test_real_math_source_conflict_is_preserved_with_structure_warning(
         )
         page = _page_payload(assignment_id, job["id"])
         assert page["math_structure"]["risk_codes"] == ["FORMULA_REVIEW_REQUIRED"]
-        assert page["processing_parameters"]["source_conflict_count"] == 1
-        assert page["processing_parameters"]["math_symbol_conflict_count"] == 1
+        source_review = page["processing_parameters"]["source_review"]
+        assert source_review["source_conflict_count"] == 1
+        assert source_review["math_symbol_conflict_count"] == 1
         blocks = client.get(
             f"/api/assignments/{assignment_id}/recognition/jobs/{job['id']}/blocks"
         ).json()
@@ -401,12 +403,11 @@ def test_reliable_pdf_text_does_not_remove_formula_structure_risk(
         )
         assert job["status"] == "completed"
         page = _page_payload(assignment_id, job["id"])
-        assert page["processing_parameters"]["text_layer_sufficient"] is True
         assert "FORMULA_REVIEW_REQUIRED" in page["math_structure"]["risk_codes"]
         blocks = client.get(
             f"/api/assignments/{assignment_id}/recognition/jobs/{job['id']}/blocks"
         ).json()
-        assert blocks[0]["source"].startswith("pdf_text:")
+        assert blocks[0]["source"] == "pdf_text"
         assert blocks[0]["status"] == "manual_required"
     finally:
         app.dependency_overrides.pop(get_storage, None)

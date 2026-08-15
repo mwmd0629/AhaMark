@@ -921,6 +921,14 @@ export type RecognitionProviderStatus = {
   version: string;
   available: boolean;
   can_start: boolean;
+  text_readiness: {
+    mode: "ready" | "pdf_fallback_only" | "blocked";
+    action_code:
+      | "START_AND_REVIEW"
+      | "PDF_TEXT_MAY_REQUIRE_RESCAN_OR_MANUAL"
+      | "OCR_REQUIRED";
+    limitations: ("SCANNED_PDF_MAY_REQUIRE_OCR" | "IMAGE_PAGES_REQUIRE_OCR")[];
+  };
   demo: boolean;
   reason?: string;
   formula: { provider: string; available: boolean; reason?: string };
@@ -953,8 +961,8 @@ export type RecognitionPage = {
   status: string;
   stage: string;
   progress: number;
-  quality_score?: string;
   quality?: {
+    version: "pil-page-quality-v1" | null;
     level: "good" | "review_required" | "rescan_required";
     issues: (
       | "low_resolution"
@@ -966,6 +974,7 @@ export type RecognitionPage = {
     )[];
   };
   math_structure?: {
+    version: "math-structure-risk-v1" | null;
     risk_codes: (
       | "FORMULA_REVIEW_REQUIRED"
       | "MATH_LAYOUT_REVIEW_REQUIRED"
@@ -981,11 +990,14 @@ export type RecognitionPage = {
   processed_url?: string;
   thumbnail_url?: string;
   processing_parameters?: {
-    source_conflict_count?: number;
-    math_symbol_conflict_count?: number;
-    missing_region_count?: number;
-    source_agreement_ratio?: number | null;
-    [key: string]: unknown;
+    page_quality: NonNullable<RecognitionPage["quality"]>;
+    math_structure: NonNullable<RecognitionPage["math_structure"]>;
+    source_review: {
+      source_conflict_count: number;
+      math_symbol_conflict_count: number;
+      missing_region_count: number;
+      source_agreement_ratio: number | null;
+    };
   };
 };
 export type RecognitionCandidate = {

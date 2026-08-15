@@ -84,6 +84,11 @@ beforeEach(() => {
     version: "1",
     available: true,
     can_start: true,
+    text_readiness: {
+      mode: "ready",
+      action_code: "START_AND_REVIEW",
+      limitations: [],
+    },
     demo: true,
     formula: { provider: "fake", available: true },
   });
@@ -123,6 +128,11 @@ it("uses the public can-start capability without showing readiness details", asy
     version: "internal-version",
     available: false,
     can_start: false,
+    text_readiness: {
+      mode: "blocked",
+      action_code: "OCR_REQUIRED",
+      limitations: ["IMAGE_PAGES_REQUIRE_OCR"],
+    },
     demo: false,
     reason: "internal readiness detail",
     formula: { provider: "unavailable", available: false },
@@ -149,6 +159,11 @@ it("allows a PDF-capable assignment to start when OCR itself is unavailable", as
     version: "none",
     available: false,
     can_start: true,
+    text_readiness: {
+      mode: "pdf_fallback_only",
+      action_code: "PDF_TEXT_MAY_REQUIRE_RESCAN_OR_MANUAL",
+      limitations: ["SCANNED_PDF_MAY_REQUIRE_OCR", "IMAGE_PAGES_REQUIRE_OCR"],
+    },
     demo: false,
     formula: { provider: "unavailable", available: false },
   });
@@ -161,6 +176,12 @@ it("allows a PDF-capable assignment to start when OCR itself is unavailable", as
   );
 
   expect(await screen.findByRole("button", { name: "开始识别" })).toBeEnabled();
+  expect(
+    screen.getByText(
+      /可尝试读取 PDF 文字；扫描页或图片页可能需要重新扫描或人工录入/,
+    ),
+  ).toBeInTheDocument();
+  expect(screen.queryByText(/文字识别：暂不可用/)).not.toBeInTheDocument();
 });
 
 it("offers a concise redraw or explicitly confirmed unreadable path", async () => {
@@ -285,10 +306,14 @@ it("shows concise actions for source conflicts and supplemented regions", async 
     {
       ...page,
       processing_parameters: {
-        source_conflict_count: 2,
-        math_symbol_conflict_count: 1,
-        missing_region_count: 1,
-        source_agreement_ratio: 0.5,
+        page_quality: { level: "good", issues: [] },
+        math_structure: { risk_codes: [], evidence: [] },
+        source_review: {
+          source_conflict_count: 2,
+          math_symbol_conflict_count: 1,
+          missing_region_count: 1,
+          source_agreement_ratio: 0.5,
+        },
       },
     },
   ]);
