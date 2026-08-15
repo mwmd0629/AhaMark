@@ -24,6 +24,31 @@ _INJECTION = re.compile(
     r"(?:ignore\s+(?:all\s+)?previous|忽略(?:之前|以上|系统)|自动发布|选择.{0,12}班级|调用.{0,8}工具|system\s*prompt)",
     re.I,
 )
+_PAGE_QUALITY_LEVELS = {"good", "review_required", "rescan_required"}
+_PAGE_QUALITY_ISSUES = {
+    "low_resolution",
+    "blur",
+    "low_contrast",
+    "shadow",
+    "skew",
+    "crop_risk",
+}
+
+
+def _public_page_quality(parameters: dict[str, object]) -> tuple[str | None, list[str]]:
+    raw = parameters.get("page_quality")
+    if not isinstance(raw, dict):
+        return None, []
+    level = raw.get("level")
+    if level not in _PAGE_QUALITY_LEVELS:
+        return None, []
+    raw_issues = raw.get("issues")
+    issues = (
+        sorted({str(issue) for issue in raw_issues if str(issue) in _PAGE_QUALITY_ISSUES})
+        if isinstance(raw_issues, list)
+        else []
+    )
+    return str(level), issues
 
 
 def _role(name: str, text: str) -> tuple[str, float, str, float]:
@@ -244,6 +269,7 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
         for page in ordered:
             result = results.get(page.id)
             params = dict(result.processing_parameters) if result else {}
+            quality_level, quality_issues = _public_page_quality(params)
             page_content_mode, page_text_source, page_content_confidence, text_count = (
                 content_by_page[page.id]
             )
@@ -274,6 +300,12 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
             elif blank is not None and blank >= 0.95:
                 status = "blank"
                 codes.append("BLANK_PAGE")
+            elif quality_level == "rescan_required":
+                status = "low_quality"
+                codes.append("PAGE_QUALITY_RESCAN_REQUIRED")
+            elif quality_level == "review_required":
+                status = "low_quality"
+                codes.append("PAGE_QUALITY_REVIEW_REQUIRED")
             elif quality is not None and quality < 0.5:
                 status = "low_quality"
                 codes.append("LOW_QUALITY_PAGE")
@@ -297,10 +329,13 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
                     corrupted=status == "corrupted",
                     variant_label=variant or "unknown",
                     metrics={
-                        k: v
-                        for k, v in params.items()
-                        if isinstance(v, (str, int, float, bool, type(None)))
-                    },
+                        "page_quality": {
+                            "level": quality_level,
+                            "issues": quality_issues,
+                        }
+                    }
+                    if quality_level is not None
+                    else {},
                     evidence=[
                         EvidenceRef(
                             kind="page",

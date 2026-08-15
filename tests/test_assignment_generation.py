@@ -4,7 +4,12 @@ from threading import Barrier
 from types import SimpleNamespace
 
 import pytest
-from app.api.assignment_generation import dispatch_job
+from app.api.assignment_generation import (
+    QuestionExtractionDispositionInput,
+    dispatch_job,
+    disposition_question_extraction,
+)
+from app.api.domain import ApiProblem
 from app.assignment_generation.extraction_stage import build_fake_candidates
 from app.assignment_generation.materializers import ProviderSemanticError, materialize_questions
 from app.assignment_generation.providers import select_provider
@@ -23,6 +28,7 @@ from app.models import (
     AssignmentAnswerDraftCandidate,
     AssignmentDraftRevision,
     AssignmentGenerationJob,
+    AssignmentPageAnalysis,
     AssignmentQuestionExtractionCandidate,
     AssignmentQuestionExtractionRegion,
     AssignmentRubricDraftCandidate,
@@ -131,29 +137,28 @@ def test_question_extraction_requires_teacher_confirmed_question_role() -> None:
         )
         db.add(stored)
         db.flush()
-        db.add(
-            AssignmentSourceFileAnalysis(
-                owner_id=actor.id,
-                assignment_id=assignment.id,
-                generation_job_id=job.id,
-                draft_revision_id=revision.id,
-                stored_file_id=stored.id,
-                detected_mime_type="application/pdf",
-                checksum=stored.checksum,
-                page_count=1,
-                content_mode="text",
-                text_source="pdf_text",
-                content_mode_confidence=1,
-                suggested_role="question_paper",
-                role_confidence=0.99,
-                suggested_answer_source="not_applicable",
-                answer_source_confidence=1,
-                evidence=[],
-                warning_codes=[],
-                analysis_status="suggested",
-                source_snapshot_hash=job.source_snapshot_hash,
-            )
+        source_analysis = AssignmentSourceFileAnalysis(
+            owner_id=actor.id,
+            assignment_id=assignment.id,
+            generation_job_id=job.id,
+            draft_revision_id=revision.id,
+            stored_file_id=stored.id,
+            detected_mime_type="application/pdf",
+            checksum=stored.checksum,
+            page_count=1,
+            content_mode="text",
+            text_source="pdf_text",
+            content_mode_confidence=1,
+            suggested_role="question_paper",
+            role_confidence=0.99,
+            suggested_answer_source="not_applicable",
+            answer_source_confidence=1,
+            evidence=[],
+            warning_codes=[],
+            analysis_status="suggested",
+            source_snapshot_hash=job.source_snapshot_hash,
         )
+        db.add(source_analysis)
         db.flush()
 
         assert build_fake_candidates(db, job, revision) == {
@@ -194,6 +199,7 @@ def test_local_extraction_accepts_legacy_blocks_and_requires_review_for_source_c
         assignment_row = db.get(Assignment, assignment.id)
         assert assignment_row is not None
         assignment_row.active_paper_version_id = paper.id
+        db.flush()
         job, revision, _ = create_job(
             db,
             actor.id,
@@ -202,28 +208,27 @@ def test_local_extraction_accepts_legacy_blocks_and_requires_review_for_source_c
             "unavailable",
             None,
         )
-        db.add(
-            AssignmentSourceFileAnalysis(
-                owner_id=actor.id,
-                assignment_id=assignment.id,
-                generation_job_id=job.id,
-                draft_revision_id=revision.id,
-                stored_file_id=stored.id,
-                detected_mime_type="application/pdf",
-                checksum=stored.checksum,
-                page_count=1,
-                content_mode="mixed",
-                text_source="mixed",
-                content_mode_confidence=0.8,
-                suggested_role="question_paper",
-                role_confidence=1,
-                suggested_answer_source="not_applicable",
-                answer_source_confidence=1,
-                analysis_status="confirmed",
-                teacher_confirmed_role="question_paper",
-                source_snapshot_hash=job.source_snapshot_hash,
-            )
+        source_analysis = AssignmentSourceFileAnalysis(
+            owner_id=actor.id,
+            assignment_id=assignment.id,
+            generation_job_id=job.id,
+            draft_revision_id=revision.id,
+            stored_file_id=stored.id,
+            detected_mime_type="application/pdf",
+            checksum=stored.checksum,
+            page_count=1,
+            content_mode="mixed",
+            text_source="mixed",
+            content_mode_confidence=0.8,
+            suggested_role="question_paper",
+            role_confidence=1,
+            suggested_answer_source="not_applicable",
+            answer_source_confidence=1,
+            analysis_status="confirmed",
+            teacher_confirmed_role="question_paper",
+            source_snapshot_hash=job.source_snapshot_hash,
         )
+        db.add(source_analysis)
         recognition = RecognitionJob(
             owner_id=actor.id,
             paper_version_id=paper.id,
@@ -305,6 +310,31 @@ def test_local_extraction_accepts_legacy_blocks_and_requires_review_for_source_c
                 ),
             ]
         )
+        db.add(
+            AssignmentPageAnalysis(
+                owner_id=actor.id,
+                assignment_id=assignment.id,
+                generation_job_id=job.id,
+                draft_revision_id=revision.id,
+                paper_page_id=page.id,
+                source_file_analysis_id=source_analysis.id,
+                source_snapshot_hash=job.source_snapshot_hash,
+                status="low_quality",
+                content_mode="mixed",
+                text_source="mixed",
+                content_mode_confidence=0.8,
+                text_character_count=100,
+                quality_score=0.2,
+                low_quality=True,
+                metrics={
+                    "page_quality": {
+                        "level": "rescan_required",
+                        "issues": ["blur", "crop_risk", "internal_metric_key"],
+                    }
+                },
+                warning_codes=["PAGE_QUALITY_RESCAN_REQUIRED"],
+            )
+        )
         db.flush()
 
         result = build_fake_candidates(db, job, revision)
@@ -319,8 +349,29 @@ def test_local_extraction_accepts_legacy_blocks_and_requires_review_for_source_c
         assert extracted.manual_required is True
         assert "SOURCE_TEXT_CONFLICT_REVIEW_REQUIRED" in extracted.warning_codes
         assert "MIXED_TEXT_SOURCE_REVIEW_REQUIRED" in extracted.warning_codes
+        assert "PAGE_QUALITY_RESCAN_REQUIRED" in extracted.warning_codes
+        assert extracted.evidence["page_quality"] == {
+            str(page.id): {
+                "level": "rescan_required",
+                "issues": ["blur", "crop_risk"],
+            }
+        }
         assert len(extracted.evidence["recognition_block_ids"]) == 2
         assert len(extracted.evidence["source_conflict_block_ids"]) == 1
+        with pytest.raises(ApiProblem) as exc_info:
+            disposition_question_extraction(
+                extracted.id,
+                QuestionExtractionDispositionInput(
+                    action="accept",
+                    expected_teacher_edit_version=0,
+                    expected_draft_revision_edit_version=revision.teacher_edit_version,
+                    expected_paper_version_id=paper.id,
+                    expected_source_snapshot=job.source_snapshot_hash,
+                ),
+                db,
+                actor,
+            )
+        assert exc_info.value.code == "RECOGNITION_PAGE_RESCAN_REQUIRED"
 
 
 def start(aid: uuid.UUID, key: str = "generation-key-0001"):
@@ -1240,6 +1291,65 @@ def test_teacher_replaces_question_regions_with_snapshot_and_version_guards(monk
         job, revision, _ = create_job(
             db, actor.id, assignment.id, f"region-edit-{uuid.uuid4()}", "unavailable", None
         )
+        source_analysis = AssignmentSourceFileAnalysis(
+            owner_id=actor.id,
+            assignment_id=assignment.id,
+            generation_job_id=job.id,
+            draft_revision_id=revision.id,
+            stored_file_id=stored.id,
+            detected_mime_type="application/pdf",
+            checksum=stored.checksum,
+            page_count=2,
+            content_mode="image",
+            text_source="ocr",
+            content_mode_confidence=1,
+            suggested_role="question_paper",
+            role_confidence=1,
+            suggested_answer_source="not_applicable",
+            answer_source_confidence=1,
+            analysis_status="confirmed",
+            teacher_confirmed_role="question_paper",
+            source_snapshot_hash=job.source_snapshot_hash,
+        )
+        db.add(source_analysis)
+        db.flush()
+        db.add_all(
+            [
+                AssignmentPageAnalysis(
+                    owner_id=actor.id,
+                    assignment_id=assignment.id,
+                    generation_job_id=job.id,
+                    draft_revision_id=revision.id,
+                    paper_page_id=pages[0].id,
+                    source_file_analysis_id=source_analysis.id,
+                    source_snapshot_hash=job.source_snapshot_hash,
+                    status="ready",
+                    content_mode="image",
+                    text_source="ocr",
+                    content_mode_confidence=1,
+                    metrics={"page_quality": {"level": "good", "issues": []}},
+                ),
+                AssignmentPageAnalysis(
+                    owner_id=actor.id,
+                    assignment_id=assignment.id,
+                    generation_job_id=job.id,
+                    draft_revision_id=revision.id,
+                    paper_page_id=pages[1].id,
+                    source_file_analysis_id=source_analysis.id,
+                    source_snapshot_hash=job.source_snapshot_hash,
+                    status="low_quality",
+                    content_mode="image",
+                    text_source="ocr",
+                    content_mode_confidence=1,
+                    metrics={
+                        "page_quality": {
+                            "level": "rescan_required",
+                            "issues": ["blur"],
+                        }
+                    },
+                ),
+            ]
+        )
         candidate = AssignmentQuestionExtractionCandidate(
             owner_id=actor.id,
             assignment_id=assignment.id,
@@ -1335,6 +1445,7 @@ def test_teacher_replaces_question_regions_with_snapshot_and_version_guards(monk
     assert payload["teacher_edit_version"] == 1
     assert payload["manual_required"] is True
     assert "REGION_TEACHER_ADJUSTED" in payload["warning_codes"]
+    assert "PAGE_QUALITY_RESCAN_REQUIRED" in payload["warning_codes"]
     assert len(payload["regions"]) == 2
     assert {item["paper_page_id"] for item in payload["regions"]} == {
         str(page_ids[0]),
@@ -1360,6 +1471,30 @@ def test_teacher_replaces_question_regions_with_snapshot_and_version_guards(monk
     )
     assert stale.status_code == 409
     assert stale.json()["code"] == "QUESTION_CANDIDATE_EDIT_CONFLICT"
+
+    disposition_guard = {
+        "expected_teacher_edit_version": 1,
+        "expected_draft_revision_edit_version": revision_version + 1,
+        "expected_paper_version_id": str(paper_id),
+        "expected_source_snapshot": snapshot,
+    }
+    accept = client.patch(
+        f"/api/question-extraction-candidates/{candidate_id}/disposition",
+        json={**disposition_guard, "action": "accept"},
+    )
+    assert accept.status_code == 409
+    assert accept.json()["code"] == "RECOGNITION_PAGE_RESCAN_REQUIRED"
+
+    modify = client.patch(
+        f"/api/question-extraction-candidates/{candidate_id}/disposition",
+        json={
+            **disposition_guard,
+            "action": "modify",
+            "teacher_value": {"content_text": "Teacher corrected question"},
+        },
+    )
+    assert modify.status_code == 409
+    assert modify.json()["code"] == "RECOGNITION_PAGE_RESCAN_REQUIRED"
 
 
 def test_production_fake_degrades_to_unavailable():

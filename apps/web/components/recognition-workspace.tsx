@@ -14,6 +14,15 @@ import {
 } from "@/lib/api";
 import { Badge, Button, Card, Input } from "@/components/ui";
 
+const QUALITY_ISSUE_LABELS: Record<string, string> = {
+  low_resolution: "分辨率不足",
+  blur: "画面模糊",
+  low_contrast: "文字对比度低",
+  shadow: "阴影遮挡",
+  skew: "页面歪斜",
+  crop_risk: "内容可能被裁切",
+};
+
 export function RecognitionWorkspace({
   assignmentId,
   paperVersionId,
@@ -103,6 +112,18 @@ export function RecognitionWorkspace({
     pages.find((item) => item.paper_page_id === region?.paper_page_id) ??
     pages[0];
   const sourceMetrics = page?.processing_parameters;
+  const qualityIssues = (page?.quality?.issues ?? [])
+    .map((issue) => QUALITY_ISSUE_LABELS[issue])
+    .filter(Boolean);
+  const currentHasRescanRequired = Boolean(
+    current?.regions.some((currentRegion) =>
+      pages.some(
+        (item) =>
+          item.paper_page_id === currentRegion.paper_page_id &&
+          item.quality?.level === "rescan_required",
+      ),
+    ),
+  );
   const currentFormula = formulaRegions.find(
     (item) => item.id === selectedFormula,
   );
@@ -223,6 +244,21 @@ export function RecognitionWorkspace({
             </p>
           )}
         </div>
+      )}
+      {page?.quality?.level === "rescan_required" && (
+        <p className="rounded-xl bg-red-50 p-3 text-sm text-red-800">
+          当前页面无法可靠读取，请重新拍摄或扫描后再识别。
+          {!!qualityIssues.length && ` 需要处理：${qualityIssues.join("、")}。`}
+        </p>
+      )}
+      {page?.quality?.level === "review_required" && (
+        <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-900">
+          当前页面可以继续使用，但请对照原页核对识别内容。
+          {!!qualityIssues.length && ` 请注意：${qualityIssues.join("、")}。`}
+        </p>
+      )}
+      {page?.quality?.level === "good" && (
+        <p className="text-xs text-emerald-700">页面清晰，可继续核对题目。</p>
       )}
       {!!sourceMetrics?.math_symbol_conflict_count && (
         <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-900">
@@ -797,6 +833,7 @@ export function RecognitionWorkspace({
                     拒绝
                   </Button>
                   <Button
+                    disabled={currentHasRescanRequired}
                     onClick={() =>
                       recognitionApi.confirm(assignmentId, job!.id, [
                         current.id,

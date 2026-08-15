@@ -197,6 +197,66 @@ describe("QuestionExtractionReview", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("blocks adopting a question whose page must be rescanned", async () => {
+    api.listQuestionCandidates.mockResolvedValue([
+      {
+        id: "candidate-rescan",
+        draft_revision_id: "revision-1",
+        paper_version_id: "paper-1",
+        candidate_version: 1,
+        question_number: "1",
+        question_type: "other",
+        content_text: "低质量页面题目",
+        content_latex: null,
+        max_score: 5,
+        knowledge_point_suggestions: [],
+        field_confidences: {},
+        overall_confidence: 0.9,
+        evidence: {},
+        quality_stats: {},
+        warning_codes: ["PAGE_QUALITY_RESCAN_REQUIRED"],
+        status: "suggested",
+        manual_required: true,
+        teacher_edit_version: 0,
+        materialized_question_id: null,
+        regions: [
+          {
+            id: "region-rescan",
+            paper_page_id: "page-1",
+            display_order: 0,
+            region_type: "stem",
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            confidence: 0.9,
+            evidence: {},
+          },
+        ],
+        server_eligible: false,
+      },
+    ]);
+    render(
+      <QuestionExtractionReview
+        revision={revision}
+        onChanged={() => undefined}
+      />,
+    );
+    fireEvent.click(await screen.findByText(/1 · 5 分/));
+    fireEvent.click(screen.getByText("识别说明"));
+
+    expect(
+      screen.getByText(/页面无法可靠读取，请重新拍摄或扫描后再识别/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认题目" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "保存修改并确认" }),
+    ).toBeDisabled();
+    expect(
+      screen.queryByText("PAGE_QUALITY_RESCAN_REQUIRED"),
+    ).not.toBeInTheDocument();
+  });
+
   it("saves adjusted multi-page-ready region drafts without accepting the question", async () => {
     api.updateQuestionRegions.mockResolvedValue({});
     const onChanged = vi.fn();

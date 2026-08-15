@@ -120,6 +120,15 @@ def test_file_analysis_ignores_newer_failed_recognition_results() -> None:
                     paper_page_id=page.id,
                     status=PageRecognitionStatus.completed,
                     quality_score=0.9,
+                    processing_parameters={
+                        "page_quality": {
+                            "version": "1",
+                            "level": "review_required",
+                            "issues": ["blur", "unknown_internal_issue"],
+                            "metrics": {"laplacian_variance": 12.34},
+                        },
+                        "recognition_provider": "internal-provider",
+                    },
                 ),
                 PageProcessingResult(
                     recognition_job_id=failed.id,
@@ -137,7 +146,12 @@ def test_file_analysis_ignores_newer_failed_recognition_results() -> None:
         assert output.files[0].suggested_role == "question_paper"
         assert output.files[0].text_source == "pdf_text"
         assert output.pages[0].quality_score == 0.9
-        assert output.pages[0].status == "ready"
+        assert output.pages[0].status == "low_quality"
+        assert output.pages[0].low_quality is True
+        assert output.pages[0].warning_codes == ["PAGE_QUALITY_REVIEW_REQUIRED"]
+        assert output.pages[0].metrics == {
+            "page_quality": {"level": "review_required", "issues": ["blur"]}
+        }
         assert not output.prompt_injection_detected
 
 

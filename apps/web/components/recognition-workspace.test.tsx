@@ -322,3 +322,69 @@ it("clears actionable results immediately when a failed page is retried", async 
     "queued",
   );
 });
+
+it("shows only actionable public page-quality guidance", async () => {
+  api.candidates.mockResolvedValue([candidate]);
+  api.pages.mockResolvedValue([
+    {
+      ...page,
+      quality: {
+        level: "rescan_required",
+        issues: ["blur", "crop_risk"],
+      },
+      processing_parameters: {
+        page_quality: {
+          metrics: { laplacian_variance: 12.34 },
+        },
+        recognition_provider: "internal-provider",
+      },
+    },
+  ]);
+  render(
+    <RecognitionWorkspace
+      assignmentId="assignment-1"
+      paperVersionId="paper-1"
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "开始识别" }));
+  expect(
+    await screen.findByText(/当前页面无法可靠读取，请重新拍摄或扫描后再识别/),
+  ).toHaveTextContent("画面模糊、内容可能被裁切");
+  expect(screen.getByRole("button", { name: "确认生成题目" })).toBeDisabled();
+  expect(screen.queryByText(/laplacian_variance/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/internal-provider/)).not.toBeInTheDocument();
+
+  cleanup();
+  api.pages.mockResolvedValue([
+    {
+      ...page,
+      quality: { level: "review_required", issues: ["shadow"] },
+    },
+  ]);
+  render(
+    <RecognitionWorkspace
+      assignmentId="assignment-1"
+      paperVersionId="paper-1"
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "开始识别" }));
+  expect(
+    await screen.findByText(/当前页面可以继续使用，但请对照原页核对识别内容/),
+  ).toHaveTextContent("阴影遮挡");
+  expect(screen.getByRole("button", { name: "确认生成题目" })).toBeEnabled();
+
+  cleanup();
+  api.pages.mockResolvedValue([
+    { ...page, quality: { level: "good", issues: [] } },
+  ]);
+  render(
+    <RecognitionWorkspace
+      assignmentId="assignment-1"
+      paperVersionId="paper-1"
+    />,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "开始识别" }));
+  expect(
+    await screen.findByText("页面清晰，可继续核对题目。"),
+  ).toBeInTheDocument();
+});

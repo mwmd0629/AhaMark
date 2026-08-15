@@ -201,6 +201,33 @@ def build_local_candidates(
     if {page.id for page in pages if page.status != "ready" and page.id not in processed_page_ids}:
         return {"created": 0, "blocked": "PAGE_PROCESSING_INCOMPLETE"}
     page_ids = {x.id for x in pages}
+    page_quality: dict[uuid.UUID, tuple[str, list[str]]] = {}
+    public_quality_issues = {
+        "low_resolution",
+        "blur",
+        "low_contrast",
+        "shadow",
+        "skew",
+        "crop_risk",
+    }
+    for analysis in db.scalars(
+        select(AssignmentPageAnalysis).where(
+            AssignmentPageAnalysis.draft_revision_id == revision.id,
+            AssignmentPageAnalysis.paper_page_id.in_(page_ids),
+        )
+    ):
+        raw = (analysis.metrics or {}).get("page_quality")
+        if not isinstance(raw, dict):
+            continue
+        level = raw.get("level")
+        issues = raw.get("issues")
+        if level in {"review_required", "rescan_required"}:
+            page_quality[analysis.paper_page_id] = (
+                str(level),
+                sorted(str(issue) for issue in issues if str(issue) in public_quality_issues)
+                if isinstance(issues, list)
+                else [],
+            )
     candidates = list(
         db.scalars(
             select(QuestionCandidate)
@@ -314,6 +341,18 @@ def build_local_candidates(
             block_ids.extend(region_blocks)
         warnings = []
         manual = False
+        region_quality = {
+            region.paper_page_id: page_quality[region.paper_page_id]
+            for region in source_regions
+            if region.paper_page_id in page_quality
+        }
+        quality_levels = {level for level, _issues in region_quality.values()}
+        if "rescan_required" in quality_levels:
+            warnings.append("PAGE_QUALITY_RESCAN_REQUIRED")
+            manual = True
+        elif "review_required" in quality_levels:
+            warnings.append("PAGE_QUALITY_REVIEW_REQUIRED")
+            manual = True
         latex = source.content_latex
         if not (source.temporary_number or "").strip():
             warnings.append("QUESTION_NUMBER_MISSING")
@@ -416,6 +455,10 @@ def build_local_candidates(
                 "source_candidate_id": str(source.id),
                 "recognition_block_ids": block_ids,
                 "source_conflict_block_ids": conflict_block_ids,
+                "page_quality": {
+                    str(page_id): {"level": level, "issues": issues}
+                    for page_id, (level, issues) in region_quality.items()
+                },
                 "quality_stats": quality_stats,
             },
             warning_codes=warnings,

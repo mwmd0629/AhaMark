@@ -608,6 +608,19 @@ export function QuestionExtractionReview({
                       item.warning_codes.includes(
                         "FORMULA_REVIEW_REQUIRED",
                       )) && <p>公式需要核对。</p>}
+                    {item.warning_codes.includes(
+                      "PAGE_QUALITY_RESCAN_REQUIRED",
+                    ) && (
+                      <p className="text-red-700">
+                        页面无法可靠读取，请重新拍摄或扫描后再识别；当前题目不能采用。
+                      </p>
+                    )}
+                    {!item.warning_codes.includes(
+                      "PAGE_QUALITY_RESCAN_REQUIRED",
+                    ) &&
+                      item.warning_codes.includes(
+                        "PAGE_QUALITY_REVIEW_REQUIRED",
+                      ) && <p>页面质量一般，请对照原页核对后再采用。</p>}
                     {item.manual_required && (
                       <p>此题需要教师核对后才能采用。</p>
                     )}
@@ -765,13 +778,23 @@ export function QuestionExtractionReview({
                 {item.status === "suggested" && (
                   <div className="mt-2 flex flex-wrap gap-2">
                     <Button
-                      disabled={busy}
+                      disabled={
+                        busy ||
+                        item.warning_codes.includes(
+                          "PAGE_QUALITY_RESCAN_REQUIRED",
+                        )
+                      }
                       onClick={() => void questionAction(item, "accept")}
                     >
                       确认题目
                     </Button>
                     <Button
-                      disabled={busy}
+                      disabled={
+                        busy ||
+                        item.warning_codes.includes(
+                          "PAGE_QUALITY_RESCAN_REQUIRED",
+                        )
+                      }
                       onClick={() => void questionAction(item, "modify")}
                     >
                       保存修改并确认

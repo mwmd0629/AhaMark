@@ -1,6 +1,6 @@
 import io
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from decimal import Decimal
 from typing import Annotated, Any, Literal, cast
 
@@ -31,6 +31,7 @@ from app.models import (
     now_utc,
 )
 from app.recognition.formula import formula_provider_from_settings
+from app.recognition.page_quality import assess_page_quality, measure_page_quality
 from app.recognition.pipeline import (
     DefaultDocumentConverter,
     PageArtifact,
@@ -69,6 +70,50 @@ def question_source_kind(source: str) -> str:
     if source.startswith("mixed:"):
         return "mixed"
     return "ocr"
+
+
+def _page_quality(parameters: dict[str, Any]) -> dict[str, Any]:
+    raw = parameters.get("page_quality")
+    if not isinstance(raw, dict):
+        return {"level": "review_required", "issues": []}
+    level = raw.get("level")
+    if level not in {"good", "review_required", "rescan_required"}:
+        level = "review_required"
+    allowed_issues = {
+        "low_resolution",
+        "blur",
+        "low_contrast",
+        "shadow",
+        "skew",
+        "crop_risk",
+    }
+    issues = raw.get("issues")
+    public_issues = (
+        [item for item in issues if isinstance(item, str) and item in allowed_issues]
+        if isinstance(issues, list)
+        else []
+    )
+    return {"level": level, "issues": public_issues}
+
+
+def _quality_score(parameters: dict[str, Any], field: str) -> Decimal:
+    page_quality = parameters.get("page_quality")
+    metrics = page_quality.get("metrics") if isinstance(page_quality, dict) else None
+    value = metrics.get(field) if isinstance(metrics, dict) else None
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return Decimal("0")
+    return Decimal(str(max(0.0, min(1.0, float(value))))).quantize(Decimal("0.000001"))
+
+
+def _public_processing_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
+    output = dict(parameters)
+    raw_quality = parameters.get("page_quality")
+    public_quality = _page_quality(parameters)
+    output["page_quality"] = {
+        "version": raw_quality.get("version") if isinstance(raw_quality, dict) else None,
+        **public_quality,
+    }
+    return output
 
 
 Db = Annotated[Session, Depends(get_db)]
@@ -239,6 +284,7 @@ def _preflight_recognition_page(
     source_content = read_all(storage.get(source.storage_key))
     source_page = page.source_page_number or 1
     original = converter.convert(source_content, source.content_type, source_page)
+    quality_metrics = measure_page_quality(original)
     previous_result = db.scalar(
         select(PageProcessingResult).where(
             PageProcessingResult.recognition_job_id == job.id,
@@ -289,6 +335,27 @@ def _preflight_recognition_page(
             else "TRUSTED_TEXT_SOURCE_UNAVAILABLE"
         )
         raise RecognitionError(unavailable_code, unavailable_reason or "没有可可靠采用的文字来源")
+    adopted_text_blocks = [block for block in adopted_blocks if (block.text or "").strip()]
+    reliable_text = (
+        bool(adopted_text_blocks)
+        and all((block.source or "").startswith("pdf_text:") for block in adopted_text_blocks)
+        and fusion.missing_region_count == 0
+        and fusion.source_conflict_count == 0
+    )
+    quality_assessment = assess_page_quality(quality_metrics, reliable_text)
+    quality_blocks = (
+        [
+            replace(block, status="manual_required")
+            if block.status in {"adopted", "manual_required"}
+            else block
+            for block in fusion.blocks
+        ]
+        if quality_assessment.manual_required
+        else fusion.blocks
+    )
+    adopted_blocks = [
+        block for block in quality_blocks if block.status in {"adopted", "manual_required"}
+    ]
     try:
         ensure_text_fields_integrity(
             [
@@ -299,7 +366,7 @@ def _preflight_recognition_page(
     except CharacterEncodingCorruptionError as exc:
         raise RecognitionError(exc.code, "识别文字存在损坏，请重新识别或人工核对") from exc
     sources = sorted(
-        {block.source or f"{provider.name}:{provider.version}" for block in fusion.blocks}
+        {block.source or f"{provider.name}:{provider.version}" for block in quality_blocks}
     )
     quality_stats = text_quality_statistics(
         [block.text for block in adopted_blocks],
@@ -313,7 +380,7 @@ def _preflight_recognition_page(
         rendered=original,
         processed=processed,
         thumbnail=thumbnail,
-        blocks=fusion.blocks,
+        blocks=quality_blocks,
         processing_parameters={
             **params,
             "text_character_count": text_character_count,
@@ -321,6 +388,12 @@ def _preflight_recognition_page(
             "recognition_sources": sources,
             "text_layer_error": text_layer_error,
             "text_quality": quality_stats,
+            "page_quality": {
+                "version": quality_metrics.algorithm_version,
+                "level": quality_assessment.grade,
+                "issues": list(quality_assessment.issues),
+                "metrics": asdict(quality_metrics),
+            },
             **fusion.metrics,
         },
     )
@@ -699,9 +772,9 @@ def run_recognition_job(
                     crop_region=cast(
                         dict[str, Any] | None, prepared.processing_parameters.get("crop")
                     ),
-                    quality_score=Decimal("0.80"),
-                    blur_score=Decimal("0.50"),
-                    shadow_score=Decimal("0.50"),
+                    quality_score=_quality_score(prepared.processing_parameters, "quality_score"),
+                    blur_score=_quality_score(prepared.processing_parameters, "sharpness_score"),
+                    shadow_score=_quality_score(prepared.processing_parameters, "shadow_score"),
                     processing_parameters=prepared.processing_parameters,
                 )
             )
@@ -869,6 +942,9 @@ def get_pages(
             "width": x.width,
             "height": x.height,
             "quality_score": str(x.quality_score) if x.quality_score is not None else None,
+            "blur_score": str(x.blur_score) if x.blur_score is not None else None,
+            "shadow_score": str(x.shadow_score) if x.shadow_score is not None else None,
+            "quality": _page_quality(x.processing_parameters),
             "error_code": x.error_code,
             "error_message": x.error_message,
             "rendered_url": storage.presigned_get(x.rendered_storage_key, 300)
@@ -880,7 +956,7 @@ def get_pages(
             "thumbnail_url": storage.presigned_get(x.thumbnail_storage_key, 300)
             if x.thumbnail_storage_key
             else None,
-            "processing_parameters": x.processing_parameters,
+            "processing_parameters": _public_processing_parameters(x.processing_parameters),
         }
         for x in rows
     ]
@@ -1032,6 +1108,41 @@ def confirm(
             422,
             "QUESTION_NUMBER_CONFLICT",
             "检测到重复题号，请教师先修改题号再确认",
+        )
+    candidate_page_ids = set(
+        db.scalars(
+            select(QuestionCandidateRegion.paper_page_id).where(
+                QuestionCandidateRegion.question_candidate_id.in_([item.id for item in candidates])
+            )
+        ).all()
+    )
+    page_results = list(
+        db.scalars(
+            select(PageProcessingResult).where(
+                PageProcessingResult.recognition_job_id == job.id,
+                PageProcessingResult.paper_page_id.in_(candidate_page_ids),
+            )
+        ).all()
+    )
+    result_page_ids = {result.paper_page_id for result in page_results}
+    if (
+        not candidate_page_ids
+        or candidate_page_ids != result_page_ids
+        or any(result.status != PageRecognitionStatus.completed for result in page_results)
+    ):
+        raise ApiProblem(
+            409,
+            "RECOGNITION_RESULTS_NOT_READY",
+            "识别结果缺少完整页面区域，请重新识别后再确认",
+        )
+    if any(
+        _page_quality(result.processing_parameters)["level"] == "rescan_required"
+        for result in page_results
+    ):
+        raise ApiProblem(
+            409,
+            "RECOGNITION_PAGE_RESCAN_REQUIRED",
+            "页面无法可靠读取，请重新拍摄或扫描后再确认",
         )
     existing_order = (
         db.scalar(

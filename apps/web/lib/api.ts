@@ -953,6 +953,17 @@ export type RecognitionPage = {
   stage: string;
   progress: number;
   quality_score?: string;
+  quality?: {
+    level: "good" | "review_required" | "rescan_required";
+    issues: (
+      | "low_resolution"
+      | "blur"
+      | "low_contrast"
+      | "shadow"
+      | "skew"
+      | "crop_risk"
+    )[];
+  };
   error_message?: string;
   rendered_url?: string;
   processed_url?: string;

@@ -2063,6 +2063,31 @@ def _ensure_candidate_current(
     return revision
 
 
+def _page_quality_warning_for_candidate_pages(
+    db: Session,
+    *,
+    draft_revision_id: uuid.UUID,
+    page_ids: set[uuid.UUID],
+) -> str | None:
+    metrics_rows = db.scalars(
+        select(AssignmentPageAnalysis.metrics).where(
+            AssignmentPageAnalysis.draft_revision_id == draft_revision_id,
+            AssignmentPageAnalysis.paper_page_id.in_(page_ids),
+        )
+    ).all()
+    levels = {
+        page_quality.get("level")
+        for metrics in metrics_rows
+        if isinstance(metrics, dict)
+        and isinstance((page_quality := metrics.get("page_quality")), dict)
+    }
+    if "rescan_required" in levels:
+        return "PAGE_QUALITY_RESCAN_REQUIRED"
+    if "review_required" in levels:
+        return "PAGE_QUALITY_REVIEW_REQUIRED"
+    return None
+
+
 @router.put("/api/question-extraction-candidates/{candidate_id}/regions")
 def update_question_extraction_regions(
     candidate_id: uuid.UUID,
@@ -2124,7 +2149,20 @@ def update_question_extraction_regions(
         )
     row.teacher_edit_version += 1
     row.manual_required = True
-    row.warning_codes = sorted({*row.warning_codes, "REGION_TEACHER_ADJUSTED"})
+    quality_warning = _page_quality_warning_for_candidate_pages(
+        db,
+        draft_revision_id=row.draft_revision_id,
+        page_ids=page_ids,
+    )
+    warning_codes = {
+        code
+        for code in row.warning_codes
+        if code not in {"PAGE_QUALITY_RESCAN_REQUIRED", "PAGE_QUALITY_REVIEW_REQUIRED"}
+    }
+    warning_codes.add("REGION_TEACHER_ADJUSTED")
+    if quality_warning is not None:
+        warning_codes.add(quality_warning)
+    row.warning_codes = sorted(warning_codes)
     revision.teacher_edit_version += 1
     audit(
         db,
@@ -2289,6 +2327,20 @@ def disposition_question_extraction(
         ).all()
     )
     if data.action in {"accept", "modify"}:
+        quality_warning = _page_quality_warning_for_candidate_pages(
+            db,
+            draft_revision_id=row.draft_revision_id,
+            page_ids={region.paper_page_id for region in regions},
+        )
+        if (
+            quality_warning == "PAGE_QUALITY_RESCAN_REQUIRED"
+            or "PAGE_QUALITY_RESCAN_REQUIRED" in row.warning_codes
+        ):
+            raise ApiProblem(
+                409,
+                "RECOGNITION_PAGE_RESCAN_REQUIRED",
+                "题目所在页面无法可靠读取，请重新拍摄或扫描后再识别",
+            )
         paper = db.scalar(
             select(PaperVersion).where(PaperVersion.id == row.paper_version_id).with_for_update()
         )

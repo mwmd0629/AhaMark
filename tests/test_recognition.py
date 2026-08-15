@@ -46,6 +46,13 @@ def image_bytes(format_: str = "PNG") -> bytes:
     return output.getvalue()
 
 
+def readable_page_image_bytes() -> bytes:
+    output = io.BytesIO()
+    image = Image.new("RGB", (700, 900), "white")
+    image.save(output, "PNG")
+    return output.getvalue()
+
+
 def text_pdf_bytes(text: str) -> bytes:
     output = io.BytesIO()
     document = canvas.Canvas(output, pagesize=(300, 200))
@@ -560,7 +567,7 @@ def test_fake_job_candidates_corrections_confirmation_and_idempotency() -> None:
         aid = assignment["id"]
         upload = client.post(
             f"/api/assignments/{aid}/files",
-            files={"file": ("paper.png", image_bytes(), "image/png")},
+            files={"file": ("paper.png", readable_page_image_bytes(), "image/png")},
         )
         assert upload.status_code == 201
         detail = client.get(f"/api/assignments/{aid}").json()
