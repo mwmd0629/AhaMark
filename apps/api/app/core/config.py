@@ -62,6 +62,8 @@ class Settings(BaseSettings):
     formula_recognition_max_pixels: int = Field(default=8_000_000, ge=1, le=40_000_000)
     formula_recognition_max_candidates: int = Field(default=5, ge=1, le=10)
     formula_recognition_config_version: str = "formula-recognition-v1"
+    formula_region_detection_enabled: bool = False
+    formula_region_detection_model_download_allowed: bool = False
     answer_recognition_provider: str = "unavailable"
     answer_recognition_base_url: str | None = None
     answer_recognition_api_key: str | None = None
@@ -167,6 +169,22 @@ class Settings(BaseSettings):
                     "CODEX_LOCAL_INTERNAL_TOKEN must be a strong value of at least "
                     "32 characters when CODEX_LOCAL_ENABLED is true"
                 )
+        formula_region_errors = []
+        if self.formula_region_detection_enabled:
+            formula_region_errors.append(
+                "FORMULA_REGION_DETECTION_ENABLED must remain false until a separately authorized "
+                "product integration is reviewed"
+            )
+        if self.formula_region_detection_model_download_allowed:
+            formula_region_errors.append(
+                "FORMULA_REGION_DETECTION_MODEL_DOWNLOAD_ALLOWED must remain false; "
+                "runtime model downloads are prohibited"
+            )
+        if formula_region_errors:
+            raise ValueError(
+                "formula region detection configuration rejected: "
+                + "; ".join(formula_region_errors)
+            )
         if self.app_env.lower() != "production":
             return self
         errors: list[str] = []
