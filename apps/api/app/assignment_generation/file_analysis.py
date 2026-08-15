@@ -33,6 +33,11 @@ _PAGE_QUALITY_ISSUES = {
     "skew",
     "crop_risk",
 }
+_MATH_STRUCTURE_RISK_CODES = {
+    "FORMULA_REVIEW_REQUIRED",
+    "MATH_LAYOUT_REVIEW_REQUIRED",
+    "READING_ORDER_CONFLICT",
+}
 
 
 def _public_page_quality(parameters: dict[str, object]) -> tuple[str | None, list[str]]:
@@ -49,6 +54,67 @@ def _public_page_quality(parameters: dict[str, object]) -> tuple[str | None, lis
         else []
     )
     return str(level), issues
+
+
+def _public_math_structure(parameters: dict[str, object]) -> dict[str, object] | None:
+    raw = parameters.get("math_structure")
+    if not isinstance(raw, dict):
+        return None
+    raw_codes = raw.get("risk_codes")
+    raw_evidence = raw.get("evidence")
+    if not isinstance(raw_codes, (list, tuple)) or not isinstance(raw_evidence, (list, tuple)):
+        return {"risk_codes": [], "evidence": []}
+    codes: list[str] = []
+    evidence: list[dict[str, object]] = []
+    for code, item in zip(raw_codes, raw_evidence, strict=False):
+        if code not in _MATH_STRUCTURE_RISK_CODES or not isinstance(item, dict):
+            continue
+        raw_indexes = item.get("block_indexes")
+        indexes = (
+            sorted(
+                {
+                    index
+                    for index in raw_indexes
+                    if isinstance(index, int) and not isinstance(index, bool) and index >= 0
+                }
+            )
+            if isinstance(raw_indexes, (list, tuple))
+            else []
+        )
+        raw_region = item.get("region")
+        if not (
+            isinstance(raw_region, (list, tuple))
+            and len(raw_region) == 4
+            and all(
+                isinstance(value, (int, float)) and not isinstance(value, bool)
+                for value in raw_region
+            )
+        ):
+            continue
+        region = [float(value) for value in raw_region]
+        x, y, width, height = region
+        if min(region) < 0 or x + width > 1 or y + height > 1 or width <= 0 or height <= 0:
+            continue
+        codes.append(str(code))
+        evidence.append({"block_indexes": indexes, "region": region})
+    return {"risk_codes": codes, "evidence": evidence}
+
+
+def _public_source_conflicts(parameters: dict[str, object]) -> dict[str, int] | None:
+    raw_count = parameters.get("source_conflict_count")
+    raw_math_count = parameters.get("math_symbol_conflict_count")
+    if not any(
+        isinstance(value, int) and not isinstance(value, bool)
+        for value in (raw_count, raw_math_count)
+    ):
+        return None
+    count = raw_count if isinstance(raw_count, int) and not isinstance(raw_count, bool) else 0
+    math_count = (
+        raw_math_count
+        if isinstance(raw_math_count, int) and not isinstance(raw_math_count, bool)
+        else 0
+    )
+    return {"count": max(count, 0), "math_symbol_count": max(math_count, 0)}
 
 
 def _role(name: str, text: str) -> tuple[str, float, str, float]:
@@ -270,6 +336,8 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
             result = results.get(page.id)
             params = dict(result.processing_parameters) if result else {}
             quality_level, quality_issues = _public_page_quality(params)
+            math_structure = _public_math_structure(params)
+            source_conflicts = _public_source_conflicts(params)
             page_content_mode, page_text_source, page_content_confidence, text_count = (
                 content_by_page[page.id]
             )
@@ -329,13 +397,25 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
                     corrupted=status == "corrupted",
                     variant_label=variant or "unknown",
                     metrics={
-                        "page_quality": {
-                            "level": quality_level,
-                            "issues": quality_issues,
-                        }
-                    }
-                    if quality_level is not None
-                    else {},
+                        **(
+                            {
+                                "page_quality": {
+                                    "level": quality_level,
+                                    "issues": quality_issues,
+                                }
+                            }
+                            if quality_level is not None
+                            else {}
+                        ),
+                        **(
+                            {"math_structure": math_structure} if math_structure is not None else {}
+                        ),
+                        **(
+                            {"source_conflicts": source_conflicts}
+                            if source_conflicts is not None
+                            else {}
+                        ),
+                    },
                     evidence=[
                         EvidenceRef(
                             kind="page",

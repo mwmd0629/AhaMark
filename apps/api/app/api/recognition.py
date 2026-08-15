@@ -31,6 +31,7 @@ from app.models import (
     now_utc,
 )
 from app.recognition.formula import formula_provider_from_settings
+from app.recognition.math_structure import apply_math_risk_status, detect_math_structure_risks
 from app.recognition.page_quality import assess_page_quality, measure_page_quality
 from app.recognition.pipeline import (
     DefaultDocumentConverter,
@@ -113,7 +114,62 @@ def _public_processing_parameters(parameters: dict[str, Any]) -> dict[str, Any]:
         "version": raw_quality.get("version") if isinstance(raw_quality, dict) else None,
         **public_quality,
     }
+    output["math_structure"] = _math_structure_risks(parameters)
     return output
+
+
+def _math_structure_risks(parameters: dict[str, Any]) -> dict[str, Any]:
+    raw = parameters.get("math_structure")
+    allowed_codes = {
+        "FORMULA_REVIEW_REQUIRED",
+        "MATH_LAYOUT_REVIEW_REQUIRED",
+        "READING_ORDER_CONFLICT",
+    }
+    if not isinstance(raw, dict):
+        return {"version": None, "risk_codes": [], "evidence": []}
+    risk_codes = raw.get("risk_codes")
+    evidence = raw.get("evidence")
+    public_codes: list[str] = []
+    public_evidence: list[dict[str, Any]] = []
+    if isinstance(risk_codes, (list, tuple)) and isinstance(evidence, (list, tuple)):
+        for code, item in zip(risk_codes, evidence, strict=False):
+            if not isinstance(code, str) or code not in allowed_codes or not isinstance(item, dict):
+                continue
+            indexes = item.get("block_indexes")
+            region = item.get("region")
+            if not (
+                isinstance(indexes, (list, tuple))
+                and all(
+                    isinstance(index, int) and not isinstance(index, bool) and index >= 0
+                    for index in indexes
+                )
+                and isinstance(region, (list, tuple))
+                and len(region) == 4
+                and all(
+                    isinstance(value, (int, float)) and not isinstance(value, bool)
+                    for value in region
+                )
+            ):
+                continue
+            normalized_region = [float(value) for value in region]
+            x, y, width, height = normalized_region
+            if (
+                min(normalized_region) < 0
+                or width <= 0
+                or height <= 0
+                or x + width > 1
+                or y + height > 1
+            ):
+                continue
+            public_codes.append(code)
+            public_evidence.append(
+                {"block_indexes": [int(index) for index in indexes], "region": normalized_region}
+            )
+    return {
+        "version": raw.get("version") if isinstance(raw.get("version"), str) else None,
+        "risk_codes": public_codes,
+        "evidence": public_evidence,
+    }
 
 
 Db = Annotated[Session, Depends(get_db)]
@@ -353,8 +409,10 @@ def _preflight_recognition_page(
         if quality_assessment.manual_required
         else fusion.blocks
     )
+    structure_assessment = detect_math_structure_risks(quality_blocks)
+    structured_blocks = apply_math_risk_status(quality_blocks, structure_assessment)
     adopted_blocks = [
-        block for block in quality_blocks if block.status in {"adopted", "manual_required"}
+        block for block in structured_blocks if block.status in {"adopted", "manual_required"}
     ]
     try:
         ensure_text_fields_integrity(
@@ -366,7 +424,7 @@ def _preflight_recognition_page(
     except CharacterEncodingCorruptionError as exc:
         raise RecognitionError(exc.code, "识别文字存在损坏，请重新识别或人工核对") from exc
     sources = sorted(
-        {block.source or f"{provider.name}:{provider.version}" for block in quality_blocks}
+        {block.source or f"{provider.name}:{provider.version}" for block in structured_blocks}
     )
     quality_stats = text_quality_statistics(
         [block.text for block in adopted_blocks],
@@ -380,7 +438,7 @@ def _preflight_recognition_page(
         rendered=original,
         processed=processed,
         thumbnail=thumbnail,
-        blocks=quality_blocks,
+        blocks=structured_blocks,
         processing_parameters={
             **params,
             "text_character_count": text_character_count,
@@ -394,6 +452,7 @@ def _preflight_recognition_page(
                 "issues": list(quality_assessment.issues),
                 "metrics": asdict(quality_metrics),
             },
+            "math_structure": asdict(structure_assessment),
             **fusion.metrics,
         },
     )
@@ -719,19 +778,22 @@ def run_recognition_job(
         )
         return
 
-    old_artifact_keys = [
-        key
-        for result in db.scalars(
-            select(PageProcessingResult).where(PageProcessingResult.recognition_job_id == job.id)
-        ).all()
-        for key in (
-            result.rendered_storage_key,
-            result.processed_storage_key,
-            result.thumbnail_storage_key,
-        )
-        if key
-    ]
+    old_artifact_keys: list[str] = []
     try:
+        old_artifact_keys = [
+            key
+            for result in db.scalars(
+                select(PageProcessingResult).where(
+                    PageProcessingResult.recognition_job_id == job.id
+                )
+            ).all()
+            for key in (
+                result.rendered_storage_key,
+                result.processed_storage_key,
+                result.thumbnail_storage_key,
+            )
+            if key
+        ]
         locked_job = db.scalar(
             select(RecognitionJob).where(RecognitionJob.id == job.id).with_for_update()
         )
@@ -945,6 +1007,7 @@ def get_pages(
             "blur_score": str(x.blur_score) if x.blur_score is not None else None,
             "shadow_score": str(x.shadow_score) if x.shadow_score is not None else None,
             "quality": _page_quality(x.processing_parameters),
+            "math_structure": _math_structure_risks(x.processing_parameters),
             "error_code": x.error_code,
             "error_message": x.error_message,
             "rendered_url": storage.presigned_get(x.rendered_storage_key, 300)
@@ -1032,6 +1095,69 @@ def candidate_json(db: Session, x: QuestionCandidate) -> dict[str, Any]:
     }
 
 
+def _rectangles_overlap(
+    first: tuple[float, float, float, float], second: tuple[float, float, float, float]
+) -> bool:
+    first_x, first_y, first_width, first_height = first
+    second_x, second_y, second_width, second_height = second
+    return min(first_x + first_width, second_x + second_width) > max(first_x, second_x) and min(
+        first_y + first_height, second_y + second_height
+    ) > max(first_y, second_y)
+
+
+def _candidate_intersects_math_risk(
+    candidate: QuestionCandidate,
+    regions: list[QuestionCandidateRegion],
+    page_results: dict[uuid.UUID, PageProcessingResult],
+    risk_code: str,
+) -> bool:
+    for region in regions:
+        if region.question_candidate_id != candidate.id:
+            continue
+        result = page_results.get(region.paper_page_id)
+        if result is None:
+            continue
+        risks = _math_structure_risks(result.processing_parameters)
+        for code, evidence in zip(risks["risk_codes"], risks["evidence"], strict=False):
+            risk_region = evidence["region"]
+            if code == risk_code and _rectangles_overlap(
+                (float(region.x), float(region.y), float(region.width), float(region.height)),
+                (
+                    float(risk_region[0]),
+                    float(risk_region[1]),
+                    float(risk_region[2]),
+                    float(risk_region[3]),
+                ),
+            ):
+                return True
+    return False
+
+
+def _candidate_content_changed(
+    db: Session, job_id: uuid.UUID, candidate: QuestionCandidate
+) -> bool:
+    corrections = list(
+        db.scalars(
+            select(RecognitionCorrection)
+            .where(
+                RecognitionCorrection.recognition_job_id == job_id,
+                RecognitionCorrection.target_type == "candidate",
+                RecognitionCorrection.target_id == candidate.id,
+                RecognitionCorrection.field.in_({"content_text", "content_latex"}),
+            )
+            .order_by(RecognitionCorrection.created_at, RecognitionCorrection.id)
+        ).all()
+    )
+    baseline: dict[str, str | None] = {}
+    for correction in corrections:
+        baseline.setdefault(correction.field, correction.original_value)
+    return any(
+        baseline[field]
+        != (str(getattr(candidate, field)) if getattr(candidate, field) is not None else None)
+        for field in baseline
+    )
+
+
 @router.get("/jobs/{job_id}/candidates")
 def get_candidates(
     assignment_id: uuid.UUID, job_id: uuid.UUID, db: Db, actor: Actor
@@ -1109,13 +1235,14 @@ def confirm(
             "QUESTION_NUMBER_CONFLICT",
             "检测到重复题号，请教师先修改题号再确认",
         )
-    candidate_page_ids = set(
+    candidate_regions = list(
         db.scalars(
-            select(QuestionCandidateRegion.paper_page_id).where(
+            select(QuestionCandidateRegion).where(
                 QuestionCandidateRegion.question_candidate_id.in_([item.id for item in candidates])
             )
         ).all()
     )
+    candidate_page_ids = {region.paper_page_id for region in candidate_regions}
     page_results = list(
         db.scalars(
             select(PageProcessingResult).where(
@@ -1143,6 +1270,23 @@ def confirm(
             409,
             "RECOGNITION_PAGE_RESCAN_REQUIRED",
             "页面无法可靠读取，请重新拍摄或扫描后再确认",
+        )
+    page_results_by_page = {result.paper_page_id: result for result in page_results}
+    if any(
+        candidate.confirmed_question_id is None
+        and _candidate_intersects_math_risk(
+            candidate,
+            candidate_regions,
+            page_results_by_page,
+            "READING_ORDER_CONFLICT",
+        )
+        and not _candidate_content_changed(db, job.id, candidate)
+        for candidate in candidates
+    ):
+        raise ApiProblem(
+            409,
+            "READING_ORDER_CONFLICT",
+            "页面疑似多栏，请先核对并修改题目内容后再确认",
         )
     existing_order = (
         db.scalar(

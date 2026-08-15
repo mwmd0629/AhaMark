@@ -330,7 +330,12 @@ def test_local_extraction_accepts_legacy_blocks_and_requires_review_for_source_c
                     "page_quality": {
                         "level": "rescan_required",
                         "issues": ["blur", "crop_risk", "internal_metric_key"],
-                    }
+                    },
+                    "math_structure": {
+                        "risk_codes": ["FORMULA_REVIEW_REQUIRED"],
+                        "evidence": [{"block_indexes": [0, 1], "region": [0, 0, 1, 1]}],
+                    },
+                    "source_conflicts": {"count": 1, "math_symbol_count": 0},
                 },
                 warning_codes=["PAGE_QUALITY_RESCAN_REQUIRED"],
             )
@@ -350,6 +355,8 @@ def test_local_extraction_accepts_legacy_blocks_and_requires_review_for_source_c
         assert "SOURCE_TEXT_CONFLICT_REVIEW_REQUIRED" in extracted.warning_codes
         assert "MIXED_TEXT_SOURCE_REVIEW_REQUIRED" in extracted.warning_codes
         assert "PAGE_QUALITY_RESCAN_REQUIRED" in extracted.warning_codes
+        assert "FORMULA_REVIEW_REQUIRED" in extracted.warning_codes
+        assert "MATH_SYMBOL_SOURCE_CONFLICT" not in extracted.warning_codes
         assert extracted.evidence["page_quality"] == {
             str(page.id): {
                 "level": "rescan_required",
@@ -372,6 +379,30 @@ def test_local_extraction_accepts_legacy_blocks_and_requires_review_for_source_c
                 actor,
             )
         assert exc_info.value.code == "RECOGNITION_PAGE_RESCAN_REQUIRED"
+
+        analysis = db.scalar(
+            select(AssignmentPageAnalysis).where(
+                AssignmentPageAnalysis.draft_revision_id == revision.id,
+                AssignmentPageAnalysis.paper_page_id == page.id,
+            )
+        )
+        assert analysis is not None
+        analysis.metrics = {
+            **analysis.metrics,
+            "source_conflicts": {"count": 1, "math_symbol_count": 1},
+        }
+        db.flush()
+        assert build_fake_candidates(db, job, revision)["created"] == 1
+        math_conflict = db.scalar(
+            select(AssignmentQuestionExtractionCandidate)
+            .where(
+                AssignmentQuestionExtractionCandidate.source_question_candidate_id == candidate.id,
+                AssignmentQuestionExtractionCandidate.status == "suggested",
+            )
+            .order_by(AssignmentQuestionExtractionCandidate.candidate_version.desc())
+        )
+        assert math_conflict is not None
+        assert "MATH_SYMBOL_SOURCE_CONFLICT" in math_conflict.warning_codes
 
 
 def start(aid: uuid.UUID, key: str = "generation-key-0001"):
@@ -1495,6 +1526,124 @@ def test_teacher_replaces_question_regions_with_snapshot_and_version_guards(monk
     )
     assert modify.status_code == 409
     assert modify.json()["code"] == "RECOGNITION_PAGE_RESCAN_REQUIRED"
+
+    with SessionLocal() as db:
+        candidate_row = db.get(AssignmentQuestionExtractionCandidate, candidate_id)
+        assert candidate_row is not None
+        paper_row = db.get(PaperVersion, paper_id)
+        assert paper_row is not None
+        paper_row.status = "ready"
+        candidate_row.warning_codes = [
+            code for code in candidate_row.warning_codes if code != "PAGE_QUALITY_RESCAN_REQUIRED"
+        ]
+        candidate_row.warning_codes.append("READING_ORDER_CONFLICT")
+        rescan_analysis = db.scalar(
+            select(AssignmentPageAnalysis).where(
+                AssignmentPageAnalysis.draft_revision_id == candidate_row.draft_revision_id,
+                AssignmentPageAnalysis.paper_page_id == page_ids[1],
+            )
+        )
+        assert rescan_analysis is not None
+        rescan_analysis.metrics = {
+            "page_quality": {"level": "good", "issues": []},
+            "math_structure": {
+                "risk_codes": ["READING_ORDER_CONFLICT"],
+                "evidence": [{"block_indexes": [], "region": [0, 0, 1, 1]}],
+            },
+        }
+        db.flush()
+        assignment_row = db.get(Assignment, assignment.id)
+        revision_row = db.get(AssignmentDraftRevision, candidate_row.draft_revision_id)
+        job_row = db.get(AssignmentGenerationJob, candidate_row.generation_job_id)
+        source_analysis_row = db.scalar(
+            select(AssignmentSourceFileAnalysis).where(
+                AssignmentSourceFileAnalysis.draft_revision_id == candidate_row.draft_revision_id
+            )
+        )
+        assert assignment_row is not None
+        assert revision_row is not None
+        assert job_row is not None
+        assert source_analysis_row is not None
+        snapshot = source_snapshot_hash(db, assignment_row)
+        candidate_row.source_snapshot_hash = snapshot
+        revision_row.source_snapshot_hash = snapshot
+        job_row.source_snapshot_hash = snapshot
+        source_analysis_row.source_snapshot_hash = snapshot
+        for analysis in db.scalars(
+            select(AssignmentPageAnalysis).where(
+                AssignmentPageAnalysis.draft_revision_id == candidate_row.draft_revision_id
+            )
+        ).all():
+            analysis.source_snapshot_hash = snapshot
+        db.commit()
+
+    disposition_guard["expected_source_snapshot"] = snapshot
+
+    reading_accept = client.patch(
+        f"/api/question-extraction-candidates/{candidate_id}/disposition",
+        json={**disposition_guard, "action": "accept"},
+    )
+    assert reading_accept.status_code == 409
+    assert reading_accept.json()["code"] == "READING_ORDER_CONFLICT"
+
+    number_only_modify = client.patch(
+        f"/api/question-extraction-candidates/{candidate_id}/disposition",
+        json={
+            **disposition_guard,
+            "action": "modify",
+            "teacher_value": {"question_number": "2(3)-checked"},
+        },
+    )
+    assert number_only_modify.status_code == 409
+    assert number_only_modify.json()["code"] == "READING_ORDER_CONFLICT"
+
+    no_op_content_modify = client.patch(
+        f"/api/question-extraction-candidates/{candidate_id}/disposition",
+        json={
+            **disposition_guard,
+            "action": "modify",
+            "teacher_value": {"content_text": "Synthetic question"},
+        },
+    )
+    assert no_op_content_modify.status_code == 409
+    assert no_op_content_modify.json()["code"] == "READING_ORDER_CONFLICT"
+
+    reading_modify = client.patch(
+        f"/api/question-extraction-candidates/{candidate_id}/disposition",
+        json={
+            **disposition_guard,
+            "action": "modify",
+            "teacher_value": {"content_text": "Teacher corrected reading order"},
+        },
+    )
+    assert reading_modify.status_code == 200, reading_modify.text
+    assert reading_modify.json()["status"] == "modified"
+    with SessionLocal() as db:
+        moved_candidate = db.get(AssignmentQuestionExtractionCandidate, candidate_id)
+        assert moved_candidate is not None
+        assert moved_candidate.paper_version_id != paper_id
+        moved_page_ids = set(
+            db.scalars(
+                select(AssignmentQuestionExtractionRegion.paper_page_id).where(
+                    AssignmentQuestionExtractionRegion.candidate_id == candidate_id
+                )
+            ).all()
+        )
+        assert moved_page_ids.isdisjoint(page_ids)
+        copied_analyses = list(
+            db.scalars(
+                select(AssignmentPageAnalysis).where(
+                    AssignmentPageAnalysis.draft_revision_id == moved_candidate.draft_revision_id,
+                    AssignmentPageAnalysis.paper_page_id.in_(moved_page_ids),
+                )
+            ).all()
+        )
+        assert {analysis.paper_page_id for analysis in copied_analyses} == moved_page_ids
+        assert any(
+            "READING_ORDER_CONFLICT"
+            in (analysis.metrics.get("math_structure") or {}).get("risk_codes", [])
+            for analysis in copied_analyses
+        )
 
 
 def test_production_fake_degrades_to_unavailable():

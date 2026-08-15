@@ -607,7 +607,21 @@ export function QuestionExtractionReview({
                     {(item.quality_stats?.has_formula_region ||
                       item.warning_codes.includes(
                         "FORMULA_REVIEW_REQUIRED",
-                      )) && <p>公式需要核对。</p>}
+                      )) && (
+                      <p>
+                        本题含数学公式，请对照原页核对上下标、分数线、根号和括号。
+                      </p>
+                    )}
+                    {item.warning_codes.includes(
+                      "MATH_LAYOUT_REVIEW_REQUIRED",
+                    ) && (
+                      <p>数学排版可能影响含义，请核对公式与文字的相对位置。</p>
+                    )}
+                    {item.warning_codes.includes("READING_ORDER_CONFLICT") && (
+                      <p className="text-red-700">
+                        页面疑似多栏或阅读顺序不明确，请按原页顺序修改题目内容后再确认。
+                      </p>
+                    )}
                     {item.warning_codes.includes(
                       "PAGE_QUALITY_RESCAN_REQUIRED",
                     ) && (
@@ -629,20 +643,7 @@ export function QuestionExtractionReview({
                         知识点：{item.knowledge_point_suggestions.join("、")}
                       </p>
                     )}
-                    <details>
-                      <summary className="cursor-pointer">技术依据</summary>
-                      <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap">
-                        {JSON.stringify(
-                          {
-                            field_confidences: item.field_confidences,
-                            evidence: item.evidence,
-                            regions: item.regions,
-                          },
-                          null,
-                          2,
-                        )}
-                      </pre>
-                    </details>
+                    <p>来源区域：{item.regions.length} 个</p>
                   </div>
                 </details>
                 <details className="rounded-lg border bg-white p-3 text-sm">

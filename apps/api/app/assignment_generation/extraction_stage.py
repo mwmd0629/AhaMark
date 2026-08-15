@@ -28,6 +28,22 @@ from app.models import (
 )
 from app.recognition.text_integrity import text_quality_statistics
 
+_MATH_STRUCTURE_RISK_CODES = {
+    "FORMULA_REVIEW_REQUIRED",
+    "MATH_LAYOUT_REVIEW_REQUIRED",
+    "READING_ORDER_CONFLICT",
+}
+
+
+def _regions_overlap(
+    first: tuple[float, float, float, float], second: tuple[float, float, float, float]
+) -> bool:
+    first_x, first_y, first_width, first_height = first
+    second_x, second_y, second_width, second_height = second
+    return min(first_x + first_width, second_x + second_width) > max(first_x, second_x) and min(
+        first_y + first_height, second_y + second_height
+    ) > max(first_y, second_y)
+
 
 def _completed_recognitions_by_version(
     db: Session, version_ids: set[uuid.UUID]
@@ -202,6 +218,10 @@ def build_local_candidates(
         return {"created": 0, "blocked": "PAGE_PROCESSING_INCOMPLETE"}
     page_ids = {x.id for x in pages}
     page_quality: dict[uuid.UUID, tuple[str, list[str]]] = {}
+    page_math_risks: dict[
+        uuid.UUID, list[tuple[str, set[int], tuple[float, float, float, float]]]
+    ] = {}
+    page_math_symbol_conflicts: dict[uuid.UUID, int] = {}
     public_quality_issues = {
         "low_resolution",
         "blur",
@@ -217,17 +237,62 @@ def build_local_candidates(
         )
     ):
         raw = (analysis.metrics or {}).get("page_quality")
-        if not isinstance(raw, dict):
-            continue
-        level = raw.get("level")
-        issues = raw.get("issues")
-        if level in {"review_required", "rescan_required"}:
-            page_quality[analysis.paper_page_id] = (
-                str(level),
-                sorted(str(issue) for issue in issues if str(issue) in public_quality_issues)
-                if isinstance(issues, list)
-                else [],
-            )
+        if isinstance(raw, dict):
+            level = raw.get("level")
+            issues = raw.get("issues")
+            if level in {"review_required", "rescan_required"}:
+                page_quality[analysis.paper_page_id] = (
+                    str(level),
+                    sorted(str(issue) for issue in issues if str(issue) in public_quality_issues)
+                    if isinstance(issues, list)
+                    else [],
+                )
+        raw_math = (analysis.metrics or {}).get("math_structure")
+        risks = []
+        if isinstance(raw_math, dict):
+            codes = raw_math.get("risk_codes")
+            evidence = raw_math.get("evidence")
+            if isinstance(codes, (list, tuple)) and isinstance(evidence, (list, tuple)):
+                for code, item in zip(codes, evidence, strict=False):
+                    if code not in _MATH_STRUCTURE_RISK_CODES or not isinstance(item, dict):
+                        continue
+                    raw_indexes = item.get("block_indexes")
+                    raw_region = item.get("region")
+                    if not (
+                        isinstance(raw_indexes, (list, tuple))
+                        and isinstance(raw_region, (list, tuple))
+                        and len(raw_region) == 4
+                        and all(
+                            isinstance(value, (int, float)) and not isinstance(value, bool)
+                            for value in raw_region
+                        )
+                    ):
+                        continue
+                    risks.append(
+                        (
+                            str(code),
+                            {
+                                index
+                                for index in raw_indexes
+                                if isinstance(index, int)
+                                and not isinstance(index, bool)
+                                and index >= 0
+                            },
+                            (
+                                float(raw_region[0]),
+                                float(raw_region[1]),
+                                float(raw_region[2]),
+                                float(raw_region[3]),
+                            ),
+                        )
+                    )
+        if risks:
+            page_math_risks[analysis.paper_page_id] = risks
+        raw_conflicts = (analysis.metrics or {}).get("source_conflicts")
+        if isinstance(raw_conflicts, dict):
+            math_count = raw_conflicts.get("math_symbol_count")
+            if isinstance(math_count, int) and not isinstance(math_count, bool) and math_count > 0:
+                page_math_symbol_conflicts[analysis.paper_page_id] = math_count
     candidates = list(
         db.scalars(
             select(QuestionCandidate)
@@ -372,13 +437,37 @@ def build_local_candidates(
             for value in block_ids
             if (block := db.get(RecognitionBlock, uuid.UUID(value))) is not None
         ]
+        referenced_orders_by_page: dict[uuid.UUID, set[int]] = {}
+        for block in referenced_blocks:
+            referenced_orders_by_page.setdefault(block.paper_page_id, set()).add(
+                block.display_order - 1
+            )
+        candidate_math_risks: set[str] = set()
+        for region in source_regions:
+            candidate_region = (
+                float(region.x),
+                float(region.y),
+                float(region.width),
+                float(region.height),
+            )
+            referenced_orders = referenced_orders_by_page.get(region.paper_page_id, set())
+            for code, block_indexes, risk_region in page_math_risks.get(region.paper_page_id, []):
+                if block_indexes & referenced_orders or _regions_overlap(
+                    candidate_region, risk_region
+                ):
+                    candidate_math_risks.add(code)
+        if candidate_math_risks:
+            warnings.extend(sorted(candidate_math_risks))
+            manual = True
         if conflict_block_ids:
             warnings.append("SOURCE_TEXT_CONFLICT_REVIEW_REQUIRED")
             manual = True
         if source.source.startswith("mixed:"):
             warnings.append("MIXED_TEXT_SOURCE_REVIEW_REQUIRED")
             manual = True
-        if any(block.status == "manual_required" for block in referenced_blocks):
+        if any(
+            page_math_symbol_conflicts.get(region.paper_page_id, 0) > 0 for region in source_regions
+        ):
             warnings.append("MATH_SYMBOL_SOURCE_CONFLICT")
             manual = True
         quality_stats = text_quality_statistics(

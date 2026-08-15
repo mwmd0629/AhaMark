@@ -115,6 +115,7 @@ export function RecognitionWorkspace({
   const qualityIssues = (page?.quality?.issues ?? [])
     .map((issue) => QUALITY_ISSUE_LABELS[issue])
     .filter(Boolean);
+  const mathRiskCodes = new Set(page?.math_structure?.risk_codes ?? []);
   const currentHasRescanRequired = Boolean(
     current?.regions.some((currentRegion) =>
       pages.some(
@@ -259,6 +260,21 @@ export function RecognitionWorkspace({
       )}
       {page?.quality?.level === "good" && (
         <p className="text-xs text-emerald-700">页面清晰，可继续核对题目。</p>
+      )}
+      {mathRiskCodes.has("FORMULA_REVIEW_REQUIRED") && (
+        <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-900">
+          本页含数学公式，请对照原页核对上下标、分数线、根号和括号。
+        </p>
+      )}
+      {mathRiskCodes.has("MATH_LAYOUT_REVIEW_REQUIRED") && (
+        <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-900">
+          数学排版可能影响含义，请核对公式与文字的相对位置后再确认。
+        </p>
+      )}
+      {mathRiskCodes.has("READING_ORDER_CONFLICT") && (
+        <p className="rounded-xl bg-red-50 p-3 text-sm text-red-800">
+          页面疑似多栏或阅读顺序不明确，请按原页顺序调整题目内容后再确认。
+        </p>
       )}
       {!!sourceMetrics?.math_symbol_conflict_count && (
         <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-900">

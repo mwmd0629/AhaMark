@@ -964,6 +964,17 @@ export type RecognitionPage = {
       | "crop_risk"
     )[];
   };
+  math_structure?: {
+    risk_codes: (
+      | "FORMULA_REVIEW_REQUIRED"
+      | "MATH_LAYOUT_REVIEW_REQUIRED"
+      | "READING_ORDER_CONFLICT"
+    )[];
+    evidence: {
+      block_indexes: number[];
+      region: [number, number, number, number];
+    }[];
+  };
   error_message?: string;
   rendered_url?: string;
   processed_url?: string;

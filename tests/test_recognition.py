@@ -34,7 +34,7 @@ from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 from pypdf import PdfWriter
 from reportlab.pdfgen import canvas
-from sqlalchemy import select
+from sqlalchemy import func, select
 from test_assignments import FakeStorage, active_class, actor_and_db, create
 
 client = TestClient(app)
@@ -951,6 +951,53 @@ def test_atomic_batch_final_commit_failure_restores_old_rows_and_deletes_new_art
         assert set(storage.objects) == old_object_keys
         assert set(storage.delete_calls).isdisjoint(old_page_keys)
         assert db.get(RecognitionJob, job_id).status == RecognitionStatus.failed
+    finally:
+        settings.recognition_provider = previous
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_old_artifact_query_failure_deletes_this_attempt_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api import recognition as recognition_api
+
+    actor, db = actor_and_db()
+    storage = FakeStorage()
+    settings = get_settings()
+    previous = settings.recognition_provider
+    settings.recognition_provider = "fake"
+    try:
+        assignment_id, version_id, original_keys = _upload_two_page_recognition_fixture(
+            db, actor, storage
+        )
+        monkeypatch.setattr(recognition_api, "dispatch_recognition_job", lambda _db, _job: None)
+        created = client.post(
+            f"/api/assignments/{assignment_id}/recognition/jobs",
+            json={"paper_version_id": version_id, "idempotency_key": "old-key-query-failure"},
+        ).json()
+        job_id = uuid.UUID(created["id"])
+        original_scalars = db.scalars
+
+        def fail_old_key_query(statement: object, *args: object, **kwargs: object) -> object:
+            new_artifacts_exist = any(key.startswith("recognition/") for key in storage.objects)
+            if new_artifacts_exist and "page_processing_results" in str(statement):
+                raise RuntimeError("synthetic old artifact query failure")
+            return original_scalars(statement, *args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(db, "scalars", fail_old_key_query)
+        run_recognition_job(db, storage, job_id)
+        monkeypatch.setattr(db, "scalars", original_scalars)
+
+        assert set(storage.objects) == original_keys
+        assert db.get(RecognitionJob, job_id).status == RecognitionStatus.failed
+        assert (
+            db.scalar(
+                select(func.count())
+                .select_from(PageProcessingResult)
+                .where(PageProcessingResult.recognition_job_id == job_id)
+            )
+            == 0
+        )
     finally:
         settings.recognition_provider = previous
         app.dependency_overrides.pop(get_storage, None)

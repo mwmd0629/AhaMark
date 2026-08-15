@@ -191,10 +191,46 @@ describe("QuestionExtractionReview", () => {
     expect(
       screen.getByText("扫描文字置信度较低，请对照原文核对。"),
     ).toBeInTheDocument();
-    expect(screen.getByText("公式需要核对。")).toBeInTheDocument();
+    expect(
+      screen.getByText(/本题含数学公式，请对照原页核对/),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /确认全部可直接采用的题目/ }),
     ).not.toBeInTheDocument();
+  });
+
+  it("shows public math-layout and reading-order guidance without internal heuristics", async () => {
+    const defaultCandidates = await api.listQuestionCandidates();
+    api.listQuestionCandidates.mockResolvedValue([
+      {
+        ...defaultCandidates[1],
+        id: "candidate-math-risk",
+        warning_codes: [
+          "FORMULA_REVIEW_REQUIRED",
+          "MATH_LAYOUT_REVIEW_REQUIRED",
+          "READING_ORDER_CONFLICT",
+        ],
+        manual_required: true,
+        evidence: { internal_column_gap: 0.12 },
+      },
+    ]);
+    render(
+      <QuestionExtractionReview
+        revision={revision}
+        onChanged={() => undefined}
+      />,
+    );
+    fireEvent.click(await screen.findByText(/一、 · 分值待定/));
+    fireEvent.click(screen.getByText("识别说明"));
+
+    expect(
+      screen.getByText(/本题含数学公式，请对照原页核对/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/数学排版可能影响含义/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/页面疑似多栏或阅读顺序不明确/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/internal_column_gap/)).not.toBeInTheDocument();
   });
 
   it("blocks adopting a question whose page must be rescanned", async () => {

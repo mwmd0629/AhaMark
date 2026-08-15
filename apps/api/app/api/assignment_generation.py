@@ -2088,6 +2088,58 @@ def _page_quality_warning_for_candidate_pages(
     return None
 
 
+def _math_structure_warnings_for_candidate_regions(
+    db: Session,
+    *,
+    draft_revision_id: uuid.UUID,
+    regions: list[AssignmentQuestionExtractionRegion],
+) -> set[str]:
+    page_ids = {region.paper_page_id for region in regions}
+    analyses = db.scalars(
+        select(AssignmentPageAnalysis).where(
+            AssignmentPageAnalysis.draft_revision_id == draft_revision_id,
+            AssignmentPageAnalysis.paper_page_id.in_(page_ids),
+        )
+    ).all()
+    regions_by_page: dict[uuid.UUID, list[AssignmentQuestionExtractionRegion]] = {}
+    for region in regions:
+        regions_by_page.setdefault(region.paper_page_id, []).append(region)
+    warnings: set[str] = set()
+    allowed = {
+        "FORMULA_REVIEW_REQUIRED",
+        "MATH_LAYOUT_REVIEW_REQUIRED",
+        "READING_ORDER_CONFLICT",
+    }
+    for analysis in analyses:
+        raw = (analysis.metrics or {}).get("math_structure")
+        if not isinstance(raw, dict):
+            continue
+        codes = raw.get("risk_codes")
+        evidence = raw.get("evidence")
+        if not isinstance(codes, list) or not isinstance(evidence, list):
+            continue
+        for code, item in zip(codes, evidence, strict=False):
+            if code not in allowed or not isinstance(item, dict):
+                continue
+            raw_region = item.get("region")
+            if not (
+                isinstance(raw_region, list)
+                and len(raw_region) == 4
+                and all(isinstance(value, (int, float)) for value in raw_region)
+            ):
+                continue
+            risk_x, risk_y, risk_width, risk_height = (float(value) for value in raw_region)
+            if any(
+                min(float(region.x + region.width), risk_x + risk_width)
+                > max(float(region.x), risk_x)
+                and min(float(region.y + region.height), risk_y + risk_height)
+                > max(float(region.y), risk_y)
+                for region in regions_by_page.get(analysis.paper_page_id, [])
+            ):
+                warnings.add(str(code))
+    return warnings
+
+
 @router.put("/api/question-extraction-candidates/{candidate_id}/regions")
 def update_question_extraction_regions(
     candidate_id: uuid.UUID,
@@ -2147,6 +2199,14 @@ def update_question_extraction_regions(
                 cross_page_group=cross_page_group,
             )
         )
+    db.flush()
+    updated_regions = list(
+        db.scalars(
+            select(AssignmentQuestionExtractionRegion).where(
+                AssignmentQuestionExtractionRegion.candidate_id == row.id
+            )
+        ).all()
+    )
     row.teacher_edit_version += 1
     row.manual_required = True
     quality_warning = _page_quality_warning_for_candidate_pages(
@@ -2157,11 +2217,25 @@ def update_question_extraction_regions(
     warning_codes = {
         code
         for code in row.warning_codes
-        if code not in {"PAGE_QUALITY_RESCAN_REQUIRED", "PAGE_QUALITY_REVIEW_REQUIRED"}
+        if code
+        not in {
+            "PAGE_QUALITY_RESCAN_REQUIRED",
+            "PAGE_QUALITY_REVIEW_REQUIRED",
+            "FORMULA_REVIEW_REQUIRED",
+            "MATH_LAYOUT_REVIEW_REQUIRED",
+            "READING_ORDER_CONFLICT",
+        }
     }
     warning_codes.add("REGION_TEACHER_ADJUSTED")
     if quality_warning is not None:
         warning_codes.add(quality_warning)
+    warning_codes.update(
+        _math_structure_warnings_for_candidate_regions(
+            db,
+            draft_revision_id=row.draft_revision_id,
+            regions=updated_regions,
+        )
+    )
     row.warning_codes = sorted(warning_codes)
     revision.teacher_edit_version += 1
     audit(
@@ -2231,6 +2305,48 @@ def _derive_draft_paper(
         db.add(copied)
         db.flush()
         page_map[source.id] = copied.id
+    source_page_ids = set(page_map)
+    for analysis in db.scalars(
+        select(AssignmentPageAnalysis).where(
+            AssignmentPageAnalysis.draft_revision_id == revision.id,
+            AssignmentPageAnalysis.paper_page_id.in_(source_page_ids),
+        )
+    ).all():
+        db.add(
+            AssignmentPageAnalysis(
+                owner_id=analysis.owner_id,
+                assignment_id=analysis.assignment_id,
+                generation_job_id=analysis.generation_job_id,
+                draft_revision_id=analysis.draft_revision_id,
+                paper_page_id=page_map[analysis.paper_page_id],
+                source_file_analysis_id=analysis.source_file_analysis_id,
+                source_snapshot_hash=analysis.source_snapshot_hash,
+                status=analysis.status,
+                content_mode=analysis.content_mode,
+                text_source=analysis.text_source,
+                content_mode_confidence=analysis.content_mode_confidence,
+                text_character_count=analysis.text_character_count,
+                quality_score=analysis.quality_score,
+                blank_probability=analysis.blank_probability,
+                duplicate_probability=analysis.duplicate_probability,
+                duplicate_of_page_id=(
+                    page_map.get(analysis.duplicate_of_page_id)
+                    if analysis.duplicate_of_page_id is not None
+                    else None
+                ),
+                missing_page_suspected=analysis.missing_page_suspected,
+                low_quality=analysis.low_quality,
+                corrupted=analysis.corrupted,
+                mixed_document_suspected=analysis.mixed_document_suspected,
+                variant_label=analysis.variant_label,
+                metrics=deepcopy(analysis.metrics),
+                evidence=deepcopy(analysis.evidence),
+                warning_codes=list(analysis.warning_codes),
+                teacher_edit_version=analysis.teacher_edit_version,
+                reviewed_by=analysis.reviewed_by,
+                reviewed_at=analysis.reviewed_at,
+            )
+        )
     affected = list(
         db.scalars(
             select(AssignmentQuestionExtractionCandidate).where(
@@ -2327,6 +2443,28 @@ def disposition_question_extraction(
         ).all()
     )
     if data.action in {"accept", "modify"}:
+        math_warnings = _math_structure_warnings_for_candidate_regions(
+            db,
+            draft_revision_id=row.draft_revision_id,
+            regions=regions,
+        )
+        reading_order_conflict = (
+            "READING_ORDER_CONFLICT" in math_warnings
+            or "READING_ORDER_CONFLICT" in row.warning_codes
+        )
+        content_changed = bool(
+            data.teacher_value
+            and any(
+                field in data.teacher_value and data.teacher_value[field] != getattr(row, field)
+                for field in ("content_text", "content_latex")
+            )
+        )
+        if reading_order_conflict and (data.action == "accept" or not content_changed):
+            raise ApiProblem(
+                409,
+                "READING_ORDER_CONFLICT",
+                "页面疑似多栏或阅读顺序不明确，请核对并修改题目内容后再确认",
+            )
         quality_warning = _page_quality_warning_for_candidate_pages(
             db,
             draft_revision_id=row.draft_revision_id,
@@ -2480,6 +2618,21 @@ def accept_eligible_question_candidates(
                 .order_by(AssignmentQuestionExtractionRegion.display_order)
             ).all()
         )
+        if (
+            "READING_ORDER_CONFLICT"
+            in _math_structure_warnings_for_candidate_regions(
+                db,
+                draft_revision_id=row.draft_revision_id,
+                regions=regions,
+            )
+            or _page_quality_warning_for_candidate_pages(
+                db,
+                draft_revision_id=row.draft_revision_id,
+                page_ids={region.paper_page_id for region in regions},
+            )
+            == "PAGE_QUALITY_RESCAN_REQUIRED"
+        ):
+            continue
         if eligible(row, regions, variant_unresolved=variant):
             parent = None
             if row.parent_candidate_id:

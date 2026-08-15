@@ -332,6 +332,18 @@ it("shows only actionable public page-quality guidance", async () => {
         level: "rescan_required",
         issues: ["blur", "crop_risk"],
       },
+      math_structure: {
+        risk_codes: [
+          "FORMULA_REVIEW_REQUIRED",
+          "MATH_LAYOUT_REVIEW_REQUIRED",
+          "READING_ORDER_CONFLICT",
+        ],
+        evidence: [
+          { block_indexes: [0], region: [0, 0, 1, 1] },
+          { block_indexes: [1], region: [0, 0, 1, 1] },
+          { block_indexes: [2], region: [0, 0, 1, 1] },
+        ],
+      },
       processing_parameters: {
         page_quality: {
           metrics: { laplacian_variance: 12.34 },
@@ -353,6 +365,12 @@ it("shows only actionable public page-quality guidance", async () => {
   expect(screen.getByRole("button", { name: "确认生成题目" })).toBeDisabled();
   expect(screen.queryByText(/laplacian_variance/)).not.toBeInTheDocument();
   expect(screen.queryByText(/internal-provider/)).not.toBeInTheDocument();
+  expect(
+    screen.getByText(/本页含数学公式，请对照原页核对/),
+  ).toBeInTheDocument();
+  expect(screen.getByText(/数学排版可能影响含义/)).toBeInTheDocument();
+  expect(screen.getByText(/页面疑似多栏或阅读顺序不明确/)).toBeInTheDocument();
+  expect(screen.queryByText(/block_indexes/)).not.toBeInTheDocument();
 
   cleanup();
   api.pages.mockResolvedValue([

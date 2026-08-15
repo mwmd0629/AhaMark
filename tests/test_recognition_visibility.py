@@ -127,6 +127,24 @@ def test_file_analysis_ignores_newer_failed_recognition_results() -> None:
                             "issues": ["blur", "unknown_internal_issue"],
                             "metrics": {"laplacian_variance": 12.34},
                         },
+                        "math_structure": {
+                            "version": "math-structure-risk-v1",
+                            "risk_codes": [
+                                "INTERNAL_HEURISTIC_CODE",
+                                "FORMULA_REVIEW_REQUIRED",
+                            ],
+                            "evidence": [
+                                {"block_indexes": [9], "region": [0, 0, 1, 1]},
+                                {
+                                    "block_indexes": [0, 1, -1],
+                                    "region": [0.1, 0.2, 0.3, 0.4],
+                                    "internal_score": 0.42,
+                                },
+                            ],
+                            "thresholds": {"column_gap": 0.12},
+                        },
+                        "source_conflict_count": 2,
+                        "math_symbol_conflict_count": 0,
                         "recognition_provider": "internal-provider",
                     },
                 ),
@@ -150,7 +168,12 @@ def test_file_analysis_ignores_newer_failed_recognition_results() -> None:
         assert output.pages[0].low_quality is True
         assert output.pages[0].warning_codes == ["PAGE_QUALITY_REVIEW_REQUIRED"]
         assert output.pages[0].metrics == {
-            "page_quality": {"level": "review_required", "issues": ["blur"]}
+            "page_quality": {"level": "review_required", "issues": ["blur"]},
+            "math_structure": {
+                "risk_codes": ["FORMULA_REVIEW_REQUIRED"],
+                "evidence": [{"block_indexes": [0, 1], "region": [0.1, 0.2, 0.3, 0.4]}],
+            },
+            "source_conflicts": {"count": 2, "math_symbol_count": 0},
         }
         assert not output.prompt_injection_detected
 
