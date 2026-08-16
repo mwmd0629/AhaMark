@@ -127,6 +127,21 @@ def test_git_tree_and_docker_context_contain_no_private_ocr_artifacts() -> None:
     assert context_findings == []
 
 
+def test_tesseract_image_is_explicit_pinned_and_not_the_default_image() -> None:
+    default = (REPOSITORY_ROOT / "apps" / "api" / "Dockerfile").read_text(encoding="utf-8")
+    tesseract = (REPOSITORY_ROOT / "apps" / "api" / "Dockerfile.tesseract").read_text(
+        encoding="utf-8"
+    )
+
+    assert "tesseract-ocr" not in default.lower()
+    assert "python:3.12-slim-bookworm@sha256:" in tesseract
+    assert "tesseract-ocr=5.3.0-2" in tesseract
+    assert "libtesseract5=5.3.0-2" in tesseract
+    assert "tesseract-ocr-chi-sim=1:4.1.0-2" in tesseract
+    assert "tesseract-ocr-eng=1:4.1.0-2" in tesseract
+    assert "curl " not in tesseract and "wget " not in tesseract
+
+
 def test_web_docker_swc_matches_the_version_declared_by_next() -> None:
     lock = json.loads((REPOSITORY_ROOT / "package-lock.json").read_text(encoding="utf-8"))
     next_package = lock["packages"]["node_modules/next"]

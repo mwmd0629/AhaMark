@@ -374,7 +374,7 @@ def binding_solution_text(db: Session, binding: ReferenceAnswerSourceBinding) ->
     if recognition is None or recognition.provider in {"fake", "unavailable"}:
         trusted_prefixes: tuple[str, ...] = ("pdf_text:",)
     else:
-        trusted_prefixes = ("pdf_text:", "rapidocr:")
+        trusted_prefixes = ("pdf_text:", "rapidocr:", "tesseract:")
     regions = list(
         db.scalars(
             select(ReferenceAnswerSourceRegion)

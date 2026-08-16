@@ -165,7 +165,7 @@ def text_quality_statistics(
             for character in text
         )
     has_ocr = any(
-        source.startswith("rapidocr:") or source == "printed_text_ocr_anchor"
+        source.startswith(("rapidocr:", "tesseract:")) or source == "printed_text_ocr_anchor"
         for source in source_values
     )
     has_pdf_text = any(
@@ -174,7 +174,11 @@ def text_quality_statistics(
     if has_ocr and has_pdf_text:
         text_source = "mixed"
     elif has_ocr:
-        text_source = "rapidocr"
+        text_source = (
+            "tesseract"
+            if source_values and all(source.startswith("tesseract:") for source in source_values)
+            else "rapidocr"
+        )
     elif has_pdf_text and all(
         source.startswith("pdf_text:") or source == "pdf_text_anchor" for source in source_values
     ):

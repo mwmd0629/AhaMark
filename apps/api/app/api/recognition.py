@@ -725,7 +725,7 @@ def _structure_recognition_candidates(
             and region.y <= item.region[1] + item.region[3] / 2 <= region.y + region.height
         }
         has_pdf_text = any(source.startswith("pdf_text:") for source in region_sources)
-        has_ocr = any(source.startswith("rapidocr:") for source in region_sources)
+        has_ocr = any(source.startswith(("rapidocr:", "tesseract:")) for source in region_sources)
         candidate_source = (
             "mixed:conservative_fusion"
             if has_pdf_text and has_ocr

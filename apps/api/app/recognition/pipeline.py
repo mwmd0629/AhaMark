@@ -234,14 +234,18 @@ def text_for_question_region(
     max_characters: int = 20000,
 ) -> str | None:
     """Join trustworthy reading-order text whose centre falls inside a question region."""
-    selected: list[tuple[int, float, float, str]] = []
+    selected: list[tuple[int, float, float, int, str, bool]] = []
     for block_order, (paper_page_id, block) in enumerate(blocks):
         text = " ".join((block.text or "").split())
         if (
             not text
             or block.source is None
             or block.status not in {"adopted", "manual_required", "recognized", "low_confidence"}
-            or not (block.source.startswith("pdf_text:") or block.source.startswith("rapidocr:"))
+            or not (
+                block.source.startswith("pdf_text:")
+                or block.source.startswith("rapidocr:")
+                or block.source.startswith("tesseract:")
+            )
         ):
             continue
         x, y, width, height = block.region
@@ -252,11 +256,24 @@ def text_for_question_region(
                 and region.x <= centre_x <= region.x + region.width
                 and region.y <= centre_y <= region.y + region.height
             ):
-                selected.append((region_order, y, x + block_order * 1e-9, text))
+                selected.append(
+                    (
+                        region_order,
+                        y,
+                        x + block_order * 1e-9,
+                        block_order,
+                        text,
+                        block.source.startswith("tesseract:"),
+                    )
+                )
                 break
     if not selected:
         return None
-    joined = "\n".join(item[3] for item in sorted(selected))
+    if all(item[5] for item in selected):
+        ordered = sorted(selected, key=lambda item: (item[0], item[3]))
+    else:
+        ordered = sorted(selected, key=lambda item: (item[0], item[1], item[2]))
+    joined = "\n".join(item[4] for item in ordered)
     return joined[:max_characters]
 
 
@@ -665,6 +682,34 @@ def provider_from_settings(settings: Settings) -> RecognitionProvider:
         ):
             return UnavailableProvider("RapidOCR 运行时未授权，且禁止在服务进程中下载模型")
         return RapidOcrProvider()
+    if settings.recognition_provider == "tesseract":
+        if not settings.recognition_tesseract_runtime_enabled:
+            return UnavailableProvider("Tesseract 本地运行时尚未配置")
+        from app.recognition.tesseract_provider import TesseractProvider
+
+        required = (
+            settings.recognition_tesseract_binary_path,
+            settings.recognition_tesseract_data_root,
+            settings.recognition_tesseract_license_path,
+            settings.recognition_tesseract_expected_version,
+            settings.recognition_tesseract_binary_sha256,
+            settings.recognition_tesseract_chi_sim_sha256,
+            settings.recognition_tesseract_eng_sha256,
+            settings.recognition_tesseract_license_sha256,
+        )
+        if any(value is None for value in required):
+            return UnavailableProvider("Tesseract 本地运行材料配置不完整")
+        return TesseractProvider(
+            binary_path=settings.recognition_tesseract_binary_path or "",
+            data_root=settings.recognition_tesseract_data_root or "",
+            license_path=settings.recognition_tesseract_license_path or "",
+            expected_version=settings.recognition_tesseract_expected_version or "",
+            binary_sha256=settings.recognition_tesseract_binary_sha256 or "",
+            chi_sim_sha256=settings.recognition_tesseract_chi_sim_sha256 or "",
+            eng_sha256=settings.recognition_tesseract_eng_sha256 or "",
+            license_sha256=settings.recognition_tesseract_license_sha256 or "",
+            timeout_seconds=settings.recognition_tesseract_timeout_seconds,
+        )
     return UnavailableProvider()
 
 

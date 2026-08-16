@@ -308,6 +308,7 @@ def build_local_candidates(
         for item in candidates
         if item.source.startswith("pdf_text:")
         or item.source.startswith("rapidocr:")
+        or item.source.startswith("tesseract:")
         or item.source.startswith("mixed:")
     ]
     if not trusted_candidates:

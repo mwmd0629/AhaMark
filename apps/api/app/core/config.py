@@ -53,6 +53,16 @@ class Settings(BaseSettings):
     recognition_config_version: str = "2026-07-22"
     recognition_rapidocr_runtime_enabled: bool = False
     recognition_rapidocr_model_download_allowed: bool = False
+    recognition_tesseract_runtime_enabled: bool = False
+    recognition_tesseract_binary_path: str | None = None
+    recognition_tesseract_data_root: str | None = None
+    recognition_tesseract_license_path: str | None = None
+    recognition_tesseract_expected_version: str | None = None
+    recognition_tesseract_binary_sha256: str | None = None
+    recognition_tesseract_chi_sim_sha256: str | None = None
+    recognition_tesseract_eng_sha256: str | None = None
+    recognition_tesseract_license_sha256: str | None = None
+    recognition_tesseract_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
     formula_recognition_provider: str = "unavailable"
     formula_recognition_base_url: str | None = None
     formula_recognition_api_key: SecretStr | None = None
@@ -200,6 +210,27 @@ class Settings(BaseSettings):
             )
         if rapidocr_errors:
             raise ValueError("RapidOCR configuration rejected: " + "; ".join(rapidocr_errors))
+        tesseract_fields = {
+            "RECOGNITION_TESSERACT_BINARY_PATH": self.recognition_tesseract_binary_path,
+            "RECOGNITION_TESSERACT_DATA_ROOT": self.recognition_tesseract_data_root,
+            "RECOGNITION_TESSERACT_LICENSE_PATH": self.recognition_tesseract_license_path,
+            "RECOGNITION_TESSERACT_EXPECTED_VERSION": self.recognition_tesseract_expected_version,
+            "RECOGNITION_TESSERACT_BINARY_SHA256": self.recognition_tesseract_binary_sha256,
+            "RECOGNITION_TESSERACT_CHI_SIM_SHA256": self.recognition_tesseract_chi_sim_sha256,
+            "RECOGNITION_TESSERACT_ENG_SHA256": self.recognition_tesseract_eng_sha256,
+            "RECOGNITION_TESSERACT_LICENSE_SHA256": self.recognition_tesseract_license_sha256,
+        }
+        if self.recognition_tesseract_runtime_enabled:
+            missing = [name for name, value in tesseract_fields.items() if not value]
+            if self.recognition_provider != "tesseract":
+                missing.append("RECOGNITION_PROVIDER=tesseract")
+            if missing:
+                raise ValueError(
+                    "Tesseract configuration rejected: missing " + ", ".join(sorted(missing))
+                )
+        elif self.recognition_provider == "tesseract":
+            # Keep the provider selectable for a stable fail-closed readiness response.
+            pass
         if self.app_env.lower() != "production":
             return self
         errors: list[str] = []

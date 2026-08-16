@@ -8,6 +8,7 @@ from urllib.request import Request, urlopen
 from app.assignment_generation.providers import select_provider as select_assignment_provider
 from app.core.config import Settings
 from app.recognition.formula import HttpFormulaProvider, formula_provider_from_settings
+from app.recognition.pipeline import provider_from_settings, safe_provider_readiness
 from redis import Redis
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
@@ -70,11 +71,13 @@ def dependency_readiness(db: Session, settings: Settings) -> dict[str, Any]:
         "hard_dependency": False,
         "suggestion_only": True,
     }
-    ocr_status = {
-        "rapidocr": "available",
-        "fake": "degraded",
-        "unavailable": "unavailable",
-    }.get(settings.recognition_provider, "unavailable")
+    recognition_provider = provider_from_settings(settings)
+    recognition_available, _ = safe_provider_readiness(recognition_provider)
+    ocr_status = (
+        "degraded"
+        if recognition_available and recognition_provider.is_demo
+        else ("available" if recognition_available else "unavailable")
+    )
     components["text_ocr"] = {
         "status": ocr_status,
         "hard_dependency": False,

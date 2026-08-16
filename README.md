@@ -136,7 +136,9 @@
 
 ## 接手必读：当前状态、问题与下一步
 
-> Git 状态更正：P11 已提交并推送为 `694efe0`，P12 已提交并推送为 `df25928`，均未部署；P13/P14 是其上的当前未提交改动。下方较早记录中的“未暂存/提交/推送”是提交前验证措辞。
+> 2026-08-16 开源 Tesseract OCR 基线 P15（开发完成，本条对应提交，未部署）：经官方许可证核对后，选择引擎与官方 `tessdata/tessdata_best` 均明确 Apache-2.0 的 Tesseract 作为第一条可落地开源 OCR，RapidOCR 继续 hard-off 作为实验对照。新增默认关闭的显式本地 Tesseract Provider：只有绝对二进制路径、`chi_sim/eng` 语言包、Apache-2.0 NOTICE、精确版本和四项 SHA-256 全部通过，才允许无 shell、有限时地以 stdin/stdout 执行；TSV 输出严格限制 UTF-8、字段、行/块/字符总量、有限置信度、页内正面积区域及危险 Unicode，任何失败继续由多页预检原子回滚。题区、质量统计、提取与教材答案来源已把 `tesseract:` 纳入可信 OCR，但教师 API 仍只显示粗粒度 `ocr`。独立 `Dockerfile.tesseract` 锁定已验证的 Python Bookworm digest、Tesseract 5.3.0 和简中/英文 Debian 数据包；默认 Dockerfile/Compose 未切换。真实 smoke 在 `--network none --read-only` 容器中从脱敏合成图片按 TSV 行/词层级稳定读出 `1.AhaMark → 开源 → 文字 → 识别 → 计算 → 2+3=5` 及坐标、置信度；镜像构建成功。上游识别、安全和仓库防泄漏组合为 `101 passed, 2 skipped, 2 warnings`，下游题目提取/教材来源为 `46 passed, 2 warnings`，聚焦阅读顺序/PDF 后备为 `14 passed, 31 deselected`，最终受影响复检为 `20 passed, 31 deselected, 2 warnings`，均由数据库守卫确认 `ahamark.db unchanged`；目标 Ruff、strict mypy、py_compile 与 `git diff --check` 通过。未运行后端/前端全量、真实试卷 benchmark、默认 Compose 切换或部署；当前证据仍不代表真实试卷、手写或公式准确率。启用为默认生产镜像前仍需锁定 Python wheels/hash，并把当前子进程完成后才执行的 4 MiB stdout 校验升级为运行中有界流读取，避免异常本地二进制或极端页面在超时前占用过多内存。
+
+> Git 状态更正：P11 已提交并推送为 `694efe0`，P12 为 `df25928`，P13/P14 为 `91c9f52`，均未部署；P15 为本条对应提交。下方较早记录中的“未暂存/提交/推送”是提交前验证措辞。
 
 > P12 synthetic 能力补充：UTF-8 A/B 证明此前中文替换符只是 Windows GBK 控制台显示问题，模型内嵌字符表与 v3.9.2 外置字典对同一中文样本输出一致。五类断网探针中，中英题干、低对比、GaussianBlur(2.2) 与轻旋转 3°均能得到可读文本；Unicode 数学样本的第一段 `x² + α ≤ 10` 保留较好，但积分段 `∫ f(x) dx` 被错误识别并发生次序/字符退化。该证据进一步确认 RapidOCR 可作为普通印刷文字基线，但不能当公式 OCR 或 LaTeX 恢复器；数学结构仍必须保留现有 manual review 风险门禁。
 
@@ -257,6 +259,8 @@
 > 2026-08-11 评分模板第一版真实闭环（完成、未暂存/提交/推送）：在完整保留 `codex/integrate-question-page-cutter` 既有工作树改动的前提下，新增独立 `RubricTemplate / RubricTemplateVersion / RubricTemplateCriterion / RubricTemplateApplication` 模型及接在 0036 后的单线迁移 `0037_rubric_templates`，不把模板伪装成题目绑定的 Structured Rubric。模板支持真实列表、搜索筛选、创建/编辑、草稿自动保存、离开保护、复制、可见历史版本、确认与归档；confirmed 版本不可原地覆盖，普通教师界面不显示 stable key、JSON 或 content hash。criterion 继续复用 `validate_rubric` 语义，支持 proportional（精确 100%）和 fixed（精确等于模板总分）的 Decimal 校验；比例应用使用稳定 ROUND_HALF_UP 舍入，末项只吸收合法尾差且最终精确等于题目满分。从现有 Structured Rubric 保存模板会保留类型、必选项、依赖、评分模式、人工复核与部分得分等 structured-only 语义，但递归剥离标准答案、expected evidence、题目描述、来源区域等题目专属信息。逐题核对区新增“使用评分模板”和“保存为模板”；服务端 preview/apply 校验 owner、draft assignment、active paper/question、题目分值、当前 confirmed reference answer、模板状态/版本/hash，并用题目/答案版本、幂等键、事务行锁及并发 409 创建新的题目绑定 Structured Rubric draft；绝不覆盖 confirmed Rubric、自动确认答案/Rubric、激活 Structured Set 或发布。应用审计固定模板版本、题目版本、答案版本/hash、生成 rubric、换算、actor/time。后端模板与迁移聚焦最终 `8 passed`，SQLite upgrade→downgrade→upgrade 与 PostgreSQL 离线 DDL通过，Alembic single head 为 0037；此前后端全量为 `671 passed, 18 skipped, 3 failed`，三项仅是测试仍断言旧迁移 head，更新为 0037 后三项精确复跑全部通过（未把未重跑的约 42 分钟全量夸大为全绿）。全仓 Ruff 通过，新 API strict mypy 通过；标准 mypy 110 files 仅报告既有脏工作树 `assignment_generation/service.py:95,108` 两处类型错误，本轮未改无关用户文件。前端模板精确回归为页面 `4 passed`、动作组件 `2 passed`；最终一次全量中模板测试全绿，另有既有 review 页单项时序失败，立即隔离复跑 `1 passed / 30 skipped`，因此不把该次全量声称为全绿；此前全量基线为 `35 files / 205 tests passed`，Prettier、ESLint、TypeScript 和 Next production build（19 pages）通过。首次误用 pnpm 在本工作树生成的未跟踪 `.pnpm-store/` 内容创建/修改时间完全一致，确认仅为本任务缓存后已只删除该目录，未触碰用户文件、lockfile 或 node_modules。`ahamark.db` unchanged；未使用 Docker、真实数据或密钥，未触碰任何容器/volume/Bucket，未进行 Git 暂存、提交、推送、合并、部署或改变 PR 状态。
 
 ### 当前事实（以当前工作树重新验证为准）
+
+- 2026-08-16：P15 已选择 Apache-2.0 Tesseract 作为开源生产基线，新增默认关闭 Provider、显式路径/版本/哈希/NOTICE 门禁、严格 TSV 解析、通用 OCR 来源贯通及独立锁定版本镜像；默认 Compose 未启用，尚未部署或用真实资料评测。聚焦 Provider/RapidOCR/预生产安全回归 `64 passed`，身份/NOTICE 收口专项 `13 passed`，`ahamark.db unchanged`；真实 Tesseract 5.3.0 在断网只读容器中完成 stdin/stdout 中英文 synthetic smoke。
 
 - 2026-08-16：P12 已提交并推送为 `df25928`；P13/P14 当前未提交，均未部署。仓库外精确依赖已分别在 Windows 隔离环境与 Linux 断网只读容器完成 synthetic smoke；v2 bundle 只接受 det/cls/rec，字符表从 rec ONNX metadata 校验，新增 runtime bridge 仍保持惰性且未接主 Provider。当前许可证审批、受信 manifest、生产只读 mount/ACL 与真实脱敏 benchmark 均未完成，runtime/download 继续 hard-off。
 
@@ -803,7 +807,7 @@ npm.cmd run build
 - Web：Next.js 15、React 19、TypeScript、Tailwind CSS 4。
 - API：FastAPI、SQLAlchemy 2、Alembic；生产数据库为 PostgreSQL。
 - Worker：Celery + Redis；对象存储：MinIO。
-- 文字 OCR：产品默认 `unavailable`；仓库外取证环境锁定 RapidOCR 3.9.2 + ONNX Runtime 1.27.0 并已完成 Windows/Linux 断网 synthetic smoke，但许可证与受信 manifest 未闭环，产品 runtime 仍 hard-off。
+- 文字 OCR：产品默认 `unavailable`；首选开源基线为 Tesseract 5.3.0 + Apache-2.0 `chi_sim/eng`，使用独立锁定镜像且必须显式配置路径、版本、哈希与 NOTICE；RapidOCR 3.9.2 仅保留仓库外实验对照并继续 hard-off。
 
 ```powershell
 Copy-Item .env.example .env
@@ -826,6 +830,7 @@ npm.cmd run dev
 
 配置 `RECOGNITION_PROVIDER`：
 
+- `tesseract`：首选开源印刷体 OCR。默认关闭；使用 `apps/api/Dockerfile.tesseract` 构建 API/Worker，并提供 `.env.example` 列出的绝对路径、精确版本和 SHA-256 后才可启动。只输出普通文字、坐标和置信度，不生成 LaTeX；真实上线前仍须完成脱敏试卷 benchmark。
 - `rapidocr`：保留给经审计的本地印刷体 OCR，但当前产品不可启用；仅安装 `[ocr]` 不会开放能力。运行时下载永久禁止，未来必须使用仓库外只读、外部哈希锚定且许可证已审批的 `det/cls/rec` 三模型 bundle；PP-OCRv6 字符表来自已验证识别模型的 ONNX metadata，字体仅用于可视化，均不再作为推理 bundle 必需文件。输出仍只允许普通文字、页内坐标和置信度，不生成或修复 LaTeX。
 - `fake`：只允许非生产自动化测试。`APP_ENV=production` 时选择 fake 会降级为 unavailable，不能用它评估准确率或宣称真实 OCR 可用。
 - `unavailable`（默认）：明确禁用识别，但转换/预处理仍可用。

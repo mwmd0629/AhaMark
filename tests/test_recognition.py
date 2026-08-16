@@ -492,7 +492,7 @@ def test_pdf_text_anchors_create_hierarchical_question_candidates() -> None:
         app.dependency_overrides.pop(get_storage, None)
 
 
-@pytest.mark.parametrize("provider_name", ["unavailable", "rapidocr"])
+@pytest.mark.parametrize("provider_name", ["unavailable", "rapidocr", "tesseract"])
 def test_text_pdf_completes_without_ocr_provider(provider_name: str) -> None:
     actor, db = actor_and_db()
     fake = FakeStorage()
