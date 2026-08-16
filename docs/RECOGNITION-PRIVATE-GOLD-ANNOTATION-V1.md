@@ -19,7 +19,7 @@ python scripts/recognition_private_gold_prepare.py `
 - 以匿名 `case_id/document_id` 生成 `annotation-seed.json`；
 - 把来源路径只写入单独的 `private-document-map.json`；
 - 将选中 PNG 复制到 `images/`，文件名严格为 `<case UUID>.png`；
-- 可选地把选中 60 页的既有 OCR 文本提取为独立私有 `ocr-drafts.json`，不复制 Provider、路径或未选页面；
+- 可选地把选中 60 页的既有 OCR 文本提取为独立私有 `ocr-drafts.json`，不复制 Provider、路径或未选页面；草稿按归一化坐标把同一视觉行的词块从左到右重组，只有不同视觉行才换行，避免“多 / 变量 / 函数 / 及 / 其 / 连续 / 性”被错误拆成七段；
 - 默认每份来源文档最多抽 3 页，优先覆盖稀缺的扫描件和照片，再平衡参考答案与学生/作业材料；
 - 固定输出 `annotation_complete=false`、`accuracy_claim=false`、`writes_product_data=false` 的聚合摘要。
 
@@ -39,6 +39,8 @@ python scripts/recognition_private_gold_prepare.py `
 8. 全部页面完成后导出 `gold.json`。
 
 标注自动保存在该浏览器本机的 localStorage，键按随机 `dataset_id` 隔离。图片只以浏览器本地 object URL 显示，不会写入 localStorage 或上传。清除浏览器站点数据会删除未导出的标注进度。
+
+坐标重建只用于减少草稿换行，不是阅读顺序或数学结构真值。多栏、上下标、分式、矩阵和手写公式仍可能被错误合并或拆开，必须以图片为准核对。
 
 导出时 fail closed：缺图、缺标签、pending 状态、正文未逐字核对、未完成隐私复核、不可判定页仍含 Gold 内容，或正文出现明显邮箱、手机号、姓名/学号标签及绝对路径，都会阻止导出。导出的 JSON 精确匹配 `recognition-private-gold-v1`，不会包含 OCR 草稿、正文核对状态、来源、角色或隐私工作字段。
 

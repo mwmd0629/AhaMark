@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import shutil
 import uuid
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -23,6 +25,36 @@ ROLES = {"reference_answer", "student_or_assignment_material"}
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_IMAGE_PIXELS = 40_000_000
 Json = dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _DraftBlock:
+    text: str
+    x: float
+    y: float
+    width: float
+    height: float
+
+    @property
+    def center_y(self) -> float:
+        return self.y + self.height / 2
+
+
+@dataclass
+class _DraftLine:
+    blocks: list[_DraftBlock]
+
+    @property
+    def top(self) -> float:
+        return min(block.y for block in self.blocks)
+
+    @property
+    def bottom(self) -> float:
+        return max(block.y + block.height for block in self.blocks)
+
+    @property
+    def center_y(self) -> float:
+        return (self.top + self.bottom) / 2
 
 
 def _object(value: object, label: str) -> Json:
@@ -137,6 +169,73 @@ def validate_private_source_map(raw: object, case_ids: set[str]) -> list[Json]:
     return validated
 
 
+def _draft_block(value: object, label: str) -> _DraftBlock:
+    block = _object(value, label)
+    _exact_keys(block, {"text", "confidence", "region", "status"}, label)
+    text = block["text"]
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("draft block text must be a non-empty string")
+    region = block["region"]
+    if not isinstance(region, list) or len(region) != 4:
+        raise ValueError("draft block region must have four values")
+    if any(isinstance(item, bool) or not isinstance(item, (int, float)) for item in region):
+        raise ValueError("draft block region values must be numeric")
+    x, y, width, height = map(float, cast(list[int | float], region))
+    if not all(math.isfinite(item) for item in (x, y, width, height)) or (
+        x < 0 or y < 0 or width <= 0 or height <= 0 or x + width > 1 or y + height > 1
+    ):
+        raise ValueError("draft block region must be within normalized bounds")
+    return _DraftBlock(text=text.strip(), x=x, y=y, width=width, height=height)
+
+
+def _same_visual_line(block: _DraftBlock, line: _DraftLine) -> tuple[float, float] | None:
+    overlap = max(0.0, min(block.y + block.height, line.bottom) - max(block.y, line.top))
+    overlap_ratio = overlap / min(block.height, line.bottom - line.top)
+    center_distance = abs(block.center_y - line.center_y)
+    if overlap_ratio >= 0.45 or center_distance <= 0.75 * max(block.height, line.bottom - line.top):
+        return overlap_ratio, -center_distance
+    return None
+
+
+def _join_visual_line(blocks: list[_DraftBlock]) -> str:
+    ordered = sorted(blocks, key=lambda block: (block.x, block.y, block.text))
+    output = ordered[0].text
+    previous = ordered[0]
+    for block in ordered[1:]:
+        gap = block.x - (previous.x + previous.width)
+        left, right = previous.text[-1], block.text[0]
+        ascii_words = left.isascii() and right.isascii() and left.isalnum() and right.isalnum()
+        separator = " " if ascii_words or gap > 0.65 * max(previous.height, block.height) else ""
+        output += separator + block.text
+        previous = block
+    return output
+
+
+def draft_text_from_blocks(values: list[object], label: str = "blocks") -> str:
+    """Reconstruct visual lines without treating every OCR word block as a paragraph."""
+    blocks = [_draft_block(value, f"{label}[{index}]") for index, value in enumerate(values)]
+    if not blocks:
+        return ""
+    lines: list[_DraftLine] = []
+    for block in sorted(blocks, key=lambda item: (item.center_y, item.x, item.text)):
+        candidates = [
+            (score, index)
+            for index, line in enumerate(lines)
+            if (score := _same_visual_line(block, line)) is not None
+        ]
+        if candidates:
+            _, index = max(candidates)
+            lines[index].blocks.append(block)
+        else:
+            lines.append(_DraftLine(blocks=[block]))
+    return "\n".join(
+        _join_visual_line(line.blocks)
+        for line in sorted(
+            lines, key=lambda line: (line.top, min(block.x for block in line.blocks))
+        )
+    )
+
+
 def _selected_drafts(raw: object, selected_ids: set[str]) -> list[Json]:
     data = _object(raw, "draft_predictions")
     _exact_keys(data, {"schema_version", "provider", "results"}, "draft_predictions")
@@ -157,14 +256,7 @@ def _selected_drafts(raw: object, selected_ids: set[str]) -> list[Json]:
             raise ValueError("draft prediction case_id must be unique")
         if result["status"] != "ok" or not isinstance(result["blocks"], list):
             raise ValueError("selected draft prediction must have successful blocks")
-        text: list[str] = []
-        for block_index, block_value in enumerate(cast(list[object], result["blocks"])):
-            block = _object(block_value, f"{label}.blocks[{block_index}]")
-            _exact_keys(block, {"text", "confidence", "region", "status"}, label)
-            if not isinstance(block["text"], str):
-                raise ValueError("draft block text must be a string")
-            text.append(block["text"])
-        draft_text = "\n".join(text)
+        draft_text = draft_text_from_blocks(cast(list[object], result["blocks"]), f"{label}.blocks")
         if len(draft_text) > 1_000_000:
             raise ValueError("selected draft text exceeds the character limit")
         drafts[case_id] = draft_text

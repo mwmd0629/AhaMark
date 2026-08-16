@@ -13,6 +13,7 @@ from scripts.recognition_private_gold_prepare import (
     DIAGNOSTIC_VERSION,
     DRAFT_VERSION,
     PRIVATE_PREDICTION_VERSION,
+    draft_text_from_blocks,
     load_json,
     prepare_bundle,
 )
@@ -72,7 +73,7 @@ def draft_predictions(diagnostic: dict[str, object]) -> dict[str, object]:
                     {
                         "text": f"OCR draft {index}",
                         "confidence": 0.5,
-                        "region": {"x": 0, "y": 0, "width": 1, "height": 1},
+                        "region": [0, 0, 1, 1],
                         "status": "manual_required",
                     }
                 ],
@@ -80,6 +81,42 @@ def draft_predictions(diagnostic: dict[str, object]) -> dict[str, object]:
             for index, case in enumerate(diagnostic["cases"])  # type: ignore[index]
         ],
     }
+
+
+def block(text: str, x: float, y: float, width: float, height: float) -> dict[str, object]:
+    return {
+        "text": text,
+        "confidence": 0.8,
+        "region": [x, y, width, height],
+        "status": "recognized",
+    }
+
+
+def test_draft_text_reconstructs_visual_lines_deterministically() -> None:
+    blocks = [
+        block("7", 0.48, 0.9, 0.02, 0.04),
+        block("连续", 0.29, 0.1, 0.06, 0.05),
+        block("9.1", 0.01, 0.1, 0.05, 0.05),
+        block("其", 0.26, 0.1, 0.02, 0.05),
+        block("函数", 0.17, 0.1, 0.06, 0.05),
+        block("多", 0.1, 0.1, 0.02, 0.05),
+        block("及", 0.235, 0.1, 0.02, 0.05),
+        block("性", 0.36, 0.1, 0.02, 0.05),
+        block("变量", 0.125, 0.1, 0.04, 0.05),
+    ]
+    expected = "9.1 多变量函数及其连续性\n7"
+    assert draft_text_from_blocks(blocks) == expected
+    assert draft_text_from_blocks(list(reversed(blocks))) == expected
+
+
+def test_draft_text_preserves_latin_word_boundaries_and_math_scripts() -> None:
+    blocks = [
+        block("Find", 0.1, 0.3, 0.08, 0.05),
+        block("limit", 0.185, 0.3, 0.08, 0.05),
+        block("x", 0.28, 0.3, 0.02, 0.05),
+        block("2", 0.301, 0.28, 0.01, 0.02),
+    ]
+    assert draft_text_from_blocks(blocks) == "Find limit x 2"
 
 
 def test_prepare_bundle_is_anonymous_stratified_and_repository_external(tmp_path: Path) -> None:
