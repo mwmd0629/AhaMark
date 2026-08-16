@@ -1,0 +1,729 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>AhaMark 私有 OCR Gold 标注 v1</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font: 14px system-ui;
+        color: #172033;
+        background: #f4f6fa;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+      }
+      header,
+      .panel {
+        background: #fff;
+        border: 1px solid #d8deea;
+      }
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 5;
+        padding: 10px;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .layout {
+        display: grid;
+        grid-template-columns: 330px minmax(0, 1fr) 390px;
+        gap: 10px;
+        padding: 10px;
+      }
+      .panel {
+        border-radius: 10px;
+        padding: 11px;
+        min-width: 0;
+      }
+      label {
+        display: block;
+        margin: 8px 0 3px;
+        font-weight: 600;
+      }
+      button,
+      select,
+      textarea,
+      input {
+        font: inherit;
+      }
+      button,
+      select,
+      input[type="text"] {
+        padding: 6px;
+      }
+      button.primary {
+        color: #fff;
+        background: #315efb;
+        border: 0;
+        border-radius: 6px;
+      }
+      button.danger {
+        color: #b91c1c;
+      }
+      textarea {
+        width: 100%;
+        resize: vertical;
+        padding: 7px;
+      }
+      #expectedText {
+        min-height: 280px;
+        font-family: ui-monospace, Consolas, monospace;
+        line-height: 1.45;
+      }
+      #questionNumbers {
+        min-height: 70px;
+      }
+      .hint {
+        color: #526078;
+        line-height: 1.45;
+      }
+      .status {
+        margin-left: auto;
+        color: #526078;
+      }
+      .pages {
+        max-height: 68vh;
+        overflow: auto;
+      }
+      .page {
+        display: block;
+        width: 100%;
+        text-align: left;
+        margin: 4px 0;
+        padding: 7px;
+        background: #fff;
+        border: 1px solid #ccd4e2;
+        border-radius: 6px;
+      }
+      .page.active {
+        border-color: #315efb;
+        background: #eef2ff;
+      }
+      .page.complete {
+        border-left: 5px solid #16a34a;
+      }
+      .stage-wrap {
+        overflow: auto;
+        max-height: 82vh;
+      }
+      .stage {
+        position: relative;
+        width: min-content;
+        margin: auto;
+        transform-origin: top left;
+      }
+      .stage img {
+        display: block;
+        max-width: none;
+        user-select: none;
+      }
+      .stage svg {
+        position: absolute;
+        inset: 0;
+        touch-action: none;
+      }
+      .box {
+        fill: #315efb22;
+        stroke: #315efb;
+        stroke-width: 3;
+        vector-effect: non-scaling-stroke;
+      }
+      .box.selected {
+        fill: #ef444433;
+        stroke: #ef4444;
+      }
+      .draft {
+        fill: #16a34a22;
+        stroke: #16a34a;
+        stroke-width: 3;
+        stroke-dasharray: 8 5;
+        vector-effect: non-scaling-stroke;
+      }
+      .checks {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 4px;
+      }
+      .checks label {
+        margin: 0;
+        font-weight: 400;
+      }
+      .row {
+        display: flex;
+        gap: 7px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      code {
+        overflow-wrap: anywhere;
+      }
+      @media (max-width: 1050px) {
+        .layout {
+          grid-template-columns: 280px 1fr;
+        }
+        .editor {
+          grid-column: 1 / -1;
+        }
+      }
+      @media (max-width: 720px) {
+        .layout {
+          grid-template-columns: 1fr;
+        }
+        .editor {
+          grid-column: auto;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <label
+        >标注种子 <input id="seed" type="file" accept="application/json"
+      /></label>
+      <label
+        >匿名页面 <input id="images" type="file" accept="image/png" multiple
+      /></label>
+      <button id="export" class="primary">验证并导出 Gold JSON</button>
+      <button id="reset" class="danger">清除本数据集本地进度</button>
+      <span id="status" class="status">尚未载入标注种子</span>
+    </header>
+    <main class="layout">
+      <aside class="panel">
+        <div class="hint">
+          全程离线运行，不上传图片或正文。浏览器只按匿名 UUID
+          匹配图片；标注自动保存在本机 localStorage。
+          若页面可见姓名、学号等身份信息，必须先在独立图片副本中遮挡，再选择“已使用去标识副本”。
+        </div>
+        <label>数据集</label><code id="datasetId">-</code>
+        <label>页面列表</label>
+        <div id="pages" class="pages"></div>
+        <label>显示缩放 <span id="zoomText">35%</span></label>
+        <input id="zoom" type="range" min="15" max="100" value="35" />
+      </aside>
+      <section class="panel stage-wrap">
+        <div id="empty" class="hint">
+          载入 annotation-seed.json 和 images 目录中的匿名 PNG。
+        </div>
+        <div id="stage" class="stage" hidden>
+          <img id="image" alt="私有待标注页面" />
+          <svg id="overlay"></svg>
+        </div>
+      </section>
+      <section class="panel editor">
+        <label>页面模态</label>
+        <select id="modality">
+          <option>text_pdf</option>
+          <option>scan</option>
+          <option>photo</option>
+          <option>mixed</option>
+        </select>
+        <label>标注状态</label>
+        <select id="annotationStatus">
+          <option value="pending">未完成</option>
+          <option value="annotated">已标注</option>
+          <option value="unjudgeable">无法可靠标注</option>
+        </select>
+        <label>隐私复核</label>
+        <select id="privacyStatus">
+          <option value="pending">未复核，禁止导出</option>
+          <option value="no_identity_visible">确认无可见身份信息</option>
+          <option value="redacted_copy">确认当前图片是去标识副本</option>
+        </select>
+        <label>退化标签（至少一项）</label>
+        <div id="degradations" class="checks"></div>
+        <label>内容标签（至少一项）</label>
+        <div id="contentTags" class="checks"></div>
+        <label>期望正文</label
+        ><textarea id="expectedText" spellcheck="false"></textarea>
+        <label>期望题号（每行一个，保持阅读顺序）</label
+        ><textarea id="questionNumbers" spellcheck="false"></textarea>
+        <label
+          ><input id="integrityReject" type="checkbox" />
+          该页应触发文字完整性拒绝</label
+        >
+        <label>题目区域</label>
+        <div class="hint">
+          在图片上拖动画框；框只表示题目区域，不表示公式框。坐标按原始图片归一化保存。
+        </div>
+        <div class="row" style="margin-top: 8px">
+          <button id="deleteRegion" class="danger">删除选中区域</button
+          ><span id="regionCount">0 个区域</span>
+        </div>
+      </section>
+    </main>
+    <script>
+      (() => {
+        "use strict";
+        const VERSION = "recognition-private-annotation-v1";
+        const GOLD_VERSION = "recognition-private-gold-v1";
+        const DEGRADATIONS = [
+          "clean",
+          "low_resolution",
+          "blurred",
+          "rotation",
+          "perspective",
+          "low_contrast",
+          "shadow",
+          "cropped",
+        ];
+        const CONTENT = [
+          "chinese",
+          "english",
+          "math",
+          "question_number",
+          "negative",
+        ];
+        const EMAIL = /[\w.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/;
+        const PHONE = /(?:\+?86[ -]?)?1[3-9]\d{9}/;
+        const IDENTITY =
+          /(?:学生姓名|姓名|学号|学生号|student[ _-]?(?:name|id))\s*[:：=]\s*\S+/i;
+        const ABSOLUTE_PATH = /(?:[A-Za-z]:[\\/]|file:\/\/|^\/)/;
+        const $ = (id) => document.getElementById(id);
+        let state = null,
+          active = null,
+          selectedRegion = null,
+          dragStart = null,
+          draft = null;
+        const imageUrls = new Map();
+
+        function storageKey() {
+          return state
+            ? `ahamark-recognition-private-gold-${state.dataset_id}`
+            : null;
+        }
+        function save() {
+          if (state) localStorage.setItem(storageKey(), JSON.stringify(state));
+          renderList();
+          updateStatus();
+        }
+        function current() {
+          return state && state.cases.find((item) => item.case_id === active);
+        }
+        function exactKeys(value, keys) {
+          return (
+            value &&
+            typeof value === "object" &&
+            !Array.isArray(value) &&
+            Object.keys(value).sort().join("|") === [...keys].sort().join("|")
+          );
+        }
+        function validUuid(value) {
+          return (
+            typeof value === "string" &&
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+              value,
+            )
+          );
+        }
+        function validateSeed(data) {
+          if (
+            !exactKeys(data, [
+              "schema_version",
+              "dataset_id",
+              "annotator_decision_version",
+              "cases",
+            ]) ||
+            data.schema_version !== VERSION ||
+            !validUuid(data.dataset_id) ||
+            !Array.isArray(data.cases) ||
+            !data.cases.length
+          )
+            throw new Error("标注种子格式不正确");
+          const ids = new Set();
+          for (const item of data.cases) {
+            const keys = [
+              "case_id",
+              "document_id",
+              "split",
+              "modality",
+              "role",
+              "image_file",
+              "page_width",
+              "page_height",
+              "degradation_tags",
+              "content_tags",
+              "annotation_status",
+              "privacy_status",
+              "expected_text",
+              "expected_question_numbers",
+              "expected_regions",
+              "expect_integrity_rejection",
+              "annotator_decision_version",
+            ];
+            if (
+              !exactKeys(item, keys) ||
+              !validUuid(item.case_id) ||
+              !validUuid(item.document_id) ||
+              ids.has(item.case_id) ||
+              item.image_file !== `${item.case_id}.png` ||
+              item.split !== "test"
+            )
+              throw new Error("标注种子页面格式不正确");
+            ids.add(item.case_id);
+          }
+          return data;
+        }
+        function buildChecks(container, values, field) {
+          container.innerHTML = "";
+          for (const value of values) {
+            const label = document.createElement("label"),
+              input = document.createElement("input");
+            input.type = "checkbox";
+            input.value = value;
+            input.onchange = () => {
+              const c = current();
+              if (!c) return;
+              c[field] = [...container.querySelectorAll("input:checked")].map(
+                (node) => node.value,
+              );
+              save();
+            };
+            label.append(input, document.createTextNode(` ${value}`));
+            container.append(label);
+          }
+        }
+        function renderList() {
+          const pages = $("pages");
+          pages.innerHTML = "";
+          if (!state) return;
+          state.cases.forEach((item, index) => {
+            const button = document.createElement("button");
+            button.className = "page";
+            if (item.case_id === active) button.classList.add("active");
+            if (
+              item.annotation_status !== "pending" &&
+              item.privacy_status !== "pending"
+            )
+              button.classList.add("complete");
+            button.textContent = `${index + 1}. ${item.modality} · ${item.role === "reference_answer" ? "参考答案" : "学生/材料"} · ${item.expected_regions.length} 区 · ${item.annotation_status}`;
+            button.onclick = () => selectCase(item.case_id);
+            pages.append(button);
+          });
+        }
+        function updateStatus(message) {
+          if (message) {
+            $("status").textContent = message;
+            return;
+          }
+          if (!state) return;
+          const done = state.cases.filter(
+            (item) =>
+              item.annotation_status !== "pending" &&
+              item.privacy_status !== "pending",
+          ).length;
+          $("status").textContent =
+            `${done}/${state.cases.length} 页已完成标注与隐私复核`;
+        }
+        function selectCase(caseId) {
+          active = caseId;
+          selectedRegion = null;
+          const c = current();
+          if (!c) return;
+          $("modality").value = c.modality;
+          $("annotationStatus").value = c.annotation_status;
+          $("privacyStatus").value = c.privacy_status;
+          $("expectedText").value = c.expected_text;
+          $("questionNumbers").value = c.expected_question_numbers.join("\n");
+          $("integrityReject").checked = c.expect_integrity_rejection;
+          for (const containerId of ["degradations", "contentTags"])
+            for (const input of $(containerId).querySelectorAll("input"))
+              input.checked = c[
+                containerId === "degradations"
+                  ? "degradation_tags"
+                  : "content_tags"
+              ].includes(input.value);
+          const url = imageUrls.get(c.image_file);
+          $("empty").hidden = Boolean(url);
+          $("stage").hidden = !url;
+          if (url) {
+            $("image").src = url;
+            $("image").onload = () => {
+              $("overlay").setAttribute(
+                "viewBox",
+                `0 0 ${c.page_width} ${c.page_height}`,
+              );
+              applyZoom();
+              renderRegions();
+            };
+          }
+          renderRegions();
+          renderList();
+        }
+        function renderRegions() {
+          const svg = $("overlay"),
+            c = current();
+          svg.innerHTML = "";
+          if (!c) return;
+          for (const region of c.expected_regions) {
+            const rect = document.createElementNS(
+                "http://www.w3.org/2000/svg",
+                "rect",
+              ),
+              b = region.bbox;
+            for (const [name, value] of Object.entries({
+              x: b.x * c.page_width,
+              y: b.y * c.page_height,
+              width: b.width * c.page_width,
+              height: b.height * c.page_height,
+            }))
+              rect.setAttribute(name, value);
+            rect.setAttribute(
+              "class",
+              `box${selectedRegion === region.region_id ? " selected" : ""}`,
+            );
+            rect.onclick = (event) => {
+              event.stopPropagation();
+              selectedRegion = region.region_id;
+              renderRegions();
+            };
+            svg.append(rect);
+          }
+          if (draft) {
+            const rect = document.createElementNS(
+              "http://www.w3.org/2000/svg",
+              "rect",
+            );
+            for (const [name, value] of Object.entries(draft))
+              rect.setAttribute(name, value);
+            rect.setAttribute("class", "draft");
+            svg.append(rect);
+          }
+          $("regionCount").textContent = `${c.expected_regions.length} 个区域`;
+        }
+        function point(event) {
+          const bounds = $("overlay").getBoundingClientRect(),
+            c = current();
+          return {
+            x: Math.max(
+              0,
+              Math.min(
+                c.page_width,
+                ((event.clientX - bounds.left) * c.page_width) / bounds.width,
+              ),
+            ),
+            y: Math.max(
+              0,
+              Math.min(
+                c.page_height,
+                ((event.clientY - bounds.top) * c.page_height) / bounds.height,
+              ),
+            ),
+          };
+        }
+        $("overlay").onpointerdown = (event) => {
+          if (!current()) return;
+          selectedRegion = null;
+          dragStart = point(event);
+          draft = { x: dragStart.x, y: dragStart.y, width: 0, height: 0 };
+          $("overlay").setPointerCapture(event.pointerId);
+          renderRegions();
+        };
+        $("overlay").onpointermove = (event) => {
+          if (!dragStart) return;
+          const p = point(event);
+          draft = {
+            x: Math.min(dragStart.x, p.x),
+            y: Math.min(dragStart.y, p.y),
+            width: Math.abs(p.x - dragStart.x),
+            height: Math.abs(p.y - dragStart.y),
+          };
+          renderRegions();
+        };
+        $("overlay").onpointerup = () => {
+          const c = current();
+          if (c && draft && draft.width >= 4 && draft.height >= 4) {
+            const region = {
+              region_id: crypto.randomUUID(),
+              bbox: {
+                x: draft.x / c.page_width,
+                y: draft.y / c.page_height,
+                width: draft.width / c.page_width,
+                height: draft.height / c.page_height,
+              },
+            };
+            c.expected_regions.push(region);
+            selectedRegion = region.region_id;
+          }
+          dragStart = null;
+          draft = null;
+          save();
+          renderRegions();
+        };
+        $("deleteRegion").onclick = () => {
+          const c = current();
+          if (!c || !selectedRegion) return;
+          c.expected_regions = c.expected_regions.filter(
+            (row) => row.region_id !== selectedRegion,
+          );
+          selectedRegion = null;
+          save();
+          renderRegions();
+        };
+        $("seed").onchange = async (event) => {
+          try {
+            const file = event.target.files[0];
+            if (!file) return;
+            const loaded = validateSeed(JSON.parse(await file.text()));
+            const saved = localStorage.getItem(
+              `ahamark-recognition-private-gold-${loaded.dataset_id}`,
+            );
+            state = saved ? validateSeed(JSON.parse(saved)) : loaded;
+            $("datasetId").textContent = state.dataset_id;
+            active = state.cases[0].case_id;
+            buildChecks($("degradations"), DEGRADATIONS, "degradation_tags");
+            buildChecks($("contentTags"), CONTENT, "content_tags");
+            selectCase(active);
+            save();
+          } catch (error) {
+            updateStatus(`载入失败：${error.message}`);
+          }
+        };
+        $("images").onchange = (event) => {
+          for (const file of event.target.files) {
+            if (/^[0-9a-f-]{36}\.png$/i.test(file.name))
+              imageUrls.set(file.name, URL.createObjectURL(file));
+          }
+          if (active) selectCase(active);
+        };
+        function applyZoom() {
+          const c = current();
+          if (!c) return;
+          const scale = Number($("zoom").value) / 100,
+            width = Math.round(c.page_width * scale),
+            height = Math.round(c.page_height * scale);
+          $("image").style.width = `${width}px`;
+          $("image").style.height = `${height}px`;
+          $("overlay").style.width = `${width}px`;
+          $("overlay").style.height = `${height}px`;
+          $("overlay").setAttribute("width", width);
+          $("overlay").setAttribute("height", height);
+          $("zoomText").textContent = `${$("zoom").value}%`;
+        }
+        $("zoom").oninput = applyZoom;
+        for (const [id, field] of [
+          ["modality", "modality"],
+          ["annotationStatus", "annotation_status"],
+          ["privacyStatus", "privacy_status"],
+        ])
+          $(id).onchange = (event) => {
+            const c = current();
+            if (c) {
+              c[field] = event.target.value;
+              save();
+            }
+          };
+        $("expectedText").oninput = (event) => {
+          const c = current();
+          if (c) {
+            c.expected_text = event.target.value.replace(/\r\n/g, "\n");
+            save();
+          }
+        };
+        $("questionNumbers").oninput = (event) => {
+          const c = current();
+          if (c) {
+            c.expected_question_numbers = event.target.value
+              .split(/\r?\n/)
+              .map((value) => value.trim())
+              .filter(Boolean);
+            save();
+          }
+        };
+        $("integrityReject").onchange = (event) => {
+          const c = current();
+          if (c) {
+            c.expect_integrity_rejection = event.target.checked;
+            save();
+          }
+        };
+        function validateForExport() {
+          if (!state) throw new Error("尚未载入标注种子");
+          for (const [index, c] of state.cases.entries()) {
+            if (!imageUrls.has(c.image_file))
+              throw new Error(`第 ${index + 1} 页未载入匿名图片`);
+            if (!c.degradation_tags.length || !c.content_tags.length)
+              throw new Error(`第 ${index + 1} 页缺少标签`);
+            if (!["annotated", "unjudgeable"].includes(c.annotation_status))
+              throw new Error(`第 ${index + 1} 页尚未完成标注`);
+            if (
+              !["no_identity_visible", "redacted_copy"].includes(
+                c.privacy_status,
+              )
+            )
+              throw new Error(`第 ${index + 1} 页尚未完成隐私复核`);
+            const text = c.expected_text;
+            if (
+              EMAIL.test(text) ||
+              PHONE.test(text) ||
+              IDENTITY.test(text) ||
+              ABSOLUTE_PATH.test(text)
+            )
+              throw new Error(`第 ${index + 1} 页正文疑似包含身份信息或路径`);
+            if (
+              c.annotation_status === "unjudgeable" &&
+              (text ||
+                c.expected_question_numbers.length ||
+                c.expected_regions.length)
+            )
+              throw new Error(`第 ${index + 1} 页不可判定时必须清空 gold 内容`);
+          }
+        }
+        $("export").onclick = () => {
+          try {
+            validateForExport();
+            const gold = {
+              schema_version: GOLD_VERSION,
+              dataset_id: state.dataset_id,
+              annotator_decision_version: state.annotator_decision_version,
+              cases: state.cases.map((c) => ({
+                case_id: c.case_id,
+                document_id: c.document_id,
+                split: c.split,
+                modality: c.modality,
+                image_file: c.image_file,
+                page_width: c.page_width,
+                page_height: c.page_height,
+                degradation_tags: c.degradation_tags,
+                content_tags: c.content_tags,
+                annotation_status: c.annotation_status,
+                expected_text: c.expected_text,
+                expected_question_numbers: c.expected_question_numbers,
+                expected_regions: c.expected_regions,
+                expect_integrity_rejection: c.expect_integrity_rejection,
+                annotator_decision_version: c.annotator_decision_version,
+              })),
+            };
+            const blob = new Blob([`${JSON.stringify(gold, null, 2)}\n`], {
+                type: "application/json",
+              }),
+              link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = "gold.json";
+            link.click();
+            URL.revokeObjectURL(link.href);
+            updateStatus("Gold JSON 已导出；图片仍只在本机");
+          } catch (error) {
+            updateStatus(`禁止导出：${error.message}`);
+          }
+        };
+        $("reset").onclick = () => {
+          if (
+            !state ||
+            !confirm("确认清除当前数据集的本地标注进度？不会删除图片文件。")
+          )
+            return;
+          localStorage.removeItem(storageKey());
+          location.reload();
+        };
+      })();
+    </script>
+  </body>
+</html>

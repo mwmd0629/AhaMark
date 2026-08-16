@@ -1,0 +1,159 @@
+from __future__ import annotations
+
+import json
+import uuid
+from collections import Counter
+from pathlib import Path
+
+import pytest
+from PIL import Image
+
+from scripts.recognition_private_gold_prepare import (
+    ANNOTATION_VERSION,
+    DIAGNOSTIC_VERSION,
+    load_json,
+    prepare_bundle,
+)
+
+
+def uid(number: int) -> str:
+    return str(uuid.UUID(int=number))
+
+
+def private_inputs(root: Path) -> tuple[dict[str, object], dict[str, object], Path]:
+    images = root / "images"
+    images.mkdir(parents=True)
+    cases: list[dict[str, object]] = []
+    entries: list[dict[str, object]] = []
+    for index in range(12):
+        case_id = uid(100 + index)
+        modality = "photo" if index == 0 else "scan" if index < 4 else "text_pdf"
+        role = "reference_answer" if index % 2 == 0 else "student_or_assignment_material"
+        cases.append(
+            {
+                "case_id": case_id,
+                "page_index": index % 2,
+                "role": role,
+                "modality": modality,
+                "width": 64,
+                "height": 48,
+                "gold_text_available": modality == "text_pdf",
+                "gold_text_chars": 40 if modality == "text_pdf" else 0,
+            }
+        )
+        entries.append(
+            {
+                "case_id": case_id,
+                "source_kind": "private_pdf",
+                "source_ref": f"C:\\private\\student-name-{index // 2}.pdf",
+                "page_index": index % 2,
+            }
+        )
+        Image.new("RGB", (64, 48), "white").save(images / f"{case_id}.png")
+    return (
+        {"schema_version": DIAGNOSTIC_VERSION, "cases": cases},
+        {"private": True, "entries": entries},
+        images,
+    )
+
+
+def test_prepare_bundle_is_anonymous_stratified_and_repository_external(tmp_path: Path) -> None:
+    diagnostic, source_map, images = private_inputs(tmp_path)
+    output = tmp_path / "annotation"
+    summary = prepare_bundle(
+        diagnostic,
+        source_map,
+        images,
+        output,
+        sample_size=8,
+        max_pages_per_document=2,
+        scan_target=2,
+        photo_target=1,
+        reference_target=4,
+        seed="stable-test-seed",
+        dataset_id=uid(1),
+    )
+
+    seed = json.loads((output / "annotation-seed.json").read_text(encoding="utf-8"))
+    private_map = json.loads((output / "private-document-map.json").read_text(encoding="utf-8"))
+    assert summary["schema_version"] == ANNOTATION_VERSION
+    assert summary["selected_page_count"] == 8
+    assert summary["selected_document_count"] >= 4
+    assert summary["modality_counts"]["photo"] == 1
+    assert summary["modality_counts"]["scan"] >= 2
+    assert summary["role_counts"] == {
+        "reference_answer": 4,
+        "student_or_assignment_material": 4,
+    }
+    assert summary["annotation_complete"] is False
+    assert summary["accuracy_claim"] is False
+    assert summary["writes_product_data"] is False
+    assert seed["schema_version"] == ANNOTATION_VERSION
+    assert len(seed["cases"]) == 8
+    assert all(case["annotation_status"] == "pending" for case in seed["cases"])
+    assert all(case["privacy_status"] == "pending" for case in seed["cases"])
+    assert all(case["split"] == "test" for case in seed["cases"])
+    assert max(Counter(case["document_id"] for case in seed["cases"]).values()) <= 2
+    assert {path.name for path in (output / "images").iterdir()} == {
+        case["image_file"] for case in seed["cases"]
+    }
+    public_text = json.dumps(seed, ensure_ascii=False)
+    assert "student-name" not in public_text
+    assert "C:\\private" not in public_text
+    assert private_map["private"] is True
+    assert "student-name" in json.dumps(private_map)
+
+
+def test_prepare_rejects_source_map_mismatch_and_unsafe_images(tmp_path: Path) -> None:
+    diagnostic, source_map, images = private_inputs(tmp_path)
+    source_map["entries"] = source_map["entries"][:-1]  # type: ignore[index]
+    with pytest.raises(ValueError, match="exactly cover"):
+        prepare_bundle(
+            diagnostic,
+            source_map,
+            images,
+            tmp_path / "mismatch",
+            sample_size=4,
+            scan_target=1,
+            photo_target=1,
+            reference_target=2,
+        )
+
+    diagnostic, source_map, images = private_inputs(tmp_path / "second")
+    selected = diagnostic["cases"][0]  # type: ignore[index]
+    (images / f"{selected['case_id']}.png").write_bytes(b"not a png")
+    with pytest.raises(OSError):
+        prepare_bundle(
+            diagnostic,
+            source_map,
+            images,
+            tmp_path / "invalid-image",
+            sample_size=12,
+            max_pages_per_document=2,
+            scan_target=3,
+            photo_target=1,
+            reference_target=6,
+        )
+
+
+def test_prepare_refuses_nonempty_output_and_duplicate_json_keys(tmp_path: Path) -> None:
+    diagnostic, source_map, images = private_inputs(tmp_path)
+    output = tmp_path / "existing"
+    output.mkdir()
+    (output / "keep.txt").write_text("do not overwrite", encoding="utf-8")
+    with pytest.raises(ValueError, match="must not already exist"):
+        prepare_bundle(
+            diagnostic,
+            source_map,
+            images,
+            output,
+            sample_size=4,
+            max_pages_per_document=2,
+            scan_target=1,
+            photo_target=1,
+            reference_target=2,
+        )
+    duplicate = tmp_path / "duplicate.json"
+    duplicate.write_text('{"schema_version":"a","schema_version":"b"}', encoding="utf-8")
+    with pytest.raises(ValueError, match="duplicate JSON key"):
+        load_json(duplicate)
