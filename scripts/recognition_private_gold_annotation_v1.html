@@ -175,6 +175,102 @@
         background: #fff;
         font-family: "Cambria Math", "STIX Two Math", serif;
       }
+      .formula-tools {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+        margin: 5px 0;
+      }
+      .formula-tools button {
+        padding: 4px 7px;
+      }
+      .formula-conversion-message {
+        min-height: 20px;
+        color: #92400e;
+        margin: 4px 0;
+      }
+      .formula-decisions {
+        margin: 7px 0;
+      }
+      .advanced-latex {
+        margin: 7px 0;
+        border-top: 1px solid #d8deea;
+        padding-top: 6px;
+      }
+      .math-preview-root {
+        display: inline-flex;
+        align-items: center;
+        min-height: 30px;
+        font-size: 17px;
+      }
+      .math-fraction {
+        display: inline-grid;
+        grid-template-rows: auto auto;
+        vertical-align: middle;
+        text-align: center;
+        margin: 0 3px;
+      }
+      .math-numerator {
+        border-bottom: 1px solid currentColor;
+        padding: 0 4px 2px;
+      }
+      .math-denominator {
+        padding: 2px 4px 0;
+      }
+      .math-radical {
+        font-size: 1.35em;
+      }
+      .math-radicand {
+        border-top: 1px solid currentColor;
+        padding: 1px 3px 0;
+      }
+      .math-operator {
+        display: inline-grid;
+        grid-template-areas: "sup" "body" "sub";
+        text-align: center;
+        vertical-align: middle;
+        margin: 0 3px;
+      }
+      .math-operator-body {
+        grid-area: body;
+        font-size: 1.15em;
+      }
+      .math-operator-sub,
+      .math-operator-sup {
+        font-size: 0.68em;
+        line-height: 1;
+      }
+      .math-operator-sub {
+        grid-area: sub;
+      }
+      .math-operator-sup {
+        grid-area: sup;
+      }
+      .math-matrix,
+      .math-cases {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        margin: 0 3px;
+      }
+      .math-matrix::before,
+      .math-matrix::after {
+        font-size: 2.2em;
+      }
+      .math-matrix::before {
+        content: "[";
+      }
+      .math-matrix::after {
+        content: "]";
+      }
+      .math-cases::before {
+        content: "{";
+        font-size: 2.5em;
+      }
+      .math-table {
+        border-collapse: separate;
+        border-spacing: 8px 2px;
+      }
       .draft {
         fill: #16a34a22;
         stroke: #16a34a;
@@ -239,7 +335,8 @@
           全程离线运行，不上传图片或正文。可载入 ocr-drafts.json
           作为待校对草稿；浏览器只按匿名 UUID 匹配，进度保存在本机
           localStorage。正文保留线性可读文本；分式、根号、上下标等二维公式应另画公式框并填写
-          LaTeX。
+          LaTeX。公式卡片优先使用严格的普通输入生成草稿；原始 LaTeX
+          仅在“高级编辑”中按需修改。
           若页面可见姓名、学号等身份信息，必须先在独立图片副本中遮挡，再选择“已使用去标识副本”。
         </div>
         <label>数据集</label><code id="datasetId">-</code>
@@ -314,13 +411,15 @@
         </div>
         <label>公式区域与结构化转写</label>
         <div class="hint">
-          选择“公式区域”后框住单个完整公式。LaTeX
-          示例：<code>\frac{a}{b}</code>、<code>\sqrt{xy+1}</code>、<code>\lim_{(x,y)\to(0,0)}</code>。线性替代文本用于搜索和旧评测，不能代替
+          选择“公式区域”后框住单个完整公式。先按日常形式输入，例如
+          <code>lim (x,y)-&gt;(0,0) [sqrt(xy+1)-1]/(x+y)</code
+          >，再生成并核对结构草稿。转换器只接受页面列出的有限语法，遇到歧义会停止，不会猜测。线性替代文本用于搜索和旧评测，不能代替
           LaTeX 结构。
         </div>
         <div id="formulaSpans"></div>
       </section>
     </main>
+    <script src="./recognition_math_input_to_latex.js"></script>
     <script>
       (() => {
         "use strict";
@@ -375,6 +474,7 @@
           draft = null,
           drawMode = "question";
         const imageUrls = new Map();
+        const plainInputs = new Map();
 
         function storageKey() {
           return state
@@ -611,6 +711,155 @@
           renderFormulaEditors();
           renderList();
         }
+        function appendMathPreview(parent, node) {
+          const appendText = (value) =>
+            parent.append(document.createTextNode(value));
+          if (node.type === "atom") {
+            appendText(node.value);
+            return;
+          }
+          if (node.type === "group") {
+            appendText(node.bracket);
+            appendMathPreview(parent, node.body);
+            appendText(node.bracket === "(" ? ")" : "]");
+            return;
+          }
+          if (node.type === "sequence") {
+            node.items.forEach((item, index) => {
+              if (index) appendText(",");
+              appendMathPreview(parent, item);
+            });
+            return;
+          }
+          if (node.type === "binary") {
+            appendMathPreview(parent, node.left);
+            appendText(
+              node.operator === "*"
+                ? "·"
+                : node.operator === "<="
+                  ? "≤"
+                  : node.operator === ">="
+                    ? "≥"
+                    : node.operator,
+            );
+            appendMathPreview(parent, node.right);
+            return;
+          }
+          if (node.type === "unary") {
+            appendText(node.operator === "-" ? "−" : "+");
+            appendMathPreview(parent, node.body);
+            return;
+          }
+          if (node.type === "product") {
+            appendMathPreview(parent, node.left);
+            appendMathPreview(parent, node.right);
+            return;
+          }
+          if (node.type === "fraction") {
+            const fraction = document.createElement("span"),
+              numerator = document.createElement("span"),
+              denominator = document.createElement("span");
+            fraction.className = "math-fraction";
+            numerator.className = "math-numerator";
+            denominator.className = "math-denominator";
+            appendMathPreview(numerator, node.numerator);
+            appendMathPreview(denominator, node.denominator);
+            fraction.append(numerator, denominator);
+            parent.append(fraction);
+            return;
+          }
+          if (node.type === "sqrt") {
+            const radical = document.createElement("span"),
+              radicand = document.createElement("span");
+            radical.className = "math-radical";
+            radical.textContent = "√";
+            radicand.className = "math-radicand";
+            appendMathPreview(radicand, node.body);
+            parent.append(radical, radicand);
+            return;
+          }
+          if (node.type === "script") {
+            const wrapper = document.createElement("span");
+            appendMathPreview(wrapper, node.base);
+            if (node.subscript) {
+              const sub = document.createElement("sub");
+              appendMathPreview(sub, node.subscript);
+              wrapper.append(sub);
+            }
+            if (node.superscript) {
+              const sup = document.createElement("sup");
+              appendMathPreview(sup, node.superscript);
+              wrapper.append(sup);
+            }
+            parent.append(wrapper);
+            return;
+          }
+          if (node.type === "limit" || node.type === "largeOperator") {
+            const operator = document.createElement("span"),
+              body = document.createElement("span"),
+              sub = document.createElement("span");
+            operator.className = "math-operator";
+            body.className = "math-operator-body";
+            sub.className = "math-operator-sub";
+            body.textContent =
+              node.type === "limit"
+                ? "lim"
+                : node.operator === "int"
+                  ? "∫"
+                  : "Σ";
+            if (node.type === "limit") {
+              appendMathPreview(sub, node.from);
+              sub.append(document.createTextNode("→"));
+              appendMathPreview(sub, node.to);
+            } else {
+              appendMathPreview(sub, node.lower);
+              if (node.upper) {
+                const sup = document.createElement("span");
+                sup.className = "math-operator-sup";
+                appendMathPreview(sup, node.upper);
+                operator.append(sup);
+              }
+            }
+            operator.append(body, sub);
+            parent.append(operator);
+            return;
+          }
+          if (node.type === "matrix" || node.type === "cases") {
+            const wrapper = document.createElement("span"),
+              table = document.createElement("table"),
+              body = document.createElement("tbody");
+            wrapper.className =
+              node.type === "matrix" ? "math-matrix" : "math-cases";
+            table.className = "math-table";
+            for (const row of node.rows) {
+              const tr = document.createElement("tr");
+              for (const cell of row) {
+                const td = document.createElement("td");
+                appendMathPreview(td, cell);
+                tr.append(td);
+              }
+              body.append(tr);
+            }
+            table.append(body);
+            wrapper.append(table);
+            parent.append(wrapper);
+          }
+        }
+
+        function renderStructurePreview(container, result, existingLatex = "") {
+          container.innerHTML = "";
+          if (!result) {
+            container.textContent = existingLatex.trim()
+              ? `已有 LaTeX 草稿；可展开高级编辑查看，或用普通输入重新生成：${existingLatex}`
+              : "等待从普通输入生成结构草稿";
+            return;
+          }
+          const root = document.createElement("span");
+          root.className = "math-preview-root";
+          appendMathPreview(root, result.ast);
+          container.append(root);
+        }
+
         function renderFormulaEditors() {
           const container = $("formulaSpans"),
             c = current();
@@ -625,7 +874,11 @@
           c.formula_spans.forEach((span, index) => {
             const card = document.createElement("div");
             card.className = `formula-card${selectedFormula === span.formula_id ? " selected" : ""}`;
-            card.onclick = () => {
+            card.onclick = (event) => {
+              if (
+                event.target.closest("textarea,button,select,details,summary")
+              )
+                return;
               selectedFormula = span.formula_id;
               selectedRegion = null;
               renderFormulaEditors();
@@ -645,6 +898,7 @@
               c.formula_spans = c.formula_spans.filter(
                 (item) => item.formula_id !== span.formula_id,
               );
+              plainInputs.delete(span.formula_id);
               selectedFormula = null;
               save();
               renderFormulaEditors();
@@ -652,43 +906,57 @@
             };
             heading.append(title, remove);
 
-            const latexLabel = document.createElement("label");
-            latexLabel.textContent = "LaTeX（保留二维结构）";
+            const plainLabel = document.createElement("label");
+            plainLabel.textContent = "普通数学输入（严格有限语法）";
+            const plain = document.createElement("textarea");
+            plain.className = "formula-plain";
+            plain.spellcheck = false;
+            plain.placeholder = "例如：lim (x,y)->(0,0) [sqrt(xy+1)-1]/(x+y)";
+            plain.value = plainInputs.get(span.formula_id) || "";
+
+            const tools = document.createElement("div");
+            tools.className = "formula-tools";
+            for (const [text, template] of [
+              ["分式", "[a]/[b]"],
+              ["根号", "sqrt(a)"],
+              ["上标", "x^2"],
+              ["下标", "x_(i)"],
+              ["极限", "lim x->0 "],
+              ["积分", "int_a^b "],
+              ["求和", "sum_(i=1)^n "],
+              ["矩阵", "matrix([a,b];[c,d])"],
+              ["分段函数", "cases([f(x),x>=0];[g(x),x<0])"],
+            ]) {
+              const button = document.createElement("button");
+              button.type = "button";
+              button.textContent = text;
+              button.onclick = () => {
+                const start = plain.selectionStart,
+                  end = plain.selectionEnd;
+                plain.setRangeText(template, start, end, "end");
+                plain.dispatchEvent(new Event("input", { bubbles: true }));
+                plain.focus();
+              };
+              tools.append(button);
+            }
+
+            const actionRow = document.createElement("div"),
+              generate = document.createElement("button"),
+              conversionMessage = document.createElement("div");
+            actionRow.className = "row";
+            generate.type = "button";
+            generate.className = "primary formula-generate";
+            generate.textContent = "生成结构草稿";
+            conversionMessage.className = "formula-conversion-message";
+            actionRow.append(generate);
+
             const latex = document.createElement("textarea");
             latex.className = "formula-latex";
             latex.spellcheck = false;
             latex.value = span.latex;
             const preview = document.createElement("div");
             preview.className = "formula-preview";
-            const updatePreview = () => {
-              preview.textContent = span.latex.trim()
-                ? `LaTeX：${span.latex}`
-                : "等待输入 LaTeX";
-            };
-            latex.oninput = (event) => {
-              span.latex = event.target.value.replace(/\r\n/g, "\n");
-              if (span.review_status === "reviewed") {
-                span.review_status = "pending";
-                status.value = "pending";
-              }
-              updatePreview();
-              save();
-            };
-
-            const linearLabel = document.createElement("label");
-            linearLabel.textContent = "线性替代文本（搜索与兼容）";
-            const linear = document.createElement("textarea");
-            linear.className = "formula-linear";
-            linear.spellcheck = false;
-            linear.value = span.linear_text;
-            linear.oninput = (event) => {
-              span.linear_text = event.target.value.replace(/\r\n/g, "\n");
-              if (span.review_status === "reviewed") {
-                span.review_status = "pending";
-                status.value = "pending";
-              }
-              save();
-            };
+            renderStructurePreview(preview, null, span.latex);
 
             const statusLabel = document.createElement("label");
             statusLabel.textContent = "公式核对状态";
@@ -705,16 +973,115 @@
               status.append(option);
             }
             status.value = span.review_status;
+
+            const markPending = () => {
+              if (span.review_status === "reviewed") {
+                span.review_status = "pending";
+                status.value = "pending";
+              }
+            };
+            plain.oninput = (event) => {
+              plainInputs.set(span.formula_id, event.target.value);
+              markPending();
+              renderStructurePreview(preview, null);
+              conversionMessage.textContent =
+                "普通输入已变化，请重新生成并对照原图核对。";
+              save();
+            };
+            generate.onclick = () => {
+              try {
+                const result = window.AhaMarkMathInput.convert(plain.value);
+                span.latex = result.latex;
+                span.linear_text = result.linearText;
+                span.review_status = "pending";
+                latex.value = span.latex;
+                linear.value = span.linear_text;
+                status.value = "pending";
+                renderStructurePreview(preview, result);
+                conversionMessage.textContent =
+                  "已生成草稿，状态保持待核对；请只在与原图一致时确认。";
+                save();
+              } catch (error) {
+                renderStructurePreview(preview, null);
+                conversionMessage.textContent = `停止转换：${error.message}`;
+              }
+            };
+            latex.oninput = (event) => {
+              span.latex = event.target.value.replace(/\r\n/g, "\n");
+              markPending();
+              conversionMessage.textContent =
+                "高级 LaTeX 已修改，请重新对照原图核对。";
+              save();
+            };
+
+            const advanced = document.createElement("details"),
+              advancedSummary = document.createElement("summary"),
+              latexLabel = document.createElement("label");
+            advanced.className = "advanced-latex";
+            advancedSummary.textContent = "高级编辑：原始 LaTeX";
+            latexLabel.textContent = "LaTeX（保留二维结构）";
+            advanced.append(advancedSummary, latexLabel, latex);
+
+            const linearLabel = document.createElement("label");
+            linearLabel.textContent = "线性替代文本（搜索与兼容）";
+            const linear = document.createElement("textarea");
+            linear.className = "formula-linear";
+            linear.spellcheck = false;
+            linear.value = span.linear_text;
+            linear.oninput = (event) => {
+              span.linear_text = event.target.value.replace(/\r\n/g, "\n");
+              markPending();
+              save();
+            };
+
             status.onchange = (event) => {
               span.review_status = event.target.value;
               save();
             };
-            updatePreview();
+
+            const decisions = document.createElement("div");
+            decisions.className = "row formula-decisions";
+            for (const [text, action] of [
+              ["与原图一致", "reviewed"],
+              ["需要修改", "modify"],
+              ["需要辅助转写", "assist"],
+            ]) {
+              const button = document.createElement("button");
+              button.type = "button";
+              button.textContent = text;
+              button.onclick = () => {
+                if (action === "reviewed") {
+                  if (!span.latex.trim() || !span.linear_text.trim()) {
+                    conversionMessage.textContent =
+                      "尚无完整草稿，不能标记为与原图一致。";
+                    return;
+                  }
+                  span.review_status = "reviewed";
+                  status.value = "reviewed";
+                  conversionMessage.textContent = "已记录人工对照确认。";
+                } else {
+                  span.review_status = "pending";
+                  status.value = "pending";
+                  conversionMessage.textContent =
+                    action === "assist"
+                      ? "保持待核对：请请求辅助转写；看不清时可单独标记局部无法可靠转写。"
+                      : "保持待核对：请修改普通输入或展开高级 LaTeX。";
+                  if (action === "modify") advanced.open = true;
+                }
+                save();
+              };
+              decisions.append(button);
+            }
             card.append(
               heading,
-              latexLabel,
-              latex,
+              plainLabel,
+              plain,
+              tools,
+              actionRow,
+              conversionMessage,
               preview,
+              decisions,
+              advanced,
               linearLabel,
               linear,
               statusLabel,

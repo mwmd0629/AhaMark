@@ -102,7 +102,14 @@ async function main() {
       viewport: { width: 1400, height: 900 },
     });
     const pageErrors = [];
+    const networkRequests = [];
     page.on("pageerror", (error) => pageErrors.push(error));
+    page.on("request", (request) => {
+      const protocol = new URL(request.url()).protocol;
+      if (!["file:", "blob:", "data:"].includes(protocol)) {
+        networkRequests.push(request.url());
+      }
+    });
     await page.goto(pathToFileURL(toolPath).href);
     await page.locator("#seed").setInputFiles(seedPath);
     await page.locator("#images").setInputFiles(imagePaths);
@@ -153,20 +160,57 @@ async function main() {
     await page.locator('input[name="drawMode"][value="formula"]').check();
     await draw(page, [10, 80], [80, 105]);
     assert.equal(await page.locator(".formula-card").count(), 1);
+    assert.deepEqual(
+      await page.locator(".formula-tools button").allTextContents(),
+      [
+        "分式",
+        "根号",
+        "上标",
+        "下标",
+        "极限",
+        "积分",
+        "求和",
+        "矩阵",
+        "分段函数",
+      ],
+    );
+    assert.equal(
+      await page.locator(".advanced-latex").evaluate((node) => node.open),
+      false,
+    );
     await page.locator("#export").click();
     await page.waitForFunction(() =>
       document.querySelector("#status").textContent.includes("公式 1 尚未核对"),
     );
-    await page
-      .locator(".formula-latex")
-      .fill("\\lim_{x\\to 0}\\frac{\\sqrt{x+1}-1}{x}");
-    await page.locator(".formula-linear").fill("lim_{x→0} [√(x+1)−1]/x");
-    await page.locator(".formula-status").selectOption("reviewed");
-    assert.match(
-      await page.locator(".formula-preview").textContent(),
-      /\\frac/,
+    const ordinary = "lim (x,y)->(0,0) [sqrt(xy+1)-1]/(x+y)";
+    await page.locator(".formula-plain").fill(ordinary);
+    await page.locator(".formula-generate").click();
+    assert.equal(
+      await page.locator(".formula-latex").inputValue(),
+      "\\lim_{(x,y)\\to(0,0)}\\frac{\\sqrt{xy+1}-1}{x+y}",
     );
+    assert.equal(await page.locator(".formula-status").inputValue(), "pending");
+    assert.equal(await page.locator(".math-fraction").count(), 1);
+    assert.equal(await page.locator(".math-radicand").count(), 1);
+    assert.equal(await page.locator(".math-operator").count(), 1);
+    await page.getByRole("button", { name: "与原图一致" }).click();
+    assert.equal(
+      await page.locator(".formula-status").inputValue(),
+      "reviewed",
+    );
+    await page.locator(".formula-plain").fill(`${ordinary} `);
+    assert.equal(await page.locator(".formula-status").inputValue(), "pending");
+    await page.locator(".formula-plain").fill("a/b");
+    await page.locator(".formula-generate").click();
+    assert.match(
+      await page.locator(".formula-conversion-message").textContent(),
+      /停止转换.*分子必须/,
+    );
+    await page.locator(".formula-plain").fill(ordinary);
+    await page.locator(".formula-generate").click();
+    await page.getByRole("button", { name: "与原图一致" }).click();
     assert.deepEqual(pageErrors, []);
+    assert.deepEqual(networkRequests, []);
 
     await page.locator(".page").nth(1).click();
     await page.locator("#privacyStatus").selectOption("redacted_copy");
@@ -189,11 +233,11 @@ async function main() {
     assert.equal(gold.cases[0].formula_spans.length, 1);
     assert.equal(
       gold.cases[0].formula_spans[0].latex,
-      "\\lim_{x\\to 0}\\frac{\\sqrt{x+1}-1}{x}",
+      "\\lim_{(x,y)\\to(0,0)}\\frac{\\sqrt{xy+1}-1}{x+y}",
     );
     assert.equal(
       gold.cases[0].formula_spans[0].linear_text,
-      "lim_{x→0} [√(x+1)−1]/x",
+      "lim_{(x,y)→(0,0)} [√(xy+1)−1]/(x+y)",
     );
     assert.equal(gold.cases[0].formula_spans[0].review_status, "reviewed");
     assert.equal(gold.cases[1].expected_regions.length, 0);
@@ -205,6 +249,8 @@ async function main() {
       "text_reviewed",
       "source_ref",
       "student_or_assignment_material",
+      "formula-plain",
+      ordinary,
     ]) {
       assert(!serialized.includes(forbidden));
     }
