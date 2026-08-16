@@ -15,6 +15,8 @@ from PIL import Image
 
 DIAGNOSTIC_VERSION = "ahamark-private-ocr-diagnostic-v1"
 ANNOTATION_VERSION = "recognition-private-annotation-v1"
+DRAFT_VERSION = "recognition-private-drafts-v1"
+PRIVATE_PREDICTION_VERSION = "ahamark-tesseract-private-predictions-v1"
 DECISION_VERSION = "decision-v1"
 MODALITIES = {"text_pdf", "scan", "photo", "mixed"}
 ROLES = {"reference_answer", "student_or_assignment_material"}
@@ -135,6 +137,42 @@ def validate_private_source_map(raw: object, case_ids: set[str]) -> list[Json]:
     return validated
 
 
+def _selected_drafts(raw: object, selected_ids: set[str]) -> list[Json]:
+    data = _object(raw, "draft_predictions")
+    _exact_keys(data, {"schema_version", "provider", "results"}, "draft_predictions")
+    if data["schema_version"] != PRIVATE_PREDICTION_VERSION:
+        raise ValueError("draft prediction schema_version is invalid")
+    results = data["results"]
+    if not isinstance(results, list):
+        raise ValueError("draft_predictions.results must be a list")
+    drafts: dict[str, str] = {}
+    for index, value in enumerate(cast(list[object], results)):
+        label = f"draft_predictions.results[{index}]"
+        result = _object(value, label)
+        _exact_keys(result, {"case_id", "status", "runtime_ms", "blocks"}, label)
+        case_id = _uuid(result["case_id"], f"{label}.case_id")
+        if case_id not in selected_ids:
+            continue
+        if case_id in drafts:
+            raise ValueError("draft prediction case_id must be unique")
+        if result["status"] != "ok" or not isinstance(result["blocks"], list):
+            raise ValueError("selected draft prediction must have successful blocks")
+        text: list[str] = []
+        for block_index, block_value in enumerate(cast(list[object], result["blocks"])):
+            block = _object(block_value, f"{label}.blocks[{block_index}]")
+            _exact_keys(block, {"text", "confidence", "region", "status"}, label)
+            if not isinstance(block["text"], str):
+                raise ValueError("draft block text must be a string")
+            text.append(block["text"])
+        draft_text = "\n".join(text)
+        if len(draft_text) > 1_000_000:
+            raise ValueError("selected draft text exceeds the character limit")
+        drafts[case_id] = draft_text
+    if set(drafts) != selected_ids:
+        raise ValueError("draft predictions must exactly cover selected cases")
+    return [{"case_id": case_id, "draft_text": drafts[case_id]} for case_id in sorted(drafts)]
+
+
 def _rank(seed: str, value: str) -> str:
     return hashlib.sha256(f"{seed}\0{value}".encode()).hexdigest()
 
@@ -208,6 +246,7 @@ def prepare_bundle(
     reference_target: int = 25,
     seed: str = "20260816",
     dataset_id: str | None = None,
+    draft_predictions_raw: object | None = None,
 ) -> Json:
     for value, label in (
         (sample_size, "sample_size"),
@@ -306,6 +345,18 @@ def prepare_bundle(
             for source_ref in source_refs
         ],
     }
+    drafts = (
+        {
+            "schema_version": DRAFT_VERSION,
+            "private": True,
+            "dataset_id": dataset_uuid,
+            "cases": _selected_drafts(
+                draft_predictions_raw, {str(case["case_id"]) for case in selected}
+            ),
+        }
+        if draft_predictions_raw is not None
+        else None
+    )
     temporary_root = output_root.with_name(f".{output_root.name}.tmp-{uuid.uuid4()}")
     temporary_root.mkdir(parents=True)
     try:
@@ -320,6 +371,10 @@ def prepare_bundle(
         (temporary_root / "private-document-map.json").write_text(
             json.dumps(private_map, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
+        if drafts is not None:
+            (temporary_root / "ocr-drafts.json").write_text(
+                json.dumps(drafts, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
         temporary_root.replace(output_root)
     except Exception:
         shutil.rmtree(temporary_root, ignore_errors=True)
@@ -335,6 +390,7 @@ def prepare_bundle(
         "annotation_complete": False,
         "accuracy_claim": False,
         "writes_product_data": False,
+        "draft_page_count": len(cast(Json, drafts)["cases"]) if drafts is not None else 0,
     }
 
 
@@ -368,6 +424,7 @@ def main() -> None:
     parser.add_argument("--reference-target", type=int, default=25)
     parser.add_argument("--seed", default="20260816")
     parser.add_argument("--dataset-id")
+    parser.add_argument("--draft-predictions", type=Path)
     args = parser.parse_args()
     summary = prepare_bundle(
         load_json(args.diagnostic),
@@ -381,6 +438,9 @@ def main() -> None:
         reference_target=args.reference_target,
         seed=args.seed,
         dataset_id=args.dataset_id,
+        draft_predictions_raw=(
+            load_json(args.draft_predictions) if args.draft_predictions is not None else None
+        ),
     )
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
 

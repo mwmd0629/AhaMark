@@ -11,6 +11,8 @@ from PIL import Image
 from scripts.recognition_private_gold_prepare import (
     ANNOTATION_VERSION,
     DIAGNOSTIC_VERSION,
+    DRAFT_VERSION,
+    PRIVATE_PREDICTION_VERSION,
     load_json,
     prepare_bundle,
 )
@@ -57,6 +59,29 @@ def private_inputs(root: Path) -> tuple[dict[str, object], dict[str, object], Pa
     )
 
 
+def draft_predictions(diagnostic: dict[str, object]) -> dict[str, object]:
+    return {
+        "schema_version": PRIVATE_PREDICTION_VERSION,
+        "provider": {"private": "ignored"},
+        "results": [
+            {
+                "case_id": case["case_id"],
+                "status": "ok",
+                "runtime_ms": 1,
+                "blocks": [
+                    {
+                        "text": f"OCR draft {index}",
+                        "confidence": 0.5,
+                        "region": {"x": 0, "y": 0, "width": 1, "height": 1},
+                        "status": "manual_required",
+                    }
+                ],
+            }
+            for index, case in enumerate(diagnostic["cases"])  # type: ignore[index]
+        ],
+    }
+
+
 def test_prepare_bundle_is_anonymous_stratified_and_repository_external(tmp_path: Path) -> None:
     diagnostic, source_map, images = private_inputs(tmp_path)
     output = tmp_path / "annotation"
@@ -72,10 +97,12 @@ def test_prepare_bundle_is_anonymous_stratified_and_repository_external(tmp_path
         reference_target=4,
         seed="stable-test-seed",
         dataset_id=uid(1),
+        draft_predictions_raw=draft_predictions(diagnostic),
     )
 
     seed = json.loads((output / "annotation-seed.json").read_text(encoding="utf-8"))
     private_map = json.loads((output / "private-document-map.json").read_text(encoding="utf-8"))
+    drafts = json.loads((output / "ocr-drafts.json").read_text(encoding="utf-8"))
     assert summary["schema_version"] == ANNOTATION_VERSION
     assert summary["selected_page_count"] == 8
     assert summary["selected_document_count"] >= 4
@@ -88,6 +115,7 @@ def test_prepare_bundle_is_anonymous_stratified_and_repository_external(tmp_path
     assert summary["annotation_complete"] is False
     assert summary["accuracy_claim"] is False
     assert summary["writes_product_data"] is False
+    assert summary["draft_page_count"] == 8
     assert seed["schema_version"] == ANNOTATION_VERSION
     assert len(seed["cases"]) == 8
     assert all(case["annotation_status"] == "pending" for case in seed["cases"])
@@ -102,6 +130,11 @@ def test_prepare_bundle_is_anonymous_stratified_and_repository_external(tmp_path
     assert "C:\\private" not in public_text
     assert private_map["private"] is True
     assert "student-name" in json.dumps(private_map)
+    assert drafts["schema_version"] == DRAFT_VERSION
+    assert drafts["private"] is True
+    assert len(drafts["cases"]) == 8
+    assert all(set(row) == {"case_id", "draft_text"} for row in drafts["cases"])
+    assert "provider" not in json.dumps(drafts)
 
 
 def test_prepare_rejects_source_map_mismatch_and_unsafe_images(tmp_path: Path) -> None:
@@ -133,6 +166,23 @@ def test_prepare_rejects_source_map_mismatch_and_unsafe_images(tmp_path: Path) -
             scan_target=3,
             photo_target=1,
             reference_target=6,
+        )
+
+    diagnostic, source_map, images = private_inputs(tmp_path / "drafts")
+    incomplete_drafts = draft_predictions(diagnostic)
+    incomplete_drafts["results"] = incomplete_drafts["results"][:-1]  # type: ignore[index]
+    with pytest.raises(ValueError, match="exactly cover selected cases"):
+        prepare_bundle(
+            diagnostic,
+            source_map,
+            images,
+            tmp_path / "missing-draft",
+            sample_size=12,
+            max_pages_per_document=2,
+            scan_target=3,
+            photo_target=1,
+            reference_target=6,
+            draft_predictions_raw=incomplete_drafts,
         )
 
 

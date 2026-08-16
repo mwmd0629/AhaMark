@@ -189,6 +189,9 @@
         >标注种子 <input id="seed" type="file" accept="application/json"
       /></label>
       <label
+        >OCR 草稿 <input id="drafts" type="file" accept="application/json"
+      /></label>
+      <label
         >匿名页面 <input id="images" type="file" accept="image/png" multiple
       /></label>
       <button id="export" class="primary">验证并导出 Gold JSON</button>
@@ -198,8 +201,9 @@
     <main class="layout">
       <aside class="panel">
         <div class="hint">
-          全程离线运行，不上传图片或正文。浏览器只按匿名 UUID
-          匹配图片；标注自动保存在本机 localStorage。
+          全程离线运行，不上传图片或正文。可载入 ocr-drafts.json
+          作为待校对草稿；浏览器只按匿名 UUID 匹配，进度保存在本机
+          localStorage。
           若页面可见姓名、学号等身份信息，必须先在独立图片副本中遮挡，再选择“已使用去标识副本”。
         </div>
         <label>数据集</label><code id="datasetId">-</code>
@@ -220,10 +224,10 @@
       <section class="panel editor">
         <label>页面模态</label>
         <select id="modality">
-          <option>text_pdf</option>
-          <option>scan</option>
-          <option>photo</option>
-          <option>mixed</option>
+          <option value="text_pdf">文字型 PDF</option>
+          <option value="scan">扫描件</option>
+          <option value="photo">照片</option>
+          <option value="mixed">混合来源</option>
         </select>
         <label>标注状态</label>
         <select id="annotationStatus">
@@ -241,8 +245,12 @@
         <div id="degradations" class="checks"></div>
         <label>内容标签（至少一项）</label>
         <div id="contentTags" class="checks"></div>
-        <label>期望正文</label
+        <label>正文草稿（必须对照图片逐字校对）</label
         ><textarea id="expectedText" spellcheck="false"></textarea>
+        <label
+          ><input id="textReviewed" type="checkbox" />
+          已逐字核对正文；不是直接接受 OCR 草稿</label
+        >
         <label>期望题号（每行一个，保持阅读顺序）</label
         ><textarea id="questionNumbers" spellcheck="false"></textarea>
         <label
@@ -264,6 +272,7 @@
         "use strict";
         const VERSION = "recognition-private-annotation-v1";
         const GOLD_VERSION = "recognition-private-gold-v1";
+        const DRAFT_VERSION = "recognition-private-drafts-v1";
         const DEGRADATIONS = [
           "clean",
           "low_resolution",
@@ -281,6 +290,23 @@
           "question_number",
           "negative",
         ];
+        const DEGRADATION_LABELS = {
+          clean: "清晰，无明显退化",
+          low_resolution: "分辨率低",
+          blurred: "模糊",
+          rotation: "旋转或倾斜",
+          perspective: "透视变形",
+          low_contrast: "低对比度",
+          shadow: "阴影或光照不均",
+          cropped: "内容贴边或疑似裁切",
+        };
+        const CONTENT_LABELS = {
+          chinese: "中文",
+          english: "英文",
+          math: "数学公式或符号",
+          question_number: "题号",
+          negative: "负例：本页没有应识别的题目区域",
+        };
         const EMAIL = /[\w.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/;
         const PHONE = /(?:\+?86[ -]?)?1[3-9]\d{9}/;
         const IDENTITY =
@@ -358,8 +384,9 @@
               "expect_integrity_rejection",
               "annotator_decision_version",
             ];
+            const savedKeys = [...keys, "text_reviewed"];
             if (
-              !exactKeys(item, keys) ||
+              (!exactKeys(item, keys) && !exactKeys(item, savedKeys)) ||
               !validUuid(item.case_id) ||
               !validUuid(item.document_id) ||
               ids.has(item.case_id) ||
@@ -367,11 +394,17 @@
               item.split !== "test"
             )
               throw new Error("标注种子页面格式不正确");
+            if (
+              "text_reviewed" in item &&
+              typeof item.text_reviewed !== "boolean"
+            )
+              throw new Error("正文核对状态不正确");
+            if (!("text_reviewed" in item)) item.text_reviewed = false;
             ids.add(item.case_id);
           }
           return data;
         }
-        function buildChecks(container, values, field) {
+        function buildChecks(container, values, field, labels) {
           container.innerHTML = "";
           for (const value of values) {
             const label = document.createElement("label"),
@@ -386,7 +419,10 @@
               );
               save();
             };
-            label.append(input, document.createTextNode(` ${value}`));
+            label.append(
+              input,
+              document.createTextNode(` ${labels[value]}（${value}）`),
+            );
             container.append(label);
           }
         }
@@ -400,10 +436,11 @@
             if (item.case_id === active) button.classList.add("active");
             if (
               item.annotation_status !== "pending" &&
-              item.privacy_status !== "pending"
+              item.privacy_status !== "pending" &&
+              (item.annotation_status === "unjudgeable" || item.text_reviewed)
             )
               button.classList.add("complete");
-            button.textContent = `${index + 1}. ${item.modality} · ${item.role === "reference_answer" ? "参考答案" : "学生/材料"} · ${item.expected_regions.length} 区 · ${item.annotation_status}`;
+            button.textContent = `${index + 1}. ${item.modality} · ${item.role === "reference_answer" ? "参考答案" : "学生/材料"} · ${item.expected_regions.length} 区 · ${item.text_reviewed ? "正文已核对" : "正文待核对"}`;
             button.onclick = () => selectCase(item.case_id);
             pages.append(button);
           });
@@ -417,10 +454,11 @@
           const done = state.cases.filter(
             (item) =>
               item.annotation_status !== "pending" &&
-              item.privacy_status !== "pending",
+              item.privacy_status !== "pending" &&
+              (item.annotation_status === "unjudgeable" || item.text_reviewed),
           ).length;
           $("status").textContent =
-            `${done}/${state.cases.length} 页已完成标注与隐私复核`;
+            `${done}/${state.cases.length} 页已完成正文核对、标注与隐私复核`;
         }
         function selectCase(caseId) {
           active = caseId;
@@ -431,6 +469,7 @@
           $("annotationStatus").value = c.annotation_status;
           $("privacyStatus").value = c.privacy_status;
           $("expectedText").value = c.expected_text;
+          $("textReviewed").checked = c.text_reviewed;
           $("questionNumbers").value = c.expected_question_numbers.join("\n");
           $("integrityReject").checked = c.expect_integrity_rejection;
           for (const containerId of ["degradations", "contentTags"])
@@ -578,8 +617,18 @@
             state = saved ? validateSeed(JSON.parse(saved)) : loaded;
             $("datasetId").textContent = state.dataset_id;
             active = state.cases[0].case_id;
-            buildChecks($("degradations"), DEGRADATIONS, "degradation_tags");
-            buildChecks($("contentTags"), CONTENT, "content_tags");
+            buildChecks(
+              $("degradations"),
+              DEGRADATIONS,
+              "degradation_tags",
+              DEGRADATION_LABELS,
+            );
+            buildChecks(
+              $("contentTags"),
+              CONTENT,
+              "content_tags",
+              CONTENT_LABELS,
+            );
             selectCase(active);
             save();
           } catch (error) {
@@ -592,6 +641,55 @@
               imageUrls.set(file.name, URL.createObjectURL(file));
           }
           if (active) selectCase(active);
+        };
+        $("drafts").onchange = async (event) => {
+          try {
+            if (!state) throw new Error("请先载入标注种子");
+            const file = event.target.files[0];
+            if (!file) return;
+            const data = JSON.parse(await file.text());
+            if (
+              !exactKeys(data, [
+                "schema_version",
+                "private",
+                "dataset_id",
+                "cases",
+              ]) ||
+              data.schema_version !== DRAFT_VERSION ||
+              data.private !== true ||
+              data.dataset_id !== state.dataset_id ||
+              !Array.isArray(data.cases)
+            )
+              throw new Error("OCR 草稿格式或数据集不匹配");
+            const drafts = new Map();
+            for (const row of data.cases) {
+              if (
+                !exactKeys(row, ["case_id", "draft_text"]) ||
+                !validUuid(row.case_id) ||
+                typeof row.draft_text !== "string" ||
+                drafts.has(row.case_id)
+              )
+                throw new Error("OCR 草稿页面格式不正确");
+              drafts.set(row.case_id, row.draft_text);
+            }
+            if (
+              drafts.size !== state.cases.length ||
+              state.cases.some((item) => !drafts.has(item.case_id))
+            )
+              throw new Error("OCR 草稿必须完整覆盖当前标注页");
+            let filled = 0;
+            for (const item of state.cases) {
+              if (!item.expected_text && !item.text_reviewed) {
+                item.expected_text = drafts.get(item.case_id);
+                filled += 1;
+              }
+            }
+            selectCase(active);
+            save();
+            updateStatus(`已填入 ${filled} 页 OCR 草稿；仍须逐页对照图片核对`);
+          } catch (error) {
+            updateStatus(`草稿载入失败：${error.message}`);
+          }
         };
         function applyZoom() {
           const c = current();
@@ -624,6 +722,15 @@
           const c = current();
           if (c) {
             c.expected_text = event.target.value.replace(/\r\n/g, "\n");
+            c.text_reviewed = false;
+            $("textReviewed").checked = false;
+            save();
+          }
+        };
+        $("textReviewed").onchange = (event) => {
+          const c = current();
+          if (c) {
+            c.text_reviewed = event.target.checked;
             save();
           }
         };
@@ -653,6 +760,8 @@
               throw new Error(`第 ${index + 1} 页缺少标签`);
             if (!["annotated", "unjudgeable"].includes(c.annotation_status))
               throw new Error(`第 ${index + 1} 页尚未完成标注`);
+            if (c.annotation_status === "annotated" && !c.text_reviewed)
+              throw new Error(`第 ${index + 1} 页正文尚未逐字核对`);
             if (
               !["no_identity_visible", "redacted_copy"].includes(
                 c.privacy_status,

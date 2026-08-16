@@ -29,8 +29,17 @@ function syntheticPng(filePath, shade) {
 }
 
 async function draw(page, start, end) {
+  await page.locator("#overlay").scrollIntoViewIfNeeded();
   const bounds = await page.locator("#overlay").boundingBox();
   assert(bounds);
+  const target = await page.evaluate(
+    ({ x, y }) => {
+      const element = document.elementFromPoint(x, y);
+      return element ? element.id || element.tagName : null;
+    },
+    { x: bounds.x + start[0], y: bounds.y + start[1] },
+  );
+  assert.equal(target, "overlay");
   await page.mouse.move(bounds.x + start[0], bounds.y + start[1]);
   await page.mouse.down();
   await page.mouse.move(bounds.x + end[0], bounds.y + end[1]);
@@ -69,6 +78,19 @@ async function main() {
   };
   const seedPath = path.join(temporaryRoot, "annotation-seed.json");
   fs.writeFileSync(seedPath, JSON.stringify(seed));
+  const draftsPath = path.join(temporaryRoot, "ocr-drafts.json");
+  fs.writeFileSync(
+    draftsPath,
+    JSON.stringify({
+      schema_version: "recognition-private-drafts-v1",
+      private: true,
+      dataset_id: datasetId,
+      cases: cases.map((item, index) => ({
+        case_id: item.case_id,
+        draft_text: index ? "" : "1. 求 x² 的极限",
+      })),
+    }),
+  );
   const imagePaths = cases.map((item, index) => {
     const filePath = path.join(temporaryRoot, item.image_file);
     syntheticPng(filePath, 245 - index * 5);
@@ -79,11 +101,26 @@ async function main() {
     const page = await browser.newPage({
       viewport: { width: 1400, height: 900 },
     });
+    const pageErrors = [];
+    page.on("pageerror", (error) => pageErrors.push(error));
     await page.goto(pathToFileURL(toolPath).href);
     await page.locator("#seed").setInputFiles(seedPath);
     await page.locator("#images").setInputFiles(imagePaths);
+    await page.locator("#drafts").setInputFiles(draftsPath);
     await page.waitForFunction(
       () => document.querySelectorAll(".page").length === 2,
+    );
+    assert.equal(
+      await page.locator("#expectedText").inputValue(),
+      "1. 求 x² 的极限",
+    );
+    assert.match(
+      await page.locator("#degradations").textContent(),
+      /清晰，无明显退化（clean）/,
+    );
+    assert.match(
+      await page.locator("#contentTags").textContent(),
+      /负例：本页没有应识别的题目区域/,
     );
 
     await page.locator("#export").click();
@@ -101,15 +138,26 @@ async function main() {
     await page.locator('#contentTags input[value="chinese"]').check();
     await page.locator('#contentTags input[value="math"]').check();
     await page.locator('#contentTags input[value="question_number"]').check();
-    await page.locator("#expectedText").fill("1. 求 x² 的极限");
+    await page.locator("#textReviewed").check();
     await page.locator("#questionNumbers").fill("1");
+    await page.locator("#zoom").evaluate((node) => {
+      node.value = "100";
+      node.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await page.waitForFunction(
+      () =>
+        document.querySelector("#overlay").getBoundingClientRect().width ===
+        100,
+    );
     await draw(page, [10, 15], [80, 70]);
+    assert.deepEqual(pageErrors, []);
 
     await page.locator(".page").nth(1).click();
     await page.locator("#privacyStatus").selectOption("redacted_copy");
     await page.locator("#annotationStatus").selectOption("annotated");
     await page.locator('#degradations input[value="blurred"]').check();
     await page.locator('#contentTags input[value="negative"]').check();
+    await page.locator("#textReviewed").check();
 
     const downloadPromise = page.waitForEvent("download");
     await page.locator("#export").click();
@@ -127,6 +175,7 @@ async function main() {
     for (const forbidden of [
       "role",
       "privacy_status",
+      "text_reviewed",
       "source_ref",
       "student_or_assignment_material",
     ]) {
