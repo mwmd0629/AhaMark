@@ -111,6 +111,37 @@ async function main() {
       }
     });
     await page.goto(pathToFileURL(toolPath).href);
+    assert.equal(
+      await page.locator("#sidebarToggle").getAttribute("aria-expanded"),
+      "true",
+    );
+    const expandedSidebarWidth = await page
+      .locator("#sidebar")
+      .evaluate((node) => node.getBoundingClientRect().width);
+    const expandedEditorWidth = await page
+      .locator(".editor")
+      .evaluate((node) => node.getBoundingClientRect().width);
+    await page.locator("#sidebarToggle").click();
+    assert.equal(await page.locator("#sidebarContent").isVisible(), false);
+    assert.equal(
+      await page.locator("#sidebarToggleText").textContent(),
+      "展开左栏",
+    );
+    const collapsedSidebarWidth = await page
+      .locator("#sidebar")
+      .evaluate((node) => node.getBoundingClientRect().width);
+    const collapsedEditorWidth = await page
+      .locator(".editor")
+      .evaluate((node) => node.getBoundingClientRect().width);
+    assert.ok(collapsedSidebarWidth < expandedSidebarWidth - 200);
+    assert.ok(collapsedEditorWidth > expandedEditorWidth + 80);
+    await page.reload();
+    assert.equal(
+      await page.locator("#sidebarToggleText").textContent(),
+      "展开左栏",
+    );
+    await page.locator("#sidebarToggle").click();
+    assert.equal(await page.locator("#sidebarContent").isVisible(), true);
     await page.locator("#seed").setInputFiles(seedPath);
     await page.locator("#images").setInputFiles(imagePaths);
     await page.locator("#drafts").setInputFiles(draftsPath);
@@ -122,14 +153,34 @@ async function main() {
       true,
     );
     assert.equal(await page.locator("#pageListCount").textContent(), "2 页");
+    assert.equal(
+      await page.locator("#pageListAction").textContent(),
+      "收起列表",
+    );
     await page.locator("#pageListDetails > summary").click();
     assert.equal(
       await page.locator("#pageListDetails").evaluate((node) => node.open),
       false,
     );
     assert.equal(await page.locator("#pages").isVisible(), false);
+    await page.waitForFunction(
+      () =>
+        document.querySelector("#pageListAction").textContent === "展开列表",
+    );
+    assert.equal(
+      await page.locator("#pageListAction").textContent(),
+      "展开列表",
+    );
     await page.locator("#pageListDetails > summary").click();
     assert.equal(await page.locator("#pages").isVisible(), true);
+    await page.waitForFunction(
+      () =>
+        document.querySelector("#pageListAction").textContent === "收起列表",
+    );
+    assert.equal(
+      await page.locator("#pageListAction").textContent(),
+      "收起列表",
+    );
     assert.equal(
       await page.locator("#expectedText").inputValue(),
       "1. 求 x² 的极限",

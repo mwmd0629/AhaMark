@@ -38,10 +38,47 @@
         gap: 10px;
         padding: 10px;
       }
+      .layout.sidebar-collapsed {
+        grid-template-columns: 48px minmax(0, 1fr) minmax(480px, 600px);
+      }
       .panel {
         border-radius: 10px;
         padding: 11px;
         min-width: 0;
+      }
+      .sidebar-toggle {
+        display: flex;
+        width: 100%;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        margin-bottom: 8px;
+        padding: 7px 9px;
+        color: #1d4ed8;
+        border: 1px solid #93c5fd;
+        border-radius: 7px;
+        background: #eff6ff;
+        cursor: pointer;
+        font-weight: 700;
+      }
+      .sidebar-toggle:hover {
+        background: #dbeafe;
+      }
+      .sidebar-toggle-icon {
+        font-size: 18px;
+        line-height: 1;
+      }
+      .layout.sidebar-collapsed .sidebar {
+        padding: 6px;
+      }
+      .layout.sidebar-collapsed .sidebar-content {
+        display: none;
+      }
+      .layout.sidebar-collapsed .sidebar-toggle {
+        min-height: 132px;
+        margin: 0;
+        padding: 8px 4px;
+        writing-mode: vertical-rl;
       }
       label {
         display: block;
@@ -122,6 +159,18 @@
         color: #64748b;
         font-size: 12px;
         font-weight: 500;
+      }
+      .page-list-action {
+        padding: 3px 8px;
+        color: #1d4ed8;
+        border: 1px solid #93c5fd;
+        border-radius: 999px;
+        background: #eff6ff;
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .page-list-details > summary:hover .page-list-action {
+        background: #dbeafe;
       }
       .page {
         display: block;
@@ -432,8 +481,13 @@
         }
       }
       @media (max-width: 720px) {
-        .layout {
+        .layout,
+        .layout.sidebar-collapsed {
           grid-template-columns: 1fr;
+        }
+        .layout.sidebar-collapsed .sidebar-toggle {
+          min-height: 0;
+          writing-mode: horizontal-tb;
         }
         .editor {
           grid-column: auto;
@@ -460,26 +514,41 @@
       <button id="reset" class="danger">清除本数据集本地进度</button>
       <span id="status" class="status">尚未载入标注种子</span>
     </header>
-    <main class="layout">
-      <aside class="panel">
-        <div class="hint">
-          全程离线运行，不上传图片或正文。可载入 ocr-drafts.json
-          作为待校对草稿；浏览器只按匿名 UUID 匹配，进度保存在本机
-          localStorage。正文保留线性可读文本；分式、根号、上下标等二维公式应另画公式框并填写
-          LaTeX。公式卡片优先使用严格的普通输入生成草稿；原始 LaTeX
-          仅在“高级编辑”中按需修改。
-          若页面可见姓名、学号等身份信息，必须先在独立图片副本中遮挡，再选择“已使用去标识副本”。
+    <main id="layout" class="layout">
+      <aside id="sidebar" class="panel sidebar">
+        <button
+          id="sidebarToggle"
+          class="sidebar-toggle"
+          type="button"
+          aria-expanded="true"
+          title="收起整个左侧栏，让标注区域更宽"
+        >
+          <span id="sidebarToggleIcon" class="sidebar-toggle-icon">‹</span>
+          <span id="sidebarToggleText">收起左栏</span>
+        </button>
+        <div id="sidebarContent" class="sidebar-content">
+          <div class="hint">
+            全程离线运行，不上传图片或正文。可载入 ocr-drafts.json
+            作为待校对草稿；浏览器只按匿名 UUID 匹配，进度保存在本机
+            localStorage。正文保留线性可读文本；分式、根号、上下标等二维公式应另画公式框并填写
+            LaTeX。公式卡片优先使用严格的普通输入生成草稿；原始 LaTeX
+            仅在“高级编辑”中按需修改。
+            若页面可见姓名、学号等身份信息，必须先在独立图片副本中遮挡，再选择“已使用去标识副本”。
+          </div>
+          <label>数据集</label><code id="datasetId">-</code>
+          <details id="pageListDetails" class="page-list-details" open>
+            <summary>
+              <span>页面列表</span
+              ><span id="pageListCount" class="page-list-count">0 页</span
+              ><span id="pageListAction" class="page-list-action"
+                >收起列表</span
+              >
+            </summary>
+            <div id="pages" class="pages"></div>
+          </details>
+          <label>显示缩放 <span id="zoomText">35%</span></label>
+          <input id="zoom" type="range" min="15" max="100" value="35" />
         </div>
-        <label>数据集</label><code id="datasetId">-</code>
-        <details id="pageListDetails" class="page-list-details" open>
-          <summary>
-            <span>页面列表</span
-            ><span id="pageListCount" class="page-list-count">0 页</span>
-          </summary>
-          <div id="pages" class="pages"></div>
-        </details>
-        <label>显示缩放 <span id="zoomText">35%</span></label>
-        <input id="zoom" type="range" min="15" max="100" value="35" />
       </aside>
       <section class="panel stage-wrap">
         <div id="empty" class="hint">
@@ -601,6 +670,8 @@
         const IDENTITY =
           /(?:学生姓名|姓名|学号|学生号|student[ _-]?(?:name|id))\s*[:：=]\s*\S+/i;
         const ABSOLUTE_PATH = /(?:[A-Za-z]:[\\/]|file:\/\/|^\/)/;
+        const SIDEBAR_COLLAPSED_KEY =
+          "ahamark-recognition-private-gold-sidebar-collapsed";
         const $ = (id) => document.getElementById(id);
         let state = null,
           active = null,
@@ -613,6 +684,35 @@
         const plainInputs = new Map();
         const readyPlainInputs = new Map();
         const conversionTimers = new Map();
+        const pageListDetails = $("pageListDetails");
+        const updatePageListAction = () => {
+          $("pageListAction").textContent = pageListDetails.open
+            ? "收起列表"
+            : "展开列表";
+        };
+        pageListDetails.ontoggle = updatePageListAction;
+        updatePageListAction();
+        const setSidebarCollapsed = (collapsed, persist = true) => {
+          $("layout").classList.toggle("sidebar-collapsed", collapsed);
+          $("sidebarToggle").setAttribute("aria-expanded", String(!collapsed));
+          $("sidebarToggleText").textContent = collapsed
+            ? "展开左栏"
+            : "收起左栏";
+          $("sidebarToggleIcon").textContent = collapsed ? "›" : "‹";
+          $("sidebarToggle").title = collapsed
+            ? "展开整个左侧栏"
+            : "收起整个左侧栏，让标注区域更宽";
+          if (persist)
+            localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(collapsed));
+        };
+        setSidebarCollapsed(
+          localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true",
+          false,
+        );
+        $("sidebarToggle").onclick = () =>
+          setSidebarCollapsed(
+            !$("layout").classList.contains("sidebar-collapsed"),
+          );
 
         function storageKey() {
           return state
