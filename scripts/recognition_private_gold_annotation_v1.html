@@ -93,6 +93,36 @@
         max-height: 68vh;
         overflow: auto;
       }
+      .page-list-details {
+        margin-top: 8px;
+      }
+      .page-list-details > summary {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 0;
+        cursor: pointer;
+        font-weight: 700;
+        list-style: none;
+      }
+      .page-list-details > summary::-webkit-details-marker {
+        display: none;
+      }
+      .page-list-details > summary::before {
+        content: "▸";
+        color: #64748b;
+        font-size: 12px;
+        transition: transform 120ms ease;
+      }
+      .page-list-details[open] > summary::before {
+        transform: rotate(90deg);
+      }
+      .page-list-count {
+        margin-left: auto;
+        color: #64748b;
+        font-size: 12px;
+        font-weight: 500;
+      }
       .page {
         display: block;
         width: 100%;
@@ -441,8 +471,13 @@
           若页面可见姓名、学号等身份信息，必须先在独立图片副本中遮挡，再选择“已使用去标识副本”。
         </div>
         <label>数据集</label><code id="datasetId">-</code>
-        <label>页面列表</label>
-        <div id="pages" class="pages"></div>
+        <details id="pageListDetails" class="page-list-details" open>
+          <summary>
+            <span>页面列表</span
+            ><span id="pageListCount" class="page-list-count">0 页</span>
+          </summary>
+          <div id="pages" class="pages"></div>
+        </details>
         <label>显示缩放 <span id="zoomText">35%</span></label>
         <input id="zoom" type="range" min="15" max="100" value="35" />
       </aside>
@@ -743,6 +778,8 @@
         function renderList() {
           const pages = $("pages");
           pages.innerHTML = "";
+          $("pageListCount").textContent =
+            `${state ? state.cases.length : 0} 页`;
           if (!state) return;
           state.cases.forEach((item, index) => {
             const button = document.createElement("button");

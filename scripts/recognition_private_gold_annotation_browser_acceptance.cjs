@@ -118,6 +118,19 @@ async function main() {
       () => document.querySelectorAll(".page").length === 2,
     );
     assert.equal(
+      await page.locator("#pageListDetails").evaluate((node) => node.open),
+      true,
+    );
+    assert.equal(await page.locator("#pageListCount").textContent(), "2 页");
+    await page.locator("#pageListDetails > summary").click();
+    assert.equal(
+      await page.locator("#pageListDetails").evaluate((node) => node.open),
+      false,
+    );
+    assert.equal(await page.locator("#pages").isVisible(), false);
+    await page.locator("#pageListDetails > summary").click();
+    assert.equal(await page.locator("#pages").isVisible(), true);
+    assert.equal(
       await page.locator("#expectedText").inputValue(),
       "1. 求 x² 的极限",
     );
