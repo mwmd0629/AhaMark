@@ -130,11 +130,15 @@ async function main() {
     const collapsedSidebarWidth = await page
       .locator("#sidebar")
       .evaluate((node) => node.getBoundingClientRect().width);
+    const collapsedStageWidth = await page
+      .locator(".stage-wrap")
+      .evaluate((node) => node.getBoundingClientRect().width);
     const collapsedEditorWidth = await page
       .locator(".editor")
       .evaluate((node) => node.getBoundingClientRect().width);
     assert.ok(collapsedSidebarWidth < expandedSidebarWidth - 200);
-    assert.ok(collapsedEditorWidth > expandedEditorWidth + 80);
+    assert.ok(Math.abs(collapsedEditorWidth - collapsedStageWidth) <= 2);
+    assert.ok(collapsedEditorWidth > expandedEditorWidth);
     await page.reload();
     assert.equal(
       await page.locator("#sidebarToggleText").textContent(),
