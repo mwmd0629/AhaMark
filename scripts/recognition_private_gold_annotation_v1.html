@@ -34,7 +34,7 @@
       }
       .layout {
         display: grid;
-        grid-template-columns: 330px minmax(0, 1fr) 390px;
+        grid-template-columns: 310px minmax(0, 1fr) minmax(420px, 480px);
         gap: 10px;
         padding: 10px;
       }
@@ -151,11 +151,12 @@
         stroke: #ef4444;
       }
       .formula-card {
-        margin-top: 8px;
-        padding: 8px;
+        margin-top: 10px;
+        padding: 12px;
         border: 1px solid #d8deea;
-        border-radius: 7px;
+        border-radius: 10px;
         background: #fafbfe;
+        box-shadow: 0 1px 3px #17203312;
       }
       .formula-card.selected {
         border-color: #d97706;
@@ -165,10 +166,59 @@
         min-height: 58px;
         font-family: ui-monospace, Consolas, monospace;
       }
+      .formula-card .formula-plain {
+        min-height: 92px;
+        line-height: 1.45;
+        border: 1px solid #9aa8bd;
+        border-radius: 7px;
+      }
+      .formula-step {
+        margin-top: 10px;
+        padding: 10px;
+        border: 1px solid #e1e6ef;
+        border-radius: 8px;
+        background: #fff;
+      }
+      .formula-step-title {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin-bottom: 6px;
+        font-weight: 700;
+      }
+      .formula-step-number {
+        display: inline-grid;
+        width: 22px;
+        height: 22px;
+        place-items: center;
+        border-radius: 999px;
+        color: #fff;
+        background: #315efb;
+        font-size: 12px;
+      }
+      .formula-review-badge {
+        margin-left: auto;
+        padding: 3px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .formula-review-badge.pending {
+        color: #92400e;
+        background: #fef3c7;
+      }
+      .formula-review-badge.reviewed {
+        color: #166534;
+        background: #dcfce7;
+      }
+      .formula-review-badge.unreadable {
+        color: #991b1b;
+        background: #fee2e2;
+      }
       .formula-preview {
-        margin-top: 5px;
-        padding: 6px;
-        min-height: 34px;
+        margin-top: 6px;
+        padding: 10px;
+        min-height: 56px;
         white-space: pre-wrap;
         overflow-wrap: anywhere;
         border: 1px dashed #d8b15c;
@@ -176,26 +226,73 @@
         font-family: "Cambria Math", "STIX Two Math", serif;
       }
       .formula-tools {
-        display: flex;
-        flex-wrap: wrap;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 5px;
-        margin: 5px 0;
+        margin: 7px 0;
       }
       .formula-tools button {
-        padding: 4px 7px;
+        padding: 5px 4px;
+        border: 1px solid #c8d1df;
+        border-radius: 6px;
+        background: #f8fafc;
       }
       .formula-conversion-message {
         min-height: 20px;
+        margin: 6px 0 0;
+        line-height: 1.4;
+      }
+      .formula-conversion-message[data-tone="success"] {
+        color: #166534;
+      }
+      .formula-conversion-message[data-tone="warning"] {
         color: #92400e;
-        margin: 4px 0;
+      }
+      .formula-conversion-message[data-tone="error"] {
+        color: #b91c1c;
       }
       .formula-decisions {
-        margin: 7px 0;
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px;
+        margin: 8px 0 0;
+      }
+      .formula-decisions button {
+        min-height: 38px;
+        border: 1px solid #c8d1df;
+        border-radius: 7px;
+        background: #fff;
+      }
+      .formula-decisions button:first-child {
+        color: #fff;
+        border-color: #15803d;
+        background: #15803d;
       }
       .advanced-latex {
-        margin: 7px 0;
-        border-top: 1px solid #d8deea;
-        padding-top: 6px;
+        margin-top: 8px;
+        padding-top: 7px;
+        border-top: 1px solid #e1e6ef;
+      }
+      .formula-help {
+        margin: 6px 0;
+        color: #526078;
+      }
+      .formula-help summary,
+      .advanced-latex summary {
+        cursor: pointer;
+        font-weight: 600;
+      }
+      .formula-help code {
+        display: block;
+        margin: 4px 0;
+        padding: 3px 5px;
+        border-radius: 4px;
+        background: #f1f5f9;
+        overflow-wrap: anywhere;
+      }
+      .formula-shortcut {
+        color: #64748b;
+        font-size: 12px;
       }
       .math-preview-root {
         display: inline-flex;
@@ -310,6 +407,10 @@
         }
         .editor {
           grid-column: auto;
+        }
+        .formula-tools,
+        .formula-decisions {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
         }
       }
     </style>
@@ -475,6 +576,8 @@
           drawMode = "question";
         const imageUrls = new Map();
         const plainInputs = new Map();
+        const readyPlainInputs = new Map();
+        const conversionTimers = new Map();
 
         function storageKey() {
           return state
@@ -889,6 +992,18 @@
             heading.className = "row";
             const title = document.createElement("strong");
             title.textContent = `公式 ${index + 1}`;
+            const reviewBadge = document.createElement("span");
+            reviewBadge.className = "formula-review-badge";
+            const updateReviewBadge = () => {
+              reviewBadge.className = `formula-review-badge ${span.review_status}`;
+              reviewBadge.textContent =
+                span.review_status === "reviewed"
+                  ? "已人工核对"
+                  : span.review_status === "unreadable"
+                    ? "局部无法转写"
+                    : "待核对";
+            };
+            updateReviewBadge();
             const remove = document.createElement("button");
             remove.type = "button";
             remove.className = "danger";
@@ -899,41 +1014,82 @@
                 (item) => item.formula_id !== span.formula_id,
               );
               plainInputs.delete(span.formula_id);
+              readyPlainInputs.delete(span.formula_id);
+              clearTimeout(conversionTimers.get(span.formula_id));
+              conversionTimers.delete(span.formula_id);
               selectedFormula = null;
               save();
               renderFormulaEditors();
               renderRegions();
             };
-            heading.append(title, remove);
+            heading.append(title, reviewBadge, remove);
 
             const plainLabel = document.createElement("label");
-            plainLabel.textContent = "普通数学输入（严格有限语法）";
+            plainLabel.textContent = "按平时写法输入公式";
             const plain = document.createElement("textarea");
             plain.className = "formula-plain";
             plain.spellcheck = false;
             plain.placeholder = "例如：lim (x,y)->(0,0) [sqrt(xy+1)-1]/(x+y)";
             plain.value = plainInputs.get(span.formula_id) || "";
 
+            const help = document.createElement("details"),
+              helpSummary = document.createElement("summary"),
+              helpIntro = document.createElement("div");
+            help.className = "formula-help";
+            helpSummary.textContent = "怎么输入？查看可复制示例";
+            helpIntro.textContent =
+              "只支持明确、有限的写法；有歧义时会停止，不会猜测。";
+            help.append(helpSummary, helpIntro);
+            for (const example of [
+              "[a]/[b]    sqrt(x+1)    x^2    x_(i+1)",
+              "lim (x,y)->(0,0) [sqrt(xy+1)-1]/(x+y)",
+              "int_a^b    sum_(i=1)^n",
+              "matrix([a,b];[c,d])",
+              "cases([f(x),x>=0];[g(x),x<0])",
+            ]) {
+              const code = document.createElement("code");
+              code.textContent = example;
+              help.append(code);
+            }
+
             const tools = document.createElement("div");
             tools.className = "formula-tools";
-            for (const [text, template] of [
-              ["分式", "[a]/[b]"],
-              ["根号", "sqrt(a)"],
-              ["上标", "x^2"],
-              ["下标", "x_(i)"],
-              ["极限", "lim x->0 "],
-              ["积分", "int_a^b "],
-              ["求和", "sum_(i=1)^n "],
-              ["矩阵", "matrix([a,b];[c,d])"],
-              ["分段函数", "cases([f(x),x>=0];[g(x),x<0])"],
+            for (const [text, buildTemplate, focusToken] of [
+              [
+                "分式",
+                (selection) => `[${selection || "a"}]/[b]`,
+                (selection) => (selection ? "b" : "a"),
+              ],
+              [
+                "根号",
+                (selection) => `sqrt(${selection || "a"})`,
+                (selection) => (selection ? null : "a"),
+              ],
+              ["上标", (selection) => `${selection || "x"}^2`, () => "2"],
+              ["下标", (selection) => `${selection || "x"}_(i)`, () => "i"],
+              ["极限", () => "lim x->0 ", () => "x"],
+              ["积分", () => "int_a^b ", () => "a"],
+              ["求和", () => "sum_(i=1)^n ", () => "i"],
+              ["矩阵", () => "matrix([a,b];[c,d])", () => "a"],
+              ["分段函数", () => "cases([f(x),x>=0];[g(x),x<0])", () => "f(x)"],
             ]) {
               const button = document.createElement("button");
               button.type = "button";
               button.textContent = text;
               button.onclick = () => {
                 const start = plain.selectionStart,
-                  end = plain.selectionEnd;
+                  end = plain.selectionEnd,
+                  selection = plain.value.slice(start, end),
+                  template = buildTemplate(selection),
+                  token = focusToken(selection);
                 plain.setRangeText(template, start, end, "end");
+                if (token) {
+                  const tokenStart = template.lastIndexOf(token);
+                  plain.setSelectionRange(
+                    start + tokenStart,
+                    start + tokenStart + token.length,
+                  );
+                }
                 plain.dispatchEvent(new Event("input", { bubbles: true }));
                 plain.focus();
               };
@@ -942,13 +1098,16 @@
 
             const actionRow = document.createElement("div"),
               generate = document.createElement("button"),
+              shortcut = document.createElement("span"),
               conversionMessage = document.createElement("div");
             actionRow.className = "row";
             generate.type = "button";
             generate.className = "primary formula-generate";
-            generate.textContent = "生成结构草稿";
+            generate.textContent = "立即生成草稿";
+            shortcut.className = "formula-shortcut";
+            shortcut.textContent = "停止输入后会自动更新 · Ctrl+Enter 立即生成";
             conversionMessage.className = "formula-conversion-message";
-            actionRow.append(generate);
+            actionRow.append(generate, shortcut);
 
             const latex = document.createElement("textarea");
             latex.className = "formula-latex";
@@ -973,44 +1132,96 @@
               status.append(option);
             }
             status.value = span.review_status;
+            let currentDraftReady =
+              Boolean(span.latex.trim() && span.linear_text.trim()) &&
+              (!plain.value.trim() ||
+                readyPlainInputs.get(span.formula_id) === plain.value);
+
+            const setFeedback = (message, tone = "warning") => {
+              conversionMessage.textContent = message;
+              conversionMessage.dataset.tone = tone;
+            };
+            setFeedback(
+              span.latex.trim()
+                ? "已有结构草稿；可以重新输入自动更新，或直接对照原图确认。"
+                : "输入停止后会自动生成结构草稿。",
+              span.latex.trim() ? "warning" : "success",
+            );
 
             const markPending = () => {
-              if (span.review_status === "reviewed") {
+              if (span.review_status !== "pending") {
                 span.review_status = "pending";
                 status.value = "pending";
+                updateReviewBadge();
               }
             };
-            plain.oninput = (event) => {
-              plainInputs.set(span.formula_id, event.target.value);
-              markPending();
-              renderStructurePreview(preview, null);
-              conversionMessage.textContent =
-                "普通输入已变化，请重新生成并对照原图核对。";
-              save();
-            };
-            generate.onclick = () => {
+            const generateDraft = ({ automatic = false } = {}) => {
               try {
                 const result = window.AhaMarkMathInput.convert(plain.value);
                 span.latex = result.latex;
                 span.linear_text = result.linearText;
                 span.review_status = "pending";
+                currentDraftReady = true;
+                readyPlainInputs.set(span.formula_id, plain.value);
                 latex.value = span.latex;
                 linear.value = span.linear_text;
                 status.value = "pending";
+                updateReviewBadge();
                 renderStructurePreview(preview, result);
-                conversionMessage.textContent =
-                  "已生成草稿，状态保持待核对；请只在与原图一致时确认。";
+                setFeedback(
+                  automatic
+                    ? "草稿已自动更新，仍需对照原图确认。"
+                    : "草稿已生成，仍需对照原图确认。",
+                  "success",
+                );
                 save();
+                return true;
               } catch (error) {
+                currentDraftReady = false;
                 renderStructurePreview(preview, null);
-                conversionMessage.textContent = `停止转换：${error.message}`;
+                setFeedback(
+                  automatic
+                    ? "输入尚未形成明确结构；可继续输入，或点击“立即生成草稿”查看原因。"
+                    : `停止转换：${error.message}`,
+                  automatic ? "warning" : "error",
+                );
+                return false;
               }
+            };
+            plain.oninput = (event) => {
+              plainInputs.set(span.formula_id, event.target.value);
+              readyPlainInputs.delete(span.formula_id);
+              currentDraftReady = false;
+              markPending();
+              renderStructurePreview(preview, null);
+              setFeedback("正在检查输入结构…", "warning");
+              clearTimeout(conversionTimers.get(span.formula_id));
+              const timer = setTimeout(() => {
+                conversionTimers.delete(span.formula_id);
+                if (plain.value.trim()) generateDraft({ automatic: true });
+              }, 450);
+              conversionTimers.set(span.formula_id, timer);
+              save();
+            };
+            plain.onkeydown = (event) => {
+              if (event.ctrlKey && event.key === "Enter") {
+                event.preventDefault();
+                clearTimeout(conversionTimers.get(span.formula_id));
+                conversionTimers.delete(span.formula_id);
+                generateDraft();
+              }
+            };
+            generate.onclick = () => {
+              clearTimeout(conversionTimers.get(span.formula_id));
+              conversionTimers.delete(span.formula_id);
+              generateDraft();
             };
             latex.oninput = (event) => {
               span.latex = event.target.value.replace(/\r\n/g, "\n");
+              currentDraftReady = true;
+              readyPlainInputs.set(span.formula_id, plain.value);
               markPending();
-              conversionMessage.textContent =
-                "高级 LaTeX 已修改，请重新对照原图核对。";
+              setFeedback("高级 LaTeX 已修改，请重新对照原图核对。", "warning");
               save();
             };
 
@@ -1018,7 +1229,7 @@
               advancedSummary = document.createElement("summary"),
               latexLabel = document.createElement("label");
             advanced.className = "advanced-latex";
-            advancedSummary.textContent = "高级编辑：原始 LaTeX";
+            advancedSummary.textContent = "高级编辑：LaTeX、线性文本与特殊状态";
             latexLabel.textContent = "LaTeX（保留二维结构）";
             advanced.append(advancedSummary, latexLabel, latex);
 
@@ -1030,14 +1241,22 @@
             linear.value = span.linear_text;
             linear.oninput = (event) => {
               span.linear_text = event.target.value.replace(/\r\n/g, "\n");
+              currentDraftReady = true;
+              readyPlainInputs.set(span.formula_id, plain.value);
               markPending();
+              setFeedback(
+                "线性替代文本已修改，请重新对照原图核对。",
+                "warning",
+              );
               save();
             };
 
             status.onchange = (event) => {
               span.review_status = event.target.value;
+              updateReviewBadge();
               save();
             };
+            advanced.append(linearLabel, linear, statusLabel, status);
 
             const decisions = document.createElement("div");
             decisions.className = "row formula-decisions";
@@ -1051,42 +1270,67 @@
               button.textContent = text;
               button.onclick = () => {
                 if (action === "reviewed") {
+                  if (plain.value.trim() && !currentDraftReady) {
+                    setFeedback(
+                      "普通输入已经变化，请先生成有效草稿再确认。",
+                      "error",
+                    );
+                    return;
+                  }
                   if (!span.latex.trim() || !span.linear_text.trim()) {
-                    conversionMessage.textContent =
-                      "尚无完整草稿，不能标记为与原图一致。";
+                    setFeedback(
+                      "尚无完整草稿，不能标记为与原图一致。",
+                      "error",
+                    );
                     return;
                   }
                   span.review_status = "reviewed";
                   status.value = "reviewed";
-                  conversionMessage.textContent = "已记录人工对照确认。";
+                  updateReviewBadge();
+                  setFeedback("已记录人工对照确认。", "success");
                 } else {
                   span.review_status = "pending";
                   status.value = "pending";
-                  conversionMessage.textContent =
+                  updateReviewBadge();
+                  setFeedback(
                     action === "assist"
                       ? "保持待核对：请请求辅助转写；看不清时可单独标记局部无法可靠转写。"
-                      : "保持待核对：请修改普通输入或展开高级 LaTeX。";
+                      : "保持待核对：请修改普通输入或展开高级编辑。",
+                    "warning",
+                  );
                   if (action === "modify") advanced.open = true;
                 }
                 save();
               };
               decisions.append(button);
             }
-            card.append(
-              heading,
+
+            const makeStep = (number, text) => {
+                const section = document.createElement("section"),
+                  stepTitle = document.createElement("div"),
+                  stepNumber = document.createElement("span");
+                section.className = "formula-step";
+                stepTitle.className = "formula-step-title";
+                stepNumber.className = "formula-step-number";
+                stepNumber.textContent = number;
+                stepTitle.append(stepNumber, document.createTextNode(text));
+                section.append(stepTitle);
+                return section;
+              },
+              inputStep = makeStep("1", "输入或套用常用结构"),
+              previewStep = makeStep("2", "查看结构草稿"),
+              reviewStep = makeStep("3", "对照原图作出判断");
+            inputStep.append(
               plainLabel,
               plain,
+              help,
               tools,
               actionRow,
               conversionMessage,
-              preview,
-              decisions,
-              advanced,
-              linearLabel,
-              linear,
-              statusLabel,
-              status,
             );
+            previewStep.append(preview);
+            reviewStep.append(decisions);
+            card.append(heading, inputStep, previewStep, reviewStep, advanced);
             container.append(card);
           });
         }

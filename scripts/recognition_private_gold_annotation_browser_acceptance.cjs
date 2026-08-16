@@ -178,16 +178,79 @@ async function main() {
       await page.locator(".advanced-latex").evaluate((node) => node.open),
       false,
     );
+    assert.equal(
+      await page.locator(".formula-help").evaluate((node) => node.open),
+      false,
+    );
+    assert.deepEqual(
+      await page.locator(".formula-step-title").allTextContents(),
+      ["1输入或套用常用结构", "2查看结构草稿", "3对照原图作出判断"],
+    );
+    assert.equal(
+      await page.locator(".formula-review-badge").textContent(),
+      "待核对",
+    );
+    assert.equal(
+      await page.locator(".advanced-latex .formula-linear").count(),
+      1,
+    );
+    assert.equal(
+      await page.locator(".advanced-latex .formula-status").count(),
+      1,
+    );
     await page.locator("#export").click();
     await page.waitForFunction(() =>
       document.querySelector("#status").textContent.includes("公式 1 尚未核对"),
     );
     const ordinary = "lim (x,y)->(0,0) [sqrt(xy+1)-1]/(x+y)";
+    await page.locator(".formula-plain").fill("x+y");
+    await page
+      .locator(".formula-plain")
+      .evaluate((node) => node.setSelectionRange(0, node.value.length));
+    await page.getByRole("button", { name: "根号", exact: true }).click();
+    assert.equal(
+      await page.locator(".formula-plain").inputValue(),
+      "sqrt(x+y)",
+    );
+    await page.waitForFunction(
+      () => document.querySelector(".formula-latex").value === "\\sqrt{x+y}",
+    );
+    await page.locator(".formula-plain").fill("a+b");
+    await page
+      .locator(".formula-plain")
+      .evaluate((node) => node.setSelectionRange(0, node.value.length));
+    await page.getByRole("button", { name: "分式", exact: true }).click();
+    assert.equal(
+      await page.locator(".formula-plain").inputValue(),
+      "[a+b]/[b]",
+    );
+    assert.deepEqual(
+      await page
+        .locator(".formula-plain")
+        .evaluate((node) => [
+          node.selectionStart,
+          node.selectionEnd,
+          node.value.slice(node.selectionStart, node.selectionEnd),
+        ]),
+      [7, 8, "b"],
+    );
     await page.locator(".formula-plain").fill(ordinary);
-    await page.locator(".formula-generate").click();
+    await page.waitForFunction(() =>
+      document
+        .querySelector(".formula-conversion-message")
+        .textContent.includes("草稿已自动更新"),
+    );
     assert.equal(
       await page.locator(".formula-latex").inputValue(),
       "\\lim_{(x,y)\\to(0,0)}\\frac{\\sqrt{xy+1}-1}{x+y}",
+    );
+    assert.equal(
+      await page.locator(".formula-latex").inputValue(),
+      "\\lim_{(x,y)\\to(0,0)}\\frac{\\sqrt{xy+1}-1}{x+y}",
+    );
+    assert.match(
+      await page.locator(".formula-conversion-message").textContent(),
+      /自动更新/,
     );
     assert.equal(await page.locator(".formula-status").inputValue(), "pending");
     assert.equal(await page.locator(".math-fraction").count(), 1);
@@ -198,17 +261,46 @@ async function main() {
       await page.locator(".formula-status").inputValue(),
       "reviewed",
     );
+    assert.equal(
+      await page.locator(".formula-review-badge").textContent(),
+      "已人工核对",
+    );
     await page.locator(".formula-plain").fill(`${ordinary} `);
     assert.equal(await page.locator(".formula-status").inputValue(), "pending");
     await page.locator(".formula-plain").fill("a/b");
-    await page.locator(".formula-generate").click();
+    await page.getByRole("button", { name: "与原图一致" }).click();
+    assert.match(
+      await page.locator(".formula-conversion-message").textContent(),
+      /请先生成有效草稿/,
+    );
+    await page.locator(".formula-plain").press("Control+Enter");
     assert.match(
       await page.locator(".formula-conversion-message").textContent(),
       /停止转换.*分子必须/,
     );
     await page.locator(".formula-plain").fill(ordinary);
-    await page.locator(".formula-generate").click();
+    await page.waitForFunction(() =>
+      document
+        .querySelector(".formula-conversion-message")
+        .textContent.includes("草稿已自动更新"),
+    );
+    assert.equal(
+      await page.locator(".formula-latex").inputValue(),
+      "\\lim_{(x,y)\\to(0,0)}\\frac{\\sqrt{xy+1}-1}{x+y}",
+    );
     await page.getByRole("button", { name: "与原图一致" }).click();
+    assert.equal(
+      await page.locator(".formula-status").inputValue(),
+      "reviewed",
+    );
+    await page.locator(".page").nth(1).click();
+    await page.locator(".page").nth(0).click();
+    assert.equal(await page.locator(".formula-plain").inputValue(), ordinary);
+    await page.getByRole("button", { name: "与原图一致" }).click();
+    assert.match(
+      await page.locator(".formula-conversion-message").textContent(),
+      /已记录人工对照确认/,
+    );
     assert.deepEqual(pageErrors, []);
     assert.deepEqual(networkRequests, []);
 
@@ -221,7 +313,18 @@ async function main() {
 
     const downloadPromise = page.waitForEvent("download");
     await page.locator("#export").click();
-    const download = await downloadPromise;
+    const outcome = await Promise.race([
+      downloadPromise.then((download) => ({ download })),
+      page
+        .waitForFunction(() =>
+          document.querySelector("#status").textContent.includes("禁止导出"),
+        )
+        .then(() => ({ error: true })),
+    ]);
+    if (outcome.error) {
+      throw new Error(await page.locator("#status").textContent());
+    }
+    const download = outcome.download;
     const exportPath = path.join(temporaryRoot, "gold.json");
     await download.saveAs(exportPath);
     const gold = JSON.parse(fs.readFileSync(exportPath, "utf8"));
