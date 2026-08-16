@@ -19,6 +19,7 @@ from typing import Any, cast
 from PIL import Image
 
 GOLD_VERSION = "recognition-private-gold-v1"
+FORMULA_GOLD_VERSION = "recognition-private-gold-v2"
 PREDICTION_VERSION = "recognition-private-predictions-v1"
 ATTESTATION_VERSION = "recognition-private-attestation-v1"
 REPORT_VERSION = "recognition-private-report-v1"
@@ -132,12 +133,41 @@ def _regions(value: object, id_key: str, label: str) -> list[Json]:
     return rows
 
 
+def _formula_spans(value: object, label: str) -> list[Json]:
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be a list")
+    rows = cast(list[Json], value)
+    seen: set[str] = set()
+    for index, item in enumerate(rows):
+        row_label = f"{label}[{index}]"
+        row = _object(item, row_label)
+        _keys(
+            row,
+            {"formula_id", "bbox", "latex", "linear_text", "review_status"},
+            row_label,
+        )
+        identifier = _uuid(row["formula_id"], f"{row_label}.formula_id")
+        if identifier in seen:
+            raise ValueError(f"{label} ids must be unique")
+        seen.add(identifier)
+        _box(row["bbox"], f"{row_label}.bbox")
+        latex, linear = row["latex"], row["linear_text"]
+        if not isinstance(latex, str) or not isinstance(linear, str):
+            raise ValueError(f"{row_label} text fields must be strings")
+        if row["review_status"] not in {"reviewed", "unreadable"}:
+            raise ValueError(f"{row_label}.review_status is invalid")
+        if row["review_status"] == "reviewed" and (not latex.strip() or not linear.strip()):
+            raise ValueError(f"{row_label} reviewed formula text must not be empty")
+    return rows
+
+
 def validate_gold(raw: object) -> Json:
     _privacy(raw, "gold")
     data = _object(raw, "gold")
     _keys(data, {"schema_version", "dataset_id", "annotator_decision_version", "cases"}, "gold")
-    if data["schema_version"] != GOLD_VERSION:
-        raise ValueError(f"schema_version must be {GOLD_VERSION}")
+    if data["schema_version"] not in {GOLD_VERSION, FORMULA_GOLD_VERSION}:
+        raise ValueError(f"schema_version must be {GOLD_VERSION} or {FORMULA_GOLD_VERSION}")
+    formula_gold = data["schema_version"] == FORMULA_GOLD_VERSION
     _uuid(data["dataset_id"], "dataset_id")
     decision = data["annotator_decision_version"]
     if not isinstance(decision, str) or re.fullmatch(r"[A-Za-z0-9._-]{1,40}", decision) is None:
@@ -150,27 +180,26 @@ def validate_gold(raw: object) -> Json:
     for index, item in enumerate(cast(list[Json], cases)):
         label = f"cases[{index}]"
         case = _object(item, label)
-        _keys(
-            case,
-            {
-                "case_id",
-                "document_id",
-                "split",
-                "modality",
-                "image_file",
-                "page_width",
-                "page_height",
-                "degradation_tags",
-                "content_tags",
-                "annotation_status",
-                "expected_text",
-                "expected_question_numbers",
-                "expected_regions",
-                "expect_integrity_rejection",
-                "annotator_decision_version",
-            },
-            label,
-        )
+        case_keys = {
+            "case_id",
+            "document_id",
+            "split",
+            "modality",
+            "image_file",
+            "page_width",
+            "page_height",
+            "degradation_tags",
+            "content_tags",
+            "annotation_status",
+            "expected_text",
+            "expected_question_numbers",
+            "expected_regions",
+            "expect_integrity_rejection",
+            "annotator_decision_version",
+        }
+        if formula_gold:
+            case_keys.add("formula_spans")
+        _keys(case, case_keys, label)
         case_id = _uuid(case["case_id"], f"{label}.case_id")
         document_id = _uuid(case["document_id"], f"{label}.document_id")
         if case_id in seen:
@@ -204,6 +233,10 @@ def validate_gold(raw: object) -> Json:
             raise ValueError(f"{label}.expected_text must be a string")
         _string_list(case["expected_question_numbers"], None, f"{label}.expected_question_numbers")
         _regions(case["expected_regions"], "region_id", f"{label}.expected_regions")
+        if formula_gold:
+            formula_spans = _formula_spans(case["formula_spans"], f"{label}.formula_spans")
+            if formula_spans and "math" not in cast(list[str], case["content_tags"]):
+                raise ValueError(f"{label} formula spans require the math content tag")
         if not isinstance(case["expect_integrity_rejection"], bool):
             raise ValueError(f"{label}.expect_integrity_rejection must be boolean")
         if case["annotator_decision_version"] != decision:
@@ -694,6 +727,10 @@ def evaluate(
         "production_ready": False,
         "writes_product_data": False,
         "human_confirmation_required": True,
+        "formula_structure_evaluated": False,
+        "gold_formula_span_count": sum(
+            len(cast(list[Json], case.get("formula_spans", []))) for case in cases
+        ),
         "detector_identity": {"trusted_identity_verified": False},
         "blocker_codes": ["TRUSTED_ATTESTATION_REQUIRED"],
         "metrics": {

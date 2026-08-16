@@ -15,12 +15,14 @@ import scripts.recognition_private_benchmark_evaluate as benchmark
 from scripts.recognition_private_benchmark_evaluate import (
     ATTESTATION_VERSION,
     DEGRADATIONS,
+    FORMULA_GOLD_VERSION,
     GOLD_VERSION,
     MODALITIES,
     PREDICTION_VERSION,
     canonical_predictions_sha256,
     evaluate,
     load_json,
+    validate_gold,
 )
 
 
@@ -125,6 +127,31 @@ def evidence(root: Path) -> tuple[dict[str, object], dict[str, object], dict[str
         },
     }
     return gold, prediction_set, attestation
+
+
+def test_formula_gold_v2_is_strict_and_keeps_text_metrics_separate(tmp_path: Path) -> None:
+    gold, predictions, attestation = evidence(tmp_path / "images")
+    gold["schema_version"] = FORMULA_GOLD_VERSION
+    for case in gold["cases"]:  # type: ignore[index]
+        case["formula_spans"] = []
+    gold["cases"][0]["formula_spans"] = [  # type: ignore[index]
+        {
+            "formula_id": uid(900),
+            "bbox": {"x": 0.2, "y": 0.25, "width": 0.4, "height": 0.15},
+            "latex": r"\frac{\sqrt{xy+1}-1}{x+y}",
+            "linear_text": "[√(xy+1)−1]/(x+y)",
+            "review_status": "reviewed",
+        }
+    ]
+
+    report = evaluate(gold, predictions, attestation, tmp_path / "images")
+    assert report["formula_structure_evaluated"] is False
+    assert report["gold_formula_span_count"] == 1
+
+    invalid = copy.deepcopy(gold)
+    invalid["cases"][0]["formula_spans"][0]["latex"] = ""  # type: ignore[index]
+    with pytest.raises(ValueError, match="reviewed formula text must not be empty"):
+        validate_gold(invalid)
 
 
 def test_perfect_private_evidence_reports_only_aggregate_metrics(tmp_path: Path) -> None:

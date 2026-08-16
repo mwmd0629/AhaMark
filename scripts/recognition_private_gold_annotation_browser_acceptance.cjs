@@ -150,6 +150,22 @@ async function main() {
         100,
     );
     await draw(page, [10, 15], [80, 70]);
+    await page.locator('input[name="drawMode"][value="formula"]').check();
+    await draw(page, [10, 80], [80, 105]);
+    assert.equal(await page.locator(".formula-card").count(), 1);
+    await page.locator("#export").click();
+    await page.waitForFunction(() =>
+      document.querySelector("#status").textContent.includes("公式 1 尚未核对"),
+    );
+    await page
+      .locator(".formula-latex")
+      .fill("\\lim_{x\\to 0}\\frac{\\sqrt{x+1}-1}{x}");
+    await page.locator(".formula-linear").fill("lim_{x→0} [√(x+1)−1]/x");
+    await page.locator(".formula-status").selectOption("reviewed");
+    assert.match(
+      await page.locator(".formula-preview").textContent(),
+      /\\frac/,
+    );
     assert.deepEqual(pageErrors, []);
 
     await page.locator(".page").nth(1).click();
@@ -165,12 +181,23 @@ async function main() {
     const exportPath = path.join(temporaryRoot, "gold.json");
     await download.saveAs(exportPath);
     const gold = JSON.parse(fs.readFileSync(exportPath, "utf8"));
-    assert.equal(gold.schema_version, "recognition-private-gold-v1");
+    assert.equal(gold.schema_version, "recognition-private-gold-v2");
     assert.equal(gold.cases.length, 2);
     assert.equal(gold.cases[0].expected_text, "1. 求 x² 的极限");
     assert.deepEqual(gold.cases[0].expected_question_numbers, ["1"]);
     assert.equal(gold.cases[0].expected_regions.length, 1);
+    assert.equal(gold.cases[0].formula_spans.length, 1);
+    assert.equal(
+      gold.cases[0].formula_spans[0].latex,
+      "\\lim_{x\\to 0}\\frac{\\sqrt{x+1}-1}{x}",
+    );
+    assert.equal(
+      gold.cases[0].formula_spans[0].linear_text,
+      "lim_{x→0} [√(x+1)−1]/x",
+    );
+    assert.equal(gold.cases[0].formula_spans[0].review_status, "reviewed");
     assert.equal(gold.cases[1].expected_regions.length, 0);
+    assert.equal(gold.cases[1].formula_spans.length, 0);
     const serialized = JSON.stringify(gold);
     for (const forbidden of [
       "role",

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>AhaMark 私有 OCR Gold 标注 v1</title>
+    <title>AhaMark 私有 OCR 与公式 Gold 标注 v2</title>
     <style>
       :root {
         color-scheme: light;
@@ -140,6 +140,41 @@
         fill: #ef444433;
         stroke: #ef4444;
       }
+      .formula-box {
+        fill: #f59e0b22;
+        stroke: #d97706;
+        stroke-width: 3;
+        vector-effect: non-scaling-stroke;
+      }
+      .formula-box.selected {
+        fill: #ef444433;
+        stroke: #ef4444;
+      }
+      .formula-card {
+        margin-top: 8px;
+        padding: 8px;
+        border: 1px solid #d8deea;
+        border-radius: 7px;
+        background: #fafbfe;
+      }
+      .formula-card.selected {
+        border-color: #d97706;
+        background: #fffbeb;
+      }
+      .formula-card textarea {
+        min-height: 58px;
+        font-family: ui-monospace, Consolas, monospace;
+      }
+      .formula-preview {
+        margin-top: 5px;
+        padding: 6px;
+        min-height: 34px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        border: 1px dashed #d8b15c;
+        background: #fff;
+        font-family: "Cambria Math", "STIX Two Math", serif;
+      }
       .draft {
         fill: #16a34a22;
         stroke: #16a34a;
@@ -203,7 +238,8 @@
         <div class="hint">
           全程离线运行，不上传图片或正文。可载入 ocr-drafts.json
           作为待校对草稿；浏览器只按匿名 UUID 匹配，进度保存在本机
-          localStorage。
+          localStorage。正文保留线性可读文本；分式、根号、上下标等二维公式应另画公式框并填写
+          LaTeX。
           若页面可见姓名、学号等身份信息，必须先在独立图片副本中遮挡，再选择“已使用去标识副本”。
         </div>
         <label>数据集</label><code id="datasetId">-</code>
@@ -257,21 +293,39 @@
           ><input id="integrityReject" type="checkbox" />
           该页应触发文字完整性拒绝</label
         >
+        <label>画框类型</label>
+        <div class="row">
+          <label
+            ><input type="radio" name="drawMode" value="question" checked />
+            题目区域</label
+          >
+          <label
+            ><input type="radio" name="drawMode" value="formula" />
+            公式区域</label
+          >
+        </div>
         <label>题目区域</label>
         <div class="hint">
-          在图片上拖动画框；框只表示题目区域，不表示公式框。坐标按原始图片归一化保存。
+          选择“题目区域”后拖动画框。坐标按原始图片归一化保存。
         </div>
         <div class="row" style="margin-top: 8px">
           <button id="deleteRegion" class="danger">删除选中区域</button
           ><span id="regionCount">0 个区域</span>
         </div>
+        <label>公式区域与结构化转写</label>
+        <div class="hint">
+          选择“公式区域”后框住单个完整公式。LaTeX
+          示例：<code>\frac{a}{b}</code>、<code>\sqrt{xy+1}</code>、<code>\lim_{(x,y)\to(0,0)}</code>。线性替代文本用于搜索和旧评测，不能代替
+          LaTeX 结构。
+        </div>
+        <div id="formulaSpans"></div>
       </section>
     </main>
     <script>
       (() => {
         "use strict";
         const VERSION = "recognition-private-annotation-v1";
-        const GOLD_VERSION = "recognition-private-gold-v1";
+        const GOLD_VERSION = "recognition-private-gold-v2";
         const DRAFT_VERSION = "recognition-private-drafts-v1";
         const DEGRADATIONS = [
           "clean",
@@ -316,8 +370,10 @@
         let state = null,
           active = null,
           selectedRegion = null,
+          selectedFormula = null,
           dragStart = null,
-          draft = null;
+          draft = null,
+          drawMode = "question";
         const imageUrls = new Map();
 
         function storageKey() {
@@ -332,6 +388,15 @@
         }
         function current() {
           return state && state.cases.find((item) => item.case_id === active);
+        }
+        function formulasComplete(item) {
+          return item.formula_spans.every(
+            (span) =>
+              span.review_status === "unreadable" ||
+              (span.review_status === "reviewed" &&
+                span.latex.trim() &&
+                span.linear_text.trim()),
+          );
         }
         function exactKeys(value, keys) {
           return (
@@ -385,8 +450,13 @@
               "annotator_decision_version",
             ];
             const savedKeys = [...keys, "text_reviewed"];
+            const formulaKeys = [...keys, "formula_spans"];
+            const savedFormulaKeys = [...savedKeys, "formula_spans"];
             if (
-              (!exactKeys(item, keys) && !exactKeys(item, savedKeys)) ||
+              (!exactKeys(item, keys) &&
+                !exactKeys(item, savedKeys) &&
+                !exactKeys(item, formulaKeys) &&
+                !exactKeys(item, savedFormulaKeys)) ||
               !validUuid(item.case_id) ||
               !validUuid(item.document_id) ||
               ids.has(item.case_id) ||
@@ -400,9 +470,50 @@
             )
               throw new Error("正文核对状态不正确");
             if (!("text_reviewed" in item)) item.text_reviewed = false;
+            if (!("formula_spans" in item)) item.formula_spans = [];
+            validateFormulaSpans(item.formula_spans);
             ids.add(item.case_id);
           }
           return data;
+        }
+        function validBox(box) {
+          return (
+            exactKeys(box, ["x", "y", "width", "height"]) &&
+            [box.x, box.y, box.width, box.height].every(
+              (value) => typeof value === "number" && Number.isFinite(value),
+            ) &&
+            box.x >= 0 &&
+            box.y >= 0 &&
+            box.width > 0 &&
+            box.height > 0 &&
+            box.x + box.width <= 1.000001 &&
+            box.y + box.height <= 1.000001
+          );
+        }
+        function validateFormulaSpans(spans) {
+          if (!Array.isArray(spans)) throw new Error("公式标注格式不正确");
+          const ids = new Set();
+          for (const span of spans) {
+            if (
+              !exactKeys(span, [
+                "formula_id",
+                "bbox",
+                "latex",
+                "linear_text",
+                "review_status",
+              ]) ||
+              !validUuid(span.formula_id) ||
+              ids.has(span.formula_id) ||
+              !validBox(span.bbox) ||
+              typeof span.latex !== "string" ||
+              typeof span.linear_text !== "string" ||
+              !["pending", "reviewed", "unreadable"].includes(
+                span.review_status,
+              )
+            )
+              throw new Error("公式标注格式不正确");
+            ids.add(span.formula_id);
+          }
         }
         function buildChecks(container, values, field, labels) {
           container.innerHTML = "";
@@ -437,10 +548,11 @@
             if (
               item.annotation_status !== "pending" &&
               item.privacy_status !== "pending" &&
-              (item.annotation_status === "unjudgeable" || item.text_reviewed)
+              (item.annotation_status === "unjudgeable" ||
+                (item.text_reviewed && formulasComplete(item)))
             )
               button.classList.add("complete");
-            button.textContent = `${index + 1}. ${item.modality} · ${item.role === "reference_answer" ? "参考答案" : "学生/材料"} · ${item.expected_regions.length} 区 · ${item.text_reviewed ? "正文已核对" : "正文待核对"}`;
+            button.textContent = `${index + 1}. ${item.modality} · ${item.role === "reference_answer" ? "参考答案" : "学生/材料"} · ${item.expected_regions.length} 题区 · ${item.formula_spans.length} 公式 · ${item.text_reviewed ? "正文已核对" : "正文待核对"}`;
             button.onclick = () => selectCase(item.case_id);
             pages.append(button);
           });
@@ -455,7 +567,8 @@
             (item) =>
               item.annotation_status !== "pending" &&
               item.privacy_status !== "pending" &&
-              (item.annotation_status === "unjudgeable" || item.text_reviewed),
+              (item.annotation_status === "unjudgeable" ||
+                (item.text_reviewed && formulasComplete(item))),
           ).length;
           $("status").textContent =
             `${done}/${state.cases.length} 页已完成正文核对、标注与隐私复核`;
@@ -463,6 +576,7 @@
         function selectCase(caseId) {
           active = caseId;
           selectedRegion = null;
+          selectedFormula = null;
           const c = current();
           if (!c) return;
           $("modality").value = c.modality;
@@ -494,7 +608,120 @@
             };
           }
           renderRegions();
+          renderFormulaEditors();
           renderList();
+        }
+        function renderFormulaEditors() {
+          const container = $("formulaSpans"),
+            c = current();
+          container.innerHTML = "";
+          if (!c || !c.formula_spans.length) {
+            const empty = document.createElement("div");
+            empty.className = "hint";
+            empty.textContent = "尚未框选公式。";
+            container.append(empty);
+            return;
+          }
+          c.formula_spans.forEach((span, index) => {
+            const card = document.createElement("div");
+            card.className = `formula-card${selectedFormula === span.formula_id ? " selected" : ""}`;
+            card.onclick = () => {
+              selectedFormula = span.formula_id;
+              selectedRegion = null;
+              renderFormulaEditors();
+              renderRegions();
+            };
+
+            const heading = document.createElement("div");
+            heading.className = "row";
+            const title = document.createElement("strong");
+            title.textContent = `公式 ${index + 1}`;
+            const remove = document.createElement("button");
+            remove.type = "button";
+            remove.className = "danger";
+            remove.textContent = "删除公式框";
+            remove.onclick = (event) => {
+              event.stopPropagation();
+              c.formula_spans = c.formula_spans.filter(
+                (item) => item.formula_id !== span.formula_id,
+              );
+              selectedFormula = null;
+              save();
+              renderFormulaEditors();
+              renderRegions();
+            };
+            heading.append(title, remove);
+
+            const latexLabel = document.createElement("label");
+            latexLabel.textContent = "LaTeX（保留二维结构）";
+            const latex = document.createElement("textarea");
+            latex.className = "formula-latex";
+            latex.spellcheck = false;
+            latex.value = span.latex;
+            const preview = document.createElement("div");
+            preview.className = "formula-preview";
+            const updatePreview = () => {
+              preview.textContent = span.latex.trim()
+                ? `LaTeX：${span.latex}`
+                : "等待输入 LaTeX";
+            };
+            latex.oninput = (event) => {
+              span.latex = event.target.value.replace(/\r\n/g, "\n");
+              if (span.review_status === "reviewed") {
+                span.review_status = "pending";
+                status.value = "pending";
+              }
+              updatePreview();
+              save();
+            };
+
+            const linearLabel = document.createElement("label");
+            linearLabel.textContent = "线性替代文本（搜索与兼容）";
+            const linear = document.createElement("textarea");
+            linear.className = "formula-linear";
+            linear.spellcheck = false;
+            linear.value = span.linear_text;
+            linear.oninput = (event) => {
+              span.linear_text = event.target.value.replace(/\r\n/g, "\n");
+              if (span.review_status === "reviewed") {
+                span.review_status = "pending";
+                status.value = "pending";
+              }
+              save();
+            };
+
+            const statusLabel = document.createElement("label");
+            statusLabel.textContent = "公式核对状态";
+            const status = document.createElement("select");
+            status.className = "formula-status";
+            for (const [value, text] of [
+              ["pending", "待核对"],
+              ["reviewed", "已对照原图核对"],
+              ["unreadable", "局部公式无法可靠转写"],
+            ]) {
+              const option = document.createElement("option");
+              option.value = value;
+              option.textContent = text;
+              status.append(option);
+            }
+            status.value = span.review_status;
+            status.onchange = (event) => {
+              span.review_status = event.target.value;
+              save();
+            };
+            updatePreview();
+            card.append(
+              heading,
+              latexLabel,
+              latex,
+              preview,
+              linearLabel,
+              linear,
+              statusLabel,
+              status,
+            );
+            container.append(card);
+          });
         }
         function renderRegions() {
           const svg = $("overlay"),
@@ -525,6 +752,32 @@
             };
             svg.append(rect);
           }
+          for (const span of c.formula_spans) {
+            const rect = document.createElementNS(
+                "http://www.w3.org/2000/svg",
+                "rect",
+              ),
+              b = span.bbox;
+            for (const [name, value] of Object.entries({
+              x: b.x * c.page_width,
+              y: b.y * c.page_height,
+              width: b.width * c.page_width,
+              height: b.height * c.page_height,
+            }))
+              rect.setAttribute(name, value);
+            rect.setAttribute(
+              "class",
+              `formula-box${selectedFormula === span.formula_id ? " selected" : ""}`,
+            );
+            rect.onclick = (event) => {
+              event.stopPropagation();
+              selectedFormula = span.formula_id;
+              selectedRegion = null;
+              renderRegions();
+              renderFormulaEditors();
+            };
+            svg.append(rect);
+          }
           if (draft) {
             const rect = document.createElementNS(
               "http://www.w3.org/2000/svg",
@@ -532,7 +785,10 @@
             );
             for (const [name, value] of Object.entries(draft))
               rect.setAttribute(name, value);
-            rect.setAttribute("class", "draft");
+            rect.setAttribute(
+              "class",
+              drawMode === "formula" ? "formula-box" : "draft",
+            );
             svg.append(rect);
           }
           $("regionCount").textContent = `${c.expected_regions.length} 个区域`;
@@ -560,6 +816,7 @@
         $("overlay").onpointerdown = (event) => {
           if (!current()) return;
           selectedRegion = null;
+          selectedFormula = null;
           dragStart = point(event);
           draft = { x: dragStart.x, y: dragStart.y, width: 0, height: 0 };
           $("overlay").setPointerCapture(event.pointerId);
@@ -579,22 +836,36 @@
         $("overlay").onpointerup = () => {
           const c = current();
           if (c && draft && draft.width >= 4 && draft.height >= 4) {
-            const region = {
-              region_id: crypto.randomUUID(),
-              bbox: {
-                x: draft.x / c.page_width,
-                y: draft.y / c.page_height,
-                width: draft.width / c.page_width,
-                height: draft.height / c.page_height,
-              },
+            const bbox = {
+              x: draft.x / c.page_width,
+              y: draft.y / c.page_height,
+              width: draft.width / c.page_width,
+              height: draft.height / c.page_height,
             };
-            c.expected_regions.push(region);
-            selectedRegion = region.region_id;
+            if (drawMode === "formula") {
+              const span = {
+                formula_id: crypto.randomUUID(),
+                bbox,
+                latex: "",
+                linear_text: "",
+                review_status: "pending",
+              };
+              c.formula_spans.push(span);
+              selectedFormula = span.formula_id;
+            } else {
+              const region = {
+                region_id: crypto.randomUUID(),
+                bbox,
+              };
+              c.expected_regions.push(region);
+              selectedRegion = region.region_id;
+            }
           }
           dragStart = null;
           draft = null;
           save();
           renderRegions();
+          renderFormulaEditors();
         };
         $("deleteRegion").onclick = () => {
           const c = current();
@@ -606,6 +877,14 @@
           save();
           renderRegions();
         };
+        for (const input of document.querySelectorAll('input[name="drawMode"]'))
+          input.onchange = (event) => {
+            drawMode = event.target.value;
+            selectedRegion = null;
+            selectedFormula = null;
+            renderRegions();
+            renderFormulaEditors();
+          };
         $("seed").onchange = async (event) => {
           try {
             const file = event.target.files[0];
@@ -762,6 +1041,31 @@
               throw new Error(`第 ${index + 1} 页尚未完成标注`);
             if (c.annotation_status === "annotated" && !c.text_reviewed)
               throw new Error(`第 ${index + 1} 页正文尚未逐字核对`);
+            if (c.formula_spans.length && !c.content_tags.includes("math"))
+              throw new Error(`第 ${index + 1} 页有公式框但缺少数学内容标签`);
+            for (const [formulaIndex, span] of c.formula_spans.entries()) {
+              if (span.review_status === "pending")
+                throw new Error(
+                  `第 ${index + 1} 页公式 ${formulaIndex + 1} 尚未核对`,
+                );
+              if (
+                span.review_status === "reviewed" &&
+                (!span.latex.trim() || !span.linear_text.trim())
+              )
+                throw new Error(
+                  `第 ${index + 1} 页公式 ${formulaIndex + 1} 缺少 LaTeX 或线性替代文本`,
+                );
+              const formulaText = `${span.latex}\n${span.linear_text}`;
+              if (
+                EMAIL.test(formulaText) ||
+                PHONE.test(formulaText) ||
+                IDENTITY.test(formulaText) ||
+                ABSOLUTE_PATH.test(formulaText)
+              )
+                throw new Error(
+                  `第 ${index + 1} 页公式 ${formulaIndex + 1} 疑似包含身份信息或路径`,
+                );
+            }
             if (
               !["no_identity_visible", "redacted_copy"].includes(
                 c.privacy_status,
@@ -780,7 +1084,8 @@
               c.annotation_status === "unjudgeable" &&
               (text ||
                 c.expected_question_numbers.length ||
-                c.expected_regions.length)
+                c.expected_regions.length ||
+                c.formula_spans.length)
             )
               throw new Error(`第 ${index + 1} 页不可判定时必须清空 gold 内容`);
           }
@@ -806,6 +1111,7 @@
                 expected_text: c.expected_text,
                 expected_question_numbers: c.expected_question_numbers,
                 expected_regions: c.expected_regions,
+                formula_spans: c.formula_spans,
                 expect_integrity_rejection: c.expect_integrity_rejection,
                 annotator_decision_version: c.annotator_decision_version,
               })),
