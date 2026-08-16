@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import uuid
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,11 @@ from app.recognition.rapidocr_artifacts import (
     ValidatedRapidOcrBundle,
     validate_rapidocr_artifact_bundle,
 )
+
+
+class FakeEngineType(Enum):
+    ONNXRUNTIME = "onnxruntime"
+
 
 ROLES = ("det", "cls", "rec", "keys", "font")
 
@@ -266,13 +272,17 @@ def test_adapter_uses_only_explicit_v3_paths_and_injected_constructor(tmp_path: 
     _, _, bundle = _bundle(tmp_path)
     calls: list[dict[str, Any]] = []
     engine = object()
+    engine_type = FakeEngineType.ONNXRUNTIME
 
     def constructor(**kwargs: Any) -> object:
         calls.append(kwargs)
         return engine
 
-    assert construct_rapidocr_engine(bundle, constructor=constructor) is engine
-    assert calls == [{"params": rapidocr_v3_params(bundle)}]
+    assert (
+        construct_rapidocr_engine(bundle, constructor=constructor, engine_type=engine_type)
+        is engine
+    )
+    assert calls == [{"params": rapidocr_v3_params(bundle, engine_type=engine_type)}]
     params = calls[0]["params"]
     assert params == {
         "Global.use_det": True,
@@ -280,11 +290,12 @@ def test_adapter_uses_only_explicit_v3_paths_and_injected_constructor(tmp_path: 
         "Global.use_rec": True,
         "Global.model_root_dir": str(bundle.root),
         "Global.font_path": str(bundle.font.path),
-        "Det.engine_type": "onnxruntime",
+        "Global.log_level": "critical",
+        "Det.engine_type": engine_type,
         "Det.model_path": str(bundle.det.path),
-        "Cls.engine_type": "onnxruntime",
+        "Cls.engine_type": engine_type,
         "Cls.model_path": str(bundle.cls.path),
-        "Rec.engine_type": "onnxruntime",
+        "Rec.engine_type": engine_type,
         "Rec.model_path": str(bundle.rec.path),
         "Rec.rec_keys_path": str(bundle.keys.path),
     }
@@ -297,7 +308,11 @@ def test_adapter_hides_constructor_failure(tmp_path: Path) -> None:
         raise RuntimeError("secret local path and runtime detail")
 
     with pytest.raises(RapidOcrAdapterError) as exc_info:
-        construct_rapidocr_engine(bundle, constructor=constructor)
+        construct_rapidocr_engine(
+            bundle,
+            constructor=constructor,
+            engine_type=FakeEngineType.ONNXRUNTIME,
+        )
 
     assert exc_info.value.code == "OCR_ENGINE_INIT_FAILED"
     assert "secret" not in str(exc_info.value)
@@ -314,7 +329,11 @@ def test_adapter_rejects_artifact_changed_after_validation(tmp_path: Path) -> No
         return object()
 
     with pytest.raises(RapidOcrArtifactError) as exc_info:
-        construct_rapidocr_engine(bundle, constructor=constructor)
+        construct_rapidocr_engine(
+            bundle,
+            constructor=constructor,
+            engine_type=FakeEngineType.ONNXRUNTIME,
+        )
 
     _assert_code(exc_info, "OCR_ARTIFACT_CHANGED")
     assert called is False
