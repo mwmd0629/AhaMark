@@ -135,6 +135,22 @@ def test_tesseract_source_is_trusted_by_region_and_quality_aggregation() -> None
     assert quality["text_source"] == "tesseract"
 
 
+def test_tesseract_tsv_treats_double_quote_as_literal_text() -> None:
+    output = (
+        HEADER
+        + '5\t1\t1\t1\t1\t1\t10\t20\t30\t10\t95\tquoted"text\n'
+        + "5\t1\t1\t1\t1\t2\t50\t20\t30\t10\t90\tsecond\n"
+    ).encode()
+
+    blocks = parse_tesseract_tsv(
+        output,
+        PageArtifact(content=b"png", width=100, height=100),
+        source_version="5.3.0",
+    )
+
+    assert [block.text for block in blocks] == ['quoted"text', "second"]
+
+
 @pytest.mark.parametrize(
     "body",
     [

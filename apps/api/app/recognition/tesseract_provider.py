@@ -168,7 +168,9 @@ def parse_tesseract_tsv(
         text_output = raw_output.decode("utf-8-sig", errors="strict")
     except UnicodeDecodeError as exc:
         raise RecognitionError("OCR_PROVIDER_OUTPUT_INVALID", "Tesseract 输出不是 UTF-8") from exc
-    reader = csv.DictReader(io.StringIO(text_output), delimiter="\t")
+    # Tesseract TSV does not use RFC CSV quoting. OCR text may legitimately
+    # contain a double quote, which must not absorb following tabs or rows.
+    reader = csv.DictReader(io.StringIO(text_output), delimiter="\t", quoting=csv.QUOTE_NONE)
     if tuple(reader.fieldnames or ()) != _TSV_FIELDS:
         raise RecognitionError("OCR_PROVIDER_OUTPUT_INVALID", "Tesseract TSV 字段无效")
 
