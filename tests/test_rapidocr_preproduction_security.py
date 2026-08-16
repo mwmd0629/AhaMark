@@ -17,13 +17,13 @@ from app.recognition.rapidocr_artifacts import (
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-ARTIFACT_ROLES = ("det", "cls", "rec", "keys", "font")
+ARTIFACT_ROLES = ("det", "cls", "rec")
 
 
 def _write_bundle(root: Path) -> str:
     artifacts: dict[str, object] = {}
     for role in ARTIFACT_ROLES:
-        suffix = ".txt" if role == "keys" else ".ttf" if role == "font" else ".onnx"
+        suffix = ".onnx"
         relative_path = f"models/{role}{suffix}"
         content = f"offline-{role}".encode()
         artifact_path = root / relative_path
@@ -35,7 +35,7 @@ def _write_bundle(root: Path) -> str:
             "sha256": hashlib.sha256(content).hexdigest(),
         }
     manifest = {
-        "schema_version": "ahamark-rapidocr-artifacts-v1",
+        "schema_version": "ahamark-rapidocr-artifacts-v2",
         "bundle_id": str(uuid.uuid4()),
         "runtime": {"rapidocr_version": "3.4.2", "onnxruntime_version": "1.20.1"},
         "license": {"locally_approved": True, "approval_id": str(uuid.uuid4())},

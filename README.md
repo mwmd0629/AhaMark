@@ -136,11 +136,11 @@
 
 ## 接手必读：当前状态、问题与下一步
 
-> Git 状态更正：P11 基线已提交并推送为 `694efe0`，未部署；P12 是其上的当前未提交改动。下方 P11 长记录中的“未暂存/提交/推送”是提交前验证措辞。
+> Git 状态更正：P11 已提交并推送为 `694efe0`，P12 已提交并推送为 `df25928`，均未部署；P13/P14 是其上的当前未提交改动。下方较早记录中的“未暂存/提交/推送”是提交前验证措辞。
 
 > P12 synthetic 能力补充：UTF-8 A/B 证明此前中文替换符只是 Windows GBK 控制台显示问题，模型内嵌字符表与 v3.9.2 外置字典对同一中文样本输出一致。五类断网探针中，中英题干、低对比、GaussianBlur(2.2) 与轻旋转 3°均能得到可读文本；Unicode 数学样本的第一段 `x² + α ≤ 10` 保留较好，但积分段 `∫ f(x) dx` 被错误识别并发生次序/字符退化。该证据进一步确认 RapidOCR 可作为普通印刷文字基线，但不能当公式 OCR 或 LaTeX 恢复器；数学结构仍必须保留现有 manual review 风险门禁。
 
-> 2026-08-16 真实 RapidOCR 仓外取证与断网 smoke P12（进行中，未暂存/提交/推送/部署）：经用户明确授权后，仅从 RapidOCR 官方 PyPI、官方文档/仓库及其明确引用的 ModelScope 版本目录取得 `rapidocr==3.9.2`、`onnxruntime==1.27.0`、完整 Windows CPython 3.12 wheelhouse、官方 wheel 内置的 PP-OCRv6 det/rec 与 PP-OCRv4 cls 模型，以及匹配 v3.9.2 的字典/字体；全部内容位于仓库外私有目录，不进入 Git、Docker context、node2 或产品数据库。隔离 venv 以 `--no-index` 安装后 `pip check` 通过；在 Python socket 与 requests 均设为触发即失败、三模型/字典/字体全部显式本地路径、官方 `EngineType/Lang*/ModelType/OCRVersion` 枚举和 `log_level=critical` 下，对运行时生成的 synthetic 图片连续推理两次，均得到单块 `1. AhaMark OCR 2 + 3 = 5`、score `0.98146`，artifact 文件数前后保持 2，证明该 Windows 组合可离线初始化和执行基本 OCR，但不代表真实试卷准确率或 Linux 容器兼容。首次实跑发现 P11 adapter 把 `engine_type` 写为普通字符串会被 RapidOCR 3.9.2 稳定拒绝；现改为由运行时显式注入 `Enum` 并固定 critical 日志，聚焦 artifact/security 回归 `23 passed, 1 skipped`，Ruff、format 与 adapter strict mypy 通过。许可仍是硬阻断：RapidOCR 工程为 Apache-2.0、ONNX Runtime 为 MIT，但官方明确模型版权归百度，PP-OCRv6 字典与 `FZYTK.TTF` 未找到足够独立许可；因此未伪造 `locally_approved`、未生成可通过产品 validator 的受信 manifest、未打开 runtime/download 配置，也未接主 Provider。后续须等待许可证/字体方案和外部签名审批授权，再做只读 bundle、Linux wheelhouse/container smoke 与私有脱敏 benchmark。
+> 2026-08-16 真实 RapidOCR 仓外取证、断网 smoke 与 v2 运行时桥 P12-P14（P12 已提交并推送 `df25928`；P13/P14 当前未提交；均未部署）：经用户明确授权后，仅从官方来源取得并在仓库外保存精确依赖与模型；Windows 隔离环境和 Linux `--network none --read-only` 容器都以离线 wheelhouse 完成 synthetic 印刷文字推理，未把 wheel、模型、字典、字体或审批材料放入 Git、普通 Docker context、node2 或产品数据库。Windows 连续运行、中文/英文、低对比、模糊和轻旋转探针验证了基础印刷文字能力；积分样本发生明显字符与次序退化，因此不代表真实试卷、公式或 LaTeX 能力。P13 将 artifact schema 升为仅允许 `det/cls/rec` 的 `ahamark-rapidocr-artifacts-v2`，字符表改为验证 rec ONNX metadata，推理不再依赖外置字典或字体；旧 v1、额外角色、路径逃逸、链接/hardlink、哈希/身份漂移和仓库/Docker context 私有 artifact 均 fail closed。P14 新增惰性 runtime bridge：只有显式调用 closure 时才精确核对 RapidOCR/ONNX Runtime 版本、动态导入模块、以 CPU provider 检查字符 metadata，并使用真实 `EngineType.ONNXRUNTIME` 构造；该桥尚未接 Settings 或主 Provider。许可仍是硬阻断：工程代码许可证不等于模型权利，当前未伪造批准、未生成受信 manifest、未开放 runtime/download。P13/P14 公共与安全组合最终 `30 passed, 1 skipped, 1 warning`；独立运行时组合 `22 passed, 1 skipped`，Ruff、format、strict mypy 与 diff-check 通过。
 
 > 2026-08-16 显式本地 RapidOCR artifact adapter 与公共识别面收口 P11（开发完成，未暂存/提交/推送/部署）：默认 API/Worker 镜像安装由 `.[ocr]` 改为核心包 `.`，普通镜像不再默认安装 RapidOCR/ONNX Runtime；新增纯本地、无网络的严格 artifact manifest 校验和仅接受已验证 bundle + 注入 constructor 的 RapidOCR v3 adapter，固定校验 manifest SHA-256、重复字段/NaN、五个 `det/cls/rec/keys/font` 角色、声明总大小、NFC 相对路径唯一性与 root confinement、普通文件/符号链接/reparse/hardlink、文件大小/哈希、本地许可证明确批准及 canonical UUID，并在构造前以 `st_dev/st_ino/st_size/st_mtime_ns` 轻量复核文件身份。Adapter 只生成显式本地绝对路径参数，不 import RapidOCR/ONNX、不联网、不下载、不零参构造；该 adapter 尚未接入 `provider_from_settings`，`RECOGNITION_RAPIDOCR_RUNTIME_ENABLED` 与模型下载在所有环境仍 hard-off。答案识别 RapidOCR 不再自行构造，必须共用主文字识别工厂及 readiness 门，不能从 answer 路径绕过。教师公共识别 API 收紧为白名单字段，readiness 改用真实 Provider 安全探测；OCR 不可用时只有全部页面均为 PDF 才允许依赖文字层启动，混合 PDF/图片不再因“任一 PDF”误报 `can_start`；页面 API 已移除质量原始分数，仅保留行动等级/问题，presigned URL 契约未修改。首次联合回归为 `1 failed, 144 passed, 3 skipped`，唯一失败是既有前端测试仍断言旧文案，修正后无持续失败；独立复审收口后核心精确为 `57 passed, 1 skipped, 1 warning`，公共相关 `23 passed`，前端 `8 passed`，均 `ahamark.db unchanged`；目标 Ruff、strict mypy、compileall、TypeScript `tsc`、ESLint、Prettier 与 `git diff --check` 通过。未运行全仓测试、Next production build、Docker build、真实模型、真实 OCR、真实资料或部署。启用前仍必须由运维提供同一只读 artifact mount 与严格 ACL；当前仅在构造前复核路径身份，检查后到库打开文件之间的句柄级 TOCTOU 尚未闭合。Docker base image 与 Python 依赖尚未按 digest/wheel hash 锁定；现有 presigned URL 仍是最长 300 秒 bearer URL，未在本轮缩短或改造成单次令牌。
 
@@ -258,9 +258,9 @@
 
 ### 当前事实（以当前工作树重新验证为准）
 
-- 2026-08-16：P12 已完成官方来源下载和 Windows 断网 synthetic smoke。仓库外 wheelhouse/venv 锁定 RapidOCR 3.9.2 + ONNX Runtime 1.27.0；显式本地模型、字典、字体连续两次识别一致且无网络/无 artifact 写入。实跑发现并修正 adapter 的 `EngineType` 枚举兼容与模型路径日志抑制，聚焦 `23 passed, 1 skipped`，静态门禁通过。当前改动未暂存/提交/推送/部署；许可证审批、受信 manifest、只读 mount、Linux container smoke 和真实脱敏 benchmark 均未完成，runtime/download 继续 hard-off。
+- 2026-08-16：P12 已提交并推送为 `df25928`；P13/P14 当前未提交，均未部署。仓库外精确依赖已分别在 Windows 隔离环境与 Linux 断网只读容器完成 synthetic smoke；v2 bundle 只接受 det/cls/rec，字符表从 rec ONNX metadata 校验，新增 runtime bridge 仍保持惰性且未接主 Provider。当前许可证审批、受信 manifest、生产只读 mount/ACL 与真实脱敏 benchmark 均未完成，runtime/download 继续 hard-off。
 
-- 2026-08-16：P11 已完成但仍未暂存、提交、推送或部署。默认镜像不再安装 `[ocr]`；严格本地 artifact/adapter 已实现但未接主 Provider，RapidOCR runtime/download 继续全环境 hard-off，answer 路径共用主门。教师公共 API/readiness、全部页面 PDF fallback 与质量公共投影已收口，presigned URL 未改。复审后核心 `57 passed, 1 skipped, 1 warning`、公共相关 `23 passed`、前端 `8 passed`，`ahamark.db unchanged`，目标静态门禁通过；未运行全仓、Next、Docker build、模型或真实数据。启用前阻断项仍是只读 mount/ACL、句柄级 TOCTOU、Docker/依赖 digest/hash 锁定，以及 300 秒 bearer presigned URL 风险。
+- 2026-08-16：P11 已提交并推送为 `694efe0`，未部署。默认镜像不再安装 `[ocr]`；严格本地 artifact/adapter 尚未接主 Provider，RapidOCR runtime/download 继续全环境 hard-off，answer 路径共用主门。教师公共 API/readiness、全部页面 PDF fallback 与质量公共投影已收口，presigned URL 未改。复审后核心 `57 passed, 1 skipped, 1 warning`、公共相关 `23 passed`、前端 `8 passed`，`ahamark.db unchanged`，目标静态门禁通过；未运行全仓、Next、生产 Docker build、真实资料或部署。启用前阻断项仍是模型权利审批、受信 manifest、只读 mount/ACL、句柄级 TOCTOU，以及 300 秒 bearer presigned URL 风险。
 
 - 2026-08-15：P9/P10 私有离线 OCR benchmark 与 RapidOCR 安全合同已完成。benchmark 固定三项 JSON 输入加私有 `image-root`，只允许 self-attested 离线聚合评测，小样本层抑制、零支持比率为 `null`，当前无真实数据；RapidOCR 运行和下载在所有环境硬关闭，默认无 import、模型或网络，注入 adapter 严格校验输入输出及 bidi/noncharacter 等危险字符，可靠 PDF 保留 fallback 与 `can_start`。无数据库或破坏性 API 变更、迁移、部署；验证为主组合 `102 passed, 2 skipped, 1 warning`、复审后 `52 passed, 1 warning`、前端 `8 passed`，`ahamark.db unchanged`，Ruff/strict mypy/tsc/ESLint/Prettier/diffcheck 通过；未运行全仓、Next、Docker 或真实 OCR。
 
@@ -803,12 +803,12 @@ npm.cmd run build
 - Web：Next.js 15、React 19、TypeScript、Tailwind CSS 4。
 - API：FastAPI、SQLAlchemy 2、Alembic；生产数据库为 PostgreSQL。
 - Worker：Celery + Redis；对象存储：MinIO。
-- 文字 OCR：RapidOCR 3.9.2 + ONNX Runtime 1.27.0（本地处理，不上传第三方）。
+- 文字 OCR：产品默认 `unavailable`；仓库外取证环境锁定 RapidOCR 3.9.2 + ONNX Runtime 1.27.0 并已完成 Windows/Linux 断网 synthetic smoke，但许可证与受信 manifest 未闭环，产品 runtime 仍 hard-off。
 
 ```powershell
 Copy-Item .env.example .env
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev,ocr]"
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 npm.cmd install
 .\.venv\Scripts\python.exe -m alembic upgrade head
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir apps/api --reload
@@ -826,11 +826,11 @@ npm.cmd run dev
 
 配置 `RECOGNITION_PROVIDER`：
 
-- `rapidocr`：真实本地印刷体文字 OCR。安装 `pip install -e ".[ocr]"`；随 RapidOCR 包使用 `PP-OCRv6_det_small.onnx`、`ch_ppocr_mobile_v2.0_cls_mobile.onnx`、`PP-OCRv6_rec_small.onnx`。输出文字、0–1 页面坐标、0–1 置信度、provider/version/source/status；不生成 LaTeX。
+- `rapidocr`：保留给经审计的本地印刷体 OCR，但当前产品不可启用；仅安装 `[ocr]` 不会开放能力。运行时下载永久禁止，未来必须使用仓库外只读、外部哈希锚定且许可证已审批的 `det/cls/rec` 三模型 bundle；PP-OCRv6 字符表来自已验证识别模型的 ONNX metadata，字体仅用于可视化，均不再作为推理 bundle 必需文件。输出仍只允许普通文字、页内坐标和置信度，不生成或修复 LaTeX。
 - `fake`：只允许非生产自动化测试。`APP_ENV=production` 时选择 fake 会降级为 unavailable，不能用它评估准确率或宣称真实 OCR 可用。
 - `unavailable`（默认）：明确禁用识别，但转换/预处理仍可用。
 
-真实最小验证使用运行时合成、无个人信息的小图：清晰中文印刷体、中英数字、空白、低对比度和损坏字节；验证了文本、坐标、置信度、空结果、错误映射和 RecognitionBlock 持久化。样本极小，未计算 CER/WER，不代表真实教学、手写、公式、表格或几何能力。公式 provider 独立为 unavailable；普通数学字符只保留为 text 并进入人工复核。DOCX 仍因缺少 LibreOffice headless 返回 `DOCX_CONVERTER_UNAVAILABLE`。
+仓库外真实引擎最小验证仅使用运行时合成、无个人信息的小图：Windows 与 Linux 无网络环境都已完成清晰印刷体推理；Windows 另覆盖中文、中英数字、低对比度、GaussianBlur(2.2) 和轻旋转 3°。Unicode 数学样本中的积分段发生明显字符/次序退化，因此该证据只证明离线 ABI、基础印刷文字和安全合同，不代表真实教学、手写、公式、表格或几何准确率，也未写产品 RecognitionBlock。公式 provider 独立为 unavailable；普通数学字符只保留为 text 并进入人工复核。DOCX 仍因缺少 LibreOffice headless 返回 `DOCX_CONVERTER_UNAVAILABLE`。
 
 ## 文件与异步链路
 

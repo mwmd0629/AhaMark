@@ -1515,5 +1515,5 @@ def adjust_page(
     return {
         "paper_page_id": str(page_id),
         "status": result.status,
-        "processing_parameters": result.processing_parameters,
+        "processing_parameters": _public_processing_parameters(result.processing_parameters),
     }

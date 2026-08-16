@@ -17,6 +17,7 @@ client = TestClient(app)
 SECRET_PROVIDER = "private-provider-C:\\secret\\model.onnx"
 SECRET_VERSION = "private-model-sha256-deadbeef"
 SECRET_ERROR = "private exception C:\\secret\\weights.bin"
+SECRET_APPROVAL = "private-license-approval-123456"
 
 
 def _text_pdf() -> bytes:
@@ -133,6 +134,7 @@ def test_teacher_contract_redacts_private_adapter_details_and_formula_failure(
         page.error_message = SECRET_ERROR
         page.processing_parameters = {
             "private_path": SECRET_ERROR,
+            "license_approval_id": SECRET_APPROVAL,
             "recognition_sources": [f"rapidocr:{SECRET_VERSION}"],
             "page_quality": {
                 "version": SECRET_VERSION,
@@ -214,10 +216,23 @@ def test_teacher_contract_redacts_private_adapter_details_and_formula_failure(
         assert public_candidates and all(
             candidate["source"] == "ocr" for candidate in public_candidates
         )
-        rendered = _serialized(
-            [readiness, public_job, public_pages, public_blocks, public_candidates]
+        adjusted_response = client.post(
+            f"/api/assignments/{assignment_id}/recognition/jobs/{job_id}/pages/"
+            f"{public_pages[0]['paper_page_id']}/adjust",
+            json={"rotation": 90, "crop": None},
         )
-        for private_value in (SECRET_PROVIDER, SECRET_VERSION, SECRET_ERROR):
+        assert adjusted_response.status_code == 200
+        adjusted = adjusted_response.json()
+        assert set(adjusted) == {"paper_page_id", "status", "processing_parameters"}
+        assert set(adjusted["processing_parameters"]) == {
+            "page_quality",
+            "math_structure",
+            "source_review",
+        }
+        rendered = _serialized(
+            [readiness, public_job, public_pages, public_blocks, public_candidates, adjusted]
+        )
+        for private_value in (SECRET_PROVIDER, SECRET_VERSION, SECRET_ERROR, SECRET_APPROVAL):
             assert private_value not in rendered
 
         mixed_upload = client.post(

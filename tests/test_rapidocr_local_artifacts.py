@@ -30,13 +30,13 @@ class FakeEngineType(Enum):
     ONNXRUNTIME = "onnxruntime"
 
 
-ROLES = ("det", "cls", "rec", "keys", "font")
+ROLES = ("det", "cls", "rec")
 
 
 def _manifest(root: Path) -> dict[str, object]:
     artifacts: dict[str, object] = {}
     for role in ROLES:
-        suffix = ".txt" if role == "keys" else ".ttf" if role == "font" else ".onnx"
+        suffix = ".onnx"
         path = root / "artifacts" / f"{role}{suffix}"
         path.parent.mkdir(parents=True, exist_ok=True)
         content = f"local-{role}-artifact".encode()
@@ -47,7 +47,7 @@ def _manifest(root: Path) -> dict[str, object]:
             "sha256": hashlib.sha256(content).hexdigest(),
         }
     return {
-        "schema_version": "ahamark-rapidocr-artifacts-v1",
+        "schema_version": "ahamark-rapidocr-artifacts-v2",
         "bundle_id": str(uuid.uuid4()),
         "runtime": {"rapidocr_version": "3.4.2", "onnxruntime_version": "1.20.1"},
         "license": {"locally_approved": True, "approval_id": str(uuid.uuid4())},
@@ -85,15 +85,40 @@ def test_validates_fixed_local_artifact_roles_and_hashes(tmp_path: Path) -> None
         bundle.det.role,
         bundle.cls.role,
         bundle.rec.role,
-        bundle.keys.role,
-        bundle.font.role,
     } == set(ROLES)
-    assert all(
-        artifact.path.is_absolute()
-        for artifact in (bundle.det, bundle.cls, bundle.rec, bundle.keys, bundle.font)
-    )
+    assert all(artifact.path.is_absolute() for artifact in (bundle.det, bundle.cls, bundle.rec))
     assert bundle.det.st_size == bundle.det.size_bytes
     assert bundle.det.st_ino == bundle.det.path.lstat().st_ino
+
+
+def test_rejects_legacy_v1_manifest_and_removed_roles(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    root.mkdir()
+    manifest = _manifest(root)
+    manifest["schema_version"] = "ahamark-rapidocr-artifacts-v1"
+    expected_hash = _write_manifest(root, manifest)
+
+    with pytest.raises(RapidOcrArtifactError) as exc_info:
+        validate_rapidocr_artifact_bundle(root, expected_manifest_sha256=expected_hash)
+    _assert_code(exc_info, "OCR_ARTIFACT_MANIFEST_INVALID")
+
+    manifest = _manifest(root)
+    artifacts = manifest["artifacts"]
+    assert isinstance(artifacts, dict)
+    for role, suffix in (("keys", ".txt"), ("font", ".ttf")):
+        content = f"legacy-{role}".encode()
+        path = root / "artifacts" / f"{role}{suffix}"
+        path.write_bytes(content)
+        artifacts[role] = {
+            "path": f"artifacts/{role}{suffix}",
+            "size_bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+    expected_hash = _write_manifest(root, manifest)
+
+    with pytest.raises(RapidOcrArtifactError) as exc_info:
+        validate_rapidocr_artifact_bundle(root, expected_manifest_sha256=expected_hash)
+    _assert_code(exc_info, "OCR_ARTIFACT_MANIFEST_INVALID")
 
 
 @pytest.mark.parametrize(
@@ -289,7 +314,7 @@ def test_adapter_uses_only_explicit_v3_paths_and_injected_constructor(tmp_path: 
         "Global.use_cls": True,
         "Global.use_rec": True,
         "Global.model_root_dir": str(bundle.root),
-        "Global.font_path": str(bundle.font.path),
+        "Global.font_path": None,
         "Global.log_level": "critical",
         "Det.engine_type": engine_type,
         "Det.model_path": str(bundle.det.path),
@@ -297,7 +322,7 @@ def test_adapter_uses_only_explicit_v3_paths_and_injected_constructor(tmp_path: 
         "Cls.model_path": str(bundle.cls.path),
         "Rec.engine_type": engine_type,
         "Rec.model_path": str(bundle.rec.path),
-        "Rec.rec_keys_path": str(bundle.keys.path),
+        "Rec.rec_keys_path": None,
     }
 
 

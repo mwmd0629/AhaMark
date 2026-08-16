@@ -13,15 +13,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-MANIFEST_SCHEMA_VERSION = "ahamark-rapidocr-artifacts-v1"
+MANIFEST_SCHEMA_VERSION = "ahamark-rapidocr-artifacts-v2"
 MANIFEST_FILENAME = "manifest.json"
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_ARTIFACT_BYTES = 1024 * 1024 * 1024
-MAX_DICTIONARY_BYTES = 20 * 1024 * 1024
 MAX_TOTAL_ARTIFACT_BYTES = 2 * 1024 * 1024 * 1024
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _VERSION = re.compile(r"[0-9]+(?:\.[0-9]+){1,3}(?:[-+][0-9A-Za-z.-]+)?")
-_ARTIFACT_ROLES = {"det", "cls", "rec", "keys", "font"}
+_ARTIFACT_ROLES = {"det", "cls", "rec"}
 
 
 class RapidOcrArtifactError(ValueError):
@@ -64,8 +63,6 @@ class ValidatedRapidOcrBundle:
     det: ValidatedArtifact
     cls: ValidatedArtifact
     rec: ValidatedArtifact
-    keys: ValidatedArtifact
-    font: ValidatedArtifact
 
 
 def _fail(code: str, message: str) -> RapidOcrArtifactError:
@@ -181,8 +178,7 @@ def _parse_artifact_declaration(role: str, value: object) -> _ArtifactDeclaratio
     size_bytes = data["size_bytes"]
     if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes <= 0:
         raise _fail("OCR_ARTIFACT_MANIFEST_INVALID", f"{role} size_bytes is invalid")
-    limit = MAX_DICTIONARY_BYTES if role in {"keys", "font"} else MAX_ARTIFACT_BYTES
-    if size_bytes > limit:
+    if size_bytes > MAX_ARTIFACT_BYTES:
         raise _fail("OCR_ARTIFACT_SIZE_INVALID", f"{role} declared size exceeds limit")
     expected_hash = _sha256(data["sha256"], f"artifacts.{role}.sha256")
     return _ArtifactDeclaration(
@@ -236,7 +232,7 @@ def _validate_artifact(root: Path, declaration: _ArtifactDeclaration) -> Validat
 def ensure_rapidocr_bundle_unchanged(bundle: ValidatedRapidOcrBundle) -> None:
     """Reject artifact replacement before engine construction without rehashing large files."""
 
-    for artifact in (bundle.det, bundle.cls, bundle.rec, bundle.keys, bundle.font):
+    for artifact in (bundle.det, bundle.cls, bundle.rec):
         try:
             metadata = artifact.path.lstat()
         except OSError as exc:
@@ -354,6 +350,4 @@ def validate_rapidocr_artifact_bundle(
         det=validated["det"],
         cls=validated["cls"],
         rec=validated["rec"],
-        keys=validated["keys"],
-        font=validated["font"],
     )

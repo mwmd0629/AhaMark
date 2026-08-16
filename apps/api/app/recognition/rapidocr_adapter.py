@@ -26,7 +26,7 @@ def rapidocr_v3_params(bundle: ValidatedRapidOcrBundle, *, engine_type: Enum) ->
         "Global.use_cls": True,
         "Global.use_rec": True,
         "Global.model_root_dir": str(bundle.root),
-        "Global.font_path": str(bundle.font.path),
+        "Global.font_path": None,
         "Global.log_level": "critical",
         "Det.engine_type": engine_type,
         "Det.model_path": str(bundle.det.path),
@@ -34,7 +34,7 @@ def rapidocr_v3_params(bundle: ValidatedRapidOcrBundle, *, engine_type: Enum) ->
         "Cls.model_path": str(bundle.cls.path),
         "Rec.engine_type": engine_type,
         "Rec.model_path": str(bundle.rec.path),
-        "Rec.rec_keys_path": str(bundle.keys.path),
+        "Rec.rec_keys_path": None,
     }
     return params
 
