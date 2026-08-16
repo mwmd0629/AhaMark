@@ -127,6 +127,8 @@ def test_server_eligibility_excludes_structural_risks() -> None:
     assert eligible(candidate, [region])
     candidate.warning_codes = ["CROSS_PAGE_REVIEW_REQUIRED"]
     assert not eligible(candidate, [region])
+    candidate.warning_codes = ["OCR_TEXT_LOW_CONFIDENCE_REVIEW_REQUIRED"]
+    assert not eligible(candidate, [region])
     candidate.warning_codes = []
     candidate.max_score = None
     assert not eligible(candidate, [region])

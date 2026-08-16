@@ -356,6 +356,7 @@ def test_local_extraction_accepts_legacy_blocks_and_requires_review_for_source_c
         assert "MIXED_TEXT_SOURCE_REVIEW_REQUIRED" in extracted.warning_codes
         assert "PAGE_QUALITY_RESCAN_REQUIRED" in extracted.warning_codes
         assert "FORMULA_REVIEW_REQUIRED" in extracted.warning_codes
+        assert "OCR_TEXT_LOW_CONFIDENCE_REVIEW_REQUIRED" in extracted.warning_codes
         assert "MATH_SYMBOL_SOURCE_CONFLICT" not in extracted.warning_codes
         assert extracted.evidence["page_quality"] == {
             str(page.id): {

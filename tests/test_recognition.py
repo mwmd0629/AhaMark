@@ -225,6 +225,23 @@ def test_conservative_text_source_fusion_marks_agreement_and_unreliable_layers()
     assert question_source_kind("mixed:conservative_fusion") == "mixed"
 
 
+def test_ocr_only_low_confidence_block_remains_manual_required() -> None:
+    low_confidence = ProviderBlock(
+        "text",
+        "Synthetic low confidence OCR text",
+        None,
+        0.65,
+        (0.1, 0.1, 0.5, 0.1),
+        status="low_confidence",
+        source="tesseract:synthetic",
+    )
+
+    fusion = fuse_text_sources([], [low_confidence])
+
+    assert [block.status for block in fusion.blocks] == ["manual_required"]
+    assert fusion.adopted_blocks[0].confidence == 0.65
+
+
 def test_non_pdf_ocr_regions_do_not_suppress_each_other_and_are_order_independent() -> None:
     pdf = ProviderBlock(
         "text",

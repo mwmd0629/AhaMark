@@ -57,6 +57,7 @@ NON_ELIGIBLE_WARNINGS = BLOCKING_WARNINGS | {
     "PROOF_MANUAL_REVIEW",
     "QUESTION_SCORE_MISSING",
     "QUESTION_SCORE_CONFLICT",
+    "OCR_TEXT_LOW_CONFIDENCE_REVIEW_REQUIRED",
 }
 INJECTION_RE = re.compile(
     r"(ignore (all |the )?previous|忽略.{0,8}(此前|以上|之前)|自动发布|选择班级|"

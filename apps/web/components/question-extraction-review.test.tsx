@@ -209,6 +209,7 @@ describe("QuestionExtractionReview", () => {
           "FORMULA_REVIEW_REQUIRED",
           "MATH_LAYOUT_REVIEW_REQUIRED",
           "READING_ORDER_CONFLICT",
+          "OCR_TEXT_LOW_CONFIDENCE_REVIEW_REQUIRED",
         ],
         manual_required: true,
         evidence: { internal_column_gap: 0.12 },
@@ -229,6 +230,9 @@ describe("QuestionExtractionReview", () => {
     expect(screen.getByText(/数学排版可能影响含义/)).toBeInTheDocument();
     expect(
       screen.getByText(/页面疑似多栏或阅读顺序不明确/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("扫描文字置信度较低，请对照原文核对。"),
     ).toBeInTheDocument();
     expect(screen.queryByText(/internal_column_gap/)).not.toBeInTheDocument();
   });

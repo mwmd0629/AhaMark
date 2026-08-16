@@ -134,7 +134,13 @@ def fuse_text_sources(
             if _overlap_coverage(block, ocr_block) >= 0.5
         ]
         if not reliable_pdf or not overlaps:
-            fused.append(replace(ocr_block, status="adopted"))
+            adopted_status = (
+                "manual_required"
+                if ocr_block.status == "low_confidence"
+                or (ocr_block.confidence is not None and ocr_block.confidence < 0.7)
+                else "adopted"
+            )
+            fused.append(replace(ocr_block, status=adopted_status))
             if reliable_pdf:
                 missing += 1
             continue

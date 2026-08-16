@@ -601,9 +601,12 @@ export function QuestionExtractionReview({
                     ) ? (
                       <p>文字可能损坏，请重新识别或人工录入。</p>
                     ) : null}
-                    {item.quality_stats?.text_source === "rapidocr" &&
-                      (item.quality_stats?.low_confidence_block_count ?? 0) >
-                        0 && <p>扫描文字置信度较低，请对照原文核对。</p>}
+                    {(item.warning_codes.includes(
+                      "OCR_TEXT_LOW_CONFIDENCE_REVIEW_REQUIRED",
+                    ) ||
+                      (item.quality_stats?.text_source === "rapidocr" &&
+                        (item.quality_stats?.low_confidence_block_count ?? 0) >
+                          0)) && <p>扫描文字置信度较低，请对照原文核对。</p>}
                     {(item.quality_stats?.has_formula_region ||
                       item.warning_codes.includes(
                         "FORMULA_REVIEW_REQUIRED",

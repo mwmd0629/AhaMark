@@ -438,6 +438,16 @@ def build_local_candidates(
             for value in block_ids
             if (block := db.get(RecognitionBlock, uuid.UUID(value))) is not None
         ]
+        if any(block.status == "manual_required" for block in referenced_blocks):
+            manual = True
+        if any(
+            not block.source.startswith("pdf_text:")
+            and block.confidence is not None
+            and float(block.confidence) < 0.7
+            for block in referenced_blocks
+        ):
+            warnings.append("OCR_TEXT_LOW_CONFIDENCE_REVIEW_REQUIRED")
+            manual = True
         referenced_orders_by_page: dict[uuid.UUID, set[int]] = {}
         for block in referenced_blocks:
             referenced_orders_by_page.setdefault(block.paper_page_id, set()).add(
