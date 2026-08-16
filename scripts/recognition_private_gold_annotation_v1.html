@@ -505,7 +505,7 @@
         >标注种子 <input id="seed" type="file" accept="application/json"
       /></label>
       <label
-        >OCR 草稿 <input id="drafts" type="file" accept="application/json"
+        >识别草稿 <input id="drafts" type="file" accept="application/json"
       /></label>
       <label
         >匿名页面 <input id="images" type="file" accept="image/png" multiple
@@ -528,8 +528,9 @@
         </button>
         <div id="sidebarContent" class="sidebar-content">
           <div class="hint">
-            全程离线运行，不上传图片或正文。可载入 ocr-drafts.json
-            作为待校对草稿；浏览器只按匿名 UUID 匹配，进度保存在本机
+            标注页面本身全程离线，不上传图片或正文。可载入旧 OCR
+            草稿或经用户明确授权、在仓库外生成的 Codex 草稿；浏览器只按匿名 UUID
+            匹配，进度保存在本机
             localStorage。正文保留线性可读文本；分式、根号、上下标等二维公式应另画公式框并填写
             LaTeX。公式卡片优先使用严格的普通输入生成草稿；原始 LaTeX
             仅在“高级编辑”中按需修改。
@@ -587,7 +588,7 @@
         ><textarea id="expectedText" spellcheck="false"></textarea>
         <label
           ><input id="textReviewed" type="checkbox" />
-          已逐字核对正文；不是直接接受 OCR 草稿</label
+          已逐字核对正文；不是直接接受识别草稿</label
         >
         <label>期望题号（每行一个，保持阅读顺序）</label
         ><textarea id="questionNumbers" spellcheck="false"></textarea>
@@ -614,6 +615,14 @@
           <button id="deleteRegion" class="danger">删除选中区域</button
           ><span id="regionCount">0 个区域</span>
         </div>
+        <details id="codexSuggestions" hidden>
+          <summary id="codexSuggestionsSummary">Codex 公式草稿</summary>
+          <div class="hint">
+            这里只显示可复制建议，不会自动创建公式框、写入 Gold
+            或标记已核对。请先在原图上框住完整公式，再按需复制到普通输入或高级编辑。
+          </div>
+          <div id="codexSuggestionList"></div>
+        </details>
         <label>公式区域与结构化转写</label>
         <div class="hint">
           选择“公式区域”后框住单个完整公式。先按日常形式输入，例如
@@ -631,6 +640,7 @@
         const VERSION = "recognition-private-annotation-v1";
         const GOLD_VERSION = "recognition-private-gold-v2";
         const DRAFT_VERSION = "recognition-private-drafts-v1";
+        const CODEX_DRAFT_VERSION = "recognition-private-codex-drafts-v1";
         const DEGRADATIONS = [
           "clean",
           "low_resolution",
@@ -681,6 +691,7 @@
           draft = null,
           drawMode = "question";
         const imageUrls = new Map();
+        const codexSuggestions = new Map();
         const plainInputs = new Map();
         const readyPlainInputs = new Map();
         const conversionTimers = new Map();
@@ -948,8 +959,76 @@
             };
           }
           renderRegions();
+          renderCodexSuggestions();
           renderFormulaEditors();
           renderList();
+        }
+        function renderCodexSuggestions() {
+          const details = $("codexSuggestions"),
+            container = $("codexSuggestionList"),
+            suggestion = codexSuggestions.get(active);
+          container.innerHTML = "";
+          if (!suggestion) {
+            details.hidden = true;
+            details.open = false;
+            return;
+          }
+          details.hidden = false;
+          $("codexSuggestionsSummary").textContent =
+            `Codex 公式草稿（${suggestion.formula_drafts.length} 条，必须人工核对）`;
+          const questionHint = document.createElement("div");
+          questionHint.className = "hint";
+          questionHint.textContent = suggestion.question_numbers.length
+            ? `题号建议：${suggestion.question_numbers.join("、")}（请核对后手动填写）`
+            : "本页没有生成题号建议。";
+          container.append(questionHint);
+          if (!suggestion.formula_drafts.length) {
+            const empty = document.createElement("div");
+            empty.className = "hint";
+            empty.textContent = "本页没有生成公式建议。";
+            container.append(empty);
+          }
+          suggestion.formula_drafts.forEach((formula, index) => {
+            const card = document.createElement("div");
+            card.className = "formula-card";
+            const heading = document.createElement("strong");
+            heading.textContent = `建议 ${index + 1}${formula.uncertain ? "（结构不确定）" : ""}`;
+            const location = document.createElement("div");
+            location.className = "hint";
+            location.textContent = `位置提示：${formula.location_hint || "未提供"}`;
+            const linearLabel = document.createElement("label");
+            linearLabel.textContent = "线性文本（可选择复制）";
+            const linear = document.createElement("textarea");
+            linear.readOnly = true;
+            linear.value = formula.linear_text;
+            const latexLabel = document.createElement("label");
+            latexLabel.textContent = "LaTeX 草稿（可选择复制）";
+            const latex = document.createElement("textarea");
+            latex.readOnly = true;
+            latex.value = formula.latex;
+            card.append(
+              heading,
+              location,
+              linearLabel,
+              linear,
+              latexLabel,
+              latex,
+            );
+            container.append(card);
+          });
+          if (suggestion.uncertainties.length) {
+            const warning = document.createElement("div");
+            warning.className = "hint";
+            warning.textContent = `不确定项（${suggestion.uncertainties.length} 处，逐项对照原图）：`;
+            container.append(warning);
+            const list = document.createElement("ul");
+            for (const uncertainty of suggestion.uncertainties) {
+              const item = document.createElement("li");
+              item.textContent = uncertainty;
+              list.append(item);
+            }
+            container.append(list);
+          }
         }
         function appendMathPreview(parent, node) {
           const appendText = (value) =>
@@ -1638,6 +1717,7 @@
             const file = event.target.files[0];
             if (!file) return;
             const loaded = validateSeed(JSON.parse(await file.text()));
+            codexSuggestions.clear();
             const saved = localStorage.getItem(
               `ahamark-recognition-private-gold-${loaded.dataset_id}`,
             );
@@ -1682,38 +1762,79 @@
                 "dataset_id",
                 "cases",
               ]) ||
-              data.schema_version !== DRAFT_VERSION ||
+              ![DRAFT_VERSION, CODEX_DRAFT_VERSION].includes(
+                data.schema_version,
+              ) ||
               data.private !== true ||
               data.dataset_id !== state.dataset_id ||
               !Array.isArray(data.cases)
             )
-              throw new Error("OCR 草稿格式或数据集不匹配");
+              throw new Error("识别草稿格式或数据集不匹配");
+            const isCodex = data.schema_version === CODEX_DRAFT_VERSION;
             const drafts = new Map();
             for (const row of data.cases) {
+              const validLegacy =
+                !isCodex && exactKeys(row, ["case_id", "draft_text"]);
+              const validCodex =
+                isCodex &&
+                exactKeys(row, [
+                  "case_id",
+                  "draft_text",
+                  "question_numbers",
+                  "formula_drafts",
+                  "uncertainties",
+                  "manual_review_required",
+                ]) &&
+                Array.isArray(row.question_numbers) &&
+                row.question_numbers.every(
+                  (value) => typeof value === "string",
+                ) &&
+                Array.isArray(row.formula_drafts) &&
+                row.formula_drafts.every(
+                  (formula) =>
+                    exactKeys(formula, [
+                      "linear_text",
+                      "latex",
+                      "location_hint",
+                      "uncertain",
+                    ]) &&
+                    typeof formula.linear_text === "string" &&
+                    typeof formula.latex === "string" &&
+                    typeof formula.location_hint === "string" &&
+                    typeof formula.uncertain === "boolean",
+                ) &&
+                Array.isArray(row.uncertainties) &&
+                row.uncertainties.every((value) => typeof value === "string") &&
+                row.manual_review_required === true;
               if (
-                !exactKeys(row, ["case_id", "draft_text"]) ||
+                (!validLegacy && !validCodex) ||
                 !validUuid(row.case_id) ||
                 typeof row.draft_text !== "string" ||
                 drafts.has(row.case_id)
               )
-                throw new Error("OCR 草稿页面格式不正确");
-              drafts.set(row.case_id, row.draft_text);
+                throw new Error("识别草稿页面格式不正确");
+              drafts.set(row.case_id, row);
             }
             if (
               drafts.size !== state.cases.length ||
               state.cases.some((item) => !drafts.has(item.case_id))
             )
-              throw new Error("OCR 草稿必须完整覆盖当前标注页");
+              throw new Error("识别草稿必须完整覆盖当前标注页");
+            codexSuggestions.clear();
             let filled = 0;
             for (const item of state.cases) {
               if (!item.expected_text && !item.text_reviewed) {
-                item.expected_text = drafts.get(item.case_id);
+                item.expected_text = drafts.get(item.case_id).draft_text;
                 filled += 1;
               }
+              if (isCodex)
+                codexSuggestions.set(item.case_id, drafts.get(item.case_id));
             }
             selectCase(active);
             save();
-            updateStatus(`已填入 ${filled} 页 OCR 草稿；仍须逐页对照图片核对`);
+            updateStatus(
+              `已填入 ${filled} 页${isCodex ? " Codex" : " OCR"} 草稿；仍须逐页对照图片核对`,
+            );
           } catch (error) {
             updateStatus(`草稿载入失败：${error.message}`);
           }

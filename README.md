@@ -136,6 +136,8 @@
 
 ## 接手必读：当前状态、问题与下一步
 
+> 2026-08-16 私有标注 Codex 识别草稿 P27（开发完成，本条对应提交，未部署）：按用户对当前指定私有资料的明确授权，私有 Gold 标注草稿阶段暂停使用 Tesseract，改由已登录 Codex CLI 逐页生成待核对正文、真实题号候选、公式线性文本/LaTeX 草稿和不确定项。新增独立 `recognition_private_codex_drafts.py`，必须显式传入上传授权标记，只接受匿名 UUID PNG，强制 seed、图片和输出位于仓库外；调用固定为 ephemeral、忽略用户规则、read-only、无搜索，按页串行执行并在每页后原子写入可断点续跑的 `recognition-private-codex-drafts-v1`。所有结果固定 `manual_review_required=true`，不含 confidence，不是 Gold、准确率或生产证据。标注页继续兼容旧 `recognition-private-drafts-v1`，新增 Codex 草稿严格校验；正文只填空白且未核对页面，题号/公式建议只在当前浏览器内存显示，公式建议不会自动创建 FormulaRegion、写入 localStorage/Gold 或标记 reviewed。一次仓库外匿名单页实跑成功生成严格 JSON；仅报告结构计数，未把正文、图片、路径或身份信息写入 Git/数据库/公开日志。合成单元测试 `4 passed`、离线 Edge 两页端到端通过且网络请求为 0、Ruff、strict mypy、Node 语法与 `git diff --check` 通过；Prettier 已机械格式化目标 HTML。产品 Provider、默认 Compose、Tesseract/RapidOCR 代码和开关均未修改，当前变化只服务于经授权的仓库外私有标注草稿，不部署、不自动识别生产数据。
+
 > 2026-08-16 折叠态主区 50/50 比例 P26（开发完成，本条对应提交，未部署）：整体左栏收起后，中间页面画布与右侧标注编辑区不再使用不对称的弹性/固定上限组合，改为严格的 `1fr / 1fr`，各占扣除 48px 左栏和间距后的剩余宽度一半。离线 Edge 合成端到端直接读取两区实际像素宽度并要求差值不超过 2px，同时继续验证右栏比展开左栏时更宽、刷新保持和完整标注导出。未读取私有资料，未改 Gold schema、数据库、API、模型或网络边界，未部署。
 
 > 2026-08-16 整体左栏横向折叠 P25（开发完成，本条对应提交，未部署）：按标注操作反馈，新增左栏顶部“收起左栏”入口；桌面宽度下可把约 310px 的整块左栏横向缩为约 48px，仅保留“展开左栏”，同时把右侧编辑栏上限从约 480px 提高到约 600px，中间画布也获得剩余空间。折叠偏好只写入本机 localStorage，刷新后保持，不进入 Gold；窄屏仍使用横向按钮。页面列表自身的次级折叠继续保留。离线 Edge 合成端到端覆盖整体折叠、内容隐藏、左栏宽度显著减少、右栏增宽、刷新保持和重新展开。未读取私有资料，未改 Gold schema、数据库、API、模型或网络边界，未部署。
@@ -281,6 +283,8 @@
 > 2026-08-11 评分模板第一版真实闭环（完成、未暂存/提交/推送）：在完整保留 `codex/integrate-question-page-cutter` 既有工作树改动的前提下，新增独立 `RubricTemplate / RubricTemplateVersion / RubricTemplateCriterion / RubricTemplateApplication` 模型及接在 0036 后的单线迁移 `0037_rubric_templates`，不把模板伪装成题目绑定的 Structured Rubric。模板支持真实列表、搜索筛选、创建/编辑、草稿自动保存、离开保护、复制、可见历史版本、确认与归档；confirmed 版本不可原地覆盖，普通教师界面不显示 stable key、JSON 或 content hash。criterion 继续复用 `validate_rubric` 语义，支持 proportional（精确 100%）和 fixed（精确等于模板总分）的 Decimal 校验；比例应用使用稳定 ROUND_HALF_UP 舍入，末项只吸收合法尾差且最终精确等于题目满分。从现有 Structured Rubric 保存模板会保留类型、必选项、依赖、评分模式、人工复核与部分得分等 structured-only 语义，但递归剥离标准答案、expected evidence、题目描述、来源区域等题目专属信息。逐题核对区新增“使用评分模板”和“保存为模板”；服务端 preview/apply 校验 owner、draft assignment、active paper/question、题目分值、当前 confirmed reference answer、模板状态/版本/hash，并用题目/答案版本、幂等键、事务行锁及并发 409 创建新的题目绑定 Structured Rubric draft；绝不覆盖 confirmed Rubric、自动确认答案/Rubric、激活 Structured Set 或发布。应用审计固定模板版本、题目版本、答案版本/hash、生成 rubric、换算、actor/time。后端模板与迁移聚焦最终 `8 passed`，SQLite upgrade→downgrade→upgrade 与 PostgreSQL 离线 DDL通过，Alembic single head 为 0037；此前后端全量为 `671 passed, 18 skipped, 3 failed`，三项仅是测试仍断言旧迁移 head，更新为 0037 后三项精确复跑全部通过（未把未重跑的约 42 分钟全量夸大为全绿）。全仓 Ruff 通过，新 API strict mypy 通过；标准 mypy 110 files 仅报告既有脏工作树 `assignment_generation/service.py:95,108` 两处类型错误，本轮未改无关用户文件。前端模板精确回归为页面 `4 passed`、动作组件 `2 passed`；最终一次全量中模板测试全绿，另有既有 review 页单项时序失败，立即隔离复跑 `1 passed / 30 skipped`，因此不把该次全量声称为全绿；此前全量基线为 `35 files / 205 tests passed`，Prettier、ESLint、TypeScript 和 Next production build（19 pages）通过。首次误用 pnpm 在本工作树生成的未跟踪 `.pnpm-store/` 内容创建/修改时间完全一致，确认仅为本任务缓存后已只删除该目录，未触碰用户文件、lockfile 或 node_modules。`ahamark.db` unchanged；未使用 Docker、真实数据或密钥，未触碰任何容器/volume/Bucket，未进行 Git 暂存、提交、推送、合并、部署或改变 PR 状态。
 
 ### 当前事实（以当前工作树重新验证为准）
+
+- 2026-08-16：当前指定私有 Gold 标注草稿已按用户授权暂停 Tesseract，使用仓库外、逐页、可断点续跑的 Codex CLI 草稿生成；所有输出固定要求人工复核，公式只显示为内存建议，不自动建框、不写 Gold。产品识别 Provider 与默认开关未改变，未部署。
 
 - 2026-08-16：P26 已把左栏收起后的中间画布与右侧标注区调整为严格 50/50，浏览器验收要求两区实际宽度差不超过 2px。该改动只影响完全离线布局，未改 schema/API/数据库/模型/开关，未部署。
 

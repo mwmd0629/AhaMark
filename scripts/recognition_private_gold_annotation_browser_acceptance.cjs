@@ -91,6 +91,32 @@ async function main() {
       })),
     }),
   );
+  const codexDraftsPath = path.join(temporaryRoot, "codex-drafts.json");
+  fs.writeFileSync(
+    codexDraftsPath,
+    JSON.stringify({
+      schema_version: "recognition-private-codex-drafts-v1",
+      private: true,
+      dataset_id: datasetId,
+      cases: cases.map((item, index) => ({
+        case_id: item.case_id,
+        draft_text: index ? "" : "Codex 不得覆盖已载入草稿",
+        question_numbers: index ? [] : ["1"],
+        formula_drafts: index
+          ? []
+          : [
+              {
+                linear_text: "CODEX_ONLY_PRIVATE_DRAFT",
+                latex: "x^2",
+                location_hint: "第一行",
+                uncertain: true,
+              },
+            ],
+        uncertainties: index ? [] : ["合成不确定项"],
+        manual_review_required: true,
+      })),
+    }),
+  );
   const imagePaths = cases.map((item, index) => {
     const filePath = path.join(temporaryRoot, item.image_file);
     syntheticPng(filePath, 245 - index * 5);
@@ -189,6 +215,29 @@ async function main() {
       await page.locator("#expectedText").inputValue(),
       "1. 求 x² 的极限",
     );
+    await page.locator("#drafts").setInputFiles(codexDraftsPath);
+    assert.equal(
+      await page.locator("#expectedText").inputValue(),
+      "1. 求 x² 的极限",
+    );
+    assert.equal(await page.locator("#codexSuggestions").isVisible(), true);
+    assert.match(
+      await page.locator("#codexSuggestionsSummary").textContent(),
+      /1 条，必须人工核对/,
+    );
+    await page.locator("#codexSuggestions > summary").click();
+    assert.equal(
+      await page.locator("#codexSuggestionList textarea").first().inputValue(),
+      "CODEX_ONLY_PRIVATE_DRAFT",
+    );
+    assert.match(
+      await page.locator("#codexSuggestions").textContent(),
+      /题号建议：1/,
+    );
+    assert.match(
+      await page.locator("#codexSuggestions").textContent(),
+      /不确定项（1 处|合成不确定项/,
+    );
     assert.match(
       await page.locator("#degradations").textContent(),
       /清晰，无明显退化（clean）/,
@@ -227,7 +276,7 @@ async function main() {
     await draw(page, [10, 15], [80, 70]);
     await page.locator('input[name="drawMode"][value="formula"]').check();
     await draw(page, [10, 80], [80, 105]);
-    assert.equal(await page.locator(".formula-card").count(), 1);
+    assert.equal(await page.locator("#formulaSpans .formula-card").count(), 1);
     assert.deepEqual(
       await page.locator(".formula-tools button").allTextContents(),
       [
@@ -422,6 +471,7 @@ async function main() {
       "student_or_assignment_material",
       "formula-plain",
       ordinary,
+      "CODEX_ONLY_PRIVATE_DRAFT",
     ]) {
       assert(!serialized.includes(forbidden));
     }
