@@ -41,7 +41,7 @@ def test_0049_sqlite_backfills_unique_username_and_round_trips(tmp_path: Path) -
             sa.text("INSERT INTO users (id, email) VALUES (:id, :email)"),
             {"id": user_id.hex, "email": "legacy@example.com"},
         )
-        setattr(migration, "op", Operations(MigrationContext.configure(connection)))
+        migration.op = Operations(MigrationContext.configure(connection))
         migration.upgrade()
         username = connection.scalar(sa.text("SELECT username FROM users"))
         assert username == f"user-{user_id.hex[:24]}"
@@ -55,15 +55,11 @@ def test_0049_sqlite_backfills_unique_username_and_round_trips(tmp_path: Path) -
 def test_0049_emits_postgresql_upgrade_and_downgrade_sql() -> None:
     output = io.StringIO()
     migration = load_migration()
-    setattr(
-        migration,
-        "op",
-        Operations(
-            MigrationContext.configure(
-                dialect_name="postgresql",
-                opts={"as_sql": True, "output_buffer": output},
-            )
-        ),
+    migration.op = Operations(
+        MigrationContext.configure(
+            dialect_name="postgresql",
+            opts={"as_sql": True, "output_buffer": output},
+        )
     )
     migration.upgrade()
     migration.downgrade()

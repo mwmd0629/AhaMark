@@ -27,7 +27,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 | ----------------- | ------------------------------------------------------------------------------------------------------------ |
 | 正确工作区        | `C:\Users\Lenovo\.codex\worktrees\06f7\AhaMark`                                                              |
 | 目标分支          | `codex/integrate-question-page-cutter`                                                                       |
-| 产品基线          | `9b129bc43961d296642b6fcb6cb461907f70a367`（本次只整理 README）                                              |
+| 应用基线          | `9b129bc43961d296642b6fcb6cb461907f70a367`；后续 README 与合并门禁修复不改变运行逻辑                         |
 | 远端状态          | 本地与 `origin/codex/integrate-question-page-cutter` 为 `0 ahead / 0 behind`                                 |
 | 数据库迁移        | Alembic 单 head：`0049_usernames`                                                                            |
 | 最新开发          | 管理员发布用户名账号；代码、迁移和本地镜像已完成，**尚未部署**                                               |
@@ -49,6 +49,8 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 - 迁移 `0049_usernames` 使用与邮箱无关的确定性占位用户名回填既有账号，避免泄漏邮箱。
 
 本轮认证开发的验证结果：认证专项 `7 passed`，登录页 Vitest `1 passed`；Ruff、strict mypy（127 个源文件）、Prettier、目标 ESLint、TypeScript、Alembic 单 head 和 `git diff --check` 均通过；`ahamark.db` 不存在且未变化。
+
+2026-08-17 合入 `master` 前的独立门禁发现并修正两处用户名提交遗留的测试契约：AI worker 迁移链测试仍把当前 head 写死为 `0048_class_resources`，现显式验证 `0049_usernames -> 0048_class_resources`；用户名迁移测试的两处常量 `setattr` 改为等价模块属性赋值，以满足 Ruff B010。认证、0049 升降级、AI worker 迁移契约、报表迁移和 orchestrator 模型链联合为 `31 passed, 4 skipped`，数据库守卫为 `ahamark.db unchanged`；全仓 Ruff lint、strict mypy（127 个源文件）和 Alembic 单 head `0049_usernames` 通过。前端 Git 跟踪文件 Prettier、ESLint、TypeScript、`38 files / 234 tests` 通过，本轮 Docker production build 成功生成 19 页；Windows 原生 build 仍受既有额外 `pnpm-lock.yaml` 与 symlink 权限影响。后端全量共收集 1067 项，首轮准确发现旧 head 断言，修复后改用独立 `--basetemp` 重跑至 6% 无失败后停止，因此不得称为本轮后端全量通过；全仓 Ruff format-check 仍只报告 12 个历史文件的既有 CRLF/新版 formatter 机械差异，本轮未接受无关大格式化。
 
 本地已构建但未上传的镜像：
 

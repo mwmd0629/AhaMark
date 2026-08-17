@@ -196,7 +196,9 @@ def test_migration_head_matches_strict_audit_models() -> None:
     assert formula_recognition_revision.down_revision == textbook_libraries_revision.revision
     class_resources_revision = script.get_revision("0048_class_resources")
     assert class_resources_revision.down_revision == formula_recognition_revision.revision
-    assert script.get_current_head() == class_resources_revision.revision
+    usernames_revision = script.get_revision("0049_usernames")
+    assert usernames_revision.down_revision == class_resources_revision.revision
+    assert script.get_current_head() == usernames_revision.revision
     assert question_structure_revision.down_revision == rubric_templates_revision.revision
     assert rubric_templates_revision.down_revision == grading_review_revision.revision
     assert grading_review_revision.down_revision == question_anchor_revision.revision
