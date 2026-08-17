@@ -1,14 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Card, Select, useToast } from "@/components/ui";
 import {
   ApiError,
   assignmentReviewApi,
+  assignmentsApi,
+  type AssignmentPreparationRecord,
   type AssignmentReadinessRecord,
+  type AssignmentReviewBundle,
   type AssignmentRecord,
   type AssignmentReviewItemRecord,
   type AssignmentReviewSessionRecord,
+  type ManualPublishReadiness,
 } from "@/lib/api";
 import { getReviewCopy } from "@/lib/review-copy";
 
@@ -16,12 +20,50 @@ const confirmations = [
   ["classes", "确认班级"],
   ["due_at", "确认截止时间"],
   ["total_score", "确认总分"],
-  ["file_roles", "确认文件角色"],
-  ["answer_sources", "确认答案来源"],
-  ["paper_version", "确认试卷版本"],
   ["reference_answers", "确认答案版本"],
   ["structured_rubrics", "确认评分标准"],
 ] as const;
+const routineConfirmationIssueCodes = new Set(
+  confirmations.map(([kind]) => `CONFIRM_${kind.toUpperCase()}_REQUIRED`),
+);
+
+const bundleSchemaVersion = "assignment-review-bundle-v2";
+export const assignmentPreparationPolling = Object.freeze({
+  intervalMs: 3_000,
+  timeoutMs: 120_000,
+});
+type PreparationProgress = Extract<
+  AssignmentPreparationRecord,
+  { preparation_status: "preparing" }
+>;
+type PreparationException = Extract<
+  AssignmentPreparationRecord,
+  { preparation_status: "exception_required" }
+>["exceptions"][number];
+
+const preparationProgressPercent = (progress: number) =>
+  Number.isFinite(progress)
+    ? Math.min(100, Math.max(0, Math.round(progress)))
+    : 0;
+
+const isCurrentBundleContract = (
+  value: AssignmentReviewBundle,
+  assignmentId: string,
+) =>
+  value.schema_version === bundleSchemaVersion &&
+  value.assignment_id === assignmentId &&
+  Array.isArray(value.blockers) &&
+  Array.isArray(value.confirmations) &&
+  Array.isArray(value.questions);
+
+const structuredSetPreparationIssueCodes = new Set([
+  "STRUCTURED_SET_REQUIRED",
+  "STRUCTURED_SET_STALE",
+]);
+const bundleApprovalIssueCodes = new Set([
+  "REFERENCE_ANSWER_UNCONFIRMED",
+  "STRUCTURED_RUBRIC_UNCONFIRMED",
+]);
 
 const manuallyResolvableBlockingCodes = new Set([
   "GENERATION_PARTIAL",
@@ -30,12 +72,52 @@ const manuallyResolvableBlockingCodes = new Set([
   "QUESTION_PAPER_ROLE_UNCONFIRMED",
 ]);
 
+type ManualPublishIssue = ManualPublishReadiness["issues"][number];
+
+const manualTaskMeta = {
+  scope: {
+    title: "完善发布范围",
+    detail: "确认发布班级、联考授权和学生范围。",
+  },
+  files: {
+    title: "核对试卷文件",
+    detail: "补齐或核对上传文件、试卷页面和文件用途。",
+  },
+  content: {
+    title: "完善题目与评分标准",
+    detail: "集中处理题目、分值、参考答案和评分标准。",
+  },
+} as const;
+
+function groupManualPublishIssues(issues: ManualPublishIssue[]) {
+  const groups = new Map<
+    keyof typeof manualTaskMeta,
+    { issues: ManualPublishIssue[]; steps: number[] }
+  >();
+  for (const issue of issues) {
+    const key: keyof typeof manualTaskMeta =
+      issue.step <= 1 ? "scope" : issue.step <= 3 ? "files" : "content";
+    const group = groups.get(key) ?? { issues: [], steps: [] };
+    group.issues.push(issue);
+    if (!group.steps.includes(issue.step)) group.steps.push(issue.step);
+    groups.set(key, group);
+  }
+  return [...groups.entries()].map(([key, group]) => ({
+    key,
+    ...manualTaskMeta[key],
+    ...group,
+    steps: group.steps.sort((left, right) => left - right),
+  }));
+}
+
 export function AssignmentCentralReview({
   item,
+  reviewInputsRevision = 0,
   onNavigate,
   onPublished,
 }: {
   item: AssignmentRecord;
+  reviewInputsRevision?: number;
   onNavigate: (step: number) => void;
   onPublished: () => void;
 }) {
@@ -43,48 +125,256 @@ export function AssignmentCentralReview({
   const [session, setSession] = useState<AssignmentReviewSessionRecord>();
   const [items, setItems] = useState<AssignmentReviewItemRecord[]>([]);
   const [readiness, setReadiness] = useState<AssignmentReadinessRecord>();
+  const [bundle, setBundle] = useState<AssignmentReviewBundle>();
+  const [bundleError, setBundleError] = useState("");
+  const [manualReadiness, setManualReadiness] =
+    useState<ManualPublishReadiness>();
+  const [manualMode, setManualMode] = useState(false);
+  const [preparingReadiness, setPreparingReadiness] = useState(false);
+  const [preparationProgress, setPreparationProgress] =
+    useState<PreparationProgress>();
+  const [preparationWaitExhausted, setPreparationWaitExhausted] =
+    useState(false);
+  const [preparationExceptions, setPreparationExceptions] = useState<
+    PreparationException[]
+  >([]);
   const [severity, setSeverity] = useState("all");
   const [section, setSection] = useState("all");
   const [busy, setBusy] = useState(false);
-  const [bindingId, setBindingId] = useState<string>();
+  const [automating, setAutomating] = useState(false);
   const [resolvedOpen, setResolvedOpen] = useState(false);
+  const requestGeneration = useRef(0);
+  const mutationGeneration = useRef(0);
+  const autoConfirmationAttempt = useRef("");
+  const autoStructuredSetAttempt = useRef("");
+  const automationRequest = useRef(0);
+  const preparationRequest = useRef(0);
+  const preparationAttempt = useRef("");
+  const preparationInFlight = useRef(false);
+  const preparationPollCancel = useRef<() => void>(() => undefined);
+  const committedBundleHash = useRef("");
+  const assignmentEpoch = useRef({
+    id: item.id,
+    reviewInputsRevision,
+    value: 0,
+  });
+  if (
+    assignmentEpoch.current.id !== item.id ||
+    assignmentEpoch.current.reviewInputsRevision !== reviewInputsRevision
+  ) {
+    assignmentEpoch.current = {
+      id: item.id,
+      reviewInputsRevision,
+      value: assignmentEpoch.current.value + 1,
+    };
+    requestGeneration.current += 1;
+    mutationGeneration.current += 1;
+    automationRequest.current += 1;
+    preparationPollCancel.current();
+    preparationRequest.current += 1;
+  }
+
+  const isCurrentRequest = useCallback(
+    (assignmentId: string, epoch: number, generation?: number) =>
+      assignmentEpoch.current.id === assignmentId &&
+      assignmentEpoch.current.value === epoch &&
+      (generation === undefined || requestGeneration.current === generation),
+    [],
+  );
+
+  const commitBundle = useCallback(
+    (next: AssignmentReviewBundle, assignmentId: string) => {
+      if (!isCurrentBundleContract(next, assignmentId)) {
+        setBundle(undefined);
+        setReadiness(undefined);
+        setBundleError(
+          "审查内容版本与当前作业不一致，请重新加载后再继续发布。",
+        );
+        return false;
+      }
+      if (committedBundleHash.current !== next.version.bundle_hash) {
+        committedBundleHash.current = next.version.bundle_hash;
+        preparationPollCancel.current();
+        preparationRequest.current += 1;
+        preparationInFlight.current = false;
+        preparationAttempt.current = "";
+        setPreparingReadiness(false);
+        setPreparationProgress(undefined);
+        setPreparationWaitExhausted(false);
+        setPreparationExceptions([]);
+      }
+      setBundle((previous) => {
+        if (
+          next.status !== "ready_to_publish" ||
+          previous?.version.bundle_hash !== next.version.bundle_hash
+        ) {
+          setReadiness(undefined);
+        }
+        return next;
+      });
+      setBundleError("");
+      return true;
+    },
+    [],
+  );
+
+  const loadBundle = useCallback(async () => {
+    const assignmentId = item.id;
+    const epoch = assignmentEpoch.current.value;
+    const generation = ++requestGeneration.current;
+    try {
+      const next = await assignmentReviewApi.bundle(assignmentId);
+      if (!isCurrentRequest(assignmentId, epoch, generation)) return next;
+      commitBundle(next, assignmentId);
+      return next;
+    } catch (error) {
+      if (!isCurrentRequest(assignmentId, epoch, generation)) return;
+      if (
+        error instanceof ApiError &&
+        ["GENERATION_REQUIRED", "DRAFT_INPUT_REQUIRED"].includes(
+          error.body.code,
+        )
+      ) {
+        try {
+          const readiness =
+            await assignmentsApi.manualPublishReadiness(assignmentId);
+          if (!isCurrentRequest(assignmentId, epoch, generation)) return;
+          setManualReadiness(readiness);
+          setManualMode(true);
+          setBundleError("");
+          return;
+        } catch (manualError) {
+          if (!isCurrentRequest(assignmentId, epoch, generation)) return;
+          setBundleError(
+            manualError instanceof ApiError
+              ? manualError.message
+              : "无法检查当前作业，请稍后重试。",
+          );
+          return;
+        }
+      }
+      setBundle(undefined);
+      setReadiness(undefined);
+      setBundleError("无法取得当前审查内容，请重试后再继续发布。");
+      throw error;
+    }
+  }, [commitBundle, isCurrentRequest, item.id]);
 
   const load = useCallback(
-    async (candidate?: AssignmentReviewSessionRecord) => {
-      const active = candidate ?? session;
-      if (!active) return;
-      const [fresh, rows] = await Promise.all([
-        assignmentReviewApi.get(active.id),
-        assignmentReviewApi.items(active.id),
-      ]);
-      setSession(fresh);
-      setItems(rows.items);
+    async (active: AssignmentReviewSessionRecord) => {
+      const assignmentId = item.id;
+      const epoch = assignmentEpoch.current.value;
+      const generation = ++requestGeneration.current;
+      try {
+        const [fresh, rows, nextBundle] = await Promise.all([
+          assignmentReviewApi.get(active.id),
+          assignmentReviewApi.items(active.id),
+          assignmentReviewApi.bundle(assignmentId),
+        ]);
+        if (!isCurrentRequest(assignmentId, epoch, generation)) return;
+        if (
+          fresh.assignment_id !== assignmentId ||
+          !isCurrentBundleContract(nextBundle, assignmentId)
+        ) {
+          setSession(undefined);
+          setItems([]);
+          setBundle(undefined);
+          setReadiness(undefined);
+          setBundleError(
+            "审查内容版本与当前作业不一致，请重新加载后再继续发布。",
+          );
+          return;
+        }
+        setSession(fresh);
+        setItems(rows.items);
+        commitBundle(nextBundle, assignmentId);
+      } catch (error) {
+        if (!isCurrentRequest(assignmentId, epoch, generation)) return;
+        setBundle(undefined);
+        setReadiness(undefined);
+        setBundleError("无法取得当前审查内容，请重试后再继续发布。");
+        throw error;
+      }
     },
-    [session],
+    [commitBundle, isCurrentRequest, item.id],
   );
 
   useEffect(() => {
+    const assignmentId = item.id;
+    const epoch = assignmentEpoch.current.value;
+    const generation = ++requestGeneration.current;
+    setSession(undefined);
+    setItems([]);
+    setReadiness(undefined);
+    setBundle(undefined);
+    setBundleError("");
+    setManualMode(false);
+    setManualReadiness(undefined);
+    preparationPollCancel.current();
+    preparationRequest.current += 1;
+    preparationInFlight.current = false;
+    setPreparingReadiness(false);
+    setPreparationProgress(undefined);
+    setPreparationWaitExhausted(false);
+    setPreparationExceptions([]);
+    setBusy(false);
+    setAutomating(false);
+    autoConfirmationAttempt.current = "";
+    autoStructuredSetAttempt.current = "";
+    preparationAttempt.current = "";
     assignmentReviewApi
-      .list(item.id)
+      .list(assignmentId)
       .then((result) => {
+        if (!isCurrentRequest(assignmentId, epoch, generation)) return;
         const active = result.items.find(
-          (row) => !["stale", "invalidated"].includes(row.status),
+          (row) =>
+            row.assignment_id === assignmentId &&
+            !["stale", "invalidated"].includes(row.status),
         );
-        if (active) void load(active);
+        if (active) {
+          setSession(active);
+          void load(active).catch(() => undefined);
+        } else {
+          void loadBundle().catch(() => undefined);
+        }
       })
       .catch(() => undefined);
-  }, [item.id, load]);
+    return () => {
+      requestGeneration.current += 1;
+      mutationGeneration.current += 1;
+      automationRequest.current += 1;
+      preparationPollCancel.current();
+      preparationRequest.current += 1;
+      preparationInFlight.current = false;
+    };
+  }, [isCurrentRequest, item.id, load, loadBundle, reviewInputsRevision]);
 
-  const act = async (fn: () => Promise<unknown>, message: string) => {
+  const act = async <T,>(
+    fn: () => Promise<T>,
+    message: string,
+    reloadFromResult?: (result: T) => AssignmentReviewSessionRecord,
+  ) => {
+    const assignmentId = item.id;
+    const epoch = assignmentEpoch.current.value;
+    const mutation = ++mutationGeneration.current;
+    const mutationIsCurrent = () =>
+      isCurrentRequest(assignmentId, epoch) &&
+      mutationGeneration.current === mutation;
     setBusy(true);
     try {
-      await fn();
+      const result = await fn();
+      if (!mutationIsCurrent()) return result;
       toast(message);
-      await load();
+      const reloadSession = reloadFromResult?.(result) ?? session;
+      if (reloadSession?.assignment_id === assignmentId)
+        await load(reloadSession);
+      else await loadBundle();
+      return result;
     } catch (error) {
-      toast(error instanceof ApiError ? error.message : "操作失败", "error");
+      if (mutationIsCurrent())
+        toast(error instanceof ApiError ? error.message : "操作失败", "error");
     } finally {
-      setBusy(false);
+      if (mutationIsCurrent()) setBusy(false);
     }
   };
   const visible = useMemo(
@@ -92,6 +382,8 @@ export function AssignmentCentralReview({
       items.filter(
         (row) =>
           !["stale", "superseded"].includes(row.status) &&
+          !structuredSetPreparationIssueCodes.has(row.issue_code) &&
+          !routineConfirmationIssueCodes.has(row.issue_code) &&
           (severity === "all" || row.severity === severity) &&
           (section === "all" || row.section === section),
       ),
@@ -116,12 +408,402 @@ export function AssignmentCentralReview({
     pages: "试卷页面",
     questions: "题目",
     answers: "参考答案",
+    answer_sources: "答案文件",
     rubrics: "评分标准",
+    file_roles: "文件用途",
+    publication: "发布版本",
     total_score: "分值",
   };
+  const openCodes = new Set(bundle?.blockers.map((row) => row.code) ?? []);
+  const bundleConfirmationsByType = useMemo(
+    () =>
+      new Map(
+        bundle?.confirmations.map((confirmation) => [
+          confirmation.type,
+          confirmation,
+        ]) ?? [],
+      ),
+    [bundle?.confirmations],
+  );
+  const bundleConfirmations = useMemo(
+    () => new Set(bundleConfirmationsByType.keys()),
+    [bundleConfirmationsByType],
+  );
+  const requiredConfirmationsComplete = confirmations.every(([kind]) =>
+    bundleConfirmations.has(kind),
+  );
+  const hasPreStructuredSetBlocker =
+    bundle?.blockers.some(
+      (blocker) =>
+        blocker.severity === "blocking" &&
+        !structuredSetPreparationIssueCodes.has(blocker.code),
+    ) ?? true;
+  const structuredSetPrerequisitesComplete =
+    requiredConfirmationsComplete && !hasPreStructuredSetBlocker;
+  const structuredSetIsCurrent =
+    bundle?.structured_rubric_set?.current === true &&
+    bundle.structured_rubric_set.status !== "stale";
+  const bundleContractIsCurrent =
+    !!bundle && isCurrentBundleContract(bundle, item.id);
+  const teacherVisibleBlockers =
+    bundle?.blockers.filter(
+      (blocker) =>
+        !structuredSetPreparationIssueCodes.has(blocker.code) &&
+        !routineConfirmationIssueCodes.has(blocker.code),
+    ) ?? [];
+  const effectiveBundleBlockers =
+    readiness?.status === "ready"
+      ? (bundle?.blockers.filter(
+          (blocker) => !bundleApprovalIssueCodes.has(blocker.code),
+        ) ?? [])
+      : (bundle?.blockers ?? []);
+  const publicationBlocked =
+    !bundle ||
+    !!bundleError ||
+    preparationExceptions.length > 0 ||
+    !bundleContractIsCurrent ||
+    (bundle.status !== "ready_to_publish" && readiness?.status !== "ready") ||
+    effectiveBundleBlockers.length > 0 ||
+    !requiredConfirmationsComplete ||
+    !structuredSetIsCurrent;
+  useEffect(() => {
+    if (
+      !session ||
+      !bundle ||
+      bundleError ||
+      busy ||
+      automating ||
+      requiredConfirmationsComplete
+    )
+      return;
+    const assignmentId = item.id;
+    const epoch = assignmentEpoch.current.value;
+    const key = `${session.id}:${session.review_version}:${[
+      ...bundleConfirmations,
+    ]
+      .sort()
+      .join(",")}`;
+    if (autoConfirmationAttempt.current === key) return;
+    autoConfirmationAttempt.current = key;
+    const request = ++automationRequest.current;
+    const automationIsCurrent = () =>
+      automationRequest.current === request &&
+      isCurrentRequest(assignmentId, epoch);
+    setAutomating(true);
+    assignmentReviewApi
+      .autoConfirm(session.id, session.review_version)
+      .then(() => {
+        if (automationIsCurrent()) return load(session);
+      })
+      .catch((error) => {
+        if (automationIsCurrent()) {
+          toast(
+            error instanceof ApiError
+              ? error.message
+              : "自动核对暂时失败，请重新扫描。",
+            "error",
+          );
+        }
+      })
+      .finally(() => {
+        if (automationIsCurrent()) setAutomating(false);
+      });
+  }, [
+    automating,
+    bundle,
+    bundleConfirmations,
+    bundleError,
+    busy,
+    isCurrentRequest,
+    item.id,
+    load,
+    requiredConfirmationsComplete,
+    session,
+    toast,
+  ]);
+  useEffect(() => {
+    if (
+      !session ||
+      !bundle ||
+      structuredSetIsCurrent ||
+      bundleError ||
+      busy ||
+      automating ||
+      !structuredSetPrerequisitesComplete
+    )
+      return;
+    const assignmentId = item.id;
+    const epoch = assignmentEpoch.current.value;
+    const key = `${session.id}:${session.review_version}`;
+    if (autoStructuredSetAttempt.current === key) return;
+    autoStructuredSetAttempt.current = key;
+    const request = ++automationRequest.current;
+    const automationIsCurrent = () =>
+      automationRequest.current === request &&
+      isCurrentRequest(assignmentId, epoch);
+    setAutomating(true);
+    assignmentReviewApi
+      .createStructuredRubricSet(session.id, session.review_version)
+      .then(() => {
+        if (automationIsCurrent()) return load(session);
+      })
+      .catch((error) => {
+        if (automationIsCurrent()) {
+          toast(
+            error instanceof ApiError
+              ? error.message
+              : "待发布评分标准集合准备失败，请重新扫描。",
+            "error",
+          );
+        }
+      })
+      .finally(() => {
+        if (automationIsCurrent()) setAutomating(false);
+      });
+  }, [
+    automating,
+    bundle,
+    bundleError,
+    busy,
+    isCurrentRequest,
+    item.id,
+    load,
+    structuredSetIsCurrent,
+    structuredSetPrerequisitesComplete,
+    session,
+    toast,
+  ]);
+  useEffect(() => {
+    if (
+      !session ||
+      !bundle ||
+      bundleError ||
+      busy ||
+      automating ||
+      !requiredConfirmationsComplete ||
+      (!structuredSetIsCurrent && structuredSetPrerequisitesComplete) ||
+      readiness ||
+      manualMode ||
+      preparationInFlight.current
+    )
+      return;
+    const attemptKey = `${session.id}:${session.review_version}:${bundle?.version.bundle_hash ?? ""}`;
+    if (preparationAttempt.current === attemptKey) return;
+    preparationAttempt.current = attemptKey;
+    const assignmentId = item.id;
+    const epoch = assignmentEpoch.current.value;
+    const request = ++preparationRequest.current;
+    preparationInFlight.current = true;
+    setPreparingReadiness(true);
+    setPreparationWaitExhausted(false);
+    const preparationIsCurrent = () =>
+      preparationRequest.current === request &&
+      isCurrentRequest(assignmentId, epoch);
+    const prepare = async () => {
+      if (!publicationBlocked) {
+        const next = await assignmentReviewApi.prepare(
+          session.id,
+          session.review_version,
+        );
+        if (preparationIsCurrent()) setReadiness(next);
+        return;
+      }
+
+      const startedAt = Date.now();
+      const waitForNextPoll = (delayMs: number) =>
+        new Promise<void>((resolve) => {
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            if (preparationPollCancel.current === finish) {
+              preparationPollCancel.current = () => undefined;
+            }
+            resolve();
+          };
+          const timer = setTimeout(finish, delayMs);
+          preparationPollCancel.current = finish;
+        });
+
+      while (preparationIsCurrent()) {
+        const next = await assignmentReviewApi.prepareAssignment(assignmentId);
+        if (!preparationIsCurrent()) return;
+        if ("id" in next) {
+          setPreparationProgress(undefined);
+          setPreparationWaitExhausted(false);
+          setPreparationExceptions([]);
+          setReadiness(next);
+          return;
+        }
+        if (next.preparation_status === "exception_required") {
+          setReadiness(undefined);
+          setPreparationProgress(undefined);
+          setPreparationWaitExhausted(false);
+          setPreparationExceptions(next.exceptions);
+          return;
+        }
+        setPreparationProgress(next);
+        setPreparationExceptions([]);
+        const remainingMs =
+          assignmentPreparationPolling.timeoutMs - (Date.now() - startedAt);
+        if (remainingMs <= 0) {
+          setPreparationWaitExhausted(true);
+          return;
+        }
+        await waitForNextPoll(
+          Math.min(assignmentPreparationPolling.intervalMs, remainingMs),
+        );
+      }
+    };
+    void prepare()
+      .catch((error) => {
+        if (preparationIsCurrent()) {
+          setPreparationWaitExhausted(false);
+          setBundleError(
+            error instanceof ApiError
+              ? error.message
+              : "无法核对发布状态，请重试。",
+          );
+        }
+      })
+      .finally(() => {
+        if (preparationRequest.current === request) {
+          preparationInFlight.current = false;
+        }
+        if (preparationIsCurrent()) {
+          setPreparingReadiness(false);
+        }
+      });
+  }, [
+    isCurrentRequest,
+    item.id,
+    manualMode,
+    automating,
+    bundle,
+    bundle?.version.bundle_hash,
+    bundleError,
+    busy,
+    structuredSetIsCurrent,
+    structuredSetPrerequisitesComplete,
+    requiredConfirmationsComplete,
+    publicationBlocked,
+    preparationExceptions.length,
+    readiness,
+    session,
+  ]);
+  const bundleBlockingCount = teacherVisibleBlockers.filter(
+    (blocker) => blocker.severity === "blocking",
+  ).length;
+  const bundleWarningCount = teacherVisibleBlockers.filter(
+    (blocker) => blocker.severity === "warning",
+  ).length;
+  const questionTotal =
+    item.paper_version?.questions.reduce(
+      (sum, question) => sum + Number(question.max_score ?? 0),
+      0,
+    ) ?? 0;
+  const questionScores =
+    item.paper_version?.questions.map((question) =>
+      Number(question.max_score ?? 0),
+    ) ?? [];
+  const scoreCalculation = questionScores.length
+    ? `${questionScores.length} 道题：${questionScores.join(" + ")} = ${questionTotal}`
+    : "尚未读取题目分值";
+  const sourceIsStale =
+    openCodes.has("SOURCE_STALE") ||
+    openCodes.has("REVIEW_SOURCE_STALE") ||
+    openCodes.has("SOURCE_CHANGED");
+  const priorityActions: {
+    title: string;
+    detail: string;
+    step?: number;
+    actionLabel?: string;
+    targetId?: string;
+    secondaryStep?: number;
+    secondaryActionLabel?: string;
+    confirmationKind?: string;
+    confirmationSuccess?: string;
+  }[] = [
+    ...(openCodes.has("TOTAL_SCORE_MISMATCH")
+      ? [
+          {
+            title: "题目分值合计与作业总分不一致",
+            detail: `${scoreCalculation}；当前作业总分：${item.total_score ?? "未设置"}`,
+            step: 4,
+            actionLabel: "核对题目分值",
+            secondaryStep: 1,
+            secondaryActionLabel: "设置作业总分",
+          },
+        ]
+      : []),
+    ...(openCodes.has("FILE_ROLE_UNCONFIRMED") ||
+    openCodes.has("FILE_ROLE_CONFLICT_REVIEW_REQUIRED")
+      ? [
+          {
+            title: "处理无法识别的文件",
+            detail: "仅需为系统无法判断或用途冲突的文件选择用途。",
+            targetId: "generation-file-analysis",
+            actionLabel: "处理异常文件",
+          },
+        ]
+      : []),
+    ...(openCodes.has("PAPER_VARIANT_REVIEW")
+      ? [
+          {
+            title: "核对试卷页面",
+            detail:
+              "先逐页查看顺序和方向；确认三页属于同一份试卷后，点击“页面无误，完成核对”。",
+            step: 3,
+            actionLabel: "查看全部页面",
+            confirmationKind: "paper_version",
+            secondaryActionLabel: "页面无误，完成核对",
+          },
+        ]
+      : []),
+  ];
+  const priorityCoveredCodes = new Set([
+    "TOTAL_SCORE_MISMATCH",
+    "FILE_ROLE_UNCONFIRMED",
+    "ANSWER_SOURCE_UNCONFIRMED",
+    "ANSWER_SOURCE_CONFIRMATION_REQUIRED",
+    "PAPER_VARIANT_REVIEW",
+  ]);
+  const hasOtherVisibleBlockers = teacherVisibleBlockers.some(
+    (blocker) => !priorityCoveredCodes.has(blocker.code),
+  );
+  const blockerMessages = [
+    ...new Set(
+      teacherVisibleBlockers.map(
+        (blocker) => getReviewCopy(blocker.code).message,
+      ),
+    ),
+  ];
+  const actionTasks = [
+    ...priorityActions,
+    ...(hasOtherVisibleBlockers
+      ? [
+          {
+            title: "处理其他内容问题",
+            detail: "相关检查已合并到记录中，打开后按提示修改即可。",
+            targetId: "review-audit",
+            actionLabel: "查看检查记录",
+          },
+        ]
+      : []),
+  ];
 
   const renderReview = (review: AssignmentReviewItemRecord) => {
     const copy = getReviewCopy(review.issue_code);
+    const guidance = review.evidence?.teacher_guidance as
+      | {
+          reason?: string;
+          impact?: string;
+          action?: string;
+          step?: number;
+          anchor?: string;
+        }
+      | undefined;
     return (
       <li key={review.id} className="rounded-xl border p-4">
         <div className="flex items-start justify-between gap-3">
@@ -148,7 +830,9 @@ export function AssignmentCentralReview({
             {isResolved(review) ? "已解决" : "待处理"}
           </span>
         </div>
-        <p className="mt-2 text-sm text-slate-700">{copy.message}</p>
+        <p className="mt-2 text-sm text-slate-700">
+          {guidance ? review.message : copy.message}
+        </p>
         {isResolved(review) && (
           <dl className="mt-3 grid gap-1 rounded-lg bg-slate-50 p-3 text-sm">
             {review.teacher_action && (
@@ -192,7 +876,7 @@ export function AssignmentCentralReview({
           <div className="mt-2 rounded bg-slate-950 p-3 text-xs text-slate-100">
             <p>错误码：{review.issue_code}</p>
             <p>问题 ID：{review.id}</p>
-            <p>来源哈希：{review.source_hash}</p>
+            <p>后端说明：{review.message}</p>
             <pre className="mt-2 overflow-auto whitespace-pre-wrap">
               {JSON.stringify(review.evidence, null, 2)}
             </pre>
@@ -261,22 +945,158 @@ export function AssignmentCentralReview({
     );
   };
 
+  if (manualMode) {
+    const issues = manualReadiness?.issues ?? [];
+    const tasks = groupManualPublishIssues(issues);
+    return (
+      <Card className="space-y-5 p-6">
+        <div>
+          <h2 className="font-bold">发布作业</h2>
+          <p className="text-sm text-slate-600">
+            这是教师手工整理的作业，不需要运行 AI
+            生成。系统会在发布时再次核对当前内容。
+          </p>
+        </div>
+        {tasks.length > 0 ? (
+          <section className="space-y-3" aria-label="发布前需要处理的问题">
+            <div>
+              <h3 className="font-semibold">还有 {tasks.length} 件事</h3>
+              <p className="mt-1 text-sm text-slate-600">
+                系统已把重复检查合并；每件事处理完成后会自动重新核对。
+              </p>
+            </div>
+            <ul className="space-y-2">
+              {tasks.map((task, index) => (
+                <li className="rounded-xl border p-4" key={task.key}>
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <strong>
+                        {index + 1}. {task.title}
+                      </strong>
+                      <p className="mt-1 text-sm text-slate-600">
+                        {task.detail}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {task.steps.map((step) => (
+                        <Button
+                          key={step}
+                          variant="outline"
+                          onClick={() => onNavigate(step)}
+                        >
+                          {step === 1
+                            ? "设置班级"
+                            : step === 2
+                              ? "检查文件"
+                              : step === 3
+                                ? "检查页面"
+                                : step === 4
+                                  ? "编辑题目与分值"
+                                  : "编辑答案与评分标准"}
+                        </Button>
+                      ))}
+                    </div>
+                  </div>
+                  <details className="mt-3 text-sm text-slate-600">
+                    <summary className="cursor-pointer">
+                      查看系统检查记录（{task.issues.length} 条）
+                    </summary>
+                    <ul className="mt-2 list-inside list-disc space-y-1">
+                      {task.issues.map((issue, issueIndex) => (
+                        <li
+                          key={`${issue.code}-${issue.question_id ?? issueIndex}`}
+                        >
+                          {issue.message}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : manualReadiness ? (
+          <section className="space-y-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+            <div>
+              <h3 className="font-semibold text-emerald-900">发布条件已满足</h3>
+              <p className="mt-1 text-sm text-emerald-800">
+                {manualReadiness.class_ids.length} 个班级 · 总分{" "}
+                {manualReadiness.total_score} · 截止时间{" "}
+                {manualReadiness.due_at
+                  ? new Date(manualReadiness.due_at).toLocaleString("zh-CN")
+                  : "无"}
+              </p>
+            </div>
+            <Button
+              loading={busy}
+              onClick={() => {
+                if (
+                  !window.confirm(
+                    "确认发布这份作业？发布后不能直接修改题目和评分标准。",
+                  )
+                )
+                  return;
+                setBusy(true);
+                void assignmentsApi
+                  .publishManual(item.id, manualReadiness)
+                  .then(() => {
+                    toast("作业已由教师确认发布");
+                    onPublished();
+                  })
+                  .catch(async (error) => {
+                    toast(
+                      error instanceof ApiError ? error.message : "发布失败",
+                      "error",
+                    );
+                    try {
+                      setManualReadiness(
+                        await assignmentsApi.manualPublishReadiness(item.id),
+                      );
+                    } catch {
+                      // Keep the original error visible through the toast.
+                    }
+                  })
+                  .finally(() => setBusy(false));
+              }}
+            >
+              确认发布
+            </Button>
+          </section>
+        ) : (
+          <p>正在检查发布条件…</p>
+        )}
+      </Card>
+    );
+  }
+
   if (!session) {
+    if (bundleError) {
+      return (
+        <Card className="space-y-4 p-6">
+          <h2 className="font-bold">集中审查中心</h2>
+          <p role="alert" className="text-sm text-red-800">
+            {bundleError}
+          </p>
+          <Button disabled={busy} onClick={() => void loadBundle()}>
+            重新加载当前作业
+          </Button>
+        </Card>
+      );
+    }
     return (
       <Card className="space-y-4 p-6">
-        <h2 className="font-bold">集中审查中心</h2>
-        <p>创建会话会固定当前生成与版本输入，不会自动发布。</p>
+        <h2 className="font-bold">发布检查</h2>
         <Button
           loading={busy}
           onClick={() =>
-            act(async () => {
-              const created = await assignmentReviewApi.create(item.id);
-              setSession(created);
-              await load(created);
-            }, "集中审查会话已创建")
+            act(
+              () => assignmentReviewApi.create(item.id),
+              "集中审查会话已创建",
+              (created) => created,
+            )
           }
         >
-          开始集中审查
+          开始检查
         </Button>
       </Card>
     );
@@ -285,142 +1105,432 @@ export function AssignmentCentralReview({
   return (
     <Card className="space-y-5 p-6">
       <div>
-        <h2 className="font-bold">集中审查中心</h2>
-        <p className="text-sm text-slate-600">
-          请先处理影响发布的问题，再确认其余内容。版本等排查信息可在技术详情中查看。
-        </p>
+        <h2 className="font-bold">发布检查</h2>
       </div>
-      <div className="grid grid-cols-3 gap-3" aria-label="风险汇总">
-        <div className="rounded bg-emerald-50 p-3">
-          提示 {session.counts.info}
-        </div>
-        <div className="rounded bg-amber-50 p-3">
-          警告 {session.counts.warning}
-        </div>
-        <div className="rounded bg-red-50 p-3">
-          阻塞 {session.counts.blocking}
-          <span className="sr-only">红色 {session.counts.blocking}</span>
-        </div>
-      </div>
-      <div className="flex flex-wrap gap-3">
-        <Select
-          aria-label="按风险过滤"
-          value={severity}
-          onChange={(event) => setSeverity(event.target.value)}
+      {bundleError ? (
+        <section
+          className="rounded-xl border border-red-300 bg-red-50 p-4"
+          aria-label="当前审查内容加载失败"
         >
-          <option value="all">全部问题</option>
-          <option value="blocking">影响发布</option>
-          <option value="warning">警告</option>
-          <option value="info">提示</option>
-        </Select>
-        <Select
-          aria-label="按分区过滤"
-          value={section}
-          onChange={(event) => setSection(event.target.value)}
-        >
-          <option value="all">全部分区</option>
-          {sections.map((value) => (
-            <option key={value} value={value}>
-              {sectionLabels[value] ?? value}
-            </option>
-          ))}
-        </Select>
-        <Button
-          variant="outline"
-          disabled={busy}
-          onClick={() =>
-            act(
-              () =>
-                assignmentReviewApi.refresh(session.id, session.review_version),
-              "审查已刷新",
-            )
-          }
-        >
-          刷新审查
-        </Button>
-      </div>
-      {unresolved.length > 0 && (
-        <ul className="space-y-2">{unresolved.map(renderReview)}</ul>
-      )}
-      {resolved.length > 0 && (
-        <section className="rounded-xl border">
-          <button
-            type="button"
-            className="flex w-full items-center justify-between p-4 text-left font-semibold"
-            aria-expanded={resolvedOpen}
-            onClick={() => setResolvedOpen((open) => !open)}
+          <h3 className="font-semibold text-red-900">
+            暂时无法确认当前发布条件
+          </h3>
+          <p className="mt-1 text-sm text-red-800">{bundleError}</p>
+          <Button
+            className="mt-3"
+            disabled={busy}
+            onClick={() => void load(session)}
           >
-            <span>已解决 {resolved.length} 项</span>
-            <span aria-hidden="true">{resolvedOpen ? "收起" : "展开"}</span>
-          </button>
-          {resolvedOpen && (
-            <ul className="space-y-2 border-t p-3">
-              {resolved.map(renderReview)}
+            重试
+          </Button>
+        </section>
+      ) : bundle ? (
+        <section
+          className="space-y-3 rounded-xl border p-4"
+          aria-label="当前答案与评分标准"
+        >
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="font-semibold">当前答案与评分标准</h3>
+            <span className="text-sm text-slate-600">
+              {bundle.status === "ready_to_publish"
+                ? "可以进入发布准备"
+                : "仍需处理"}
+            </span>
+          </div>
+          <details className="rounded-lg border bg-slate-50">
+            <summary className="cursor-pointer p-3 text-sm font-medium">
+              查看题目、答案与评分标准（{bundle.questions.length} 道题）
+            </summary>
+            <ul className="grid gap-3 border-t p-3">
+              {bundle.questions.map((question) => {
+                const pendingAnswer =
+                  question.answer.materialized?.status === "draft" &&
+                  question.answer.materialized.id !==
+                    question.answer.selected?.id;
+                const pendingRubric =
+                  question.rubric.materialized?.status === "draft" &&
+                  question.rubric.materialized.id !==
+                    question.rubric.selected?.id;
+                return (
+                  <li
+                    key={question.id}
+                    className="rounded-lg bg-slate-50 p-3 text-sm"
+                  >
+                    <strong>第 {question.number} 题</strong>
+                    <p className="mt-1">
+                      {question.content ?? "题目内容待补充"}
+                    </p>
+                    <p className="mt-2">
+                      参考答案：
+                      {question.answer.selected?.content ?? "尚未确定"}
+                    </p>
+                    <p className="text-xs text-slate-600">
+                      {question.answer.selected?.status === "draft"
+                        ? "等待确认"
+                        : question.answer.selected
+                          ? "已确认"
+                          : "未提供"}
+                    </p>
+                    <p className="mt-2">
+                      评分标准：{question.rubric.selected?.title ?? "尚未确定"}
+                    </p>
+                    <p className="text-xs text-slate-600">
+                      {question.rubric.selected?.status === "draft"
+                        ? "等待确认"
+                        : question.rubric.selected
+                          ? "已确认"
+                          : "未提供"}
+                    </p>
+                    {question.rubric.selected && (
+                      <div className="mt-2 rounded-lg border bg-white p-3">
+                        <p className="font-medium">
+                          总分：{question.rubric.selected.total_points}
+                        </p>
+                        {question.rubric.selected.criteria.length > 0 ? (
+                          <ul
+                            className="mt-2 space-y-2"
+                            aria-label={`第 ${question.number} 题 Rubric 评分项`}
+                          >
+                            {question.rubric.selected.criteria.map(
+                              (criterion) => (
+                                <li
+                                  key={criterion.id}
+                                  className="rounded-md bg-slate-50 p-2"
+                                >
+                                  <strong>
+                                    {criterion.key} · {criterion.title} ·{" "}
+                                    {criterion.points} 分
+                                  </strong>
+                                  {criterion.description && (
+                                    <p className="mt-1 whitespace-pre-wrap text-slate-600">
+                                      {criterion.description}
+                                    </p>
+                                  )}
+                                </li>
+                              ),
+                            )}
+                          </ul>
+                        ) : (
+                          <p className="mt-2 text-slate-600">暂无具体评分项</p>
+                        )}
+                      </div>
+                    )}
+                    {(pendingAnswer || pendingRubric) && (
+                      <p className="mt-2 text-amber-800">
+                        有较新的内容等待教师确认。
+                      </p>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
+          </details>
+        </section>
+      ) : null}
+      {preparationExceptions.length > 0 ? (
+        <section
+          className="rounded-xl border border-red-200 bg-red-50 p-4"
+          aria-label="统一准备异常"
+        >
+          <h3 className="font-semibold text-red-900">
+            系统准备发现需要处理的问题
+          </h3>
+          <p className="mt-1 text-sm text-red-800">
+            以下内容来自服务器的最新核查；处理后请重新扫描，系统不会在异常未解决时发布。
+          </p>
+          <ul className="mt-3 list-inside list-disc space-y-2 text-sm text-red-900">
+            {preparationExceptions.map((exception, index) => (
+              <li key={`${exception.code}:${exception.entity_id ?? index}`}>
+                {exception.message}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : preparationProgress &&
+        (preparingReadiness || preparationWaitExhausted) ? (
+        <section
+          className="rounded-xl border border-sky-200 bg-sky-50 p-4"
+          aria-label="自动发布检查"
+        >
+          <h3 className="font-semibold text-sky-900">正在自动完成发布检查</h3>
+          <p className="mt-1 text-sm text-sky-800">
+            {preparationProgress.stage}：
+            {preparationProgressPercent(preparationProgress.progress)}%。
+            {preparationWaitExhausted
+              ? "检查用时较长，可以重新检查。"
+              : "请稍候。"}
+          </p>
+        </section>
+      ) : teacherVisibleBlockers.length > 0 ? (
+        <section
+          className="rounded-xl border border-red-200 bg-red-50 p-4"
+          aria-label="发布阻断说明"
+        >
+          <h3 className="font-semibold text-red-900">
+            还有 {Math.max(actionTasks.length, 1)} 件事
+          </h3>
+          <p className="mt-1 text-sm text-red-800">
+            同类检查已经合并。请按下面顺序处理；修改内容后系统会重新核对。
+          </p>
+          {sourceIsStale && (
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-300 bg-white p-3">
+              <div>
+                <strong className="text-sm text-red-900">
+                  内容已经发生变化
+                </strong>
+                <p className="text-xs text-red-700">请重新检查最新内容。</p>
+              </div>
+              <Button
+                disabled={busy}
+                onClick={() =>
+                  act(
+                    () => assignmentReviewApi.create(item.id),
+                    "已切换到最新内容并重新开始审查",
+                    (created) => created,
+                  )
+                }
+              >
+                检查最新内容
+              </Button>
+            </div>
+          )}
+          {actionTasks.length > 0 && (
+            <ol className="mt-3 grid gap-2">
+              {actionTasks.map((action, index) => (
+                <li
+                  key={action.title}
+                  className="flex items-center justify-between gap-3 rounded-lg bg-white p-3"
+                >
+                  <div>
+                    <strong className="text-sm">
+                      {index + 1}. {action.title}
+                    </strong>
+                    <p className="text-xs text-slate-600">{action.detail}</p>
+                  </div>
+                  {(action.step || action.targetId) && (
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          if (action.targetId) {
+                            const target = document.getElementById(
+                              action.targetId,
+                            );
+                            if (target instanceof HTMLDetailsElement) {
+                              target.open = true;
+                            }
+                            target?.scrollIntoView({
+                              behavior: "smooth",
+                              block: "start",
+                            });
+                            return;
+                          }
+                          onNavigate(action.step!);
+                        }}
+                      >
+                        {action.actionLabel ?? "去处理"}
+                      </Button>
+                      {action.secondaryStep && (
+                        <Button
+                          variant="outline"
+                          onClick={() => onNavigate(action.secondaryStep!)}
+                        >
+                          {action.secondaryActionLabel ?? "继续处理"}
+                        </Button>
+                      )}
+                      {action.confirmationKind && (
+                        <Button
+                          disabled={busy}
+                          onClick={() =>
+                            act(
+                              () =>
+                                assignmentReviewApi.confirm(
+                                  session.id,
+                                  action.confirmationKind!,
+                                  session.review_version,
+                                ),
+                              action.confirmationSuccess ??
+                                "试卷页面与当前版本已完成核对",
+                            )
+                          }
+                        >
+                          {bundleConfirmations.has(action.confirmationKind!) &&
+                          !openCodes.has("PAPER_VARIANT_REVIEW")
+                            ? "✓ 页面已核对"
+                            : action.secondaryActionLabel}
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ol>
+          )}
+          {blockerMessages.length > 0 && (
+            <details className="mt-3 rounded-lg border border-red-200 bg-white p-3 text-sm">
+              <summary className="cursor-pointer text-red-900">
+                查看涉及内容（{blockerMessages.length} 类）
+              </summary>
+              <ul className="mt-2 list-inside list-disc space-y-1 text-red-800">
+                {blockerMessages.map((message) => (
+                  <li key={message}>{message}</li>
+                ))}
+              </ul>
+            </details>
           )}
         </section>
+      ) : publicationBlocked ? (
+        <section
+          className="rounded-xl border border-sky-200 bg-sky-50 p-4"
+          aria-label="自动发布检查"
+        >
+          <h3 className="font-semibold text-sky-900">正在自动完成发布检查</h3>
+          <p className="mt-1 text-sm text-sky-800">
+            {preparationProgress
+              ? `${preparationProgress.stage}：${preparationProgressPercent(preparationProgress.progress)}%。系统会在两分钟内持续检查；如仍未完成，可重新扫描继续。`
+              : "无需逐项确认；检查完成后将直接开放“确认并发布”。"}
+          </p>
+        </section>
+      ) : (
+        <section
+          className="rounded-xl border border-emerald-200 bg-emerald-50 p-4"
+          aria-label="可以发布说明"
+        >
+          <h3 className="font-semibold text-emerald-900">
+            {readiness?.status === "ready" ? "✓ 可以发布" : "正在完成检查…"}
+          </h3>
+        </section>
       )}
-      <div className="space-y-2">
-        <h3 className="font-semibold">教师显式确认</h3>
-        <div className="flex flex-wrap gap-2">
-          {confirmations.map(([kind, label]) => (
-            <Button
-              key={kind}
-              variant="outline"
-              disabled={busy}
-              onClick={() =>
-                act(
-                  () =>
-                    assignmentReviewApi.confirm(
-                      session.id,
-                      kind,
-                      session.review_version,
-                    ),
-                  `${label}完成`,
-                )
-              }
-            >
-              {label}
-            </Button>
-          ))}
-        </div>
-      </div>
-      <div className="space-y-2">
-        <h3 className="font-semibold">评分标准发布绑定</h3>
-        <div className="flex gap-2">
+      <details className="text-right text-sm">
+        <summary className="cursor-pointer text-slate-600">更多操作</summary>
+        <div className="mt-2 flex justify-end">
           <Button
-            disabled={busy}
-            onClick={() =>
-              act(async () => {
-                const binding = await assignmentReviewApi.createBinding(
-                  session.id,
-                  session.review_version,
-                );
-                setBindingId(binding.id);
-              }, "发布评分标准已准备")
-            }
-          >
-            准备发布评分标准
-          </Button>
-          <Button
-            disabled={!bindingId || busy}
-            onClick={() =>
-              act(
+            variant="outline"
+            disabled={busy || automating}
+            onClick={() => {
+              autoConfirmationAttempt.current = "";
+              autoStructuredSetAttempt.current = "";
+              preparationAttempt.current = "";
+              preparationPollCancel.current();
+              preparationRequest.current += 1;
+              preparationInFlight.current = false;
+              setPreparingReadiness(false);
+              setPreparationProgress(undefined);
+              setPreparationWaitExhausted(false);
+              setPreparationExceptions([]);
+              void act(
                 () =>
-                  assignmentReviewApi.confirmBinding(
-                    bindingId!,
+                  assignmentReviewApi.refresh(
+                    session.id,
                     session.review_version,
                   ),
-                "评分标准绑定已确认",
-              )
-            }
+                "审查已刷新",
+              );
+            }}
           >
-            确认绑定
+            重新检查
           </Button>
         </div>
-      </div>
+      </details>
+      {(visible.length > 0 || teacherVisibleBlockers.length > 0) && (
+        <details id="review-audit" className="rounded-xl border">
+          <summary className="cursor-pointer rounded-xl p-4 font-semibold hover:bg-slate-50">
+            查看检查记录（{unresolved.length + resolved.length} 条）
+          </summary>
+          <div className="space-y-3 border-t p-3">
+            <div className="grid grid-cols-3 gap-3" aria-label="风险汇总">
+              <div className="rounded bg-emerald-50 p-3">
+                提示{" "}
+                {visible.filter((entry) => entry.severity === "info").length}
+              </div>
+              <div className="rounded bg-amber-50 p-3">
+                警告 {bundleWarningCount}
+              </div>
+              <div className="rounded bg-red-50 p-3">
+                阻塞 {bundleBlockingCount}
+                <span className="sr-only">红色 {bundleBlockingCount}</span>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-3">
+              <Select
+                aria-label="按风险过滤"
+                value={severity}
+                onChange={(event) => setSeverity(event.target.value)}
+              >
+                <option value="all">全部问题</option>
+                <option value="blocking">影响发布</option>
+                <option value="warning">警告</option>
+                <option value="info">提示</option>
+              </Select>
+              <Select
+                aria-label="按分区过滤"
+                value={section}
+                onChange={(event) => setSection(event.target.value)}
+              >
+                <option value="all">全部分区</option>
+                {sections.map((value) => (
+                  <option key={value} value={value}>
+                    {sectionLabels[value] ?? value}
+                  </option>
+                ))}
+              </Select>
+            </div>
+            {unresolved.length > 0 && (
+              <details className="rounded-xl border">
+                <summary className="cursor-pointer rounded-xl p-4 font-semibold hover:bg-slate-50">
+                  查看全部待处理明细（{unresolved.length} 项）
+                </summary>
+                <ul className="space-y-2 border-t p-3">
+                  {unresolved.map(renderReview)}
+                </ul>
+              </details>
+            )}
+            {resolved.length > 0 && (
+              <section className="rounded-xl border">
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between p-4 text-left font-semibold"
+                  aria-expanded={resolvedOpen}
+                  onClick={() => setResolvedOpen((open) => !open)}
+                >
+                  <span>已解决 {resolved.length} 项</span>
+                  <span aria-hidden="true">
+                    {resolvedOpen ? "收起" : "展开"}
+                  </span>
+                </button>
+                {resolvedOpen && (
+                  <ul className="space-y-2 border-t p-3">
+                    {resolved.map(renderReview)}
+                  </ul>
+                )}
+              </section>
+            )}
+            {teacherVisibleBlockers.length > 0 && (
+              <details className="rounded-xl border p-3 text-sm">
+                <summary className="cursor-pointer text-slate-600">
+                  详细信息
+                </summary>
+                <pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap rounded bg-slate-950 p-3 text-xs text-slate-100">
+                  {JSON.stringify(teacherVisibleBlockers, null, 2)}
+                </pre>
+              </details>
+            )}
+          </div>
+        </details>
+      )}
+      {bundle?.structured_rubric_set && (
+        <details
+          className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm"
+          data-testid="structured-rubric-set-summary"
+        >
+          <summary className="cursor-pointer font-semibold">
+            评分标准已准备
+          </summary>
+          <p className="mt-2 text-slate-600">当前题目、答案和分值已核对。</p>
+        </details>
+      )}
       <div className="rounded-xl border p-4">
-        <h3 className="font-semibold">发布门禁</h3>
+        <h3 className="font-semibold">发布信息</h3>
         <p>
           班级 {item.classes.length} · 截止时间 {item.due_at ?? "无截止时间"} ·
           总分 {item.total_score ?? "未设置"}
@@ -428,44 +1538,39 @@ export function AssignmentCentralReview({
         <div className="mt-3 flex gap-2">
           <Button
             disabled={
-              busy || session.counts.blocking > 0 || session.counts.warning > 0
+              publicationBlocked ||
+              !readiness ||
+              readiness.status !== "ready" ||
+              busy
             }
-            onClick={() =>
-              act(
-                async () =>
-                  setReadiness(
-                    await assignmentReviewApi.prepare(
-                      session.id,
-                      session.review_version,
-                    ),
-                  ),
-                "发布准备快照已生成；作业尚未发布",
-              )
-            }
-          >
-            准备发布
-          </Button>
-          <Button
-            disabled={!readiness || readiness.status !== "ready" || busy}
             onClick={() => {
-              if (
-                !readiness ||
-                !window.confirm(
-                  `确认由教师发布？\n班级：${readiness.class_ids.length}\n截止：${readiness.due_at ?? "无截止时间"}\n总分：${readiness.total_score}`,
-                )
-              )
-                return;
+              if (!readiness) return;
               void act(async () => {
-                await assignmentReviewApi.publish(
-                  item.id,
-                  readiness,
-                  item.updated_at,
-                );
+                try {
+                  await assignmentReviewApi.publish(
+                    item.id,
+                    readiness,
+                    item.updated_at,
+                  );
+                } catch (error) {
+                  if (!(error instanceof ApiError) || error.status !== 409)
+                    throw error;
+                  const refreshed = await assignmentReviewApi.prepareAssignment(
+                    item.id,
+                  );
+                  if (!("id" in refreshed) || refreshed.status !== "ready")
+                    throw error;
+                  await assignmentReviewApi.publish(
+                    item.id,
+                    refreshed,
+                    item.updated_at,
+                  );
+                }
                 onPublished();
               }, "作业已由教师发布");
             }}
           >
-            教师确认并发布
+            {preparingReadiness ? "正在核对发布状态…" : "确认并发布"}
           </Button>
         </div>
       </div>

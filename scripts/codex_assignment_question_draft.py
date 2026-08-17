@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import uuid
 from pathlib import Path
+from typing import Any
 
 from app.api.domain import audit
 from app.assignment_generation.materializers import materialize_questions
@@ -26,13 +28,38 @@ from app.models import (
     GenerationStageResult,
     now_utc,
 )
+from pydantic import ValidationError
 from sqlalchemy import func, select
 
 
+def load_payload(payload_path: Path) -> tuple[str, ExtractionOutput, dict[str, Any]]:
+    """Load and validate an ASCII-safe-error draft before opening a database transaction."""
+
+    try:
+        raw = payload_path.read_bytes().decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        raise ValueError("INVALID_UTF8_PAYLOAD") from None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ValueError("INVALID_JSON_PAYLOAD") from None
+    if not isinstance(payload, dict):
+        raise ValueError("INVALID_QUESTION_DRAFT_PAYLOAD")
+    payload = dict(payload)
+    expected_snapshot = payload.pop("source_snapshot_hash", None)
+    if not isinstance(expected_snapshot, str) or not expected_snapshot:
+        raise ValueError("INVALID_QUESTION_DRAFT_PAYLOAD")
+    try:
+        extraction = ExtractionOutput.model_validate(payload)
+    except ValidationError as exc:
+        if "CHARACTER_ENCODING_CORRUPTION_DETECTED" in str(exc):
+            raise ValueError("CHARACTER_ENCODING_CORRUPTION_DETECTED") from None
+        raise ValueError("INVALID_QUESTION_DRAFT_PAYLOAD") from None
+    return expected_snapshot, extraction, payload
+
+
 def apply_draft(job_id: uuid.UUID, payload_path: Path) -> dict[str, object]:
-    payload = json.loads(payload_path.read_text(encoding="utf-8"))
-    expected_snapshot = str(payload.pop("source_snapshot_hash"))
-    extraction = ExtractionOutput.model_validate(payload)
+    expected_snapshot, extraction, payload = load_payload(payload_path)
 
     with SessionLocal.begin() as db:
         job = db.scalar(
@@ -111,7 +138,7 @@ def apply_draft(job_id: uuid.UUID, payload_path: Path) -> dict[str, object]:
             select(GenerationIssue).where(
                 GenerationIssue.job_id == job.id,
                 GenerationIssue.stage == "extracting_questions",
-                GenerationIssue.code == "PROVIDER_UNAVAILABLE",
+                GenerationIssue.code.in_({"PROVIDER_UNAVAILABLE", "CODEX_DRAFT_PENDING"}),
                 GenerationIssue.resolution_status == "open",
             )
         ):
@@ -162,7 +189,12 @@ def main() -> None:
     parser.add_argument("job_id", type=uuid.UUID)
     parser.add_argument("payload", type=Path)
     args = parser.parse_args()
-    print(json.dumps(apply_draft(args.job_id, args.payload), ensure_ascii=False))
+    try:
+        result = apply_draft(args.job_id, args.payload)
+    except (OSError, ValueError) as exc:
+        print(json.dumps({"ok": False, "error_code": str(exc)}, ensure_ascii=True), file=sys.stderr)
+        raise SystemExit(2) from None
+    print(json.dumps(result, ensure_ascii=True))
 
 
 if __name__ == "__main__":

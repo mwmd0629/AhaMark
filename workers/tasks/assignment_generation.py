@@ -1,13 +1,18 @@
 import uuid
 from typing import Any
 
+import structlog
 from app.assignment_generation.answer_rubric import (
     AnswerRubricProviderOutput,
     generate_candidates,
     validate_revision_candidates,
 )
 from app.assignment_generation.dispatcher import DispatchedProviderResult, dispatch_stage
-from app.assignment_generation.extraction_stage import build_fake_candidates, build_page_suggestions
+from app.assignment_generation.extraction_stage import (
+    build_local_candidates,
+    build_page_suggestions,
+    materialize_draft_questions,
+)
 from app.assignment_generation.file_analysis import collect_file_analysis
 from app.assignment_generation.materializers import (
     ProviderSemanticError,
@@ -20,19 +25,23 @@ from app.assignment_generation.materializers import (
 from app.assignment_generation.metadata_analysis import deterministic_metadata
 from app.assignment_generation.providers import AssignmentProviderResponse, select_provider
 from app.assignment_generation.question_extraction import ExtractionOutput
+from app.assignment_generation.reference_bindings import build_reference_answer_bindings
 from app.assignment_generation.schemas import FileAnalysisOutput, MetadataProviderOutput
 from app.assignment_generation.service import (
     ACTIVE_STATUSES,
     STAGES,
+    autofill_total_score_from_draft_questions,
     complete_stage_retry,
     ensure_current,
+    has_retryable_stage,
     issue,
     next_stage_generation,
     pages_for_job,
     transition,
     update_risk_summary,
 )
-from app.assignment_generation.snapshot import canonical_hash
+from app.assignment_generation.snapshot import canonical_hash, source_snapshot_hash
+from app.assignment_generation.textbook_sources import auto_match_available_solutions
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.models import (
@@ -46,8 +55,10 @@ from app.models import (
     AssignmentSourceFileAnalysis,
     GenerationStageResult,
     Question,
+    QuestionStatus,
     RecognitionBlock,
     RecognitionJob,
+    RecognitionStatus,
     StoredFile,
     now_utc,
 )
@@ -56,6 +67,8 @@ from sqlalchemy import func, select, update
 
 from workers.celery_app import celery_app
 from workers.task_context import run_traced_task
+
+log = structlog.get_logger()
 
 PROVIDER_ERROR_CODES = {
     "provider_unavailable": "PROVIDER_UNAVAILABLE",
@@ -167,14 +180,15 @@ def _claim_job(
         return job, revision, "duplicate_delivery"
     if retry_stage and job.current_stage != retry_stage:
         return job, revision, "retry_stage_mismatch"
-    job.attempt += 1
-    if job.attempt > job.max_attempts:
-        transition(job, "failed")
-        job.retryable = False
-        job.error_code = "GENERATION_MAX_ATTEMPTS_REACHED"
-        job.error_message = "生成任务已达到最大尝试次数"
-        db.commit()
-        return job, revision, "max_attempts_reached"
+    if not retry_stage:
+        job.attempt += 1
+        if job.attempt > job.max_attempts:
+            transition(job, "failed")
+            job.retryable = False
+            job.error_code = "GENERATION_MAX_ATTEMPTS_REACHED"
+            job.error_message = "生成任务已达到最大尝试次数"
+            db.commit()
+            return job, revision, "max_attempts_reached"
     if retry_stage:
         reserved = db.scalar(
             select(GenerationStageResult)
@@ -271,11 +285,11 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
     status = "completed"
     error_code = None
     invocation = None
-    extraction_provider_available = False
-    rubric_provider_available = False
+    local_extraction_requested = False
+    assignment = db.get(Assignment, job.assignment_id)
+    assert assignment is not None
     if stage == "analyzing":
         provider = select_provider(get_settings(), job.provider_mode)
-        assignment = db.get(Assignment, job.assignment_id)
         pages = list(pages_for_job(db, job))
         file_ids = {page.stored_file_id for page in pages}
         files = (
@@ -357,7 +371,11 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                     "suggestion_count": 0,
                     "draft_only": True,
                 }
-        elif provider.name == "fake" and provider.available and assignment is not None:
+        elif (
+            provider.name in {"fake", "codex_local"}
+            and provider.available
+            and assignment is not None
+        ):
             invocation = AssignmentGenerationProviderInvocation(
                 job_id=job.id,
                 stage_result_id=row.id,
@@ -430,7 +448,7 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
     elif stage == "processing_pages":
         pages = list(pages_for_job(db, job))
         provider = select_provider(get_settings(), job.provider_mode)
-        if provider.name == "openai_compatible" and provider.available:
+        if provider.available and provider.name == "openai_compatible":
             file_ids = {page.stored_file_id for page in pages}
             files = list(db.scalars(select(StoredFile).where(StoredFile.id.in_(file_ids))).all())
             dispatched = dispatch_stage(
@@ -484,7 +502,10 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
         request_hash = canonical_hash(
             {"job_id": job.id, "stage": stage, "snapshot": job.source_snapshot_hash}
         )
-        if provider.name == "openai_compatible" and provider.available:
+        if provider.available and (
+            provider.name == "openai_compatible"
+            or (provider.name == "fake" and stage == "generating_rubrics")
+        ):
             if stage == "extracting_questions":
                 pages = list(pages_for_job(db, job))
                 blocks = list(
@@ -594,10 +615,13 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                                 "rubric_request_hash": rubric_dispatch.response.request_hash,
                                 "rubric_response_hash": rubric_dispatch.response.response_hash,
                                 "model_snapshot": answer_dispatch.response.model_snapshot,
+                                "provider": provider.name,
                             },
                         )
                     )
-                result["capability"] = "openai_compatible"
+                result["capability"] = (
+                    "fake_test" if provider.name == "fake" else "openai_compatible"
+                )
                 result["question_count"] = len(questions)
         else:
             invocation = AssignmentGenerationProviderInvocation(
@@ -623,23 +647,53 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
             db.add(invocation)
             db.flush()
             row.provider_invocation_id = invocation.id
-        if provider.name not in {"fake", "openai_compatible"} or not provider.available:
+        if (
+            stage in {"extracting_questions", "generating_rubrics"}
+            and provider.name == "codex_local"
+        ):
             status = "unavailable"
-            error_code = provider.error_code or "PROVIDER_UNAVAILABLE"
-            result["capability"] = "unavailable"
+            error_code = "CODEX_DRAFT_PENDING"
+            result["capability"] = "codex_pending"
             issue(
                 db,
                 job,
                 revision,
                 stage,
-                "blocking" if stage == "extracting_questions" else "warning",
-                "PROVIDER_UNAVAILABLE",
-                "未配置真实生成 Provider；未生成或确认任何题目、答案或 Rubric",
+                "warning",
+                "CODEX_DRAFT_PENDING",
+                "前置处理已完成，等待 Codex 生成草稿",
+                {"provider": provider.name, "endpoint_mode": provider.endpoint_mode},
+            )
+        elif stage == "extracting_questions" and extraction_output is None:
+            local_extraction_requested = True
+            status = "completed"
+            error_code = None
+            result["capability"] = "trusted_local_text"
+        elif provider.name not in {"fake", "openai_compatible"} or not provider.available:
+            status = "unavailable"
+            waiting_for_codex = provider.name == "codex_local"
+            error_code = (
+                "CODEX_DRAFT_PENDING"
+                if waiting_for_codex
+                else provider.error_code or "PROVIDER_UNAVAILABLE"
+            )
+            result["capability"] = "codex_pending" if waiting_for_codex else "unavailable"
+            issue(
+                db,
+                job,
+                revision,
+                stage,
+                "warning",
+                "CODEX_DRAFT_PENDING" if waiting_for_codex else "PROVIDER_UNAVAILABLE",
+                (
+                    "前置处理已完成，等待 Codex 生成草稿"
+                    if waiting_for_codex
+                    else "生成能力暂不可用；未生成或确认任何题目、答案或评分标准"
+                ),
                 {"provider": provider.name, "endpoint_mode": provider.endpoint_mode},
             )
         elif provider.name == "fake":
-            extraction_provider_available = stage == "extracting_questions"
-            rubric_provider_available = stage == "generating_rubrics"
+            local_extraction_requested = stage == "extracting_questions"
             result["capability"] = "fake_test"
     elif stage == "validating":
         result["checks"] = {
@@ -710,6 +764,12 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                 )
         else:
             for metadata_candidate in metadata_output.suggestions:
+                if (
+                    metadata_candidate.field_name == "total_score"
+                    and assignment.total_score is not None
+                    and assignment.total_score > 0
+                ):
+                    continue
                 previous_version = (
                     db.scalar(
                         select(func.max(AssignmentFieldSuggestion.suggestion_version)).where(
@@ -818,12 +878,27 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
     elif stage == "processing_pages" and file_output is not None:
         analyses: dict[str, AssignmentSourceFileAnalysis] = {}
         for file_candidate in file_output.files:
+            stored_file_id = uuid.UUID(file_candidate.stored_file_id)
+            inherited_confirmation = db.scalar(
+                select(AssignmentSourceFileAnalysis)
+                .where(
+                    AssignmentSourceFileAnalysis.assignment_id == job.assignment_id,
+                    AssignmentSourceFileAnalysis.stored_file_id == stored_file_id,
+                    AssignmentSourceFileAnalysis.checksum == file_candidate.checksum,
+                    AssignmentSourceFileAnalysis.analysis_status == "confirmed",
+                    AssignmentSourceFileAnalysis.teacher_confirmed_role.is_not(None),
+                )
+                .order_by(
+                    AssignmentSourceFileAnalysis.confirmed_at.desc(),
+                    AssignmentSourceFileAnalysis.updated_at.desc(),
+                )
+                .limit(1)
+            )
             for old in db.scalars(
                 select(AssignmentSourceFileAnalysis)
                 .where(
                     AssignmentSourceFileAnalysis.draft_revision_id == revision.id,
-                    AssignmentSourceFileAnalysis.stored_file_id
-                    == uuid.UUID(file_candidate.stored_file_id),
+                    AssignmentSourceFileAnalysis.stored_file_id == stored_file_id,
                     AssignmentSourceFileAnalysis.analysis_status == "suggested",
                 )
                 .with_for_update()
@@ -834,7 +909,7 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                 assignment_id=job.assignment_id,
                 generation_job_id=job.id,
                 draft_revision_id=revision.id,
-                stored_file_id=uuid.UUID(file_candidate.stored_file_id),
+                stored_file_id=stored_file_id,
                 source_snapshot_hash=job.source_snapshot_hash,
                 detected_mime_type=file_candidate.detected_mime_type,
                 checksum=file_candidate.checksum,
@@ -848,14 +923,41 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                 else None,
                 evidence=[x.model_dump() for x in file_candidate.evidence],
                 warning_codes=file_candidate.warning_codes,
+                analysis_status="confirmed" if inherited_confirmation else "suggested",
+                teacher_confirmed_role=(
+                    inherited_confirmation.teacher_confirmed_role
+                    if inherited_confirmation
+                    else None
+                ),
+                teacher_confirmed_answer_source=(
+                    inherited_confirmation.teacher_confirmed_answer_source
+                    if inherited_confirmation
+                    else None
+                ),
+                teacher_edit_version=(
+                    inherited_confirmation.teacher_edit_version if inherited_confirmation else 0
+                ),
+                confirmed_by=(
+                    inherited_confirmation.confirmed_by if inherited_confirmation else None
+                ),
+                confirmed_at=(
+                    inherited_confirmation.confirmed_at if inherited_confirmation else None
+                ),
+                review_note=(
+                    inherited_confirmation.review_note if inherited_confirmation else None
+                ),
             )
             db.add(analysis)
             db.flush()
             analyses[file_candidate.stored_file_id] = analysis
             for code in file_candidate.warning_codes:
-                severity = (
-                    "blocking" if code == "ANSWER_SOURCE_CONFIRMATION_REQUIRED" else "warning"
-                )
+                if inherited_confirmation and code in {
+                    "FILE_ROLE_REVIEW_REQUIRED",
+                    "FILE_ROLE_CONFLICT_REVIEW_REQUIRED",
+                    "ANSWER_SOURCE_CONFIRMATION_REQUIRED",
+                }:
+                    continue
+                severity = "warning"
                 created_issue = issue(
                     db,
                     job,
@@ -863,8 +965,8 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                     stage,
                     severity,
                     code,
-                    "文件角色或答案来源需要教师确认"
-                    if code in {"FILE_ROLE_REVIEW_REQUIRED", "ANSWER_SOURCE_CONFIRMATION_REQUIRED"}
+                    "文件用途无法可靠判断，需要教师选择"
+                    if code in {"FILE_ROLE_REVIEW_REQUIRED", "FILE_ROLE_CONFLICT_REVIEW_REQUIRED"}
                     else "检测到重复文件；系统不会自动删除",
                     {"stored_file_id": file_candidate.stored_file_id},
                 )
@@ -939,6 +1041,22 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
             try:
                 extraction = materialize_questions(db, job, revision, extraction_output)
                 result.update(extraction)
+                result["materialized_draft_questions"] = materialize_draft_questions(
+                    db, job, revision
+                )
+                result["reference_answer_bindings"] = build_reference_answer_bindings(
+                    db, job, revision
+                )
+                result["textbook_source_matches"] = auto_match_available_solutions(
+                    db,
+                    assignment=assignment,
+                    revision=revision,
+                )
+                derived_total = autofill_total_score_from_draft_questions(
+                    db, revision, job.owner_id
+                )
+                if derived_total is not None:
+                    result["autofilled_total_score"] = str(derived_total)
                 if extraction["manual_required"]:
                     issue(
                         db,
@@ -966,11 +1084,21 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                     "题目 Provider 输出引用无效，未创建题目候选",
                     {"draft_only": True},
                 )
-        elif extraction_provider_available:
-            extraction = build_fake_candidates(db, job, revision)
+        elif local_extraction_requested:
+            extraction = build_local_candidates(db, job, revision)
             result.update(extraction)
-            blocked = extraction.get("blocked")
+            blocked_value = extraction.get("blocked")
+            blocked = blocked_value if isinstance(blocked_value, str) else None
             if blocked:
+                if blocked == "QUESTION_PAPER_ROLE_UNCONFIRMED":
+                    result["reference_answer_bindings"] = build_reference_answer_bindings(
+                        db, job, revision
+                    )
+                    result["textbook_source_matches"] = auto_match_available_solutions(
+                        db,
+                        assignment=assignment,
+                        revision=revision,
+                    )
                 status = "unavailable"
                 error_code = str(blocked)
                 issue(
@@ -982,6 +1110,18 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                     str(blocked),
                     "题目抽取前置条件未满足；未创建业务候选",
                     {"draft_only": True},
+                )
+            else:
+                result["materialized_draft_questions"] = materialize_draft_questions(
+                    db, job, revision
+                )
+                result["reference_answer_bindings"] = build_reference_answer_bindings(
+                    db, job, revision
+                )
+                result["textbook_source_matches"] = auto_match_available_solutions(
+                    db,
+                    assignment=assignment,
+                    revision=revision,
                 )
             if extraction.get("prompt_injection_detected"):
                 issue(
@@ -1006,7 +1146,17 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                     {"structural_conflict": True},
                 )
     elif stage == "generating_rubrics":
-        if answer_rubric_outputs:
+        if result.get("capability") == "codex_pending":
+            result.update(
+                {
+                    "kind": "answer_rubric_candidates",
+                    "question_count": 0,
+                    "created": 0,
+                    "draft_only": True,
+                }
+            )
+            generated = None
+        elif answer_rubric_outputs:
             created = 0
             manual_required = 0
             try:
@@ -1050,9 +1200,10 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                     {"draft_only": True},
                 )
         else:
-            generated = generate_candidates(db, job, revision, rubric_provider_available)
-        result.update(generated)
-        if generated["question_count"] == 0:
+            generated = generate_candidates(db, job, revision, False)
+        if generated is not None:
+            result.update(generated)
+        if generated is not None and generated["question_count"] == 0:
             status = "unavailable"
             error_code = "QUESTION_CONFIRMATION_REQUIRED"
             issue(
@@ -1065,7 +1216,7 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                 "只有教师已接受并物化的当前题目才能生成答案和 Rubric 草稿",
                 {"draft_only": True},
             )
-        if generated["manual_required"]:
+        if generated is not None and generated["manual_required"]:
             issue(
                 db,
                 job,
@@ -1076,7 +1227,7 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                 "部分题目超出确定性能力边界，已保留为空草稿或人工模式",
                 {"count": generated["manual_required"]},
             )
-        if generated["prompt_injection_detected"]:
+        if generated is not None and generated["prompt_injection_detected"]:
             issue(
                 db,
                 job,
@@ -1160,6 +1311,7 @@ def _run(job_id: str, retry_stage: str | None) -> dict[str, Any]:
             return {"status": reason.lower(), "stages": outcomes}
         if retry_stage:
             complete_stage_retry(job)
+            job.retryable = has_retryable_stage(db, job)
         else:
             target = (
                 "partial"
@@ -1177,15 +1329,6 @@ def _run(job_id: str, retry_stage: str | None) -> dict[str, Any]:
                     "GENERATION_PARTIAL",
                     "至少一个 Provider 阶段不可用；已保留空草稿或部分结果，未伪造成功",
                 )
-            issue(
-                db,
-                job,
-                revision,
-                "validating",
-                "warning",
-                "MANUAL_REVIEW_REQUIRED",
-                "教师必须检查并确认所有草稿内容；Worker 不能发布作业",
-            )
         revision.status = "review_required" if job.status == "review_required" else "partial"
         update_risk_summary(db, revision)
         db.commit()
@@ -1198,10 +1341,31 @@ def _guarded_run(job_id: str, retry_stage: str | None) -> dict[str, Any]:
     except Exception:
         # Persist a stable, redacted failure. Provider/database exceptions must
         # never expose credentials or signed URLs through the user-facing job.
+        log.exception(
+            "assignment_generation_failed",
+            job_id=job_id,
+            retry_stage=retry_stage,
+        )
         parsed = uuid.UUID(job_id)
         with SessionLocal() as db:
             job, revision = _load(db, parsed)
             if job is not None and revision is not None and job.status in ACTIVE_STATUSES:
+                failed_stage = retry_stage or job.current_stage
+                stage_result = db.scalar(
+                    select(GenerationStageResult)
+                    .where(
+                        GenerationStageResult.job_id == job.id,
+                        GenerationStageResult.stage == failed_stage,
+                        GenerationStageResult.status == "running",
+                    )
+                    .order_by(GenerationStageResult.stage_generation.desc())
+                    .with_for_update()
+                )
+                if stage_result is not None:
+                    stage_result.status = "failed"
+                    stage_result.error_code = "STAGE_FAILED"
+                    stage_result.error_message = "生成阶段执行失败，可由教师选择阶段重试"
+                    stage_result.completed_at = now_utc()
                 transition(job, "failed")
                 job.retryable = True
                 job.error_code = "STAGE_FAILED"
@@ -1210,7 +1374,7 @@ def _guarded_run(job_id: str, retry_stage: str | None) -> dict[str, Any]:
                     db,
                     job,
                     revision,
-                    retry_stage or job.current_stage,
+                    failed_stage,
                     "blocking",
                     "STAGE_FAILED",
                     "生成阶段执行失败，详细异常仅保留在受控 Worker 日志",
@@ -1218,6 +1382,194 @@ def _guarded_run(job_id: str, retry_stage: str | None) -> dict[str, Any]:
                 update_risk_summary(db, revision)
                 db.commit()
         return {"status": "failed"}
+
+
+def _regenerate_question(
+    stage_result_id: str,
+    revision_id: str,
+    question_id: str,
+    expected_source_snapshot: str,
+    expected_teacher_edit_version: int,
+) -> dict[str, Any]:
+    with SessionLocal() as db:
+        row = db.scalar(
+            select(GenerationStageResult)
+            .where(GenerationStageResult.id == uuid.UUID(stage_result_id))
+            .with_for_update()
+        )
+        revision = db.get(AssignmentDraftRevision, uuid.UUID(revision_id))
+        question = db.get(Question, uuid.UUID(question_id))
+        if row is None or revision is None or question is None:
+            return {"status": "missing"}
+        if row.status != "queued":
+            return {"status": "duplicate_delivery"}
+        job = db.get(AssignmentGenerationJob, revision.generation_job_id)
+        assignment = db.get(Assignment, revision.assignment_id)
+        if job is None or assignment is None:
+            row.status = "discarded"
+            row.error_code = "GENERATION_CONTEXT_MISSING"
+            row.completed_at = now_utc()
+            db.commit()
+            return {"status": "discarded"}
+        row.status = "running"
+        row.started_at = now_utc()
+        if (
+            revision.teacher_edit_version != expected_teacher_edit_version
+            or revision.source_snapshot_hash != expected_source_snapshot
+            or source_snapshot_hash(db, assignment) != expected_source_snapshot
+            or question.paper_version_id != assignment.active_paper_version_id
+            or question.status != QuestionStatus.active
+        ):
+            row.status = "discarded"
+            row.error_code = "GENERATION_SOURCE_CHANGED"
+            row.error_message = "题目或试卷内容已变化，单题结果未写入"
+            row.completed_at = now_utc()
+            db.commit()
+            return {"status": "discarded"}
+        provider = select_provider(get_settings(), job.provider_mode)
+        payload = {
+            "question": {
+                "id": str(question.id),
+                "number": question.question_number,
+                "type": question.question_type,
+                "text": question.content_text,
+                "latex": question.content_latex,
+                "max_score": str(question.max_score) if question.max_score is not None else None,
+            }
+        }
+        answer_dispatch = dispatch_stage(
+            get_settings(), job.provider_mode, "answer_generation", payload
+        )
+        answer_invocation = _record_invocation(db, job, row, answer_dispatch)
+        rubric_dispatch = dispatch_stage(
+            get_settings(), job.provider_mode, "rubric_generation", payload
+        )
+        rubric_invocation = _record_invocation(db, job, row, rubric_dispatch)
+        if not isinstance(
+            answer_dispatch.response.output, AnswerRubricProviderOutput
+        ) or not isinstance(rubric_dispatch.response.output, AnswerRubricProviderOutput):
+            row.status = "unavailable"
+            row.error_code = (
+                answer_invocation.error_code
+                or rubric_invocation.error_code
+                or "PROVIDER_UNAVAILABLE"
+            )
+            row.error_message = "本题暂时无法生成新建议，旧内容保持不变"
+            row.completed_at = now_utc()
+            db.commit()
+            return {"status": "unavailable"}
+        try:
+            with db.begin_nested():
+                answer = materialize_answer(
+                    db,
+                    job,
+                    revision,
+                    question,
+                    answer_dispatch.response.output,
+                    {
+                        "answer_request_hash": answer_dispatch.response.request_hash,
+                        "answer_response_hash": answer_dispatch.response.response_hash,
+                        "rubric_request_hash": rubric_dispatch.response.request_hash,
+                        "rubric_response_hash": rubric_dispatch.response.response_hash,
+                        "model_snapshot": answer_dispatch.response.model_snapshot,
+                        "provider": provider.name,
+                        "regenerated_from_existing_question": True,
+                    },
+                )
+                rubric = materialize_rubric(
+                    db,
+                    job,
+                    revision,
+                    question,
+                    answer,
+                    rubric_dispatch.response.output,
+                )
+        except ProviderSemanticError as exc:
+            row.status = "unavailable"
+            row.error_code = exc.code
+            row.error_message = "新建议未通过安全检查，旧内容保持不变"
+            row.completed_at = now_utc()
+            db.commit()
+            return {"status": "unavailable"}
+        result = {
+            "scope": "single_question",
+            "question_id": str(question.id),
+            "answer_candidate_id": str(answer.id),
+            "rubric_candidate_id": str(rubric.id),
+            "draft_only": True,
+            "replaces_confirmed_content": False,
+        }
+        row.status = "completed"
+        row.result_payload = result
+        row.output_hash = canonical_hash(result)
+        row.completed_at = now_utc()
+        db.commit()
+        return {"status": "completed", **result}
+
+
+def _guarded_regenerate_question(
+    stage_result_id: str,
+    revision_id: str,
+    question_id: str,
+    expected_source_snapshot: str,
+    expected_teacher_edit_version: int,
+) -> dict[str, Any]:
+    try:
+        return _regenerate_question(
+            stage_result_id,
+            revision_id,
+            question_id,
+            expected_source_snapshot,
+            expected_teacher_edit_version,
+        )
+    except Exception:
+        # Keep unexpected provider/database details in controlled worker logs.
+        # The persisted result must always leave the running state and must not
+        # expose secrets, signed URLs, or raw exception text to the teacher.
+        try:
+            parsed = uuid.UUID(stage_result_id)
+        except ValueError:
+            return {"status": "failed"}
+        with SessionLocal() as db:
+            row = db.scalar(
+                select(GenerationStageResult)
+                .where(GenerationStageResult.id == parsed)
+                .with_for_update()
+            )
+            if row is not None and row.status in {"queued", "running"}:
+                row.status = "failed"
+                row.error_code = "QUESTION_REGENERATION_FAILED"
+                row.error_message = "本题暂时无法生成新建议，旧内容保持不变"
+                row.completed_at = now_utc()
+                db.commit()
+        return {"status": "failed"}
+
+
+@celery_app.task(
+    name="ahamark.assignment_generation.regenerate_question",
+    bind=True,
+    soft_time_limit=120,
+    time_limit=150,
+)
+def regenerate_question(
+    self: Any,
+    stage_result_id: str,
+    revision_id: str,
+    question_id: str,
+    expected_source_snapshot: str,
+    expected_teacher_edit_version: int,
+) -> dict[str, Any]:
+    return run_traced_task(
+        self,
+        stage_result_id,
+        lambda: _guarded_regenerate_question(
+            stage_result_id,
+            revision_id,
+            question_id,
+            expected_source_snapshot,
+            expected_teacher_edit_version,
+        ),
+    )
 
 
 @celery_app.task(
@@ -1230,3 +1582,21 @@ def run_assignment_generation(
     self: Any, job_id: str, retry_stage: str | None = None
 ) -> dict[str, Any]:
     return run_traced_task(self, job_id, lambda: _guarded_run(job_id, retry_stage))
+
+
+@celery_app.task(
+    name="ahamark.assignment_generation.run_after_recognition",
+    bind=True,
+    max_retries=180,
+)
+def run_assignment_generation_after_recognition(
+    self: Any, job_id: str, recognition_job_id: str
+) -> dict[str, Any]:
+    with SessionLocal() as db:
+        recognition = db.get(RecognitionJob, uuid.UUID(recognition_job_id))
+        if recognition is not None and recognition.status in {
+            RecognitionStatus.queued,
+            RecognitionStatus.running,
+        }:
+            raise self.retry(countdown=2)
+    return run_traced_task(self, job_id, lambda: _guarded_run(job_id, None))

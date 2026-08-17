@@ -6,13 +6,6 @@ from types import ModuleType
 import sqlalchemy as sa
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from app.models import (
-    AssignmentExplicitConfirmation,
-    AssignmentPublishReadinessSnapshot,
-    AssignmentReviewItem,
-    AssignmentReviewSession,
-    AssignmentRubricPublicationBinding,
-)
 
 from test_support.database_isolation import create_marked_target, discover_git_protected_roots
 
@@ -26,6 +19,18 @@ def load_migration() -> ModuleType:
         / "apps/api/alembic/versions/0022_assignment_central_review_publish.py"
     )
     spec = importlib.util.spec_from_file_location("migration_0022", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_semantic_projection_migration() -> ModuleType:
+    path = (
+        Path(__file__).parents[1]
+        / "apps/api/alembic/versions/0027_semantic_confirmation_projection.py"
+    )
+    spec = importlib.util.spec_from_file_location("migration_0027", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -46,29 +51,35 @@ def base_metadata() -> sa.MetaData:
     return metadata
 
 
-def test_0022_upgrade_downgrade_upgrade_and_orm_parity(tmp_path: Path) -> None:
+def test_0022_upgrade_downgrade_upgrade_preserves_historical_schema(tmp_path: Path) -> None:
     target = create_marked_target(tmp_path, "migration-0022.db", forbidden_roots=FORBIDDEN_ROOTS)
     engine = sa.create_engine(target.database_url)
     base_metadata().create_all(engine)
     migration = load_migration()
-    models = (
-        AssignmentReviewSession,
-        AssignmentReviewItem,
-        AssignmentExplicitConfirmation,
-        AssignmentRubricPublicationBinding,
-        AssignmentPublishReadinessSnapshot,
-    )
+    semantic_projection = load_semantic_projection_migration()
+    historical_tables = {
+        "assignment_review_sessions",
+        "assignment_review_items",
+        "assignment_explicit_confirmations",
+        "assignment_rubric_publication_bindings",
+        "assignment_publish_readiness_snapshots",
+    }
     with engine.begin() as connection:
         migration.op = Operations(MigrationContext.configure(connection))
         migration.upgrade()
-        for model in models:
-            migrated = {
-                column["name"] for column in sa.inspect(connection).get_columns(model.__tablename__)
-            }
-            assert migrated == set(model.__table__.columns.keys())
+        semantic_projection.op = Operations(MigrationContext.configure(connection))
+        semantic_projection.upgrade()
+        assert historical_tables <= set(sa.inspect(connection).get_table_names())
+        session_columns = {
+            column["name"]
+            for column in sa.inspect(connection).get_columns("assignment_review_sessions")
+        }
+        assert {"structured_binding_hash", "legacy_rubric_version_id"} <= session_columns
+        semantic_projection.downgrade()
         migration.downgrade()
         assert "assignment_review_sessions" not in sa.inspect(connection).get_table_names()
         migration.upgrade()
+        semantic_projection.upgrade()
         assert "assignment_publish_readiness_snapshots" in sa.inspect(connection).get_table_names()
 
 

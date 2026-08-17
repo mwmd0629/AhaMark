@@ -7,7 +7,15 @@ from typing import Literal, Protocol
 import httpx
 
 from app.core.config import Settings
-from app.recognition.pipeline import PageArtifact, ProviderBlock, RapidOcrProvider
+from app.recognition.pipeline import (
+    PageArtifact,
+    ProviderBlock,
+    RapidOcrProvider,
+    safe_provider_readiness,
+)
+from app.recognition.pipeline import (
+    provider_from_settings as recognition_provider_from_settings,
+)
 
 ProviderKind = Literal["printed_text", "handwriting_text", "math_formula", "multimodal_document"]
 BlockType = Literal["text", "formula", "matrix", "table", "diagram", "unknown"]
@@ -38,8 +46,8 @@ class UnavailableAnswerProvider:
 class RapidOcrAnswerProvider:
     name = "rapidocr"
 
-    def __init__(self) -> None:
-        self.provider = RapidOcrProvider()
+    def __init__(self, provider: RapidOcrProvider) -> None:
+        self.provider = provider
         self.version = self.provider.version
 
     def recognize(self, image: PageArtifact, kind: ProviderKind) -> list[ProviderBlock]:
@@ -60,8 +68,8 @@ class FakeAnswerProvider:
 
     def recognize(self, image: PageArtifact, kind: ProviderKind) -> list[ProviderBlock]:
         if kind == "math_formula":
-            return [ProviderBlock("formula", "x²+1", "x^{2}+1", 0.86, (0, 0, 1, 1))]
-        return [ProviderBlock("text", "Student answer", None, 0.92, (0, 0, 1, 1))]
+            return [ProviderBlock("formula", "x²+1", "x^{2}+1", 0.99, (0, 0, 1, 1))]
+        return [ProviderBlock("text", "Student answer", None, 0.99, (0, 0, 1, 1))]
 
 
 class OpenAICompatibleAnswerProvider:
@@ -169,10 +177,14 @@ def provider_from_settings(settings: Settings) -> AnswerProvider:
     name = settings.answer_recognition_provider
     if name == "unavailable" and settings.recognition_provider in {"fake", "rapidocr"}:
         name = settings.recognition_provider
-    if name == "fake" and settings.app_env.lower() != "production":
+    if name == "fake" and settings.app_env.lower() == "test":
         return FakeAnswerProvider()
     if name == "rapidocr":
-        return RapidOcrAnswerProvider()
+        recognition_provider = recognition_provider_from_settings(settings)
+        available, _ = safe_provider_readiness(recognition_provider)
+        if isinstance(recognition_provider, RapidOcrProvider) and available:
+            return RapidOcrAnswerProvider(recognition_provider)
+        return UnavailableAnswerProvider()
     if name == "openai-compatible":
         return OpenAICompatibleAnswerProvider(settings)
     return UnavailableAnswerProvider()

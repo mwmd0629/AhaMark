@@ -23,10 +23,12 @@ import {
   importsApi,
   studentsApi,
   type ClassRecord,
+  type ClassResource,
   type Group,
   type ImportPreview,
   type Student,
 } from "@/lib/api";
+import { useSmartRefresh } from "@/lib/use-smart-refresh";
 
 export default function ClassDetailPage({
   params,
@@ -37,6 +39,7 @@ export default function ClassDetailPage({
   const [klass, setClass] = useState<ClassRecord>();
   const [students, setStudents] = useState<Student[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
+  const [resources, setResources] = useState<ClassResource[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
@@ -46,41 +49,52 @@ export default function ClassDetailPage({
   const [studentOpen, setStudentOpen] = useState(false);
   const [preview, setPreview] = useState<ImportPreview>();
   const toast = useToast();
-  const load = async () => {
-    setLoading(true);
-    setError("");
+  const load = async (background = false) => {
+    if (!background) {
+      setLoading(true);
+      setError("");
+    }
     try {
       const query = new URLSearchParams({ search, status: membership });
       if (groupId) query.set("group_id", groupId);
-      const [c, s, g] = await Promise.all([
+      const [c, s, g, r] = await Promise.all([
         classesApi.get(classId),
         studentsApi.list(classId, query.toString()),
         groupsApi.list(classId),
+        classesApi.resources(classId),
       ]);
       setClass(c);
       setStudents(s.items);
       setGroups(g);
+      setResources(r);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "班级详情加载失败");
+      if (!background) {
+        setError(e instanceof Error ? e.message : "班级详情加载失败");
+      }
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
     }
   };
   useEffect(() => {
     const timer = window.setTimeout(() => void load(), 200);
     return () => window.clearTimeout(timer);
   }, [classId, search, membership, groupId]);
+  useSmartRefresh(() => load(true), {
+    enabled: !saving,
+    intervalMs: 60_000,
+  });
   const addStudent = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setSaving(true);
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     try {
       await studentsApi.add(classId, {
         name: String(form.get("name")),
         student_number: String(form.get("student_number")),
         email: String(form.get("email") || "") || undefined,
       });
-      event.currentTarget.reset();
+      formElement.reset();
       toast("学生已加入班级");
       await load();
       setStudentOpen(false);
@@ -93,13 +107,14 @@ export default function ClassDetailPage({
   const addGroup = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setSaving(true);
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     try {
       await groupsApi.create(classId, {
         name: String(form.get("name")),
         description: String(form.get("description") || ""),
       });
-      event.currentTarget.reset();
+      formElement.reset();
       toast("分组已创建");
       await load();
     } catch (e) {
@@ -117,6 +132,32 @@ export default function ClassDetailPage({
       setPreview(await importsApi.preview(classId, file));
     } catch (e) {
       toast(e instanceof ApiError ? e.body.message : "文件解析失败", "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+  const uploadResource = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const file = form.get("resource_file");
+    if (!(file instanceof File) || !file.size) return;
+    setSaving(true);
+    try {
+      await classesApi.uploadResource(classId, file, {
+        title: String(form.get("resource_title") || "") || undefined,
+        resource_type: String(
+          form.get("resource_type") || "exercise",
+        ) as ClassResource["resource_type"],
+      });
+      formElement.reset();
+      await load(true);
+      toast("资料已整理并保存");
+    } catch (error) {
+      toast(
+        error instanceof ApiError ? error.message : "资料保存失败",
+        "error",
+      );
     } finally {
       setSaving(false);
     }
@@ -156,6 +197,18 @@ export default function ClassDetailPage({
       await load();
     } catch (e) {
       toast(e instanceof Error ? e.message : "操作失败", "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+  const linkAccount = async (student: Student) => {
+    setSaving(true);
+    try {
+      await studentsApi.linkAccount(student.id);
+      toast("学生登录账号已关联");
+      await load();
+    } catch (e) {
+      toast(e instanceof ApiError ? e.body.message : "账号关联失败", "error");
     } finally {
       setSaving(false);
     }
@@ -361,6 +414,73 @@ export default function ClassDetailPage({
         />
         <StatCard label="作业历史" value="—" note="将在创建作业阶段接入" />
       </section>
+      <Card className="space-y-4 p-5">
+        <div>
+          <h2 className="font-bold">班级资料</h2>
+          <p className="mt-1 text-sm text-slate-600">
+            保存常用习题、讲义或参考资料；创建本班作业时可以直接选择。
+          </p>
+        </div>
+        <form
+          className="grid gap-3 md:grid-cols-[1fr_180px_1fr_auto]"
+          onSubmit={uploadResource}
+        >
+          <Input
+            name="resource_file"
+            type="file"
+            accept=".pdf,.png,.jpg,.jpeg"
+            aria-label="选择班级资料文件"
+            required
+          />
+          <Select
+            name="resource_type"
+            aria-label="资料类型"
+            defaultValue="exercise"
+          >
+            <option value="exercise">习题</option>
+            <option value="handout">讲义</option>
+            <option value="reference">参考资料</option>
+            <option value="other">其他</option>
+          </Select>
+          <Input
+            name="resource_title"
+            aria-label="资料名称（可选）"
+            placeholder="资料名称（可选）"
+          />
+          <Button loading={saving} disabled={klass.status !== "active"}>
+            添加资料
+          </Button>
+        </form>
+        {resources.length ? (
+          <ul className="divide-y rounded-xl border border-slate-200 px-4">
+            {resources.map((resource) => (
+              <li
+                className="flex flex-wrap justify-between gap-2 py-3"
+                key={resource.id}
+              >
+                <span>
+                  <strong>{resource.title}</strong>
+                  <span className="ml-2 text-sm text-slate-600">
+                    {resource.file_name} · {resource.page_count} 页
+                  </span>
+                </span>
+                <span className="text-sm text-slate-500">
+                  {
+                    {
+                      exercise: "习题",
+                      handout: "讲义",
+                      reference: "参考资料",
+                      other: "其他",
+                    }[resource.resource_type]
+                  }
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-sm text-slate-500">暂时没有班级资料。</p>
+        )}
+      </Card>
       <Card className="grid gap-3 p-4 md:grid-cols-[1fr_180px_180px]">
         <Input
           aria-label="搜索学生"
@@ -405,6 +525,7 @@ export default function ClassDetailPage({
                 <th>学号</th>
                 <th>分组</th>
                 <th>状态</th>
+                <th>学生端</th>
                 <th>加入时间</th>
                 <th>操作</th>
               </tr>
@@ -422,6 +543,20 @@ export default function ClassDetailPage({
                   </td>
                   <td>
                     {student.membership_status === "active" ? "在班" : "已移出"}
+                  </td>
+                  <td>
+                    {student.account_linked ? (
+                      <span className="text-sm text-emerald-700">已关联</span>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        disabled={saving || !student.email}
+                        title={student.email ? undefined : "请先填写学生邮箱"}
+                        onClick={() => void linkAccount(student)}
+                      >
+                        {student.email ? "关联账号" : "未填邮箱"}
+                      </Button>
+                    )}
                   </td>
                   <td>
                     {new Date(student.joined_at).toLocaleDateString("zh-CN")}

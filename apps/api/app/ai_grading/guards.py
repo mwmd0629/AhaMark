@@ -32,6 +32,7 @@ class ErrorCodes:
     PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
     PROVIDER_INVALID_RESPONSE = "PROVIDER_INVALID_RESPONSE"
     FINALIZED_SUBMISSION = "FINALIZED_SUBMISSION"
+    VOIDED_SUBMISSION = "VOIDED_SUBMISSION"
     OWNER_MISMATCH = "OWNER_MISMATCH"
     CSRF_REQUIRED = "CSRF_REQUIRED"
 
@@ -93,10 +94,17 @@ def require_owner(actual_owner: Any, expected_owner: Any) -> None:
 def require_submission_mutable(submission: Any) -> None:
     if submission is None:
         raise GuardViolation("SUBMISSION_NOT_FOUND", "Submission not found")
-    if getattr(submission, "finalized_at", None) is not None:
+    status = getattr(submission, "status", None)
+    if getattr(submission, "finalized_at", None) is not None or status == "finalized":
         raise GuardViolation(
             ErrorCodes.FINALIZED_SUBMISSION,
             "Finalized submissions are read-only",
+            status="stale",
+        )
+    if status == "voided":
+        raise GuardViolation(
+            ErrorCodes.VOIDED_SUBMISSION,
+            "Voided submissions are read-only",
             status="stale",
         )
 

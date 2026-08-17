@@ -10,7 +10,10 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.models import (
+    Assignment,
+    Question,
     QuestionRecognitionEvidence,
+    QuestionStatus,
     RecognitionRevision,
     RegionEvidenceImage,
     StudentAnswer,
@@ -129,6 +132,60 @@ def _evidence(
     return existing, artifact
 
 
+def _discard_late_job_result(
+    db: Session,
+    current: SubmissionRecognitionJob | None,
+    created_block_ids: set[uuid.UUID],
+) -> None:
+    timestamp = now_utc()
+    if current is not None:
+        current.warning_codes = sorted(set([*current.warning_codes, "LATE_RESULT_DISCARDED"]))
+        current.error_code = "LATE_RESULT_DISCARDED"
+        if current.status != "cancelled":
+            current.status = "stale"
+    if created_block_ids:
+        for block in db.scalars(
+            select(SubmissionRecognitionBlock).where(
+                SubmissionRecognitionBlock.id.in_(created_block_ids),
+                SubmissionRecognitionBlock.stale_at.is_(None),
+            )
+        ):
+            block.status, block.requires_review, block.stale_at = (
+                "late_discarded",
+                True,
+                timestamp,
+            )
+    db.commit()
+
+
+def _locked_recognition_generation(
+    db: Session,
+    submission_id: uuid.UUID,
+    job_id: uuid.UUID,
+) -> tuple[SubmissionRecognitionJob | None, int]:
+    db.scalar(
+        select(Submission)
+        .where(Submission.id == submission_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    current = db.scalar(
+        select(SubmissionRecognitionJob)
+        .where(SubmissionRecognitionJob.id == job_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    maximum = (
+        db.scalar(
+            select(func.max(SubmissionRecognitionJob.generation)).where(
+                SubmissionRecognitionJob.submission_id == submission_id
+            )
+        )
+        or 0
+    )
+    return current, maximum
+
+
 def run_answer_evidence_phase(
     db: Session,
     storage: ObjectStorage,
@@ -137,8 +194,35 @@ def run_answer_evidence_phase(
     *,
     region_id: uuid.UUID | None = None,
 ) -> None:
-    job = db.get(SubmissionRecognitionJob, job_id)
+    job_hint = db.get(SubmissionRecognitionJob, job_id)
+    if job_hint is None:
+        return
+    submission = db.scalar(
+        select(Submission)
+        .where(Submission.id == job_hint.submission_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    job = db.scalar(
+        select(SubmissionRecognitionJob)
+        .where(SubmissionRecognitionJob.id == job_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if job is None or job.status == "cancelled":
+        return
+    current_generation = (
+        db.scalar(
+            select(func.max(SubmissionRecognitionJob.generation)).where(
+                SubmissionRecognitionJob.submission_id == job.submission_id
+            )
+        )
+        or 0
+    )
+    if job.generation < current_generation:
+        _discard_late_job_result(db, job, set())
+        return
+    if job.status == "completed":
         return
     if job.attempt >= job.max_attempts:
         job.status, job.error_code, job.error_message = (
@@ -148,25 +232,41 @@ def run_answer_evidence_phase(
         )
         db.commit()
         return
-    submission = db.get(Submission, job.submission_id)
     if (
         submission is None
         or submission.finalized_at is not None
-        or submission.status == "finalized"
+        or submission.status in {"finalized", "voided"}
     ):
         if job:
-            job.status, job.error_code = "failed", "FINALIZED_SUBMISSION_IMMUTABLE"
+            job.status = "failed"
+            job.error_code = (
+                "VOIDED_SUBMISSION_IMMUTABLE"
+                if submission is not None and submission.status == "voided"
+                else "FINALIZED_SUBMISSION_IMMUTABLE"
+            )
             db.commit()
+        return
+    assignment = db.get(Assignment, submission.assignment_id)
+    if assignment is None or assignment.active_paper_version_id is None:
+        job.status, job.error_code, job.error_message = (
+            "failed",
+            "ACTIVE_PAPER_REQUIRED",
+            "the submission assignment has no active paper",
+        )
+        db.commit()
         return
     generation = job.generation
     regions = list(
         db.scalars(
             select(StudentAnswerRegion)
             .join(StudentAnswer, StudentAnswer.id == StudentAnswerRegion.student_answer_id)
+            .join(Question, Question.id == StudentAnswer.question_id)
             .join(SubmissionPage, SubmissionPage.id == StudentAnswerRegion.submission_page_id)
             .where(
                 StudentAnswer.submission_id == submission.id,
                 StudentAnswerRegion.status == "confirmed",
+                Question.paper_version_id == assignment.active_paper_version_id,
+                Question.status == QuestionStatus.active,
             )
             .order_by(
                 SubmissionPage.page_number,
@@ -177,7 +277,15 @@ def run_answer_evidence_phase(
         ).all()
     )
     answers = list(
-        db.scalars(select(StudentAnswer).where(StudentAnswer.submission_id == submission.id)).all()
+        db.scalars(
+            select(StudentAnswer)
+            .join(Question, Question.id == StudentAnswer.question_id)
+            .where(
+                StudentAnswer.submission_id == submission.id,
+                Question.paper_version_id == assignment.active_paper_version_id,
+                Question.status == QuestionStatus.active,
+            )
+        ).all()
     )
     answer_versions = {
         answer.id: (
@@ -226,11 +334,14 @@ def run_answer_evidence_phase(
     )
     db.commit()
     failures = 0
+    failed_page_ids: set[uuid.UUID] = set()
     created: list[SubmissionRecognitionBlock] = []
+    created_block_ids: set[uuid.UUID] = set()
     for order, region in enumerate(regions):
         page = db.get(SubmissionPage, region.submission_page_id)
         if page is None:
             failures += 1
+            failed_page_ids.add(region.submission_page_id)
             continue
         try:
             active_blocks = list(
@@ -241,31 +352,29 @@ def run_answer_evidence_phase(
                     )
                 ).all()
             )
-            has_human_revision = any(
-                db.scalar(
+            preserved_human_blocks = [
+                active
+                for active in active_blocks
+                if db.scalar(
                     select(RecognitionRevision.id).where(
                         RecognitionRevision.recognition_block_id == active.id,
                         RecognitionRevision.source == "human",
+                        RecognitionRevision.stale_at.is_(None),
                     )
                 )
                 is not None
-                for active in active_blocks
-            )
-            if has_human_revision:
+            ]
+            if preserved_human_blocks:
                 job.warning_codes = sorted(set([*job.warning_codes, "MANUAL_REVISION_PRESERVED"]))
-                created.extend(active_blocks)
+                created.extend(preserved_human_blocks)
+                job.progress = int((order + 1) / max(1, len(regions)) * 100)
+                db.commit()
                 continue
-            for active in active_blocks:
-                active.status, active.requires_review, active.stale_at = (
-                    "stale",
-                    True,
-                    now_utc(),
-                )
             if not page.rendered_storage_key or not page.processed_storage_key:
                 raise AnswerProviderError(
                     "PAGE_ARTIFACT_UNAVAILABLE", "page processing is incomplete"
                 )
-            original, _ = _evidence(
+            _evidence(
                 db,
                 storage,
                 settings,
@@ -287,9 +396,38 @@ def run_answer_evidence_phase(
                 page.processed_storage_key,
                 order,
             )
+            reusable_blocks = [
+                block
+                for block in active_blocks
+                if block.submission_recognition_job_id == job.id
+                and block.input_hash == processed.input_hash
+                and block.status in {"recognized", "requires_review"}
+            ]
+            if reusable_blocks:
+                created.extend(reusable_blocks)
+                continue
             blocks = provider.recognize(artifact, job.provider_kind)  # type: ignore[arg-type]
             if not blocks:
                 raise AnswerProviderError("PROVIDER_EMPTY_RESULT", "provider returned no blocks")
+            current, current_generation = _locked_recognition_generation(
+                db,
+                job.submission_id,
+                job.id,
+            )
+            if (
+                current is None
+                or current.generation != generation
+                or generation < current_generation
+                or current.status == "cancelled"
+            ):
+                _discard_late_job_result(db, current, created_block_ids)
+                return
+            for active in active_blocks:
+                active.status, active.requires_review, active.stale_at = (
+                    "stale",
+                    True,
+                    now_utc(),
+                )
             for index, result in enumerate(blocks):
                 normalized = normalize_math(result.text, result.latex, result.block_type)
                 warnings = list(normalized.warnings)
@@ -334,7 +472,7 @@ def run_answer_evidence_phase(
                     provider_version=provider.version,
                     warning_codes=warnings,
                     requires_review=requires_review,
-                    evidence_image_key=original.object_key,
+                    evidence_image_key=processed.object_key,
                     recognition_version=version,
                     input_hash=processed.input_hash,
                     output_hash=output_hash,
@@ -342,6 +480,7 @@ def run_answer_evidence_phase(
                 next_block_index[page.id] += 1
                 db.add(block)
                 db.flush()
+                created_block_ids.add(block.id)
                 db.add(
                     RecognitionRevision(
                         recognition_block_id=block.id,
@@ -358,23 +497,23 @@ def run_answer_evidence_phase(
                 created.append(block)
         except AnswerProviderError as exc:
             failures += 1
+            failed_page_ids.add(page.id)
             job.error_code, job.error_message = exc.code, str(exc)
             job.warning_codes = sorted(set([*job.warning_codes, exc.code]))
         job.progress = int((order + 1) / max(1, len(regions)) * 100)
         db.commit()
-    current = db.get(SubmissionRecognitionJob, job.id)
-    if current is None or current.generation != generation or current.status == "cancelled":
-        if current:
-            current.warning_codes = sorted(set([*current.warning_codes, "LATE_RESULT_DISCARDED"]))
-            current.error_code = "LATE_RESULT_DISCARDED"
-            for block in created:
-                if block.submission_recognition_job_id == job.id:
-                    block.status, block.requires_review, block.stale_at = (
-                        "late_discarded",
-                        True,
-                        now_utc(),
-                    )
-            db.commit()
+    current, current_generation = _locked_recognition_generation(
+        db,
+        job.submission_id,
+        job.id,
+    )
+    if (
+        current is None
+        or current.generation != generation
+        or generation < current_generation
+        or current.status == "cancelled"
+    ):
+        _discard_late_job_result(db, current, created_block_ids)
         return
     for answer in answers:
         answer_blocks = [
@@ -387,17 +526,55 @@ def run_answer_evidence_phase(
         ]
         if not answer_blocks:
             continue
-        sources = [
-            {
-                "block_id": str(block.id),
-                "page_id": str(block.submission_page_id),
-                "region_id": str(block.student_answer_region_id),
-                "source_page_number": block.source_page_number,
-                "reading_order": block.reading_order,
-            }
-            for block in sorted(answer_blocks, key=lambda item: item.reading_order)
-        ]
+        sources: list[dict[str, object]] = []
+        for block in sorted(answer_blocks, key=lambda item: item.reading_order):
+            block_region = db.get(StudentAnswerRegion, block.student_answer_region_id)
+            if block_region is None:
+                continue
+            preserved_human_revision = (
+                db.scalar(
+                    select(RecognitionRevision.id).where(
+                        RecognitionRevision.recognition_block_id == block.id,
+                        RecognitionRevision.source == "human",
+                        RecognitionRevision.stale_at.is_(None),
+                    )
+                )
+                is not None
+            )
+            sources.append(
+                {
+                    "block_id": str(block.id),
+                    "page_id": str(block.submission_page_id),
+                    "region_id": str(block.student_answer_region_id),
+                    "region_version": block_region.region_version,
+                    "region_bbox": [
+                        str(block_region.x),
+                        str(block_region.y),
+                        str(block_region.width),
+                        str(block_region.height),
+                    ],
+                    "block_recognition_job_id": str(block.submission_recognition_job_id),
+                    "block_recognition_version": block.recognition_version,
+                    "preserved_human_revision": preserved_human_revision,
+                    "source_page_number": block.source_page_number,
+                    "reading_order": block.reading_order,
+                }
+            )
         text = "\n".join(block.normalized_text or block.text or "" for block in answer_blocks)
+        input_hash = _digest([block.input_hash for block in answer_blocks])
+        existing_evidence = db.scalar(
+            select(QuestionRecognitionEvidence).where(
+                QuestionRecognitionEvidence.recognition_job_id == job.id,
+                QuestionRecognitionEvidence.student_answer_id == answer.id,
+                QuestionRecognitionEvidence.input_hash == input_hash,
+                QuestionRecognitionEvidence.stale_at.is_(None),
+            )
+        )
+        if existing_evidence is not None:
+            answer.recognized_text = existing_evidence.normalized_text
+            answer.requires_review = existing_evidence.requires_review
+            answer.status = existing_evidence.status
+            continue
         evidence = QuestionRecognitionEvidence(
             owner_id=job.owner_id,
             submission_id=submission.id,
@@ -410,7 +587,7 @@ def run_answer_evidence_phase(
             normalized_text=text or None,
             latex=None,
             provider_versions={provider.name: provider.version},
-            input_hash=_digest([block.input_hash for block in answer_blocks]),
+            input_hash=input_hash,
             output_hash=_digest([block.output_hash for block in answer_blocks]),
             recognition_version=answer_versions[answer.id],
             requires_review=any(block.requires_review for block in answer_blocks),
@@ -419,6 +596,19 @@ def run_answer_evidence_phase(
         answer.recognized_text = text or None
         answer.requires_review = evidence.requires_review
         answer.status = evidence.status
+    recognized_page_ids = {block.submission_page_id for block in created} - failed_page_ids
+    submission_pages = list(
+        db.scalars(
+            select(SubmissionPage).where(SubmissionPage.submission_id == submission.id)
+        ).all()
+    )
+    for page in submission_pages:
+        if page.id in recognized_page_ids:
+            page.status = "recognized"
+    if submission_pages and all(
+        page.status in {"recognized", "blank"} for page in submission_pages
+    ):
+        submission.status, submission.recognized_at = "recognized", now_utc()
     job.output_hash = _digest([block.output_hash for block in created])
     job.completed_at = now_utc()
     job.status = (

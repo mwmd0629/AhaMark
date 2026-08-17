@@ -65,13 +65,14 @@ class FakeAIScoringProvider:
             deterministic_pass = context.deterministic.get(key) == "suggested_pass"
             conflicted = key in context.conflicted
             manual = key in context.manual_only or key in context.unsupported
+            score_required = key in context.score_required
             status = (
                 "deterministic_conflict"
                 if conflicted
                 else "manual_required"
                 if manual
                 else "suggested_pass"
-                if deterministic_pass
+                if deterministic_pass or score_required
                 else "abstain"
             )
             scored = status == "suggested_pass"
@@ -96,6 +97,8 @@ class FakeAIScoringProvider:
                     "detected_errors": [],
                     "reasoning_summary": (
                         "Deterministic validation passed."
+                        if deterministic_pass
+                        else "Synthetic AI-suggestion fixture produced a test-only score."
                         if scored
                         else "Deterministic fake provider did not produce an adoptable score."
                     ),

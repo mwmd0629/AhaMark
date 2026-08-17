@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     signed_url_expiry_seconds: int = 900
     demo_actor_enabled: bool = True
     demo_actor_email: str = "demo-teacher@ahamark.local"
+    synthetic_demo_reset_enabled: bool = False
+    synthetic_demo_reset_bucket: str = "ahamark-business-e2e-files"
     session_hmac_secret: str = "development-only-session-secret"
     auth_cookie_name: str = "ahamark_session"
     auth_session_hours: int = 12
@@ -49,6 +51,31 @@ class Settings(BaseSettings):
     recognition_low_confidence: float = 0.70
     recognition_high_confidence: float = 0.90
     recognition_config_version: str = "2026-07-22"
+    recognition_rapidocr_runtime_enabled: bool = False
+    recognition_rapidocr_model_download_allowed: bool = False
+    recognition_tesseract_runtime_enabled: bool = False
+    recognition_tesseract_binary_path: str | None = None
+    recognition_tesseract_data_root: str | None = None
+    recognition_tesseract_license_path: str | None = None
+    recognition_tesseract_expected_version: str | None = None
+    recognition_tesseract_binary_sha256: str | None = None
+    recognition_tesseract_chi_sim_sha256: str | None = None
+    recognition_tesseract_eng_sha256: str | None = None
+    recognition_tesseract_license_sha256: str | None = None
+    recognition_tesseract_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
+    formula_recognition_provider: str = "unavailable"
+    formula_recognition_base_url: str | None = None
+    formula_recognition_api_key: SecretStr | None = None
+    formula_recognition_allowed_hosts: list[str] = []
+    formula_recognition_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
+    formula_recognition_max_image_bytes: int = Field(
+        default=5 * 1024 * 1024, ge=1024, le=20 * 1024 * 1024
+    )
+    formula_recognition_max_pixels: int = Field(default=8_000_000, ge=1, le=40_000_000)
+    formula_recognition_max_candidates: int = Field(default=5, ge=1, le=10)
+    formula_recognition_config_version: str = "formula-recognition-v1"
+    formula_region_detection_enabled: bool = False
+    formula_region_detection_model_download_allowed: bool = False
     answer_recognition_provider: str = "unavailable"
     answer_recognition_base_url: str | None = None
     answer_recognition_api_key: str | None = None
@@ -112,6 +139,10 @@ class Settings(BaseSettings):
     ai_grading_store_responses: bool = False
     ai_grading_review_provider: str | None = None
     ai_grading_review_model: str | None = None
+    codex_local_enabled: bool = False
+    codex_local_internal_token: SecretStr | None = None
+    codex_local_lease_seconds: int = Field(default=300, ge=30, le=3600)
+    codex_local_max_claim: int = Field(default=20, ge=1, le=100)
     submission_max_files: int = 100
     submission_batch_max_bytes: int = 250 * 1024 * 1024
     submission_match_threshold: float = 0.95
@@ -121,6 +152,7 @@ class Settings(BaseSettings):
         "trusted_hosts",
         "csrf_trusted_origins",
         "allowed_upload_types",
+        "formula_recognition_allowed_hosts",
         mode="before",
     )
     @classmethod
@@ -129,6 +161,76 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def production_guard(self) -> "Settings":
+        weak_codex_tokens = {
+            "",
+            "change-me",
+            "change-me-in-production",
+            "password",
+            "secret",
+            "codex-local",
+            "development-only-codex-token",
+        }
+        if self.codex_local_enabled:
+            token = (
+                self.codex_local_internal_token.get_secret_value()
+                if self.codex_local_internal_token is not None
+                else ""
+            )
+            if token.lower() in weak_codex_tokens or len(token) < 32:
+                raise ValueError(
+                    "CODEX_LOCAL_INTERNAL_TOKEN must be a strong value of at least "
+                    "32 characters when CODEX_LOCAL_ENABLED is true"
+                )
+        formula_region_errors = []
+        if self.formula_region_detection_enabled:
+            formula_region_errors.append(
+                "FORMULA_REGION_DETECTION_ENABLED must remain false until a separately authorized "
+                "product integration is reviewed"
+            )
+        if self.formula_region_detection_model_download_allowed:
+            formula_region_errors.append(
+                "FORMULA_REGION_DETECTION_MODEL_DOWNLOAD_ALLOWED must remain false; "
+                "runtime model downloads are prohibited"
+            )
+        if formula_region_errors:
+            raise ValueError(
+                "formula region detection configuration rejected: "
+                + "; ".join(formula_region_errors)
+            )
+        rapidocr_errors = []
+        if self.recognition_rapidocr_runtime_enabled:
+            rapidocr_errors.append(
+                "RECOGNITION_RAPIDOCR_RUNTIME_ENABLED must remain false until an audited "
+                "explicit-model adapter exists"
+            )
+        if self.recognition_rapidocr_model_download_allowed:
+            rapidocr_errors.append(
+                "RECOGNITION_RAPIDOCR_MODEL_DOWNLOAD_ALLOWED must remain false; "
+                "runtime model downloads are prohibited"
+            )
+        if rapidocr_errors:
+            raise ValueError("RapidOCR configuration rejected: " + "; ".join(rapidocr_errors))
+        tesseract_fields = {
+            "RECOGNITION_TESSERACT_BINARY_PATH": self.recognition_tesseract_binary_path,
+            "RECOGNITION_TESSERACT_DATA_ROOT": self.recognition_tesseract_data_root,
+            "RECOGNITION_TESSERACT_LICENSE_PATH": self.recognition_tesseract_license_path,
+            "RECOGNITION_TESSERACT_EXPECTED_VERSION": self.recognition_tesseract_expected_version,
+            "RECOGNITION_TESSERACT_BINARY_SHA256": self.recognition_tesseract_binary_sha256,
+            "RECOGNITION_TESSERACT_CHI_SIM_SHA256": self.recognition_tesseract_chi_sim_sha256,
+            "RECOGNITION_TESSERACT_ENG_SHA256": self.recognition_tesseract_eng_sha256,
+            "RECOGNITION_TESSERACT_LICENSE_SHA256": self.recognition_tesseract_license_sha256,
+        }
+        if self.recognition_tesseract_runtime_enabled:
+            missing = [name for name, value in tesseract_fields.items() if not value]
+            if self.recognition_provider != "tesseract":
+                missing.append("RECOGNITION_PROVIDER=tesseract")
+            if missing:
+                raise ValueError(
+                    "Tesseract configuration rejected: missing " + ", ".join(sorted(missing))
+                )
+        elif self.recognition_provider == "tesseract":
+            # Keep the provider selectable for a stable fail-closed readiness response.
+            pass
         if self.app_env.lower() != "production":
             return self
         errors: list[str] = []
@@ -145,8 +247,28 @@ class Settings(BaseSettings):
             errors.append("DEBUG must be false")
         if self.demo_actor_enabled:
             errors.append("DEMO_ACTOR_ENABLED must be false")
+        if self.synthetic_demo_reset_enabled:
+            errors.append("SYNTHETIC_DEMO_RESET_ENABLED must be false")
+        if self.codex_local_enabled:
+            errors.append("CODEX_LOCAL_ENABLED must be false")
         if self.recognition_provider.lower() == "fake":
             errors.append("RECOGNITION_PROVIDER cannot be fake")
+        if self.formula_recognition_provider.lower() == "fake":
+            errors.append("FORMULA_RECOGNITION_PROVIDER cannot be fake")
+        if self.formula_recognition_provider.lower() == "http":
+            formula_token = (
+                self.formula_recognition_api_key.get_secret_value()
+                if self.formula_recognition_api_key is not None
+                else ""
+            )
+            if len(formula_token) < 32 or formula_token.lower() in weak:
+                errors.append(
+                    "FORMULA_RECOGNITION_API_KEY must be a strong value of at least 32 characters"
+                )
+            if not self.formula_recognition_allowed_hosts:
+                errors.append("FORMULA_RECOGNITION_ALLOWED_HOSTS is required")
+        if self.answer_recognition_provider.lower() == "fake":
+            errors.append("ANSWER_RECOGNITION_PROVIDER cannot be fake")
         if self.grading_provider.lower() == "fake":
             errors.append("GRADING_PROVIDER cannot be fake")
         if self.ai_grading_provider.lower() == "fake":

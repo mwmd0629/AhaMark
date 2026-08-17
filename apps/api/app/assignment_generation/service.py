@@ -1,5 +1,6 @@
 import uuid
 from collections.abc import Iterable
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import func, select
@@ -12,13 +13,132 @@ from app.core.config import get_settings
 from app.models import (
     Assignment,
     AssignmentDraftRevision,
+    AssignmentFieldSuggestion,
     AssignmentGenerationJob,
+    AssignmentPageAnalysis,
+    AssignmentQuestionExtractionCandidate,
+    AssignmentSourceFileAnalysis,
     GenerationIssue,
     GenerationStageResult,
     PaperPage,
+    PaperPageOrganizationSuggestion,
     PaperVersion,
+    Question,
+    QuestionStatus,
     now_utc,
 )
+
+
+def autofill_total_score_from_draft_questions(
+    db: Session, revision: AssignmentDraftRevision, actor_id: uuid.UUID
+) -> Decimal | None:
+    """Fill a missing total from the complete materialized PDF question draft."""
+    db.flush()
+    assignment = db.get(Assignment, revision.assignment_id)
+    if assignment is None or assignment.total_score is not None:
+        return None
+    latest_version = db.scalar(
+        select(func.max(AssignmentQuestionExtractionCandidate.candidate_version)).where(
+            AssignmentQuestionExtractionCandidate.draft_revision_id == revision.id
+        )
+    )
+    if latest_version is None:
+        return None
+    rows = list(
+        db.scalars(
+            select(AssignmentQuestionExtractionCandidate).where(
+                AssignmentQuestionExtractionCandidate.draft_revision_id == revision.id,
+                AssignmentQuestionExtractionCandidate.candidate_version == latest_version,
+            )
+        )
+    )
+    if not rows or any(row.materialized_question_id is None for row in rows):
+        return None
+    paper_ids = {row.paper_version_id for row in rows}
+    if len(paper_ids) != 1:
+        return None
+    questions = list(
+        db.scalars(
+            select(Question).where(
+                Question.paper_version_id == next(iter(paper_ids)),
+                Question.status == QuestionStatus.active,
+            )
+        )
+    )
+    materialized_ids = {row.materialized_question_id for row in rows}
+    if (
+        len(materialized_ids) != len(rows)
+        or {question.id for question in questions} != materialized_ids
+        or any(question.max_score is None for question in questions)
+    ):
+        return None
+    total = sum((Decimal(str(question.max_score)) for question in questions), Decimal("0"))
+    if total <= 0:
+        return None
+    assignment.total_score = total
+    assignment.updated_at = now_utc()
+    db.flush()
+    snapshot = source_snapshot_hash(db, assignment)
+    revision.source_snapshot_hash = snapshot
+    job = db.get(AssignmentGenerationJob, revision.generation_job_id)
+    if job is not None:
+        job.source_snapshot_hash = snapshot
+    for row in rows:
+        row.source_snapshot_hash = snapshot
+    for source_file_analysis in db.scalars(
+        select(AssignmentSourceFileAnalysis).where(
+            AssignmentSourceFileAnalysis.draft_revision_id == revision.id,
+            AssignmentSourceFileAnalysis.analysis_status == "suggested",
+        )
+    ):
+        source_file_analysis.source_snapshot_hash = snapshot
+    for page_analysis in db.scalars(
+        select(AssignmentPageAnalysis).where(
+            AssignmentPageAnalysis.draft_revision_id == revision.id
+        )
+    ):
+        page_analysis.source_snapshot_hash = snapshot
+    for page_suggestion in db.scalars(
+        select(PaperPageOrganizationSuggestion).where(
+            PaperPageOrganizationSuggestion.draft_revision_id == revision.id,
+            PaperPageOrganizationSuggestion.status == "suggested",
+        )
+    ):
+        page_suggestion.source_snapshot_hash = snapshot
+    for field_suggestion in db.scalars(
+        select(AssignmentFieldSuggestion).where(
+            AssignmentFieldSuggestion.draft_revision_id == revision.id,
+            AssignmentFieldSuggestion.field_name == "total_score",
+            AssignmentFieldSuggestion.status == "suggested",
+        )
+    ):
+        field_suggestion.status = "superseded"
+    now = now_utc()
+    for generation_issue in db.scalars(
+        select(GenerationIssue).where(
+            GenerationIssue.draft_revision_id == revision.id,
+            GenerationIssue.code == "TOTAL_SCORE_UNCONFIRMED",
+            GenerationIssue.resolution_status == "open",
+        )
+    ):
+        generation_issue.resolution_status = "resolved"
+        generation_issue.resolved_by = actor_id
+        generation_issue.resolved_at = now
+        generation_issue.resolution_note = "已根据 PDF 中完整的题目分值自动汇总作业总分。"
+    audit(
+        db,
+        actor_id,
+        "assignment.total_score.autofill",
+        "assignment",
+        assignment.id,
+        {
+            "total_score": str(total),
+            "source": "materialized_pdf_question_scores",
+            "explicit_confirmation_required": False,
+        },
+    )
+    return total
+
 
 STAGES = (
     "analyzing",
@@ -155,7 +275,7 @@ def create_job(
     requested_mode = (
         requested_provider
         if settings.app_env == "test" and requested_provider is not None
-        else settings.assignment_generation_provider
+        else "codex_local"
     )
     provider = select_provider(settings, requested_mode)
     request_fingerprint = canonical_hash(
@@ -383,6 +503,32 @@ def complete_stage_retry(job: AssignmentGenerationJob) -> None:
     job.error_code = None
     job.error_message = None
     job.completed_at = now_utc()
+
+
+def has_retryable_stage(db: Session, job: AssignmentGenerationJob) -> bool:
+    """Return whether any latest stage result still has retry budget.
+
+    ``job.max_attempts`` is a per-stage safety limit.  A teacher may need to
+    resolve more than one sequential prerequisite (file roles, page layout,
+    then questions), so retries of different stages must not consume a shared
+    whole-job budget.
+    """
+    rows = db.scalars(
+        select(GenerationStageResult)
+        .where(GenerationStageResult.job_id == job.id)
+        .order_by(
+            GenerationStageResult.stage,
+            GenerationStageResult.stage_generation.desc(),
+        )
+    ).all()
+    latest: dict[str, GenerationStageResult] = {}
+    for row in rows:
+        latest.setdefault(row.stage, row)
+    return any(
+        row.status in {"failed", "unavailable", "discarded"}
+        and row.stage_generation < job.max_attempts
+        for row in latest.values()
+    )
 
 
 def stage_history(db: Session, job_id: uuid.UUID) -> list[GenerationStageResult]:

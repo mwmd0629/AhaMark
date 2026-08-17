@@ -7,6 +7,7 @@ from typing import Any
 
 from app.assignment_generation.providers import (
     AssignmentProviderResponse,
+    DeterministicFakeAssignmentGenerationProvider,
     OpenAICompatibleAssignmentGenerationProvider,
     ProviderSelection,
     StageName,
@@ -29,10 +30,14 @@ def dispatch_stage(
 ) -> DispatchedProviderResult:
     """Dispatch using server configuration; payloads cannot override model or endpoint."""
     selection = select_provider(settings, requested_mode)
-    if selection.name != "openai_compatible" or not selection.available:
+    if not selection.available:
         return DispatchedProviderResult(
             selection,
             AssignmentProviderResponse(None, error=selection.error_code or "provider_unavailable"),
         )
-    provider = OpenAICompatibleAssignmentGenerationProvider(settings)
+    provider = (
+        OpenAICompatibleAssignmentGenerationProvider(settings)
+        if selection.name == "openai_compatible"
+        else DeterministicFakeAssignmentGenerationProvider()
+    )
     return DispatchedProviderResult(selection, provider.generate(stage, payload))

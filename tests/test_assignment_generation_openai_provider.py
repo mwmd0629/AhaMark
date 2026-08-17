@@ -4,6 +4,7 @@ import urllib.error
 
 import pytest
 from app.assignment_generation.providers import (
+    DeterministicFakeAssignmentGenerationProvider,
     OpenAICompatibleAssignmentGenerationProvider,
     provider_from_settings,
     select_provider,
@@ -91,6 +92,60 @@ def test_strict_schema_rejects_extra_privileged_or_incomplete_output(monkeypatch
     )
     assert result.output is None
     assert result.error == "provider_schema_invalid"
+
+
+def test_question_extraction_preserves_character_corruption_error_code(monkeypatch) -> None:
+    raw = {
+        "candidates": [
+            {
+                "ref": "1",
+                "question_number": "1",
+                "question_type": "calculation",
+                "content_text": "???? x?+xy+y?=7",
+                "content_latex": None,
+                "max_score": "5",
+                "difficulty": None,
+                "knowledge_points": [],
+                "field_confidences": {
+                    key: "0.9"
+                    for key in (
+                        "question_number",
+                        "parent_relation",
+                        "question_type",
+                        "content_text",
+                        "content_latex",
+                        "max_score",
+                        "difficulty",
+                        "knowledge_points",
+                        "regions",
+                    )
+                },
+                "overall_confidence": "0.9",
+                "evidence": {},
+                "warning_codes": [],
+                "manual_required": True,
+                "regions": [
+                    {
+                        "page_id": "00000000-0000-0000-0000-000000000001",
+                        "display_order": 0,
+                        "region_type": "stem",
+                        "x": "0",
+                        "y": "0",
+                        "width": "1",
+                        "height": "1",
+                        "confidence": "0.9",
+                    }
+                ],
+            }
+        ]
+    }
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_a, **_k: Response(envelope(raw)))
+    result = OpenAICompatibleAssignmentGenerationProvider(configured()).generate(
+        "question_extraction", {}
+    )
+    assert result.output is None
+    assert result.error == "CHARACTER_ENCODING_CORRUPTION_DETECTED"
+    assert raw["candidates"][0]["content_text"] not in repr(result)
 
 
 @pytest.mark.parametrize("body", [b"not-json", json.dumps({"output": []}).encode()])
@@ -224,3 +279,26 @@ def test_external_provider_requests_require_server_side_enablement() -> None:
     assert selection.name == "unavailable"
     assert selection.available is False
     assert selection.error_code == "PROVIDER_EXTERNAL_REQUESTS_DISABLED"
+
+
+def test_fake_answer_rubric_uses_provider_interface_schema_and_hashes() -> None:
+    provider = DeterministicFakeAssignmentGenerationProvider()
+    payload = {
+        "question": {
+            "id": "00000000-0000-0000-0000-000000000001",
+            "number": "1",
+            "type": "calculation",
+            "text": "计算 1+1",
+            "latex": None,
+            "max_score": "5",
+        }
+    }
+    answer = provider.generate("answer_generation", payload)
+    rubric = provider.generate("rubric_generation", payload)
+    assert answer.output is not None
+    assert rubric.output is not None
+    assert answer.request_hash and answer.response_hash
+    assert rubric.request_hash and rubric.response_hash
+    assert answer.model_snapshot == "deterministic-test-only"
+    assert answer.output.degradation_reason is None
+    assert answer.output.criteria[0].degradation_reason is None

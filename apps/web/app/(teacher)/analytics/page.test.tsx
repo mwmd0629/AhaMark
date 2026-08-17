@@ -63,10 +63,30 @@ it("loads a release, drills into a score band, and edits and confirms an insight
       highest_score: 10,
       lowest_score: 6,
       median_score: 8,
+      average_score_rate: 0.8,
       score_distribution: { "90-100": 2 },
-      questions: [],
-      knowledge_points: [],
-      error_types: [],
+      questions: [
+        {
+          question_id: "q1",
+          question_number: "2",
+          participants: 3,
+          average_score: 6,
+          average_max_score: 10,
+          score_rate: 0.6,
+          full_rate: 0.33,
+          zero_rate: 0,
+          correct_rate: null,
+        },
+      ],
+      knowledge_points: [
+        {
+          knowledge_point_id: "kp1",
+          knowledge_point_name: "线性相关",
+          mastery_rate: 0.55,
+          sample_count: 3,
+        },
+      ],
+      error_types: [{ code: "概念混淆", count: 2 }],
     },
   });
   mocks.classTrends.mockResolvedValueOnce({
@@ -109,8 +129,15 @@ it("loads a release, drills into a score band, and edits and confirms an insight
   });
   fireEvent.click(screen.getByRole("button", { name: /生成 \/ 刷新分析/ }));
   await screen.findByText("分数分布");
+  expect(screen.getByText("本次作业讲评重点")).toBeInTheDocument();
+  expect(screen.getAllByText(/线性相关/).length).toBeGreaterThan(0);
+  expect(screen.getAllByText(/概念混淆/).length).toBeGreaterThan(0);
   fireEvent.click(screen.getByRole("button", { name: "90-100" }));
   await screen.findByText(/分数段 90-100/);
+  expect(
+    screen.getByRole("columnheader", { name: "学号" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("001")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "生成规则建议" }));
   const textarea = await screen.findByLabelText("建议内容");
   fireEvent.change(textarea, { target: { value: "修改建议" } });

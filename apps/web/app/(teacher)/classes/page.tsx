@@ -16,6 +16,7 @@ import {
   useToast,
 } from "@/components/ui";
 import { ApiError, classesApi, type ClassRecord } from "@/lib/api";
+import { useSmartRefresh } from "@/lib/use-smart-refresh";
 
 export default function ClassesPage() {
   const academicYearRef = useRef<HTMLSelectElement>(null);
@@ -39,34 +40,45 @@ export default function ClassesPage() {
       // Native select remains focused when the browser blocks programmatic opening.
     }
   };
-  const load = async () => {
-    setLoading(true);
-    setError("");
+  const load = async (background = false) => {
+    if (!background) {
+      setLoading(true);
+      setError("");
+    }
     try {
       const q = new URLSearchParams({ page: String(page), status, search });
       const data = await classesApi.list(q.toString());
       setItems(data.items);
       setPages(Math.max(data.pages, 1));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "班级列表加载失败");
+      if (!background) {
+        setError(e instanceof Error ? e.message : "班级列表加载失败");
+      }
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
     }
   };
   useEffect(() => {
     const timer = window.setTimeout(() => void load(), 250);
     return () => window.clearTimeout(timer);
   }, [search, status, page]);
+  useSmartRefresh(() => load(true), { intervalMs: 60_000 });
   const create = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setSaving(true);
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
+    const subject = String(form.get("subject") || "").trim();
+    if (!subject || subject === "数学") {
+      toast("请填写具体大学课程，例如数学分析或线性代数", "error");
+      setSaving(false);
+      return;
+    }
     try {
       await classesApi.create({
         name: String(form.get("name")),
         grade: String(form.get("grade") || ""),
-        subject: String(form.get("subject") || ""),
+        subject,
         academic_year: String(form.get("academic_year") || ""),
         semester: String(form.get("semester") || ""),
       });
@@ -122,8 +134,10 @@ export default function ClassesPage() {
               <div className="grid grid-cols-2 gap-3">
                 <Input label="年级" name="grade" />
                 <Input
-                  label="学科"
+                  label="大学课程"
                   name="subject"
+                  list="class-course-options"
+                  placeholder="如：数学分析、线性代数"
                   onKeyDown={(event) => {
                     if (event.key === "Enter") {
                       event.preventDefault();
@@ -131,6 +145,13 @@ export default function ClassesPage() {
                     }
                   }}
                 />
+                <datalist id="class-course-options">
+                  <option value="数学分析" />
+                  <option value="线性代数" />
+                  <option value="高等代数" />
+                  <option value="概率论" />
+                  <option value="常微分方程" />
+                </datalist>
                 <Select
                   ref={academicYearRef}
                   label="学年"

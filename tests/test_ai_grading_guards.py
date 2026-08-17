@@ -55,6 +55,12 @@ def test_finalized_submission_is_read_only() -> None:
     assert exc.value.code == ErrorCodes.FINALIZED_SUBMISSION
 
 
+def test_voided_submission_is_read_only() -> None:
+    with pytest.raises(GuardViolation) as exc:
+        require_submission_mutable(SimpleNamespace(finalized_at=None, status="voided"))
+    assert exc.value.code == ErrorCodes.VOIDED_SUBMISSION
+
+
 def test_validation_link_rejects_stale_and_conflict() -> None:
     job = SimpleNamespace(
         student_answer_id="answer",

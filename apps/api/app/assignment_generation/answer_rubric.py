@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 import uuid
 from collections.abc import Sequence
@@ -10,7 +8,8 @@ from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.assignment_generation.snapshot import canonical_hash
@@ -27,6 +26,13 @@ from app.models import (
     RubricCriterion,
     StructuredRubricVersion,
     now_utc,
+)
+from app.question_versions import question_version_token
+from app.semantic_content import (
+    reference_answer_semantic_payload,
+    semantic_hash,
+    semantic_normalize,
+    structured_rubric_semantic_payload,
 )
 
 ANSWER_SOURCES = {
@@ -76,6 +82,10 @@ INJECTION_PATTERNS = re.compile(
 VALIDATOR_VERSION = "assignment-rubric-validator-v1"
 
 
+class MaterializationConflict(ValueError):
+    code = "MATERIALIZATION_CONTEXT_CONFLICT"
+
+
 class EvidenceRef(BaseModel):
     model_config = ConfigDict(extra="forbid")
     kind: Literal["question", "page", "region", "block", "file", "derived"]
@@ -109,6 +119,7 @@ class CriterionDraftSchema(BaseModel):
     feedback_template: str | None = Field(None, max_length=2000)
     confidence: float = Field(ge=0, le=1)
     evidence: list[EvidenceRef] = Field(default_factory=list, max_length=30)
+    degradation_reason: str | None = Field(None, max_length=500)
     manual_required: bool = False
 
     @field_validator("dependency_keys")
@@ -121,6 +132,11 @@ class CriterionDraftSchema(BaseModel):
         return value
 
 
+class ProviderCriterionDraftSchema(CriterionDraftSchema):
+    evidence: list[EvidenceRef] = Field(min_length=1, max_length=30)
+    degradation_reason: str | None = Field(max_length=500)
+
+
 class AnswerRubricProviderOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     raw_content: str | None = Field(None, max_length=20000)
@@ -129,20 +145,40 @@ class AnswerRubricProviderOutput(BaseModel):
     alternative_answers: list[AlternativeAnswer] = Field(default_factory=list, max_length=20)
     title: str = Field(min_length=1, max_length=200)
     requested_scoring_mode: Literal["deterministic", "ai_suggestion", "hybrid", "manual_only"]
-    total_points: Decimal | None = Field(None, gt=0, le=1000000)
+    total_points: Decimal | None = Field(gt=0, le=1000000)
     allow_partial_credit: bool = True
     domain_requirements: dict[str, Any] = Field(default_factory=dict)
     validation_config: dict[str, Any] = Field(default_factory=dict)
     common_error_types: list[dict[str, Any]] = Field(default_factory=list, max_length=30)
     feedback_templates: dict[str, Any] = Field(default_factory=dict)
     confidence: float = Field(ge=0, le=1)
-    evidence: list[EvidenceRef] = Field(default_factory=list, max_length=30)
+    evidence: list[EvidenceRef] = Field(min_length=1, max_length=30)
+    degradation_reason: str | None = Field(max_length=500)
     warning_codes: list[str] = Field(default_factory=list, max_length=30)
-    criteria: list[CriterionDraftSchema] = Field(min_length=1, max_length=60)
+    criteria: list[ProviderCriterionDraftSchema] = Field(min_length=1, max_length=60)
 
     @model_validator(mode="after")
     def reject_privileged_fields(self) -> AnswerRubricProviderOutput:
-        # extra=forbid is the actual boundary; this keeps the security intent visible in the schema.
+        degradation_reason = (self.degradation_reason or "").strip()
+        if self.requested_scoring_mode != "deterministic" and not degradation_reason:
+            raise ValueError("non-deterministic output requires degradation_reason")
+        if self.requested_scoring_mode == "deterministic" and degradation_reason:
+            raise ValueError("deterministic output cannot declare degradation_reason")
+        if self.requested_scoring_mode == "deterministic":
+            answer_type = self.validation_config.get("answer_type")
+            if answer_type not in VALIDATION_RULES - {"manual_only"}:
+                raise ValueError("deterministic output requires a supported answer_type")
+            if self.total_points is None:
+                raise ValueError("deterministic output requires total_points")
+            for criterion in self.criteria:
+                if criterion.manual_required or (criterion.degradation_reason or "").strip():
+                    raise ValueError("deterministic criterion cannot be degraded")
+                criterion_answer_type = criterion.validation_rule.get("answer_type")
+                if criterion_answer_type not in VALIDATION_RULES - {"manual_only"}:
+                    raise ValueError(
+                        "deterministic criterion requires a supported validation_rule answer_type"
+                    )
+        # extra=forbid is the actual privileged-field boundary.
         return self
 
 
@@ -161,6 +197,19 @@ def question_version(question: Question) -> str:
 def route_scoring_mode(
     question: Question, output: AnswerRubricProviderOutput
 ) -> tuple[str, bool, list[str]]:
+    if output.requested_scoring_mode != "deterministic":
+        if not (output.degradation_reason or "").strip():
+            return "manual_only", True, ["PROVIDER_DEGRADATION_REASON_REQUIRED"]
+        warnings = ["PROVIDER_NON_DETERMINISTIC_MODE"]
+        if output.requested_scoring_mode in {"manual_only", "hybrid"}:
+            warnings.append("MANUAL_RUBRIC_REQUIRED")
+        return output.requested_scoring_mode, True, warnings
+
+    if (output.degradation_reason or "").strip() or any(
+        item.manual_required or (item.degradation_reason or "").strip() for item in output.criteria
+    ):
+        return "manual_only", True, ["PROVIDER_DETERMINISTIC_CONTRACT_INVALID"]
+
     text = " ".join(
         filter(None, [question.question_type, question.content_text, question.content_latex])
     )
@@ -283,9 +332,10 @@ def deterministic_fake_output(question: Question) -> AnswerRubricProviderOutput:
         evidence=[
             EvidenceRef(kind="question", reference_id=str(question.id), summary="当前已物化题目")
         ],
+        degradation_reason="题型需要人工评分" if manual else None,
         warning_codes=warnings,
         criteria=[
-            CriterionDraftSchema(
+            ProviderCriterionDraftSchema(
                 criterion_key="result",
                 title="结果与过程",
                 points=points,
@@ -297,6 +347,7 @@ def deterministic_fake_output(question: Question) -> AnswerRubricProviderOutput:
                         kind="question", reference_id=str(question.id), summary="题目满分与类型"
                     )
                 ],
+                degradation_reason="题型需要人工评分" if manual else None,
                 manual_required=manual,
             )
         ],
@@ -316,7 +367,9 @@ def _current_questions(
             .where(
                 AssignmentQuestionExtractionCandidate.draft_revision_id == revision.id,
                 AssignmentQuestionExtractionCandidate.generation_job_id == job.id,
-                AssignmentQuestionExtractionCandidate.status.in_({"accepted", "modified"}),
+                AssignmentQuestionExtractionCandidate.status.in_(
+                    {"suggested", "accepted", "modified"}
+                ),
                 Question.status == "active",
             )
             .order_by(Question.display_order, Question.id)
@@ -457,7 +510,7 @@ def generate_candidates(
                 AssignmentRubricCriterionDraft(
                     rubric_candidate_id=rubric.id,
                     display_order=order,
-                    **criterion.model_dump(exclude={"evidence"}),
+                    **criterion.model_dump(exclude={"evidence", "degradation_reason"}),
                     evidence=[item.model_dump() for item in criterion.evidence],
                 )
             )
@@ -573,12 +626,168 @@ def validate_revision_candidates(
     }
 
 
+def _is_materialization_conflict(
+    exc: IntegrityError, constraint_names: set[str], column_names: set[str]
+) -> bool:
+    diagnostic = getattr(exc.orig, "diag", None)
+    constraint_name = getattr(diagnostic, "constraint_name", None)
+    if constraint_name in constraint_names:
+        return True
+    message = str(exc.orig).lower()
+    return "unique" in message and any(name.lower() in message for name in column_names)
+
+
+def _answer_semantic_payload(
+    candidate: AssignmentAnswerDraftCandidate,
+    raw: str,
+    normalized: str,
+    structured: Any,
+) -> dict[str, Any]:
+    return reference_answer_semantic_payload(
+        source_type=candidate.source_type,
+        source_region=candidate.source_region,
+        raw_content=raw,
+        normalized_content=normalized,
+        structured_content=structured,
+        alternative_answers=candidate.alternative_answers,
+        provenance=candidate.provenance,
+    )
+
+
+def _rubric_semantic_payload(
+    candidate: AssignmentRubricDraftCandidate,
+    criteria: Sequence[AssignmentRubricCriterionDraft],
+    reference_answer_content_hash: str,
+) -> dict[str, Any]:
+    return structured_rubric_semantic_payload(
+        reference_answer_content_hash=reference_answer_content_hash,
+        title=candidate.title,
+        scoring_mode=candidate.scoring_mode,
+        total_points=candidate.total_points,
+        allow_partial_credit=candidate.allow_partial_credit,
+        domain_requirements=candidate.domain_requirements,
+        validation_config=candidate.validation_config,
+        common_error_types=candidate.common_error_types,
+        feedback_templates=candidate.feedback_templates,
+        manual_required=candidate.manual_required,
+        criteria=[
+            {
+                "criterion_key": criterion.criterion_key,
+                "display_order": criterion.display_order,
+                "title": criterion.title,
+                "description": criterion.description,
+                "points": str(criterion.points) if criterion.points is not None else None,
+                "criterion_type": criterion.criterion_type,
+                "required": criterion.required,
+                "dependency_keys": semantic_normalize(criterion.dependency_keys),
+                "alternative_group": criterion.alternative_group,
+                "partial_credit_rule": semantic_normalize(criterion.partial_credit_rule),
+                "deduction_rule": semantic_normalize(criterion.deduction_rule),
+                "validation_rule": semantic_normalize(criterion.validation_rule),
+                "common_error_codes": semantic_normalize(criterion.common_error_codes),
+                "feedback_template": criterion.feedback_template,
+                "manual_required": criterion.manual_required,
+                "evidence": semantic_normalize(criterion.evidence),
+            }
+            for criterion in criteria
+        ],
+    )
+
+
+def _existing_reference_materialization(
+    db: Session,
+    candidate: AssignmentAnswerDraftCandidate,
+    materialization_key: str,
+    content_hash: str,
+) -> ReferenceAnswerVersion | None:
+    if candidate.materialized_reference_answer_id:
+        existing = db.get(ReferenceAnswerVersion, candidate.materialized_reference_answer_id)
+        if existing is None:
+            raise RuntimeError("MATERIALIZED_REFERENCE_ANSWER_NOT_FOUND")
+        if existing.origin_answer_candidate_id not in {None, candidate.id}:
+            raise MaterializationConflict("REFERENCE_ANSWER_ORIGIN_MISMATCH")
+        if (
+            existing.materialization_key != materialization_key
+            or existing.content_hash != content_hash
+        ):
+            raise MaterializationConflict("REFERENCE_ANSWER_MATERIALIZATION_DRIFT")
+        return existing
+    existing = db.scalar(
+        select(ReferenceAnswerVersion).where(
+            or_(
+                ReferenceAnswerVersion.origin_answer_candidate_id == candidate.id,
+                ReferenceAnswerVersion.materialization_key == materialization_key,
+            )
+        )
+    )
+    if existing is not None and existing.origin_answer_candidate_id not in {None, candidate.id}:
+        raise MaterializationConflict("REFERENCE_ANSWER_MATERIALIZATION_KEY_COLLISION")
+    if existing is not None and (
+        existing.materialization_key != materialization_key or existing.content_hash != content_hash
+    ):
+        raise MaterializationConflict("REFERENCE_ANSWER_MATERIALIZATION_DRIFT")
+    return existing
+
+
+def _existing_rubric_materialization(
+    db: Session,
+    candidate: AssignmentRubricDraftCandidate,
+    materialization_key: str,
+    content_hash: str,
+) -> StructuredRubricVersion | None:
+    if candidate.materialized_structured_rubric_id:
+        existing = db.get(StructuredRubricVersion, candidate.materialized_structured_rubric_id)
+        if existing is None:
+            raise RuntimeError("MATERIALIZED_STRUCTURED_RUBRIC_NOT_FOUND")
+        if existing.origin_rubric_candidate_id not in {None, candidate.id}:
+            raise MaterializationConflict("STRUCTURED_RUBRIC_ORIGIN_MISMATCH")
+        if (
+            existing.materialization_key != materialization_key
+            or existing.content_hash != content_hash
+        ):
+            raise MaterializationConflict("STRUCTURED_RUBRIC_MATERIALIZATION_DRIFT")
+        return existing
+    existing = db.scalar(
+        select(StructuredRubricVersion).where(
+            or_(
+                StructuredRubricVersion.origin_rubric_candidate_id == candidate.id,
+                StructuredRubricVersion.materialization_key == materialization_key,
+            )
+        )
+    )
+    if existing is not None and existing.origin_rubric_candidate_id not in {None, candidate.id}:
+        raise MaterializationConflict("STRUCTURED_RUBRIC_MATERIALIZATION_KEY_COLLISION")
+    if existing is not None and (
+        existing.materialization_key != materialization_key or existing.content_hash != content_hash
+    ):
+        raise MaterializationConflict("STRUCTURED_RUBRIC_MATERIALIZATION_DRIFT")
+    return existing
+
+
 def materialize_reference(
     db: Session, candidate: AssignmentAnswerDraftCandidate, actor_id: uuid.UUID
 ) -> ReferenceAnswerVersion:
-    if candidate.materialized_reference_answer_id:
-        existing = db.get(ReferenceAnswerVersion, candidate.materialized_reference_answer_id)
-        assert existing is not None
+    value = candidate.teacher_value or {}
+    raw = str(value.get("raw_content", candidate.raw_content or ""))
+    normalized = str(value.get("normalized_content", candidate.normalized_content or raw))
+    structured = value.get("structured_content", candidate.structured_content)
+    semantic_payload = _answer_semantic_payload(candidate, raw, normalized, structured)
+    content_hash = semantic_hash(semantic_payload)
+    materialization_payload = {
+        "schema": "reference-answer-materialization-v1",
+        "candidate_id": str(candidate.id),
+        "assignment_id": str(candidate.assignment_id),
+        "draft_revision_id": str(candidate.draft_revision_id),
+        "question_id": str(candidate.question_id),
+        "question_version": candidate.question_version,
+        "source_snapshot_hash": candidate.source_snapshot_hash,
+        "teacher_edit_version": candidate.teacher_edit_version,
+        "content_hash": content_hash,
+    }
+    materialization_key = canonical_hash(materialization_payload)
+    existing = _existing_reference_materialization(db, candidate, materialization_key, content_hash)
+    if existing is not None:
+        candidate.materialized_reference_answer_id = existing.id
         return existing
     version = (
         db.scalar(
@@ -588,17 +797,6 @@ def materialize_reference(
         )
         or 0
     ) + 1
-    value = candidate.teacher_value or {}
-    raw = str(value.get("raw_content", candidate.raw_content or ""))
-    normalized = str(value.get("normalized_content", candidate.normalized_content or raw))
-    structured = value.get("structured_content", candidate.structured_content)
-    payload = {
-        "source_type": candidate.source_type,
-        "raw_content": raw,
-        "normalized_content": normalized,
-        "structured_content": structured,
-        "provenance": candidate.provenance,
-    }
     item = ReferenceAnswerVersion(
         question_id=candidate.question_id,
         source_type=candidate.source_type,
@@ -610,34 +808,92 @@ def materialize_reference(
         raw_content=raw,
         normalized_content=normalized,
         structured_content=structured,
-        content_hash=hashlib.sha256(
-            json.dumps(payload, sort_keys=True, default=str).encode()
-        ).hexdigest(),
+        content_hash=content_hash,
         version=version,
         provenance={
             **candidate.provenance,
-            "teacher_reviewed_by": str(actor_id),
+            (
+                "teacher_reviewed_by" if candidate.reviewed_by is not None else "system_prepared_by"
+            ): str(actor_id),
             "candidate_id": str(candidate.id),
         },
         created_by=actor_id,
         status="draft",
+        origin_answer_candidate_id=candidate.id,
+        materialization_key=materialization_key,
     )
-    db.add(item)
-    db.flush()
+    try:
+        with db.begin_nested():
+            db.add(item)
+            db.flush()
+    except IntegrityError as exc:
+        if not _is_materialization_conflict(
+            exc,
+            {
+                "uq_reference_answer_origin_candidate",
+                "uq_reference_answer_materialization_key",
+            },
+            {"origin_answer_candidate_id", "materialization_key"},
+        ):
+            raise
+        existing = _existing_reference_materialization(
+            db, candidate, materialization_key, content_hash
+        )
+        if existing is None:
+            raise
+        item = existing
     candidate.materialized_reference_answer_id = item.id
     return item
+
+
+def _criterion_validation_mode(
+    candidate: AssignmentRubricDraftCandidate,
+    criterion: AssignmentRubricCriterionDraft,
+) -> str:
+    if candidate.scoring_mode == "manual_only" or criterion.manual_required:
+        return "manual_only"
+    if candidate.scoring_mode == "ai_suggestion":
+        return "ai_suggestion"
+    return "deterministic"
+
+
+def _formal_criterion_type(candidate_type: str) -> str:
+    formal_types = {
+        "result": "final_answer",
+        "method": "method",
+        "step": "intermediate_result",
+        "reasoning": "justification",
+        "proof": "proof_step",
+        "format": "presentation",
+        "unit": "presentation",
+        "precision": "presentation",
+        "other": "method",
+        # Imported or older draft rows can already use the formal vocabulary.
+        "final_answer": "final_answer",
+        "intermediate_result": "intermediate_result",
+        "justification": "justification",
+        "proof_step": "proof_step",
+        "presentation": "presentation",
+    }
+    try:
+        return formal_types[candidate_type]
+    except KeyError:
+        raise ValueError("RUBRIC_CRITERION_TYPE_INVALID") from None
 
 
 def materialize_rubric(
     db: Session, candidate: AssignmentRubricDraftCandidate, actor_id: uuid.UUID
 ) -> StructuredRubricVersion:
-    if candidate.materialized_structured_rubric_id:
-        existing = db.get(StructuredRubricVersion, candidate.materialized_structured_rubric_id)
-        assert existing is not None
-        return existing
     answer = db.get(AssignmentAnswerDraftCandidate, candidate.answer_candidate_id)
-    if answer is None or answer.materialized_reference_answer_id is None:
+    if (
+        answer is None
+        or answer.status not in {"accepted", "modified", "system_prepared"}
+        or answer.materialized_reference_answer_id is None
+    ):
         raise ValueError("ANSWER_CANDIDATE_NOT_ACCEPTED")
+    question = db.get(Question, candidate.question_id)
+    if question is None:
+        raise ValueError("QUESTION_NOT_FOUND")
     criteria = list(
         db.scalars(
             select(AssignmentRubricCriterionDraft)
@@ -652,6 +908,29 @@ def materialize_rubric(
     )
     if not structural.valid or candidate.total_points is None:
         raise ValueError(structural.blocking[0] if structural.blocking else "RUBRIC_SCORE_REQUIRED")
+    reference_answer = db.get(ReferenceAnswerVersion, answer.materialized_reference_answer_id)
+    if reference_answer is None:
+        raise ValueError("MATERIALIZED_REFERENCE_ANSWER_NOT_FOUND")
+    semantic_payload = _rubric_semantic_payload(candidate, criteria, reference_answer.content_hash)
+    content_hash = semantic_hash(semantic_payload)
+    materialization_payload = {
+        "schema": "structured-rubric-materialization-v1",
+        "candidate_id": str(candidate.id),
+        "assignment_id": str(candidate.assignment_id),
+        "draft_revision_id": str(candidate.draft_revision_id),
+        "question_id": str(candidate.question_id),
+        "question_version": candidate.question_version,
+        "source_snapshot_hash": candidate.source_snapshot_hash,
+        "answer_candidate_id": str(candidate.answer_candidate_id),
+        "reference_answer_version_id": str(answer.materialized_reference_answer_id),
+        "teacher_edit_version": candidate.teacher_edit_version,
+        "content_hash": content_hash,
+    }
+    materialization_key = canonical_hash(materialization_payload)
+    existing = _existing_rubric_materialization(db, candidate, materialization_key, content_hash)
+    if existing is not None:
+        candidate.materialized_structured_rubric_id = existing.id
+        return existing
     version = (
         db.scalar(
             select(func.coalesce(func.max(StructuredRubricVersion.rubric_version), 0)).where(
@@ -660,68 +939,72 @@ def materialize_rubric(
         )
         or 0
     ) + 1
-    payload = {
-        "candidate_id": str(candidate.id),
-        "title": candidate.title,
-        "total_points": str(candidate.total_points),
-        "criteria": [item.criterion_key for item in criteria],
-    }
     item = StructuredRubricVersion(
         question_id=candidate.question_id,
-        question_version=candidate.question_version,
+        # Candidate versions also include the question UUID and can exceed the
+        # 100-character storage contract for formal rubric versions.
+        question_version=question_version_token(question),
         reference_answer_version_id=answer.materialized_reference_answer_id,
         rubric_version=version,
         title=candidate.title,
         total_points=candidate.total_points,
         status="draft",
-        content_hash=canonical_hash(payload),
+        content_hash=content_hash,
         created_by=actor_id,
+        origin_rubric_candidate_id=candidate.id,
+        materialization_key=materialization_key,
     )
-    db.add(item)
-    db.flush()
-    formal_types = {
-        "result": "final_answer",
-        "method": "method",
-        "step": "intermediate_result",
-        "reasoning": "justification",
-        "proof": "proof_step",
-        "format": "presentation",
-        "unit": "presentation",
-        "precision": "presentation",
-        "other": "method",
-    }
-    for criterion in criteria:
-        db.add(
-            RubricCriterion(
-                rubric_version_id=item.id,
-                stable_key=criterion.criterion_key,
-                title=criterion.title,
-                description=criterion.description,
-                max_points=criterion.points or Decimal("0"),
-                display_order=criterion.display_order,
-                criterion_type=formal_types[criterion.criterion_type],
-                required=criterion.required,
-                dependencies=criterion.dependency_keys,
-                expected_evidence={"candidate_evidence": criterion.evidence},
-                validation_mode="manual_only"
-                if candidate.scoring_mode == "manual_only" or criterion.manual_required
-                else "deterministic",
-                manual_review_policy={
-                    "required": candidate.manual_required or criterion.manual_required
-                },
-                partial_credit_policy=criterion.partial_credit_rule,
-                error_category=criterion.common_error_codes[0]
-                if criterion.common_error_codes
-                else None,
-                validation_rule=criterion.validation_rule,
-                metadata_={
-                    "alternative_group": criterion.alternative_group,
-                    "deduction_rule": criterion.deduction_rule,
-                    "common_error_codes": criterion.common_error_codes,
-                    "feedback_template": criterion.feedback_template,
-                    "scoring_mode": candidate.scoring_mode,
-                },
-            )
+    try:
+        with db.begin_nested():
+            db.add(item)
+            db.flush()
+            for criterion in criteria:
+                db.add(
+                    RubricCriterion(
+                        rubric_version_id=item.id,
+                        stable_key=criterion.criterion_key,
+                        title=criterion.title,
+                        description=criterion.description,
+                        max_points=criterion.points or Decimal("0"),
+                        display_order=criterion.display_order,
+                        criterion_type=_formal_criterion_type(criterion.criterion_type),
+                        required=criterion.required,
+                        dependencies=criterion.dependency_keys,
+                        expected_evidence={"candidate_evidence": criterion.evidence},
+                        validation_mode=_criterion_validation_mode(candidate, criterion),
+                        manual_review_policy={
+                            "required": candidate.manual_required or criterion.manual_required
+                        },
+                        partial_credit_policy=criterion.partial_credit_rule,
+                        error_category=criterion.common_error_codes[0]
+                        if criterion.common_error_codes
+                        else None,
+                        validation_rule=criterion.validation_rule,
+                        metadata_={
+                            "alternative_group": criterion.alternative_group,
+                            "deduction_rule": criterion.deduction_rule,
+                            "common_error_codes": criterion.common_error_codes,
+                            "feedback_template": criterion.feedback_template,
+                            "scoring_mode": candidate.scoring_mode,
+                        },
+                    )
+                )
+            db.flush()
+    except IntegrityError as exc:
+        if not _is_materialization_conflict(
+            exc,
+            {
+                "uq_structured_rubric_origin_candidate",
+                "uq_structured_rubric_materialization_key",
+            },
+            {"origin_rubric_candidate_id", "materialization_key"},
+        ):
+            raise
+        existing = _existing_rubric_materialization(
+            db, candidate, materialization_key, content_hash
         )
+        if existing is None:
+            raise
+        item = existing
     candidate.materialized_structured_rubric_id = item.id
     return item

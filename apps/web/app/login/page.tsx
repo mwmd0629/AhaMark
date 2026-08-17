@@ -14,11 +14,16 @@ export default function LoginPage() {
     setError("");
     const data = new FormData(event.currentTarget);
     try {
-      await authApi.login(
-        String(data.get("email")),
+      const user = await authApi.login(
+        String(data.get("username")),
         String(data.get("password")),
       );
-      router.replace("/dashboard");
+      const roles = user.roles ?? [];
+      router.replace(
+        roles.includes("student") && !roles.includes("teacher")
+          ? "/student"
+          : "/dashboard",
+      );
     } catch (reason) {
       setError(
         reason instanceof ApiError ? reason.message : "登录失败，请稍后重试",
@@ -31,23 +36,25 @@ export default function LoginPage() {
     <main className="grid min-h-screen place-items-center bg-slate-50 p-4">
       <form
         onSubmit={submit}
+        autoComplete="off"
+        data-form-type="other"
         className="w-full max-w-sm rounded-2xl border bg-white p-7 shadow-sm"
       >
         <div className="mb-6">
           <div className="mb-3 grid h-11 w-11 place-items-center rounded-xl bg-[var(--brand-600)] text-xl font-black text-white">
             A
           </div>
-          <h1 className="text-2xl font-bold">教师登录</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            登录 AhaMark 批改与学情分析平台
-          </p>
+          <h1 className="text-2xl font-bold">登录 AhaMark</h1>
+          <p className="mt-1 text-sm text-slate-500">账号由管理员统一发放</p>
         </div>
         <label className="mb-4 block text-sm font-medium">
-          邮箱
+          用户名
           <input
-            name="email"
-            type="email"
+            name="username"
+            type="text"
             autoComplete="username"
+            data-1p-ignore
+            data-lpignore="true"
             required
             className="mt-1.5 w-full rounded-lg border px-3 py-2.5"
           />
@@ -58,6 +65,8 @@ export default function LoginPage() {
             name="password"
             type="password"
             autoComplete="current-password"
+            data-1p-ignore
+            data-lpignore="true"
             minLength={8}
             required
             className="mt-1.5 w-full rounded-lg border px-3 py-2.5"

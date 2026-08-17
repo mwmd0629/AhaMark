@@ -65,9 +65,18 @@ export function SubmissionSegmentationWorkspace({
   const [job, setJob] = useState<SubmissionProcessingJob>();
   const [pages, setPages] = useState<SubmissionProcessingPage[]>([]);
   const [regions, setRegions] = useState<SubmissionRegionCandidate[]>([]);
+  const [questionIds, setQuestionIds] = useState<string[]>([]);
+  const [questionNumbers, setQuestionNumbers] = useState<
+    Record<string, string>
+  >({});
+  const [incompleteQuestionIds, setIncompleteQuestionIds] = useState<string[]>(
+    [],
+  );
   const [currentPageId, setCurrentPageId] = useState("");
   const [questionId, setQuestionId] = useState("");
   const [showProcessed, setShowProcessed] = useState(true);
+  const [manualMode, setManualMode] = useState(false);
+  const [drawMode, setDrawMode] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [draft, setDraft] = useState<{
     x: number;
@@ -77,52 +86,104 @@ export function SubmissionSegmentationWorkspace({
   }>();
   const startPoint = useRef<{ x: number; y: number } | undefined>(undefined);
   const canvas = useRef<HTMLDivElement>(null);
+  const reloadGeneration = useRef(0);
 
   const reload = useCallback(async () => {
+    const generation = ++reloadGeneration.current;
     const [nextPages, nextRegions, incomplete] = await Promise.all([
       submissionProcessingApi.pages(submissionId),
       submissionProcessingApi.regions(submissionId),
       submissionProcessingApi.incomplete(submissionId),
     ]);
+    if (generation !== reloadGeneration.current) return;
+    const nextQuestionIds = incomplete.questions?.length
+      ? incomplete.questions.map((item) => item.id)
+      : Array.from(
+          new Set([
+            ...nextRegions.map((item) => item.question_id),
+            ...incomplete.question_ids,
+          ]),
+        );
+    setQuestionNumbers(
+      Object.fromEntries([
+        ...(incomplete.questions ?? []).map((item) => [
+          item.id,
+          item.question_number,
+        ]),
+        ...nextRegions
+          .filter((item) => item.question_number)
+          .map((item) => [item.question_id, item.question_number!]),
+      ]),
+    );
     setPages(nextPages);
     setRegions(nextRegions);
-    setCurrentPageId((old) => old || nextPages[0]?.id || "");
-    setQuestionId(
-      (old) =>
-        old || incomplete.question_ids[0] || nextRegions[0]?.question_id || "",
+    setIncompleteQuestionIds(incomplete.question_ids);
+    setQuestionIds(nextQuestionIds);
+    setCurrentPageId((old) =>
+      old && nextPages.some((item) => item.id === old)
+        ? old
+        : (nextPages[0]?.id ?? ""),
+    );
+    setQuestionId((old) =>
+      old && nextQuestionIds.includes(old) ? old : (nextQuestionIds[0] ?? ""),
     );
   }, [submissionId]);
 
   useEffect(() => {
     void reload();
+    return () => {
+      reloadGeneration.current += 1;
+    };
   }, [reload]);
 
   useEffect(() => {
     if (!job || terminal.has(job.status)) return;
+    let cancelled = false;
     const timer = window.setInterval(async () => {
       const next = await submissionProcessingApi.job(submissionId, job.id);
+      if (cancelled) return;
       setJob(next);
       if (terminal.has(next.status)) await reload();
     }, 1500);
-    return () => window.clearInterval(timer);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [job, reload, submissionId]);
+
+  useEffect(() => {
+    startPoint.current = undefined;
+    setDraft(undefined);
+    setDrawMode(false);
+  }, [currentPageId, questionId, manualMode]);
 
   const page = pages.find((item) => item.id === currentPageId) ?? pages[0];
   const pageRegions = useMemo(
     () => regions.filter((item) => item.submission_page_id === page?.id),
     [page?.id, regions],
   );
-  const questionIds = Array.from(
-    new Set(regions.map((item) => item.question_id)),
+  const allConfirmed =
+    regions.length > 0 &&
+    incompleteQuestionIds.length === 0 &&
+    regions.every((item) => item.status === "confirmed");
+  const candidateCount = regions.filter(
+    (item) => item.status === "candidate",
+  ).length;
+  const hasPageIssues = pages.some(
+    (item) =>
+      item.processing_status === "failed" ||
+      item.processing_status === "partially_completed" ||
+      item.quality.warnings.length > 0,
   );
-  const questionNumberById = new Map(
-    regions
-      .filter((item) => item.question_number)
-      .map((item) => [item.question_id, item.question_number]),
-  );
-  if (questionId && !questionIds.includes(questionId))
-    questionIds.push(questionId);
-
+  const showEditor = manualMode || !allConfirmed;
+  const showPageNavigation = pages.length > 1 || hasPageIssues;
+  const selectedQuestionLabel = questionNumbers[questionId]
+    ? `第 ${questionNumbers[questionId]} 题`
+    : "当前题目";
+  async function removeRegion(regionId: string) {
+    await submissionProcessingApi.removeRegion(submissionId, regionId);
+    await reload();
+  }
   function point(event: React.PointerEvent<HTMLDivElement>) {
     const rect = canvas.current!.getBoundingClientRect();
     return {
@@ -138,34 +199,51 @@ export function SubmissionSegmentationWorkspace({
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h3 className="font-semibold">答卷页面处理与题目切分</h3>
+          <h3 className="font-semibold">答卷切题</h3>
           <p className="text-xs text-slate-600">
-            只对教师确认区域运行后续 OCR；不会按页码推断题号。
+            {allConfirmed
+              ? `已自动完成 ${regions.length} 道题的切分`
+              : "请处理下方标出的异常或待确认区域"}
           </p>
         </div>
-        <div className="flex gap-2">
-          <Button
-            variant="outline"
-            disabled={!!job && !terminal.has(job.status)}
-            onClick={async () =>
-              setJob(await submissionProcessingApi.start(submissionId))
-            }
-          >
-            {job && !terminal.has(job.status) ? "自动切题中" : "处理并自动切题"}
-          </Button>
-          <Button
-            variant="outline"
-            onClick={async () => {
-              await submissionProcessingApi.confirmHighConfidence(submissionId);
-              await reload();
-            }}
-          >
-            确认高置信度区域
-          </Button>
-        </div>
+        {showEditor && (
+          <div className="flex gap-2">
+            <Button
+              data-testid="submission-processing-start"
+              variant="outline"
+              disabled={!!job && !terminal.has(job.status)}
+              onClick={async () =>
+                setJob(await submissionProcessingApi.start(submissionId))
+              }
+            >
+              {job && !terminal.has(job.status) ? "自动切题中" : "重新自动切题"}
+            </Button>
+            {candidateCount > 0 && (
+              <Button
+                data-testid="submission-confirm-high-confidence"
+                variant="outline"
+                onClick={async () => {
+                  await submissionProcessingApi.confirmHighConfidence(
+                    submissionId,
+                  );
+                  await reload();
+                }}
+              >
+                确认待确认区域
+              </Button>
+            )}
+          </div>
+        )}
       </div>
-      {job && (
-        <div className="rounded-lg bg-slate-50 p-2 text-sm">
+      {job && (!terminal.has(job.status) || job.status !== "completed") && (
+        <div
+          className="rounded-lg bg-slate-50 p-2 text-sm"
+          data-testid="submission-processing-job"
+          data-job-id={job.id}
+          data-status={job.status}
+          data-stage={job.stage}
+          data-progress={job.progress}
+        >
           <Badge status={job.status} />{" "}
           {processingStageLabels[job.stage] ?? job.stage} · {job.progress}%
           {job.error_code && (
@@ -174,88 +252,108 @@ export function SubmissionSegmentationWorkspace({
         </div>
       )}
       {!!pages.length && (
-        <div className="grid gap-3 lg:grid-cols-[9rem_minmax(0,1fr)_15rem]">
-          <nav aria-label="答卷页面缩略图" className="space-y-2">
-            {pages.map((item) => (
-              <div
-                key={item.id}
-                className={`w-full rounded-lg border p-2 text-left text-xs ${
-                  item.id === page?.id ? "border-blue-500" : ""
-                }`}
-              >
-                <button
-                  className="w-full text-left"
-                  onClick={() => setCurrentPageId(item.id)}
+        <div
+          className={`grid gap-3 ${
+            showPageNavigation
+              ? "lg:grid-cols-[9rem_minmax(0,1fr)_15rem]"
+              : "lg:grid-cols-[minmax(0,1fr)_15rem]"
+          }`}
+        >
+          {showPageNavigation && (
+            <nav aria-label="答卷页面缩略图" className="space-y-2">
+              {pages.map((item) => (
+                <div
+                  key={item.id}
+                  className={`w-full rounded-lg border p-2 text-left text-xs ${
+                    item.id === page?.id ? "border-blue-500" : ""
+                  }`}
+                  data-testid="submission-processing-page"
+                  data-page-id={item.id}
+                  data-page-number={item.page_number}
+                  data-status={item.processing_status}
                 >
-                  第 {item.page_number} 页 ·{" "}
-                  {processingStatusLabels[item.processing_status] ??
-                    item.processing_status}
-                  {item.thumbnail_url && (
-                    // Signed object URLs are runtime-generated and intentionally unoptimized.
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      className="mt-1 w-full"
-                      alt={`第 ${item.page_number} 页`}
-                      src={item.thumbnail_url}
-                    />
-                  )}
-                  {item.quality.warnings.map((warning) => (
-                    <span key={warning} className="mt-1 block text-amber-700">
-                      {qualityWarningLabels[warning] ?? warning}
-                    </span>
-                  ))}
-                </button>
-                {item.processing_status === "failed" &&
-                  item.retryable &&
-                  job && (
-                    <Button
-                      variant="outline"
-                      onClick={async (event) => {
-                        event.stopPropagation();
-                        setJob(
-                          await submissionProcessingApi.retryPage(
-                            submissionId,
-                            job.id,
-                            item.id,
-                          ),
-                        );
-                      }}
-                    >
-                      重新处理
-                    </Button>
-                  )}
-              </div>
-            ))}
-          </nav>
+                  <button
+                    className="w-full text-left"
+                    onClick={() => setCurrentPageId(item.id)}
+                  >
+                    第 {item.page_number} 页 ·{" "}
+                    {processingStatusLabels[item.processing_status] ??
+                      item.processing_status}
+                    {item.thumbnail_url && (
+                      // Signed object URLs are runtime-generated and intentionally unoptimized.
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        className="mt-1 w-full"
+                        alt={`第 ${item.page_number} 页`}
+                        src={item.thumbnail_url}
+                      />
+                    )}
+                    {item.quality.warnings.map((warning) => (
+                      <span key={warning} className="mt-1 block text-amber-700">
+                        {qualityWarningLabels[warning] ?? warning}
+                      </span>
+                    ))}
+                  </button>
+                  {item.processing_status === "failed" &&
+                    item.retryable &&
+                    job && (
+                      <Button
+                        variant="outline"
+                        onClick={async (event) => {
+                          event.stopPropagation();
+                          setJob(
+                            await submissionProcessingApi.retryPage(
+                              submissionId,
+                              job.id,
+                              item.id,
+                            ),
+                          );
+                        }}
+                      >
+                        重新处理
+                      </Button>
+                    )}
+                </div>
+              ))}
+            </nav>
+          )}
           <section className="min-w-0">
-            <div className="mb-2 flex flex-wrap gap-2">
-              <Button variant="outline" onClick={() => setShowProcessed(false)}>
-                原图
-              </Button>
-              <Button variant="outline" onClick={() => setShowProcessed(true)}>
-                处理图
-              </Button>
+            <div className="mb-2 flex flex-wrap items-center gap-2 text-sm">
               <Button
                 variant="outline"
-                onClick={() => setZoom((value) => Math.min(2, value + 0.25))}
+                onClick={() => setShowProcessed((value) => !value)}
               >
-                放大
+                {showProcessed ? "查看原图" : "查看处理图"}
               </Button>
               <Button
                 variant="outline"
+                aria-label="缩小"
                 onClick={() => setZoom((value) => Math.max(0.5, value - 0.25))}
               >
-                缩小
+                −
+              </Button>
+              <span>{Math.round(zoom * 100)}%</span>
+              <Button
+                variant="outline"
+                aria-label="放大"
+                onClick={() => setZoom((value) => Math.min(2, value + 0.25))}
+              >
+                +
               </Button>
             </div>
             <div className="overflow-auto rounded-lg border bg-slate-100">
               <div
                 ref={canvas}
                 aria-label="框选题目区域"
-                className="relative touch-none select-none"
+                data-testid="submission-region-canvas"
+                data-page-id={page?.id}
+                className={`relative touch-none select-none ${
+                  drawMode ? "cursor-crosshair" : "cursor-default"
+                }`}
+                data-draw-enabled={drawMode ? "true" : "false"}
                 style={{ width: `${zoom * 100}%` }}
                 onPointerDown={(event) => {
-                  if (!page || !questionId) return;
+                  if (!showEditor || !drawMode || !page || !questionId) return;
                   startPoint.current = point(event);
                   setDraft({ ...startPoint.current, width: 0, height: 0 });
                   event.currentTarget.setPointerCapture(event.pointerId);
@@ -293,6 +391,7 @@ export function SubmissionSegmentationWorkspace({
                   });
                   startPoint.current = undefined;
                   setDraft(undefined);
+                  setDrawMode(false);
                   await reload();
                   target.releasePointerCapture(pointerId);
                 }}
@@ -314,11 +413,24 @@ export function SubmissionSegmentationWorkspace({
                 {[
                   ...pageRegions,
                   ...(draft
-                    ? [{ ...draft, id: "draft", status: "candidate" as const }]
+                    ? [
+                        {
+                          ...draft,
+                          id: "draft",
+                          question_id: questionId,
+                          question_number: questionNumbers[questionId],
+                          status: "candidate" as const,
+                        },
+                      ]
                     : []),
                 ].map((region) => (
                   <div
                     key={region.id}
+                    aria-label={`${
+                      region.question_number
+                        ? `第 ${region.question_number} 题`
+                        : "题目"
+                    }框选区域`}
                     className={`absolute border-2 ${
                       region.status === "confirmed"
                         ? "border-emerald-600 bg-emerald-300/20"
@@ -332,191 +444,232 @@ export function SubmissionSegmentationWorkspace({
                       width: `${Number(region.width) * 100}%`,
                       height: `${Number(region.height) * 100}%`,
                     }}
-                  />
+                  >
+                    <span className="absolute left-0 top-0 bg-slate-900/80 px-1.5 py-0.5 text-xs font-semibold text-white">
+                      {region.question_number
+                        ? `第 ${region.question_number} 题`
+                        : "题目"}
+                    </span>
+                    {showEditor && region.id !== "draft" && (
+                      <button
+                        type="button"
+                        data-testid="submission-region-overlay-delete"
+                        data-region-id={region.id}
+                        aria-label={`删除${
+                          region.question_number
+                            ? `第 ${region.question_number} 题`
+                            : "当前题目"
+                        }的这个框选区域`}
+                        className="absolute right-0 top-0 rounded-bl bg-red-700 px-2 py-1 text-xs font-semibold text-white shadow hover:bg-red-800"
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={async (event) => {
+                          event.stopPropagation();
+                          await removeRegion(region.id);
+                        }}
+                      >
+                        删除此框
+                      </button>
+                    )}
+                  </div>
                 ))}
               </div>
             </div>
           </section>
           <aside className="space-y-2 text-sm">
-            {page && (
-              <div
-                className="space-y-2 rounded-lg border bg-slate-50 p-3"
-                data-testid="page-quality"
-              >
-                <strong>页面质量与方向</strong>
-                <dl className="grid grid-cols-2 gap-x-2 gap-y-1 text-xs">
-                  <dt className="text-slate-500">页面尺寸</dt>
-                  <dd>
-                    {page.width ?? "—"} × {page.height ?? "—"}
-                  </dd>
-                  <dt className="text-slate-500">当前旋转</dt>
-                  <dd>{page.rotation}°</dd>
-                  <dt className="text-slate-500">方向置信度</dt>
-                  <dd>
-                    {page.quality.orientation_confidence == null
-                      ? "未检测"
-                      : `${Math.round(
-                          Number(page.quality.orientation_confidence) * 100,
-                        )}%`}
-                  </dd>
-                  <dt className="text-slate-500">清晰度</dt>
-                  <dd>
-                    {page.quality.blur_score == null
-                      ? "未检测"
-                      : Number(page.quality.blur_score).toFixed(1)}
-                  </dd>
-                  <dt className="text-slate-500">亮度</dt>
-                  <dd>
-                    {page.quality.brightness == null
-                      ? "未检测"
-                      : Number(page.quality.brightness).toFixed(1)}
-                  </dd>
-                  <dt className="text-slate-500">对比度</dt>
-                  <dd>
-                    {page.quality.contrast == null
-                      ? "未检测"
-                      : Number(page.quality.contrast).toFixed(1)}
-                  </dd>
-                  <dt className="text-slate-500">空白概率</dt>
-                  <dd>
-                    {page.quality.blank_probability == null
-                      ? "未检测"
-                      : `${Math.round(
-                          Number(page.quality.blank_probability) * 100,
-                        )}%`}
-                  </dd>
-                </dl>
-                {page.quality.duplicate_of_page_id && (
-                  <p className="text-xs text-amber-700">
-                    疑似与另一页重复，请对照后决定是否保留。
-                  </p>
-                )}
-                {page.quality.warnings.length > 0 && (
-                  <ul className="list-inside list-disc text-xs text-amber-700">
-                    {page.quality.warnings.map((warning) => (
-                      <li key={warning}>
-                        {qualityWarningLabels[warning] ?? warning}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                <div className="flex flex-wrap gap-1">
-                  <Button
-                    variant="outline"
-                    onClick={async () => {
-                      setJob(
-                        await submissionProcessingApi.rotatePage(
-                          submissionId,
-                          page.id,
-                          -90,
-                        ),
-                      );
-                    }}
-                  >
-                    向左旋转
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={async () => {
-                      setJob(
-                        await submissionProcessingApi.rotatePage(
-                          submissionId,
-                          page.id,
-                          90,
-                        ),
-                      );
-                    }}
-                  >
-                    向右旋转
-                  </Button>
+            <div
+              className="rounded-lg border bg-emerald-50 p-3"
+              data-testid="submission-segmentation-summary"
+            >
+              <strong>{allConfirmed ? "切题已完成" : "需要检查"}</strong>
+              <p className="mt-1 text-xs text-slate-600">
+                {allConfirmed
+                  ? `${regions.length} 道题已匹配，可继续识别答案。`
+                  : `${incompleteQuestionIds.length} 道题尚未完成切分。`}
+              </p>
+              {allConfirmed && (
+                <Button
+                  data-testid="submission-adjust-segmentation"
+                  variant="outline"
+                  onClick={() => setManualMode((value) => !value)}
+                >
+                  {manualMode ? "收起调整" : "调整切题"}
+                </Button>
+              )}
+            </div>
+            {page &&
+              (manualMode ||
+                page.processing_status === "failed" ||
+                page.quality.warnings.length > 0) && (
+                <div
+                  className="space-y-2 rounded-lg border bg-slate-50 p-3"
+                  data-testid="page-quality"
+                >
+                  <strong>
+                    {page.quality.warnings.length ? "页面需要注意" : "页面调整"}
+                  </strong>
+                  {page.quality.duplicate_of_page_id && (
+                    <p className="text-xs text-amber-700">
+                      疑似与另一页重复，请对照后决定是否保留。
+                    </p>
+                  )}
+                  {page.quality.warnings.length > 0 && (
+                    <ul className="list-inside list-disc text-xs text-amber-700">
+                      {page.quality.warnings.map((warning) => (
+                        <li key={warning}>
+                          {qualityWarningLabels[warning] ?? warning}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {manualMode && (
+                    <div className="flex flex-wrap gap-1">
+                      <Button
+                        variant="outline"
+                        onClick={async () => {
+                          setJob(
+                            await submissionProcessingApi.rotatePage(
+                              submissionId,
+                              page.id,
+                              -90,
+                            ),
+                          );
+                        }}
+                      >
+                        向左旋转
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={async () => {
+                          setJob(
+                            await submissionProcessingApi.rotatePage(
+                              submissionId,
+                              page.id,
+                              90,
+                            ),
+                          );
+                        }}
+                      >
+                        向右旋转
+                      </Button>
+                    </div>
+                  )}
                 </div>
-                <p className="text-xs text-slate-500">
-                  手动旋转后只重新处理当前页，并使相关识别与评分进入待复核状态。
+              )}
+            {showEditor && (
+              <div className="space-y-2 rounded-lg border p-2">
+                <label className="grid gap-1">
+                  框选归属题目
+                  <select
+                    data-testid="submission-question-select"
+                    className="rounded-lg border p-2"
+                    value={questionId}
+                    onChange={(event) => setQuestionId(event.target.value)}
+                  >
+                    {questionIds.map((id) => (
+                      <option key={id} value={id}>
+                        {questionNumbers[id]
+                          ? `第 ${questionNumbers[id]} 题`
+                          : id}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <Button
+                  data-testid="submission-region-draw-toggle"
+                  variant="outline"
+                  disabled={!page || !questionId}
+                  onClick={() => setDrawMode((value) => !value)}
+                >
+                  {drawMode ? "退出框选" : "开始框选"}
+                </Button>
+                <p className="text-xs text-slate-600">
+                  {drawMode
+                    ? `正在框选${selectedQuestionLabel}，请在左侧图片上拖动。完成一次后会自动关闭。`
+                    : `当前选择：${selectedQuestionLabel}。点击开始后再到左侧图片拖动。`}
                 </p>
               </div>
             )}
-            <label className="grid gap-1">
-              框选后分配给题目
-              <select
-                className="rounded-lg border p-2"
-                value={questionId}
-                onChange={(event) => setQuestionId(event.target.value)}
-              >
-                {questionIds.map((id) => (
-                  <option key={id} value={id}>
-                    {questionNumberById.get(id)
-                      ? `第 ${questionNumberById.get(id)} 题`
-                      : id}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {pageRegions.map((region) => (
-              <div key={region.id} className="rounded-lg border p-2">
-                <strong>
-                  {region.question_number
-                    ? `第 ${region.question_number} 题`
-                    : region.question_id}
-                </strong>
-                <div>
-                  {regionSourceLabels[region.source] ?? region.source} ·{" "}
-                  {regionStatusLabels[region.status] ?? region.status} ·{" "}
-                  {region.confidence == null
-                    ? "无置信度"
-                    : `${Math.round(Number(region.confidence) * 100)}%`}
-                </div>
-                {region.reason && (
-                  <div className="text-amber-700">
-                    {regionReasonLabels[region.reason] ?? region.reason}
+            {showEditor &&
+              pageRegions.map((region) => (
+                <div
+                  key={region.id}
+                  className="rounded-lg border p-2"
+                  data-testid="submission-region-card"
+                  data-region-id={region.id}
+                  data-question-id={region.question_id}
+                  data-page-id={region.submission_page_id}
+                  data-status={region.status}
+                >
+                  <strong>
+                    {region.question_number
+                      ? `第 ${region.question_number} 题`
+                      : region.question_id}
+                  </strong>
+                  <div>
+                    {regionStatusLabels[region.status] ?? region.status}
                   </div>
-                )}
-                <div className="mt-1 flex gap-1">
                   {region.status !== "confirmed" && (
-                    <Button
-                      variant="outline"
-                      onClick={async () => {
-                        await submissionProcessingApi.updateRegion(
-                          submissionId,
-                          region.id,
-                          {
-                            question_id: region.question_id,
-                            submission_page_id: region.submission_page_id,
-                            x: Number(region.x),
-                            y: Number(region.y),
-                            width: Number(region.width),
-                            height: Number(region.height),
-                            source: region.source as
-                              "manual" | "template" | "ocr" | "alignment",
-                            confidence:
-                              region.confidence == null
-                                ? undefined
-                                : Number(region.confidence),
-                            status: "confirmed",
-                            reason: region.reason,
-                          },
-                        );
-                        await reload();
-                      }}
-                    >
-                      确认
-                    </Button>
+                    <div className="text-xs text-slate-500">
+                      {regionSourceLabels[region.source] ?? region.source}
+                      {region.confidence == null
+                        ? ""
+                        : ` · ${Math.round(Number(region.confidence) * 100)}%`}
+                    </div>
                   )}
-                  <Button
-                    variant="danger"
-                    onClick={async () => {
-                      await submissionProcessingApi.removeRegion(
-                        submissionId,
-                        region.id,
-                      );
-                      await reload();
-                    }}
-                  >
-                    删除
-                  </Button>
+                  {region.status !== "confirmed" && region.reason && (
+                    <div className="text-amber-700">
+                      {regionReasonLabels[region.reason] ?? region.reason}
+                    </div>
+                  )}
+                  <div className="mt-1 flex gap-1">
+                    {region.status !== "confirmed" && (
+                      <Button
+                        data-testid="submission-region-confirm"
+                        data-region-id={region.id}
+                        variant="outline"
+                        onClick={async () => {
+                          await submissionProcessingApi.updateRegion(
+                            submissionId,
+                            region.id,
+                            {
+                              question_id: region.question_id,
+                              submission_page_id: region.submission_page_id,
+                              x: Number(region.x),
+                              y: Number(region.y),
+                              width: Number(region.width),
+                              height: Number(region.height),
+                              source: region.source as
+                                "manual" | "template" | "ocr" | "alignment",
+                              confidence:
+                                region.confidence == null
+                                  ? undefined
+                                  : Number(region.confidence),
+                              status: "confirmed",
+                              reason: region.reason,
+                            },
+                          );
+                          await reload();
+                        }}
+                      >
+                        确认
+                      </Button>
+                    )}
+                    {(manualMode || region.status !== "confirmed") && (
+                      <Button
+                        data-testid="submission-region-delete"
+                        data-region-id={region.id}
+                        variant="danger"
+                        onClick={async () => {
+                          await removeRegion(region.id);
+                        }}
+                      >
+                        删除
+                      </Button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
-            {!pageRegions.length && (
+              ))}
+            {showEditor && !pageRegions.length && (
               <p className="text-amber-700">需要人工切题</p>
             )}
           </aside>

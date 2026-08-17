@@ -8,15 +8,19 @@ from app.core.config import get_settings
 from app.main import app
 from app.models import (
     AnalyticsSnapshot,
+    Assignment,
     ClassStudent,
     GradeRelease,
     GradeReleaseItem,
     GradingResult,
     MembershipStatus,
+    Question,
+    ReferenceAnswerVersion,
     ReportJob,
-    RubricVersion,
     ScoreRevision,
     StoredFile,
+    StructuredRubricSet,
+    StructuredRubricVersion,
     Student,
     StudentAnswer,
     Submission,
@@ -24,13 +28,13 @@ from app.models import (
     SubmissionPage,
     SubmissionScoreSnapshot,
     TeachingInsight,
-    VersionStatus,
     now_utc,
 )
 from app.results.services import FinalScoreService, release_scores
 from app.storage.dependencies import get_storage
 from sqlalchemy import func, select
-from test_submission_workflow import client, png, workflow
+from structured_rubric_support import activate_structured_rubric_set
+from test_submission_workflow import client, confirm_answer_regions, png, workflow
 
 
 @pytest.mark.parametrize(
@@ -134,8 +138,17 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
     db, _storage, batch_id, submission_id, question_id = workflow()
     settings = get_settings()
     previous_provider = settings.recognition_provider
+    previous_answer_provider = settings.answer_recognition_provider
     settings.recognition_provider = "fake"
+    settings.answer_recognition_provider = "fake"
     try:
+        processing = client.post(
+            f"/api/submissions/{submission_id}/processing-jobs?run_now=true",
+            json={"idempotency_key": "exceptions-versioning-processing"},
+        )
+        assert processing.status_code == 201, processing.text
+        assert processing.json()["status"] == "completed"
+        confirm_answer_regions(db, submission_id)
         recognition = client.post(
             f"/api/submissions/{submission_id}/recognition-jobs?run_now=true",
             json={"idempotency_key": "exceptions-versioning-ocr"},
@@ -145,6 +158,11 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
             select(StudentAnswer).where(StudentAnswer.submission_id == submission_id)
         )
         assert answer is not None
+        corrected = client.patch(
+            f"/api/student-answers/{answer.id}",
+            json={"corrected_text": "1. 测试题"},
+        )
+        assert corrected.status_code == 200, corrected.text
         answer.status, answer.requires_review = "ready_for_grading", False
         db.commit()
 
@@ -155,24 +173,27 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
             json={"decision": "accepted"},
         )
         assert review_v1.status_code == 200
-        snapshot_v1 = client.post(f"/api/submissions/{submission_id}/finalize")
-        assert snapshot_v1.status_code == 200
-        assert snapshot_v1.json()["status"] == "complete"
-        assert snapshot_v1.json()["version"] == 1
-        assert snapshot_v1.json()["total_score"] == "10.00"
-        snapshot_v1_details = copy.deepcopy(snapshot_v1.json()["details"])
-
         submission = db.get(Submission, submission_id)
         assert submission is not None
-        release_v1 = client.post(
-            "/api/grade-releases",
+        readiness_v1 = client.get(f"/api/grading-batches/{batch_id}/confirm-results/readiness")
+        assert readiness_v1.status_code == 200 and readiness_v1.json()["ready"] is True
+        confirm_v1 = client.post(
+            f"/api/grading-batches/{batch_id}/confirm-results",
             json={
-                "assignment_id": str(submission.assignment_id),
-                "class_id": str(submission.class_id),
                 "idempotency_key": "exceptions-release-v1",
+                "expected_review_hash": readiness_v1.json()["review_hash"],
             },
         )
-        assert release_v1.status_code == 201, release_v1.text
+        assert confirm_v1.status_code == 201, confirm_v1.text
+        snapshot_v1_id = confirm_v1.json()["snapshot_ids"][0]
+        stored_snapshot_v1 = db.get(SubmissionScoreSnapshot, uuid.UUID(snapshot_v1_id))
+        assert stored_snapshot_v1 is not None
+        assert stored_snapshot_v1.status == "complete"
+        assert stored_snapshot_v1.version == 1
+        assert stored_snapshot_v1.total_score == Decimal("10")
+        snapshot_v1_details = copy.deepcopy(stored_snapshot_v1.details)
+        release_v1 = client.get(f"/api/grade-releases/{confirm_v1.json()['grade_release_id']}")
+        assert release_v1.status_code == 200
         analytics_v1 = client.post(f"/api/grade-releases/{release_v1.json()['id']}/analytics")
         assert analytics_v1.status_code == 201
         metrics_v1 = copy.deepcopy(analytics_v1.json()["metrics"])
@@ -203,6 +224,18 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
         assert confirmed.status_code == 200 and confirmed.json()["status"] == "confirmed"
         confirmed_content = copy.deepcopy(confirmed.json()["content"])
 
+        reopened = client.post(
+            f"/api/submissions/{submission_id}/reopen",
+            json={"reason": "第三部分版本一致性测试：创建新的成绩版本"},
+        )
+        assert reopened.status_code == 200, reopened.text
+        assert reopened.json()["previous_snapshot_id"] == snapshot_v1_id
+
+        db.expire_all()
+        release_1_model = db.get(GradeRelease, uuid.UUID(release_v1.json()["id"]))
+        assert release_1_model is not None
+        assert release_scores(db, release_1_model.id)[0].payload.total_score == Decimal("10")
+
         review_v2 = client.put(
             f"/api/student-answers/{answer.id}/review",
             json={
@@ -210,29 +243,56 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
                 "final_score": 8,
                 "final_feedback": "合成改分",
                 "reason": "第三部分版本一致性测试",
+                "expected_review_version": review_v1.json()["review_version"],
             },
         )
         assert review_v2.status_code == 200
-        snapshot_v2 = client.post(f"/api/submissions/{submission_id}/finalize")
-        assert snapshot_v2.status_code == 200
-        assert snapshot_v2.json()["status"] == "complete"
-        assert snapshot_v2.json()["version"] == 2
-        assert snapshot_v2.json()["total_score"] == "8.00"
         assert db.scalar(select(func.count()).select_from(ScoreRevision)) == 1
 
-        release_v2 = client.post(
-            "/api/grade-releases",
+        readiness_v2 = client.get(f"/api/grading-batches/{batch_id}/confirm-results/readiness")
+        assert readiness_v2.status_code == 200 and readiness_v2.json()["ready"] is True
+        confirm_v2 = client.post(
+            f"/api/grading-batches/{batch_id}/confirm-results",
             json={
-                "assignment_id": str(submission.assignment_id),
-                "class_id": str(submission.class_id),
                 "idempotency_key": "exceptions-release-v2",
+                "expected_review_hash": readiness_v2.json()["review_hash"],
             },
         )
-        assert release_v2.status_code == 201
+        assert confirm_v2.status_code == 201, confirm_v2.text
+        snapshot_v2_id = confirm_v2.json()["snapshot_ids"][0]
+        stored_snapshot_v2 = db.get(SubmissionScoreSnapshot, uuid.UUID(snapshot_v2_id))
+        assert stored_snapshot_v2 is not None
+        assert stored_snapshot_v2.status == "complete"
+        assert stored_snapshot_v2.version == 2
+        assert stored_snapshot_v2.total_score == Decimal("8")
+        release_v2 = client.get(f"/api/grade-releases/{confirm_v2.json()['grade_release_id']}")
+        assert release_v2.status_code == 200
         analytics_v2 = client.post(f"/api/grade-releases/{release_v2.json()['id']}/analytics")
         assert analytics_v2.status_code == 201
         assert analytics_v2.json()["metrics"]["average_score"] == 8
 
+        question = db.get(Question, uuid.UUID(question_id))
+        assert question is not None
+        original_question_metadata = (
+            question.question_number,
+            question.question_type,
+            question.max_score,
+        )
+        question.question_number = "renumbered-after-release"
+        question.question_type = "subjective"
+        question.max_score = Decimal("12")
+        db.flush()
+        assert release_scores(db, uuid.UUID(release_v1.json()["id"]))[
+            0
+        ].payload.total_score == Decimal("10")
+        (
+            question.question_number,
+            question.question_type,
+            question.max_score,
+        ) = original_question_metadata
+        db.commit()
+
+        db.expire_all()
         release_1_model = db.get(GradeRelease, uuid.UUID(release_v1.json()["id"]))
         release_2_model = db.get(GradeRelease, uuid.UUID(release_v2.json()["id"]))
         assert release_1_model is not None and release_2_model is not None
@@ -243,11 +303,11 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
             select(GradeReleaseItem).where(GradeReleaseItem.grade_release_id == release_2_model.id)
         )
         assert item_v1 is not None and item_v2 is not None
-        assert str(item_v1.score_snapshot_id) == snapshot_v1.json()["id"]
-        assert str(item_v2.score_snapshot_id) == snapshot_v2.json()["id"]
+        assert str(item_v1.score_snapshot_id) == snapshot_v1_id
+        assert str(item_v2.score_snapshot_id) == snapshot_v2_id
         assert release_scores(db, release_1_model.id)[0].payload.total_score == Decimal("10")
         assert release_scores(db, release_2_model.id)[0].payload.total_score == Decimal("8")
-        stored_v1 = db.get(SubmissionScoreSnapshot, uuid.UUID(snapshot_v1.json()["id"]))
+        stored_v1 = db.get(SubmissionScoreSnapshot, uuid.UUID(snapshot_v1_id))
         assert stored_v1 is not None and stored_v1.details == snapshot_v1_details
         old_analytics = db.get(AnalyticsSnapshot, uuid.UUID(analytics_v1.json()["id"]))
         assert old_analytics is not None and old_analytics.metrics == metrics_v1
@@ -305,29 +365,54 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
         assert expired_download.status_code == 409
         assert expired_download.json()["code"] == "REPORT_JOB_EXPIRED"
 
-        assignment = client.get(f"/api/assignments/{submission.assignment_id}").json()
-        rubric_change = client.put(
-            f"/api/assignments/{submission.assignment_id}/rubrics/{question_id}",
-            json={
-                "standard_answer": "修订后的合成答案",
-                "items": [{"title": "修订评分点", "points": 10}],
-            },
-        )
-        assert rubric_change.status_code == 200
-        assert (
-            rubric_change.json()["rubric_version"]["version"]
-            == assignment["rubric_version"]["version"] + 1
-        )
-        db.refresh(answer)
-        assert answer.status == "stale" and answer.requires_review is True
+        assignment_model = db.get(Assignment, submission.assignment_id)
+        assert assignment_model is not None
+        assert assignment_model.active_structured_rubric_set_id is not None
+        old_set = db.get(StructuredRubricSet, assignment_model.active_structured_rubric_set_id)
+        assert old_set is not None
         old_result = db.get(GradingResult, uuid.UUID(grade_v1.json()["id"]))
-        assert old_result is not None and old_result.status == "stale"
+        assert old_result is not None
+        old_answer_status = answer.status
+        old_result_status = old_result.status
+        answer_version = (
+            db.scalar(
+                select(func.max(ReferenceAnswerVersion.version)).where(
+                    ReferenceAnswerVersion.question_id == uuid.UUID(question_id)
+                )
+            )
+            or 0
+        ) + 1
+        rubric_version = (
+            db.scalar(
+                select(func.max(StructuredRubricVersion.rubric_version)).where(
+                    StructuredRubricVersion.question_id == uuid.UUID(question_id)
+                )
+            )
+            or 0
+        ) + 1
+        changed_set, _items = activate_structured_rubric_set(
+            db,
+            assignment_model,
+            [question],
+            actor_id=assignment_model.owner_id,
+            answers={question.id: "synthetic revised reference answer"},
+            set_version=old_set.version + 1,
+            answer_version=answer_version,
+            rubric_version=rubric_version,
+        )
+        assert changed_set.id != old_set.id
+        db.refresh(answer)
+        db.refresh(old_result)
+        assert answer.status == old_answer_status
+        assert old_result.status == old_result_status
+        assert stored_snapshot_v1.structured_rubric_set_id == old_set.id
+        assert stored_snapshot_v2.structured_rubric_set_id == old_set.id
         stale_accept = client.put(
             f"/api/student-answers/{answer.id}/review",
             json={"decision": "accepted"},
         )
         assert stale_accept.status_code == 409
-        assert stale_accept.json()["code"] == "GRADING_RESULT_STALE"
+        assert stale_accept.json()["code"] == "SUBMISSION_FINALIZED"
         republish = client.post(f"/api/assignments/{submission.assignment_id}/publish")
         # A published assignment cannot bypass the new readiness contract.
         # Re-publication requires a fresh teacher review flow rather than
@@ -337,38 +422,59 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
             client.get(f"/api/assignments/{submission.assignment_id}").json()["status"]
             == "published"
         )
-        # Continue this legacy downstream versioning fixture with an explicitly
-        # confirmed rubric; production confirmation now occurs through review.
-        changed_rubric = db.get(
-            RubricVersion, uuid.UUID(rubric_change.json()["rubric_version"]["id"])
-        )
-        assert changed_rubric is not None
-        changed_rubric.status = VersionStatus.confirmed
-        changed_rubric.confirmed_at = now_utc()
-        db.commit()
         blocked = client.post(f"/api/submissions/{submission_id}/finalize")
-        assert blocked.status_code == 200
-        assert blocked.json()["status"] == "incomplete"
-        assert all(
-            snapshot.status != "complete"
-            for snapshot in db.scalars(
-                select(SubmissionScoreSnapshot).where(
-                    SubmissionScoreSnapshot.version == blocked.json()["version"],
-                    SubmissionScoreSnapshot.submission_id == submission_id,
-                )
-            )
-        )
+        assert blocked.status_code == 409
+        assert blocked.json()["code"] == "SUBMISSION_FINALIZED"
 
-        regrade = client.post(f"/api/student-answers/{answer.id}/grade")
-        assert regrade.status_code == 200
-        db.refresh(answer)
-        assert answer.status == "graded"
+        finalized_regrade = client.post(f"/api/student-answers/{answer.id}/grade")
+        assert finalized_regrade.status_code == 409
+        assert finalized_regrade.json()["code"] == "SUBMISSION_FINALIZED"
+
+        current_batch = client.post(
+            f"/api/assignments/{submission.assignment_id}/grading-batches",
+            json={"class_id": str(submission.class_id)},
+        )
+        assert current_batch.status_code == 201, current_batch.text
+        next_upload = client.post(
+            f"/api/grading-batches/{current_batch.json()['id']}/files",
+            files=[("files", ("0001-regrade.png", png("azure"), "image/png"))],
+        )
+        assert next_upload.status_code == 201, next_upload.text
+        current_submission_id = uuid.UUID(next_upload.json()["items"][0]["submission_id"])
+        assert current_submission_id != submission_id
+        current_processing = client.post(
+            f"/api/submissions/{current_submission_id}/processing-jobs?run_now=true",
+            json={"idempotency_key": "exceptions-versioning-processing-current"},
+        )
+        assert current_processing.status_code == 201, current_processing.text
+        assert current_processing.json()["status"] == "completed"
+        confirm_answer_regions(db, current_submission_id)
+        current_recognition = client.post(
+            f"/api/submissions/{current_submission_id}/recognition-jobs?run_now=true",
+            json={"idempotency_key": "exceptions-versioning-ocr-current"},
+        )
+        assert current_recognition.status_code == 201, current_recognition.text
+        current_answer = db.scalar(
+            select(StudentAnswer).where(StudentAnswer.submission_id == current_submission_id)
+        )
+        assert current_answer is not None
+        current_corrected = client.patch(
+            f"/api/student-answers/{current_answer.id}",
+            json={"corrected_text": "1. 测试题"},
+        )
+        assert current_corrected.status_code == 200, current_corrected.text
+        current_answer.status, current_answer.requires_review = "ready_for_grading", False
+        db.commit()
+        regrade = client.post(f"/api/student-answers/{current_answer.id}/grade")
+        assert regrade.status_code == 200, regrade.text
+        db.refresh(current_answer)
+        assert current_answer.status == "graded"
         rereview = client.put(
-            f"/api/student-answers/{answer.id}/review",
+            f"/api/student-answers/{current_answer.id}/review",
             json={"decision": "accepted"},
         )
         assert rereview.status_code == 200
-        snapshot_current = client.post(f"/api/submissions/{submission_id}/finalize")
+        snapshot_current = client.post(f"/api/submissions/{current_submission_id}/finalize")
         assert snapshot_current.status_code == 200
         assert snapshot_current.json()["status"] == "complete"
         extra_incomplete = Submission(
@@ -390,7 +496,7 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
         assert readiness.status_code == 200
         assert readiness.json()["releasable_count"] == 1
         assert readiness.json()["unreleasable_count"] == 0
-        assert readiness.json()["ready"][0]["submission_id"] == str(submission.id)
+        assert readiness.json()["ready"][0]["submission_id"] == str(current_submission_id)
         assert readiness.json()["ready"][0]["score_snapshot_id"] == snapshot_current.json()["id"]
         latest = FinalScoreService(db, submission.owner_id).latest(
             submission.assignment_id, submission.class_id
@@ -398,10 +504,11 @@ def test_score_release_report_analytics_and_insight_versions_remain_fixed(
         assert len(latest) == 1
         assert str(latest[0].snapshot.id) == snapshot_current.json()["id"]
         assert stored_v1.details == snapshot_v1_details
-        assert item_v1.score_snapshot_id == uuid.UUID(snapshot_v1.json()["id"])
-        assert item_v2.score_snapshot_id == uuid.UUID(snapshot_v2.json()["id"])
+        assert item_v1.score_snapshot_id == uuid.UUID(snapshot_v1_id)
+        assert item_v2.score_snapshot_id == uuid.UUID(snapshot_v2_id)
         assert old_analytics.metrics == metrics_v1
     finally:
         settings.recognition_provider = previous_provider
+        settings.answer_recognition_provider = previous_answer_provider
         app.dependency_overrides.pop(get_storage, None)
         db.close()

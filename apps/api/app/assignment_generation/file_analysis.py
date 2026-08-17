@@ -11,29 +11,184 @@ from app.assignment_generation.schemas import (
     FileAnalysisOutput,
     PageAnalysisCandidate,
 )
-from app.models import PageProcessingResult, PaperPage, RecognitionBlock, RecognitionJob, StoredFile
+from app.models import (
+    PageProcessingResult,
+    PaperPage,
+    RecognitionBlock,
+    RecognitionJob,
+    RecognitionStatus,
+    StoredFile,
+)
 
 _INJECTION = re.compile(
     r"(?:ignore\s+(?:all\s+)?previous|忽略(?:之前|以上|系统)|自动发布|选择.{0,12}班级|调用.{0,8}工具|system\s*prompt)",
     re.I,
 )
+_PAGE_QUALITY_LEVELS = {"good", "review_required", "rescan_required"}
+_PAGE_QUALITY_ISSUES = {
+    "low_resolution",
+    "blur",
+    "low_contrast",
+    "shadow",
+    "skew",
+    "crop_risk",
+}
+_MATH_STRUCTURE_RISK_CODES = {
+    "FORMULA_REVIEW_REQUIRED",
+    "MATH_LAYOUT_REVIEW_REQUIRED",
+    "READING_ORDER_CONFLICT",
+}
+
+
+def _public_page_quality(parameters: dict[str, object]) -> tuple[str | None, list[str]]:
+    raw = parameters.get("page_quality")
+    if not isinstance(raw, dict):
+        return None, []
+    level = raw.get("level")
+    if level not in _PAGE_QUALITY_LEVELS:
+        return None, []
+    raw_issues = raw.get("issues")
+    issues = (
+        sorted({str(issue) for issue in raw_issues if str(issue) in _PAGE_QUALITY_ISSUES})
+        if isinstance(raw_issues, list)
+        else []
+    )
+    return str(level), issues
+
+
+def _public_math_structure(parameters: dict[str, object]) -> dict[str, object] | None:
+    raw = parameters.get("math_structure")
+    if not isinstance(raw, dict):
+        return None
+    raw_codes = raw.get("risk_codes")
+    raw_evidence = raw.get("evidence")
+    if not isinstance(raw_codes, (list, tuple)) or not isinstance(raw_evidence, (list, tuple)):
+        return {"risk_codes": [], "evidence": []}
+    codes: list[str] = []
+    evidence: list[dict[str, object]] = []
+    for code, item in zip(raw_codes, raw_evidence, strict=False):
+        if code not in _MATH_STRUCTURE_RISK_CODES or not isinstance(item, dict):
+            continue
+        raw_indexes = item.get("block_indexes")
+        indexes = (
+            sorted(
+                {
+                    index
+                    for index in raw_indexes
+                    if isinstance(index, int) and not isinstance(index, bool) and index >= 0
+                }
+            )
+            if isinstance(raw_indexes, (list, tuple))
+            else []
+        )
+        raw_region = item.get("region")
+        if not (
+            isinstance(raw_region, (list, tuple))
+            and len(raw_region) == 4
+            and all(
+                isinstance(value, (int, float)) and not isinstance(value, bool)
+                for value in raw_region
+            )
+        ):
+            continue
+        region = [float(value) for value in raw_region]
+        x, y, width, height = region
+        if min(region) < 0 or x + width > 1 or y + height > 1 or width <= 0 or height <= 0:
+            continue
+        codes.append(str(code))
+        evidence.append({"block_indexes": indexes, "region": region})
+    return {"risk_codes": codes, "evidence": evidence}
+
+
+def _public_source_conflicts(parameters: dict[str, object]) -> dict[str, int] | None:
+    raw_count = parameters.get("source_conflict_count")
+    raw_math_count = parameters.get("math_symbol_conflict_count")
+    if not any(
+        isinstance(value, int) and not isinstance(value, bool)
+        for value in (raw_count, raw_math_count)
+    ):
+        return None
+    count = raw_count if isinstance(raw_count, int) and not isinstance(raw_count, bool) else 0
+    math_count = (
+        raw_math_count
+        if isinstance(raw_math_count, int) and not isinstance(raw_math_count, bool)
+        else 0
+    )
+    return {"count": max(count, 0), "math_symbol_count": max(math_count, 0)}
 
 
 def _role(name: str, text: str) -> tuple[str, float, str, float]:
     corpus = f"{name} {text[:2000]}".lower()
+    if re.search(r"教材|课本|教科书|数学分析讲义|textbook", corpus, re.I):
+        return "textbook", 0.82, "not_applicable", 1.0
     if re.search(r"ai.{0,8}(?:生成|generated).{0,8}(?:答案|answer)", corpus, re.I):
         return "reference_answer", 0.75, "ai_generated", 0.95
     if re.search(r"第三方|third[ _-]?party", corpus, re.I):
         return "reference_answer", 0.7, "third_party", 0.95
-    if re.search(r"参考答案|答案|answer|solution", corpus, re.I):
+    has_answer = bool(re.search(r"参考答案|答案|解答|answer|solution", corpus, re.I))
+    has_questions = bool(re.search(r"习题|练习|试卷|题目|question|paper|测试|考试", corpus, re.I))
+    if has_answer and has_questions:
+        return "question_and_answer", 0.78, "unknown", 0.3
+    if has_answer:
         return "reference_answer", 0.78, "unknown", 0.3
     if re.search(r"评分标准|rubric|评分细则", corpus, re.I):
         return "rubric", 0.85, "not_applicable", 1.0
     if re.search(r"说明|instructions?|须知", corpus, re.I):
         return "instructions", 0.75, "not_applicable", 1.0
-    if re.search(r"试卷|question|paper|测试|考试", corpus, re.I):
+    if has_questions:
         return "question_paper", 0.72, "not_applicable", 1.0
     return "unknown", 0.25, "unknown", 0.2
+
+
+def _content_evidence(
+    blocks: list[RecognitionBlock], job: RecognitionJob | None
+) -> tuple[str, str, float, int]:
+    blocks = [
+        block
+        for block in blocks
+        if getattr(block, "status", "recognized")
+        in {"adopted", "manual_required", "recognized", "low_confidence"}
+    ]
+    pdf_blocks = [block for block in blocks if block.source.startswith("pdf_text:")]
+    provider_is_test_or_unavailable = job is None or job.provider in {"fake", "unavailable"}
+    ocr_blocks = (
+        []
+        if provider_is_test_or_unavailable
+        else [block for block in blocks if not block.source.startswith("pdf_text:")]
+    )
+    text_character_count = sum(
+        len("".join((block.text or "").split())) for block in [*pdf_blocks, *ocr_blocks]
+    )
+    if pdf_blocks and ocr_blocks:
+        confidences = [
+            float(block.confidence)
+            for block in [*pdf_blocks, *ocr_blocks]
+            if block.confidence is not None
+        ]
+        return "mixed", "mixed", min(confidences, default=0.5), text_character_count
+    if pdf_blocks:
+        return "text", "pdf_text", 1.0, text_character_count
+    if ocr_blocks:
+        confidences = [
+            float(block.confidence) for block in ocr_blocks if block.confidence is not None
+        ]
+        return "scanned", "ocr", min(confidences, default=0.5), text_character_count
+    return "unknown", "unavailable", 0.0, 0
+
+
+def _file_content_evidence(
+    page_evidence: list[tuple[str, str, float, int]],
+) -> tuple[str, str, float]:
+    if not page_evidence or any(
+        mode == "unknown" for mode, _source, _confidence, _count in page_evidence
+    ):
+        return "unknown", "unavailable", 0.0
+    modes = {mode for mode, _source, _confidence, _count in page_evidence}
+    sources = {source for _mode, source, _confidence, _count in page_evidence}
+    confidence = min(item[2] for item in page_evidence)
+    if "mixed" in modes or len(modes) > 1:
+        return "mixed", "mixed", confidence
+    return next(iter(modes)), next(iter(sources)), confidence
 
 
 def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOutput:
@@ -52,7 +207,10 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
     for page in pages:
         job = db.scalar(
             select(RecognitionJob)
-            .where(RecognitionJob.paper_version_id == page.paper_version_id)
+            .where(
+                RecognitionJob.paper_version_id == page.paper_version_id,
+                RecognitionJob.status == RecognitionStatus.completed,
+            )
             .order_by(RecognitionJob.created_at.desc())
             .limit(1)
         )
@@ -78,8 +236,15 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
             )
             if row:
                 results[page.id] = row
+    content_by_page = {
+        page.id: _content_evidence(
+            blocks_by_page.get(page.id, []), latest_jobs.get(page.paper_version_id)
+        )
+        for page in pages
+    }
     checksum_first: dict[str, uuid.UUID] = {}
     name_page_signatures: dict[tuple[str, int], uuid.UUID] = {}
+    roles_by_file: dict[uuid.UUID, str] = {}
     file_rows: list[FileAnalysisCandidate] = []
     page_rows: list[PageAnalysisCandidate] = []
     injection_evidence: list[EvidenceRef] = []
@@ -87,10 +252,20 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
     for file_id, file_pages in grouped.items():
         stored = files[file_id]
         text = " ".join(
-            (block.text or "") for page in file_pages for block in blocks_by_page.get(page.id, [])
+            (block.text or "")
+            for page in file_pages
+            for block in blocks_by_page.get(page.id, [])
+            if block.status in {"adopted", "manual_required", "recognized", "low_confidence"}
         )[:8000]
         role, role_conf, answer_source, source_conf = _role(stored.original_name, text)
-        warnings = ["FILE_ROLE_REVIEW_REQUIRED"]
+        content_mode, text_source, content_confidence = _file_content_evidence(
+            [content_by_page[page.id] for page in file_pages]
+        )
+        warnings: list[str] = []
+        if role == "unknown" or role_conf < 0.7:
+            warnings.append("FILE_ROLE_REVIEW_REQUIRED")
+        if content_mode == "unknown":
+            warnings.append("TEXT_SOURCE_UNAVAILABLE")
         duplicate = checksum_first.get(stored.checksum)
         if duplicate:
             warnings.append("DUPLICATE_FILE")
@@ -105,13 +280,21 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
             warnings.append("PROBABLE_DUPLICATE_FILE")
         else:
             name_page_signatures[signature] = stored.id
-        if role == "reference_answer":
-            warnings.append("ANSWER_SOURCE_CONFIRMATION_REQUIRED")
+        if duplicate and roles_by_file.get(duplicate) not in {None, role}:
+            warnings.append("FILE_ROLE_CONFLICT_REVIEW_REQUIRED")
+        roles_by_file[stored.id] = role
         evidence = [
             EvidenceRef(
                 kind="file_name",
                 reference_id=str(stored.id),
-                summary="文件角色仅由受控文件名/OCR线索建议，仍需教师确认",
+                summary=(
+                    "文件用途无法可靠判断，需要教师选择"
+                    if any(
+                        code in {"FILE_ROLE_REVIEW_REQUIRED", "FILE_ROLE_CONFLICT_REVIEW_REQUIRED"}
+                        for code in warnings
+                    )
+                    else "文件用途由受控文件名与 OCR 线索自动识别，可由教师修改"
+                ),
             )
         ]
         if _INJECTION.search(f"{stored.original_name} {text}"):
@@ -134,6 +317,9 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
                 detected_mime_type=stored.content_type,
                 checksum=stored.checksum,
                 page_count=len(file_pages),
+                content_mode=content_mode,
+                text_source=text_source,
+                content_mode_confidence=content_confidence,
                 suggested_role=role,
                 role_confidence=role_conf,
                 suggested_answer_source=answer_source,
@@ -149,6 +335,12 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
         for page in ordered:
             result = results.get(page.id)
             params = dict(result.processing_parameters) if result else {}
+            quality_level, quality_issues = _public_page_quality(params)
+            math_structure = _public_math_structure(params)
+            source_conflicts = _public_source_conflicts(params)
+            page_content_mode, page_text_source, page_content_confidence, text_count = (
+                content_by_page[page.id]
+            )
             blank = (
                 float(params.get("blank_probability", 0))
                 if params.get("blank_probability") is not None
@@ -176,16 +368,28 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
             elif blank is not None and blank >= 0.95:
                 status = "blank"
                 codes.append("BLANK_PAGE")
+            elif quality_level == "rescan_required":
+                status = "low_quality"
+                codes.append("PAGE_QUALITY_RESCAN_REQUIRED")
+            elif quality_level == "review_required":
+                status = "low_quality"
+                codes.append("PAGE_QUALITY_REVIEW_REQUIRED")
             elif quality is not None and quality < 0.5:
                 status = "low_quality"
                 codes.append("LOW_QUALITY_PAGE")
             if missing:
                 codes.append("POSSIBLE_MISSING_PAGE")
+            if page_content_mode == "unknown":
+                codes.append("TEXT_SOURCE_UNAVAILABLE")
             page_rows.append(
                 PageAnalysisCandidate(
                     paper_page_id=str(page.id),
                     stored_file_id=str(stored.id),
                     status=status,
+                    content_mode=page_content_mode,
+                    text_source=page_text_source,
+                    content_mode_confidence=page_content_confidence,
+                    text_character_count=text_count,
                     quality_score=quality,
                     blank_probability=blank,
                     missing_page_suspected=missing,
@@ -193,9 +397,24 @@ def collect_file_analysis(db: Session, pages: list[PaperPage]) -> FileAnalysisOu
                     corrupted=status == "corrupted",
                     variant_label=variant or "unknown",
                     metrics={
-                        k: v
-                        for k, v in params.items()
-                        if isinstance(v, (str, int, float, bool, type(None)))
+                        **(
+                            {
+                                "page_quality": {
+                                    "level": quality_level,
+                                    "issues": quality_issues,
+                                }
+                            }
+                            if quality_level is not None
+                            else {}
+                        ),
+                        **(
+                            {"math_structure": math_structure} if math_structure is not None else {}
+                        ),
+                        **(
+                            {"source_conflicts": source_conflicts}
+                            if source_conflicts is not None
+                            else {}
+                        ),
                     },
                     evidence=[
                         EvidenceRef(

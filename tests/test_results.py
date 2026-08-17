@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from app.main import app
+from app.models import AuditLog, GradeRelease
 from app.results.services import (
     SnapshotPayload,
     ValidatedScore,
@@ -13,9 +15,12 @@ from app.results.services import (
     gradebook_xlsx,
     student_report_pdf,
 )
+from app.storage.dependencies import get_storage
 from openpyxl import load_workbook
 from pydantic import ValidationError
 from pypdf import PdfReader
+from sqlalchemy import func, select
+from test_submission_workflow import client, workflow
 
 
 def payload(
@@ -28,7 +33,7 @@ def payload(
             "assignment_id": uuid.uuid4(),
             "student_id": uuid.uuid4(),
             "paper_version_id": uuid.uuid4(),
-            "rubric_version_id": uuid.uuid4(),
+            "structured_rubric_set_id": uuid.uuid4(),
             "total_score": score,
             "max_score": maximum,
             "question_count": 1,
@@ -92,8 +97,20 @@ def test_metrics_formulas_distribution_errors_and_knowledge_points() -> None:
         "90-100": 1,
     }
     assert metrics["questions"][0]["score_rate"] == 0.9
+    assert metrics["questions"][0]["average_score"] == 9
+    assert metrics["questions"][0]["average_max_score"] == 10
     assert metrics["knowledge_points"][0]["mastery_rate"] == 0.9
+    assert metrics["knowledge_points"][0]["knowledge_point_name"] == str(uuid.UUID(int=1))
     assert metrics["error_types"] == [{"code": "concept", "count": 1}]
+
+
+def test_metrics_include_snapshot_knowledge_point_names() -> None:
+    point_id = str(uuid.UUID(int=1))
+    metrics = compute_metrics(
+        [validated(payload())],
+        {point_id: "矩阵的秩"},
+    )
+    assert metrics["knowledge_points"][0]["knowledge_point_name"] == "矩阵的秩"
 
 
 def test_subjective_question_does_not_claim_correct_rate() -> None:
@@ -166,3 +183,46 @@ def test_chinese_student_pdf_embeds_font_and_is_parseable(monkeypatch: pytest.Mo
     assert len(reader.pages) >= 2
     assert "AhaMark" in text and "合成测试学生" in text and "函数综合练习" in text
     assert b"NotoSansSC" in content
+
+
+def test_grade_release_creation_is_retired_and_audits_the_call_source() -> None:
+    db, _storage, _batch_id, _submission_id, _question_id = workflow()
+    try:
+        releases_before = db.scalar(select(func.count()).select_from(GradeRelease))
+        audits_before = db.scalar(select(func.count()).select_from(AuditLog))
+
+        response = client.post(
+            "/api/grade-releases",
+            json={"arbitrary": "ignored"},
+            headers={"X-AhaMark-Client": "legacy-test-client"},
+        )
+
+        assert response.status_code == 410
+        assert response.json()["code"] == "GRADE_RELEASE_CREATION_RETIRED"
+        assert (
+            client.get("/openapi.json").json()["paths"]["/api/grade-releases"]["post"]["deprecated"]
+            is True
+        )
+        assert response.headers["Deprecation"] == "true"
+        assert (
+            response.headers["X-AhaMark-Replacement"]
+            == "POST /api/grading-batches/{batch_id}/confirm-results"
+        )
+        assert (
+            response.json()["details"]["replacement"]
+            == "POST /api/grading-batches/{batch_id}/confirm-results"
+        )
+        db.expire_all()
+        assert db.scalar(select(func.count()).select_from(GradeRelease)) == releases_before
+        assert db.scalar(select(func.count()).select_from(AuditLog)) == audits_before + 1
+        audit_row = db.scalar(
+            select(AuditLog)
+            .where(AuditLog.action == "grade_release.legacy_create_attempt")
+            .order_by(AuditLog.created_at.desc())
+        )
+        assert audit_row is not None
+        assert audit_row.metadata_["client"] == "legacy-test-client"
+        assert audit_row.metadata_["replacement"].endswith("/confirm-results")
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+        db.close()

@@ -15,6 +15,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, TypeVar
 
+from app.api.assignment_central_review import (
+    _answer_content_payload,
+    _criterion_payload,
+    _rubric_content_payload,
+)
 from app.api.auth import hash_password
 from app.db.session import SessionLocal
 from app.models import (
@@ -28,9 +33,13 @@ from app.models import (
     KnowledgePoint,
     PaperVersion,
     Question,
-    RubricVersion,
+    ReferenceAnswerVersion,
+    RubricCriterion,
     SchoolClass,
     ScoreRevision,
+    StructuredRubricSet,
+    StructuredRubricSetItem,
+    StructuredRubricVersion,
     Student,
     StudentAnswer,
     Submission,
@@ -39,7 +48,9 @@ from app.models import (
     TeachingInsight,
     User,
 )
+from app.question_versions import question_version_token
 from app.results.services import compute_metrics, gradebook_xlsx, release_scores, student_report_pdf
+from app.semantic_content import semantic_hash
 from openpyxl import load_workbook
 from pypdf import PdfReader
 from sqlalchemy import select
@@ -167,20 +178,8 @@ def main() -> None:
                 confirmed_at=generated_at,
             ),
         )
-        rubric = add(
-            db,
-            RubricVersion(
-                id=uid(run_id, "rubric"),
-                assignment_id=assignment.id,
-                version=1,
-                status="confirmed",
-                created_by=teacher.id,
-                confirmed_at=generated_at,
-            ),
-        )
         db.flush()
         assignment.active_paper_version_id = paper.id
-        assignment.active_rubric_version_id = rubric.id
         maxima = [10, 20, 5, 15]
         types = ["single_choice", "essay", "single_choice", "essay"]
         questions = [
@@ -198,6 +197,134 @@ def main() -> None:
             )
             for i in range(1, 5)
         ]
+        db.flush()
+        rubric_set = add(
+            db,
+            StructuredRubricSet(
+                id=uid(run_id, "structured-set"),
+                owner_id=teacher.id,
+                assignment_id=assignment.id,
+                paper_version_id=paper.id,
+                version=1,
+                status="active",
+                content_hash="0" * 64,
+                source_snapshot_hash=semantic_hash(
+                    {"fixture": MARKER, "run_id": run_id, "paper_id": str(paper.id)}
+                ),
+                total_points=Decimal("50.00"),
+                created_by=teacher.id,
+                confirmed_by=teacher.id,
+                confirmed_at=generated_at,
+                activated_at=generated_at,
+            ),
+        )
+        db.flush()
+        set_items: list[StructuredRubricSetItem] = []
+        for index, question in enumerate(questions, 1):
+            maximum = Decimal(maxima[index - 1]).quantize(Decimal("0.01"))
+            reference = add(
+                db,
+                ReferenceAnswerVersion(
+                    id=uid(run_id, f"reference-{index}"),
+                    question_id=question.id,
+                    source_type="teacher_official",
+                    source_region={},
+                    raw_content=f"Synthetic gold answer {index}",
+                    normalized_content=f"Synthetic gold answer {index}",
+                    structured_content={"synthetic": True},
+                    content_hash="0" * 64,
+                    version=1,
+                    provenance={"fixture": MARKER, "run_id": run_id},
+                    created_by=teacher.id,
+                    status="confirmed",
+                    teacher_confirmed_at=generated_at,
+                ),
+            )
+            reference.content_hash = semantic_hash(_answer_content_payload(reference))
+            db.flush()
+            structured_rubric = add(
+                db,
+                StructuredRubricVersion(
+                    id=uid(run_id, f"structured-rubric-{index}"),
+                    question_id=question.id,
+                    question_version=question_version_token(question),
+                    reference_answer_version_id=reference.id,
+                    rubric_version=1,
+                    title=f"Synthetic gold rubric {index}",
+                    total_points=maximum,
+                    status="confirmed",
+                    content_hash="0" * 64,
+                    created_by=teacher.id,
+                    confirmed_by=teacher.id,
+                    confirmed_at=generated_at,
+                ),
+            )
+            db.flush()
+            criterion = add(
+                db,
+                RubricCriterion(
+                    id=uid(run_id, f"criterion-{index}"),
+                    rubric_version_id=structured_rubric.id,
+                    stable_key="manual-score",
+                    title="Synthetic teacher-confirmed score",
+                    description="Score-correctness synthetic criterion",
+                    max_points=maximum,
+                    display_order=1,
+                    criterion_type="manual",
+                    required=True,
+                    dependencies=[],
+                    expected_evidence={"fixture": MARKER},
+                    validation_mode="manual",
+                    validation_rule={},
+                    manual_review_policy={"manual_only": True},
+                    partial_credit_policy={},
+                    metadata_={"synthetic": True},
+                ),
+            )
+            db.flush()
+            structured_rubric.content_hash = semantic_hash(
+                _rubric_content_payload(db, structured_rubric)
+            )
+            set_item = add(
+                db,
+                StructuredRubricSetItem(
+                    id=uid(run_id, f"structured-set-item-{index}"),
+                    rubric_set_id=rubric_set.id,
+                    question_id=question.id,
+                    question_version=structured_rubric.question_version,
+                    reference_answer_version_id=reference.id,
+                    structured_rubric_version_id=structured_rubric.id,
+                    answer_content_hash=reference.content_hash,
+                    rubric_content_hash=structured_rubric.content_hash,
+                    criteria_hash=semantic_hash([_criterion_payload(criterion)]),
+                    display_order=index,
+                    max_points=maximum,
+                ),
+            )
+            set_items.append(set_item)
+        rubric_set.content_hash = semantic_hash(
+            {
+                "assignment_id": str(assignment.id),
+                "paper_version_id": str(paper.id),
+                "source_snapshot_hash": rubric_set.source_snapshot_hash,
+                "total_points": "50.00",
+                "items": [
+                    {
+                        "question_id": str(item.question_id),
+                        "question_version": item.question_version,
+                        "reference_answer_version_id": str(item.reference_answer_version_id),
+                        "structured_rubric_version_id": str(item.structured_rubric_version_id),
+                        "answer_content_hash": item.answer_content_hash,
+                        "rubric_content_hash": item.rubric_content_hash,
+                        "criteria_hash": item.criteria_hash,
+                        "display_order": item.display_order,
+                        "max_points": str(item.max_points),
+                    }
+                    for item in set_items
+                ],
+            }
+        )
+        assignment.active_structured_rubric_set_id = rubric_set.id
         batch = add(
             db,
             GradingBatch(
@@ -290,7 +417,7 @@ def main() -> None:
                         assignment_id=assignment.id,
                         student_id=submission.student_id,
                         paper_version_id=paper.id,
-                        rubric_version_id=rubric.id,
+                        structured_rubric_set_id=rubric_set.id,
                         total_score=Decimal(sum(row_scores)),
                         max_score=Decimal("50"),
                         status="complete",
@@ -400,7 +527,7 @@ def main() -> None:
                 assignment_id=assignment.id,
                 student_id=students[3].id,
                 paper_version_id=paper.id,
-                rubric_version_id=rubric.id,
+                structured_rubric_set_id=rubric_set.id,
                 total_score=Decimal("45"),
                 max_score=Decimal("50"),
                 status="complete",

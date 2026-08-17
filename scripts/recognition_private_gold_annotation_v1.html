@@ -1,0 +1,2312 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>AhaMark 私有 OCR 与公式 Gold 标注 v2</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font: 14px system-ui;
+        color: #172033;
+        background: #f4f6fa;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+      }
+      header,
+      .panel {
+        background: #fff;
+        border: 1px solid #d8deea;
+      }
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 5;
+        padding: 10px;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .layout {
+        display: grid;
+        grid-template-columns: 310px minmax(0, 1fr) minmax(420px, 480px);
+        gap: 10px;
+        padding: 10px;
+      }
+      .layout.sidebar-collapsed {
+        grid-template-columns: 48px minmax(0, 1fr) minmax(0, 1fr);
+      }
+      .panel {
+        border-radius: 10px;
+        padding: 11px;
+        min-width: 0;
+      }
+      .sidebar-toggle {
+        display: flex;
+        width: 100%;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        margin-bottom: 8px;
+        padding: 7px 9px;
+        color: #1d4ed8;
+        border: 1px solid #93c5fd;
+        border-radius: 7px;
+        background: #eff6ff;
+        cursor: pointer;
+        font-weight: 700;
+      }
+      .sidebar-toggle:hover {
+        background: #dbeafe;
+      }
+      .sidebar-toggle-icon {
+        font-size: 18px;
+        line-height: 1;
+      }
+      .layout.sidebar-collapsed .sidebar {
+        padding: 6px;
+      }
+      .layout.sidebar-collapsed .sidebar-content {
+        display: none;
+      }
+      .layout.sidebar-collapsed .sidebar-toggle {
+        min-height: 132px;
+        margin: 0;
+        padding: 8px 4px;
+        writing-mode: vertical-rl;
+      }
+      label {
+        display: block;
+        margin: 8px 0 3px;
+        font-weight: 600;
+      }
+      button,
+      select,
+      textarea,
+      input {
+        font: inherit;
+      }
+      button,
+      select,
+      input[type="text"] {
+        padding: 6px;
+      }
+      button.primary {
+        color: #fff;
+        background: #315efb;
+        border: 0;
+        border-radius: 6px;
+      }
+      button.danger {
+        color: #b91c1c;
+      }
+      textarea {
+        width: 100%;
+        resize: vertical;
+        padding: 7px;
+      }
+      #expectedText {
+        min-height: 280px;
+        font-family: ui-monospace, Consolas, monospace;
+        line-height: 1.45;
+      }
+      #questionNumbers {
+        min-height: 70px;
+      }
+      .quick-review-intro {
+        margin-bottom: 10px;
+        padding: 10px 12px;
+        border: 1px solid #bfdbfe;
+        border-radius: 9px;
+        background: #eff6ff;
+      }
+      .quick-review-intro strong {
+        display: block;
+        margin-bottom: 3px;
+        font-size: 16px;
+      }
+      .quick-review-actions {
+        display: grid;
+        grid-template-columns: 1.4fr 1fr 1fr;
+        gap: 7px;
+        margin: 8px 0 12px;
+      }
+      .quick-review-actions button {
+        min-height: 42px;
+        border: 1px solid #c8d1df;
+        border-radius: 7px;
+        background: #fff;
+      }
+      .quick-review-actions .confirm {
+        color: #fff;
+        border-color: #15803d;
+        background: #15803d;
+      }
+      .quick-question-hint {
+        margin: 4px 0 8px;
+        color: #526078;
+      }
+      .advanced-annotation {
+        margin-top: 12px;
+        padding-top: 9px;
+        border-top: 1px solid #d8deea;
+      }
+      .advanced-annotation > summary {
+        cursor: pointer;
+        color: #1d4ed8;
+        font-weight: 700;
+      }
+      .hint {
+        color: #526078;
+        line-height: 1.45;
+      }
+      .status {
+        margin-left: auto;
+        color: #526078;
+      }
+      .pages {
+        max-height: 68vh;
+        overflow: auto;
+      }
+      .page-list-details {
+        margin-top: 8px;
+      }
+      .page-list-details > summary {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 5px 0;
+        cursor: pointer;
+        font-weight: 700;
+        list-style: none;
+      }
+      .page-list-details > summary::-webkit-details-marker {
+        display: none;
+      }
+      .page-list-details > summary::before {
+        content: "▸";
+        color: #64748b;
+        font-size: 12px;
+        transition: transform 120ms ease;
+      }
+      .page-list-details[open] > summary::before {
+        transform: rotate(90deg);
+      }
+      .page-list-count {
+        margin-left: auto;
+        color: #64748b;
+        font-size: 12px;
+        font-weight: 500;
+      }
+      .page-list-action {
+        padding: 3px 8px;
+        color: #1d4ed8;
+        border: 1px solid #93c5fd;
+        border-radius: 999px;
+        background: #eff6ff;
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .page-list-details > summary:hover .page-list-action {
+        background: #dbeafe;
+      }
+      .page {
+        display: block;
+        width: 100%;
+        text-align: left;
+        margin: 4px 0;
+        padding: 7px;
+        background: #fff;
+        border: 1px solid #ccd4e2;
+        border-radius: 6px;
+      }
+      .page.active {
+        border-color: #315efb;
+        background: #eef2ff;
+      }
+      .page.complete {
+        border-left: 5px solid #16a34a;
+      }
+      .stage-wrap {
+        overflow: auto;
+        max-height: 82vh;
+      }
+      .stage {
+        position: relative;
+        width: min-content;
+        margin: auto;
+        transform-origin: top left;
+      }
+      .stage img {
+        display: block;
+        max-width: none;
+        user-select: none;
+      }
+      .stage svg {
+        position: absolute;
+        inset: 0;
+        touch-action: none;
+      }
+      .box {
+        fill: #315efb22;
+        stroke: #315efb;
+        stroke-width: 3;
+        vector-effect: non-scaling-stroke;
+      }
+      .box.selected {
+        fill: #ef444433;
+        stroke: #ef4444;
+      }
+      .formula-box {
+        fill: #f59e0b22;
+        stroke: #d97706;
+        stroke-width: 3;
+        vector-effect: non-scaling-stroke;
+      }
+      .formula-box.selected {
+        fill: #ef444433;
+        stroke: #ef4444;
+      }
+      .formula-card {
+        margin-top: 10px;
+        padding: 12px;
+        border: 1px solid #d8deea;
+        border-radius: 10px;
+        background: #fafbfe;
+        box-shadow: 0 1px 3px #17203312;
+      }
+      .formula-card.selected {
+        border-color: #d97706;
+        background: #fffbeb;
+      }
+      .formula-card textarea {
+        min-height: 58px;
+        font-family: ui-monospace, Consolas, monospace;
+      }
+      .formula-card .formula-plain {
+        min-height: 92px;
+        line-height: 1.45;
+        border: 1px solid #9aa8bd;
+        border-radius: 7px;
+      }
+      .formula-step {
+        margin-top: 10px;
+        padding: 10px;
+        border: 1px solid #e1e6ef;
+        border-radius: 8px;
+        background: #fff;
+      }
+      .formula-step-title {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin-bottom: 6px;
+        font-weight: 700;
+      }
+      .formula-step-number {
+        display: inline-grid;
+        width: 22px;
+        height: 22px;
+        place-items: center;
+        border-radius: 999px;
+        color: #fff;
+        background: #315efb;
+        font-size: 12px;
+      }
+      .formula-review-badge {
+        margin-left: auto;
+        padding: 3px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 700;
+      }
+      .formula-review-badge.pending {
+        color: #92400e;
+        background: #fef3c7;
+      }
+      .formula-review-badge.reviewed {
+        color: #166534;
+        background: #dcfce7;
+      }
+      .formula-review-badge.unreadable {
+        color: #991b1b;
+        background: #fee2e2;
+      }
+      .formula-preview {
+        margin-top: 6px;
+        padding: 10px;
+        min-height: 56px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        border: 1px dashed #d8b15c;
+        background: #fff;
+        font-family: "Cambria Math", "STIX Two Math", serif;
+      }
+      .formula-tools {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 5px;
+        margin: 7px 0;
+      }
+      .formula-tools button {
+        padding: 5px 4px;
+        border: 1px solid #c8d1df;
+        border-radius: 6px;
+        background: #f8fafc;
+      }
+      .formula-conversion-message {
+        min-height: 20px;
+        margin: 6px 0 0;
+        line-height: 1.4;
+      }
+      .formula-conversion-message[data-tone="success"] {
+        color: #166534;
+      }
+      .formula-conversion-message[data-tone="warning"] {
+        color: #92400e;
+      }
+      .formula-conversion-message[data-tone="error"] {
+        color: #b91c1c;
+      }
+      .formula-decisions {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px;
+        margin: 8px 0 0;
+      }
+      .formula-decisions button {
+        min-height: 38px;
+        border: 1px solid #c8d1df;
+        border-radius: 7px;
+        background: #fff;
+      }
+      .formula-decisions button:first-child {
+        color: #fff;
+        border-color: #15803d;
+        background: #15803d;
+      }
+      .advanced-latex {
+        margin-top: 8px;
+        padding-top: 7px;
+        border-top: 1px solid #e1e6ef;
+      }
+      .formula-help {
+        margin: 6px 0;
+        color: #526078;
+      }
+      .formula-help summary,
+      .advanced-latex summary {
+        cursor: pointer;
+        font-weight: 600;
+      }
+      .formula-help code {
+        display: block;
+        margin: 4px 0;
+        padding: 3px 5px;
+        border-radius: 4px;
+        background: #f1f5f9;
+        overflow-wrap: anywhere;
+      }
+      .formula-shortcut {
+        color: #64748b;
+        font-size: 12px;
+      }
+      .math-preview-root {
+        display: inline-flex;
+        align-items: center;
+        min-height: 30px;
+        font-size: 17px;
+      }
+      .math-fraction {
+        display: inline-grid;
+        grid-template-rows: auto auto;
+        vertical-align: middle;
+        text-align: center;
+        margin: 0 3px;
+      }
+      .math-numerator {
+        border-bottom: 1px solid currentColor;
+        padding: 0 4px 2px;
+      }
+      .math-denominator {
+        padding: 2px 4px 0;
+      }
+      .math-radical {
+        font-size: 1.35em;
+      }
+      .math-radicand {
+        border-top: 1px solid currentColor;
+        padding: 1px 3px 0;
+      }
+      .math-operator {
+        display: inline-grid;
+        grid-template-areas: "sup" "body" "sub";
+        text-align: center;
+        vertical-align: middle;
+        margin: 0 3px;
+      }
+      .math-operator-body {
+        grid-area: body;
+        font-size: 1.15em;
+      }
+      .math-operator-sub,
+      .math-operator-sup {
+        font-size: 0.68em;
+        line-height: 1;
+      }
+      .math-operator-sub {
+        grid-area: sub;
+      }
+      .math-operator-sup {
+        grid-area: sup;
+      }
+      .math-matrix,
+      .math-cases {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        margin: 0 3px;
+      }
+      .math-matrix::before,
+      .math-matrix::after {
+        font-size: 2.2em;
+      }
+      .math-matrix::before {
+        content: "[";
+      }
+      .math-matrix::after {
+        content: "]";
+      }
+      .math-cases::before {
+        content: "{";
+        font-size: 2.5em;
+      }
+      .math-table {
+        border-collapse: separate;
+        border-spacing: 8px 2px;
+      }
+      .draft {
+        fill: #16a34a22;
+        stroke: #16a34a;
+        stroke-width: 3;
+        stroke-dasharray: 8 5;
+        vector-effect: non-scaling-stroke;
+      }
+      .checks {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 4px;
+      }
+      .checks label {
+        margin: 0;
+        font-weight: 400;
+      }
+      .row {
+        display: flex;
+        gap: 7px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      code {
+        overflow-wrap: anywhere;
+      }
+      @media (max-width: 1050px) {
+        .layout {
+          grid-template-columns: 280px 1fr;
+        }
+        .editor {
+          grid-column: 1 / -1;
+        }
+      }
+      @media (max-width: 720px) {
+        .layout,
+        .layout.sidebar-collapsed {
+          grid-template-columns: 1fr;
+        }
+        .layout.sidebar-collapsed .sidebar-toggle {
+          min-height: 0;
+          writing-mode: horizontal-tb;
+        }
+        .editor {
+          grid-column: auto;
+        }
+        .formula-tools,
+        .formula-decisions,
+        .quick-review-actions {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <label
+        >标注种子 <input id="seed" type="file" accept="application/json"
+      /></label>
+      <label
+        >识别草稿 <input id="drafts" type="file" accept="application/json"
+      /></label>
+      <label
+        >匿名页面 <input id="images" type="file" accept="image/png" multiple
+      /></label>
+      <button id="exportTextReview" class="primary">导出正文校对集</button>
+      <button id="export">高级：验证并导出 Gold JSON</button>
+      <button id="reset" class="danger">清除本数据集本地进度</button>
+      <span id="status" class="status">尚未载入标注种子</span>
+    </header>
+    <main id="layout" class="layout">
+      <aside id="sidebar" class="panel sidebar">
+        <button
+          id="sidebarToggle"
+          class="sidebar-toggle"
+          type="button"
+          aria-expanded="true"
+          title="收起整个左侧栏，让标注区域更宽"
+        >
+          <span id="sidebarToggleIcon" class="sidebar-toggle-icon">‹</span>
+          <span id="sidebarToggleText">收起左栏</span>
+        </button>
+        <div id="sidebarContent" class="sidebar-content">
+          <div class="hint">
+            标注页面本身全程离线，不上传图片或正文。可载入旧 OCR
+            草稿或经用户明确授权、在仓库外生成的 Codex 草稿；浏览器只按匿名 UUID
+            匹配，进度保存在本机 localStorage。旧 OCR 草稿只填入空白正文；安全的
+            Codex 正文和题号草稿会自动带入快速核对区，但始终保持待核对，含
+            LaTeX/Markdown
+            标记的旧建议不会自动带入。正文保留线性可读文本；分式、根号、上下标等二维结构可按需在高级区标注
+            LaTeX。公式卡片优先使用严格的普通输入生成草稿；原始 LaTeX
+            仅在“高级编辑”中按需修改。
+            若页面可见姓名、学号等身份信息，必须先在独立图片副本中遮挡，再选择“已使用去标识副本”。
+          </div>
+          <label>数据集</label><code id="datasetId">-</code>
+          <details id="pageListDetails" class="page-list-details" open>
+            <summary>
+              <span>页面列表</span
+              ><span id="pageListCount" class="page-list-count">0 页</span
+              ><span id="pageListAction" class="page-list-action"
+                >收起列表</span
+              >
+            </summary>
+            <div id="pages" class="pages"></div>
+          </details>
+          <label>显示缩放 <span id="zoomText">35%</span></label>
+          <input id="zoom" type="range" min="15" max="100" value="35" />
+        </div>
+      </aside>
+      <section class="panel stage-wrap">
+        <div id="empty" class="hint">
+          载入 annotation-seed.json 和 images 目录中的匿名 PNG。
+        </div>
+        <div id="stage" class="stage" hidden>
+          <img id="image" alt="私有待标注页面" />
+          <svg id="overlay"></svg>
+        </div>
+      </section>
+      <section class="panel editor">
+        <div class="quick-review-intro">
+          <strong>正文快速核对</strong>
+          默认只需对照左侧图片检查正文。题号由 Codex
+          草稿自动带入；公式、画框和标签都放在下方高级区，不影响正文校对。
+        </div>
+        <label>正文草稿（对照图片修改）</label
+        ><textarea id="expectedText" spellcheck="false"></textarea>
+        <div id="quickQuestionHint" class="quick-question-hint">
+          题号：尚未载入
+        </div>
+        <div class="quick-review-actions">
+          <button id="confirmText" class="confirm" type="button">
+            正文一致，下一页
+          </button>
+          <button id="editText" type="button">需要修改</button>
+          <button id="insertUnreadable" type="button">插入 ⟦不清⟧</button>
+        </div>
+        <label
+          ><input id="textReviewed" type="checkbox" /> 已逐字核对正文</label
+        >
+        <details id="advancedAnnotation" class="advanced-annotation">
+          <summary>高级结构标注（可选：题号、标签、区域与 LaTeX）</summary>
+          <label>页面模态</label>
+          <select id="modality">
+            <option value="text_pdf">文字型 PDF</option>
+            <option value="scan">扫描件</option>
+            <option value="photo">照片</option>
+            <option value="mixed">混合来源</option>
+          </select>
+          <label>标注状态</label>
+          <select id="annotationStatus">
+            <option value="pending">未完成</option>
+            <option value="annotated">已标注</option>
+            <option value="unjudgeable">无法可靠标注</option>
+          </select>
+          <label>隐私复核</label>
+          <select id="privacyStatus">
+            <option value="pending">未复核，禁止导出</option>
+            <option value="no_identity_visible">确认无可见身份信息</option>
+            <option value="redacted_copy">确认当前图片是去标识副本</option>
+          </select>
+          <label>退化标签（至少一项）</label>
+          <div id="degradations" class="checks"></div>
+          <label>内容标签（至少一项）</label>
+          <div id="contentTags" class="checks"></div>
+          <label>期望题号（每行一个，保持阅读顺序）</label
+          ><textarea id="questionNumbers" spellcheck="false"></textarea>
+          <label
+            ><input id="integrityReject" type="checkbox" />
+            该页应触发文字完整性拒绝</label
+          >
+          <label>画框类型</label>
+          <div class="row">
+            <label
+              ><input type="radio" name="drawMode" value="question" checked />
+              题目区域</label
+            >
+            <label
+              ><input type="radio" name="drawMode" value="formula" />
+              公式区域</label
+            >
+          </div>
+          <label>题目区域</label>
+          <div class="hint">
+            选择“题目区域”后拖动画框。坐标按原始图片归一化保存。
+          </div>
+          <div class="row" style="margin-top: 8px">
+            <button id="deleteRegion" class="danger">删除选中区域</button
+            ><span id="regionCount">0 个区域</span>
+          </div>
+          <details id="codexSuggestions" hidden>
+            <summary id="codexSuggestionsSummary">
+              Codex 正文、题号与公式建议
+            </summary>
+            <div class="hint">
+              安全的正文和题号建议已自动填入空白字段，但不会标记已核对。公式建议仍只供复制，不会自动创建公式框或写入结构化
+              Gold。
+            </div>
+            <div id="codexSuggestionList"></div>
+          </details>
+          <label>公式区域与结构化转写</label>
+          <div class="hint">
+            选择“公式区域”后框住单个完整公式。先按日常形式输入，例如
+            <code>lim (x,y)-&gt;(0,0) [sqrt(xy+1)-1]/(x+y)</code
+            >，再生成并核对结构草稿。转换器只接受页面列出的有限语法，遇到歧义会停止，不会猜测。线性替代文本用于搜索和旧评测，不能代替
+            LaTeX 结构。
+          </div>
+          <div id="formulaSpans"></div>
+        </details>
+      </section>
+    </main>
+    <script src="./recognition_math_input_to_latex.js"></script>
+    <script>
+      (() => {
+        "use strict";
+        const VERSION = "recognition-private-annotation-v1";
+        const GOLD_VERSION = "recognition-private-gold-v2";
+        const DRAFT_VERSION = "recognition-private-drafts-v1";
+        const CODEX_DRAFT_VERSION = "recognition-private-codex-drafts-v1";
+        const DEGRADATIONS = [
+          "clean",
+          "low_resolution",
+          "blurred",
+          "rotation",
+          "perspective",
+          "low_contrast",
+          "shadow",
+          "cropped",
+        ];
+        const CONTENT = [
+          "chinese",
+          "english",
+          "math",
+          "question_number",
+          "negative",
+        ];
+        const DEGRADATION_LABELS = {
+          clean: "清晰，无明显退化",
+          low_resolution: "分辨率低",
+          blurred: "模糊",
+          rotation: "旋转或倾斜",
+          perspective: "透视变形",
+          low_contrast: "低对比度",
+          shadow: "阴影或光照不均",
+          cropped: "内容贴边或疑似裁切",
+        };
+        const CONTENT_LABELS = {
+          chinese: "中文",
+          english: "英文",
+          math: "数学公式或符号",
+          question_number: "题号",
+          negative: "负例：本页没有应识别的题目区域",
+        };
+        const EMAIL = /[\w.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/;
+        const PHONE = /(?:\+?86[ -]?)?1[3-9]\d{9}/;
+        const IDENTITY =
+          /(?:学生姓名|姓名|学号|学生号|student[ _-]?(?:name|id))\s*[:：=]\s*\S+/i;
+        const ABSOLUTE_PATH = /(?:[A-Za-z]:[\\/]|file:\/\/|^\/)/;
+        const SIDEBAR_COLLAPSED_KEY =
+          "ahamark-recognition-private-gold-sidebar-collapsed";
+        const $ = (id) => document.getElementById(id);
+        let state = null,
+          active = null,
+          selectedRegion = null,
+          selectedFormula = null,
+          dragStart = null,
+          draft = null,
+          drawMode = "question";
+        const imageUrls = new Map();
+        const codexSuggestions = new Map();
+        const hasDraftMarkup = (value) =>
+          value.includes("\\") || value.includes("$") || value.includes("```");
+        const hasDraftMetaResponse = (value) =>
+          [
+            "已进入“私有数学页面识别草稿助手”模式",
+            "已进入「私有数学页面识别草稿助手」模式",
+            "请继续指定需要我对该页执行的任务",
+            "需要我对该页执行的任务",
+            "请提供需要识别的图片",
+            "未收到图片",
+            "无法查看图片",
+          ].some((marker) => value.includes(marker));
+        const plainInputs = new Map();
+        const readyPlainInputs = new Map();
+        const conversionTimers = new Map();
+        const pageListDetails = $("pageListDetails");
+        const updatePageListAction = () => {
+          $("pageListAction").textContent = pageListDetails.open
+            ? "收起列表"
+            : "展开列表";
+        };
+        pageListDetails.ontoggle = updatePageListAction;
+        updatePageListAction();
+        const setSidebarCollapsed = (collapsed, persist = true) => {
+          $("layout").classList.toggle("sidebar-collapsed", collapsed);
+          $("sidebarToggle").setAttribute("aria-expanded", String(!collapsed));
+          $("sidebarToggleText").textContent = collapsed
+            ? "展开左栏"
+            : "收起左栏";
+          $("sidebarToggleIcon").textContent = collapsed ? "›" : "‹";
+          $("sidebarToggle").title = collapsed
+            ? "展开整个左侧栏"
+            : "收起整个左侧栏，让标注区域更宽";
+          if (persist)
+            localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(collapsed));
+        };
+        setSidebarCollapsed(
+          localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true",
+          false,
+        );
+        $("sidebarToggle").onclick = () =>
+          setSidebarCollapsed(
+            !$("layout").classList.contains("sidebar-collapsed"),
+          );
+
+        function storageKey() {
+          return state
+            ? `ahamark-recognition-private-gold-${state.dataset_id}`
+            : null;
+        }
+        function save() {
+          if (state) localStorage.setItem(storageKey(), JSON.stringify(state));
+          renderList();
+          updateStatus();
+        }
+        function current() {
+          return state && state.cases.find((item) => item.case_id === active);
+        }
+        function exactKeys(value, keys) {
+          return (
+            value &&
+            typeof value === "object" &&
+            !Array.isArray(value) &&
+            Object.keys(value).sort().join("|") === [...keys].sort().join("|")
+          );
+        }
+        function validUuid(value) {
+          return (
+            typeof value === "string" &&
+            /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+              value,
+            )
+          );
+        }
+        function validateSeed(data) {
+          if (
+            !exactKeys(data, [
+              "schema_version",
+              "dataset_id",
+              "annotator_decision_version",
+              "cases",
+            ]) ||
+            data.schema_version !== VERSION ||
+            !validUuid(data.dataset_id) ||
+            !Array.isArray(data.cases) ||
+            !data.cases.length
+          )
+            throw new Error("标注种子格式不正确");
+          const ids = new Set();
+          for (const item of data.cases) {
+            const keys = [
+              "case_id",
+              "document_id",
+              "split",
+              "modality",
+              "role",
+              "image_file",
+              "page_width",
+              "page_height",
+              "degradation_tags",
+              "content_tags",
+              "annotation_status",
+              "privacy_status",
+              "expected_text",
+              "expected_question_numbers",
+              "expected_regions",
+              "expect_integrity_rejection",
+              "annotator_decision_version",
+            ];
+            const savedKeys = [...keys, "text_reviewed"];
+            const formulaKeys = [...keys, "formula_spans"];
+            const savedFormulaKeys = [...savedKeys, "formula_spans"];
+            if (
+              (!exactKeys(item, keys) &&
+                !exactKeys(item, savedKeys) &&
+                !exactKeys(item, formulaKeys) &&
+                !exactKeys(item, savedFormulaKeys)) ||
+              !validUuid(item.case_id) ||
+              !validUuid(item.document_id) ||
+              ids.has(item.case_id) ||
+              item.image_file !== `${item.case_id}.png` ||
+              item.split !== "test"
+            )
+              throw new Error("标注种子页面格式不正确");
+            if (
+              "text_reviewed" in item &&
+              typeof item.text_reviewed !== "boolean"
+            )
+              throw new Error("正文核对状态不正确");
+            if (!("text_reviewed" in item)) item.text_reviewed = false;
+            if (!("formula_spans" in item)) item.formula_spans = [];
+            validateFormulaSpans(item.formula_spans);
+            ids.add(item.case_id);
+          }
+          return data;
+        }
+        function validBox(box) {
+          return (
+            exactKeys(box, ["x", "y", "width", "height"]) &&
+            [box.x, box.y, box.width, box.height].every(
+              (value) => typeof value === "number" && Number.isFinite(value),
+            ) &&
+            box.x >= 0 &&
+            box.y >= 0 &&
+            box.width > 0 &&
+            box.height > 0 &&
+            box.x + box.width <= 1.000001 &&
+            box.y + box.height <= 1.000001
+          );
+        }
+        function validateFormulaSpans(spans) {
+          if (!Array.isArray(spans)) throw new Error("公式标注格式不正确");
+          const ids = new Set();
+          for (const span of spans) {
+            if (
+              !exactKeys(span, [
+                "formula_id",
+                "bbox",
+                "latex",
+                "linear_text",
+                "review_status",
+              ]) ||
+              !validUuid(span.formula_id) ||
+              ids.has(span.formula_id) ||
+              !validBox(span.bbox) ||
+              typeof span.latex !== "string" ||
+              typeof span.linear_text !== "string" ||
+              !["pending", "reviewed", "unreadable"].includes(
+                span.review_status,
+              )
+            )
+              throw new Error("公式标注格式不正确");
+            ids.add(span.formula_id);
+          }
+        }
+        function buildChecks(container, values, field, labels) {
+          container.innerHTML = "";
+          for (const value of values) {
+            const label = document.createElement("label"),
+              input = document.createElement("input");
+            input.type = "checkbox";
+            input.value = value;
+            input.onchange = () => {
+              const c = current();
+              if (!c) return;
+              c[field] = [...container.querySelectorAll("input:checked")].map(
+                (node) => node.value,
+              );
+              save();
+            };
+            label.append(
+              input,
+              document.createTextNode(` ${labels[value]}（${value}）`),
+            );
+            container.append(label);
+          }
+        }
+        function renderList() {
+          const pages = $("pages");
+          pages.innerHTML = "";
+          $("pageListCount").textContent =
+            `${state ? state.cases.length : 0} 页`;
+          if (!state) return;
+          state.cases.forEach((item, index) => {
+            const button = document.createElement("button");
+            button.className = "page";
+            if (item.case_id === active) button.classList.add("active");
+            if (item.text_reviewed) button.classList.add("complete");
+            button.textContent = `${index + 1}. ${item.role === "reference_answer" ? "参考答案" : "学生/材料"} · ${item.text_reviewed ? "正文已核对" : "正文待核对"}`;
+            button.onclick = () => selectCase(item.case_id);
+            pages.append(button);
+          });
+        }
+        function updateStatus(message) {
+          if (message) {
+            $("status").textContent = message;
+            return;
+          }
+          if (!state) return;
+          const done = state.cases.filter((item) => item.text_reviewed).length;
+          $("status").textContent =
+            `${done}/${state.cases.length} 页正文已核对`;
+        }
+        function selectCase(caseId) {
+          active = caseId;
+          selectedRegion = null;
+          selectedFormula = null;
+          const c = current();
+          if (!c) return;
+          $("modality").value = c.modality;
+          $("annotationStatus").value = c.annotation_status;
+          $("privacyStatus").value = c.privacy_status;
+          $("expectedText").value = c.expected_text;
+          $("textReviewed").checked = c.text_reviewed;
+          $("questionNumbers").value = c.expected_question_numbers.join("\n");
+          $("quickQuestionHint").textContent = c.expected_question_numbers
+            .length
+            ? `题号草稿：${c.expected_question_numbers.join("、")}`
+            : "题号：本页未识别到明确题号，可忽略或在高级区修改";
+          $("integrityReject").checked = c.expect_integrity_rejection;
+          for (const containerId of ["degradations", "contentTags"])
+            for (const input of $(containerId).querySelectorAll("input"))
+              input.checked = c[
+                containerId === "degradations"
+                  ? "degradation_tags"
+                  : "content_tags"
+              ].includes(input.value);
+          const url = imageUrls.get(c.image_file);
+          $("empty").hidden = Boolean(url);
+          $("stage").hidden = !url;
+          if (url) {
+            $("image").src = url;
+            $("image").onload = () => {
+              $("overlay").setAttribute(
+                "viewBox",
+                `0 0 ${c.page_width} ${c.page_height}`,
+              );
+              applyZoom();
+              renderRegions();
+            };
+          }
+          renderRegions();
+          renderCodexSuggestions();
+          renderFormulaEditors();
+          renderList();
+        }
+        function renderCodexSuggestions() {
+          const details = $("codexSuggestions"),
+            container = $("codexSuggestionList"),
+            suggestion = codexSuggestions.get(active);
+          container.innerHTML = "";
+          if (!suggestion) {
+            details.hidden = true;
+            details.open = false;
+            return;
+          }
+          details.hidden = false;
+          $("codexSuggestionsSummary").textContent =
+            `Codex 正文、题号与公式建议（${suggestion.formula_drafts.length} 条公式，必须人工核对）`;
+          const textCard = document.createElement("div");
+          textCard.className = "formula-card codex-text-suggestion";
+          const textHeading = document.createElement("strong");
+          textHeading.textContent = "Codex 原始正文建议";
+          const textLabel = document.createElement("label");
+          textLabel.textContent = "只读建议；必须逐字对照原图";
+          const textDraft = document.createElement("textarea");
+          textDraft.className = "codex-draft-text";
+          textDraft.readOnly = true;
+          textDraft.value = suggestion.draft_text;
+          const unsafeMarkup = hasDraftMarkup(suggestion.draft_text),
+            unsafeMetaResponse = hasDraftMetaResponse(suggestion.draft_text);
+          const textWarning = document.createElement("div");
+          textWarning.className = "hint codex-draft-warning";
+          textWarning.textContent = unsafeMarkup
+            ? "该旧建议含 LaTeX/Markdown 标记，禁止采用为正文；请人工改成线性 Unicode 或重新生成。"
+            : unsafeMetaResponse
+              ? "该建议是助手操作说明，不是图片正文，已禁止采用；请重新生成此页。"
+              : "空白正文会自动带入此草稿，但模型仍可能遗漏或补写；必须对照原图核对。";
+          const adoptText = document.createElement("button");
+          adoptText.type = "button";
+          adoptText.className = "codex-adopt-text";
+          adoptText.textContent = "人工采用为正文草稿";
+          adoptText.disabled =
+            unsafeMarkup ||
+            unsafeMetaResponse ||
+            !suggestion.draft_text.trim() ||
+            Boolean(current()?.expected_text);
+          adoptText.onclick = () => {
+            const item = current();
+            if (
+              !item ||
+              hasDraftMarkup(suggestion.draft_text) ||
+              hasDraftMetaResponse(suggestion.draft_text)
+            )
+              return;
+            if (item.expected_text) {
+              updateStatus("正文已有内容，Codex 建议不会覆盖；请手动对照修改");
+              return;
+            }
+            item.expected_text = suggestion.draft_text.replace(/\r\n/g, "\n");
+            item.text_reviewed = false;
+            $("expectedText").value = item.expected_text;
+            $("textReviewed").checked = false;
+            adoptText.disabled = true;
+            save();
+            renderList();
+            updateStatus("已人工采用为正文草稿；仍须逐字对照原图核对");
+          };
+          textCard.append(
+            textHeading,
+            textLabel,
+            textDraft,
+            textWarning,
+            adoptText,
+          );
+          const activeItem = current();
+          if (
+            activeItem &&
+            (hasDraftMarkup(activeItem.expected_text) ||
+              hasDraftMetaResponse(activeItem.expected_text))
+          ) {
+            const existingMetaResponse = hasDraftMetaResponse(
+              activeItem.expected_text,
+            );
+            const cleanupWarning = document.createElement("div");
+            cleanupWarning.className = "hint codex-existing-markup-warning";
+            cleanupWarning.textContent = activeItem.text_reviewed
+              ? `当前正文含${existingMetaResponse ? "助手元话术" : "LaTeX/Markdown"}且已标记核对，不能自动清除；请人工复查。`
+              : `当前未核对正文含${existingMetaResponse ? "助手元话术" : "旧 LaTeX/Markdown"}，可清除后重新对照原图。`;
+            const cleanup = document.createElement("button");
+            cleanup.type = "button";
+            cleanup.className = "codex-clear-existing-markup";
+            cleanup.textContent = "清除当前未核对的无效正文";
+            cleanup.disabled = activeItem.text_reviewed;
+            cleanup.onclick = () => {
+              const item = current();
+              if (
+                !item ||
+                item.text_reviewed ||
+                (!hasDraftMarkup(item.expected_text) &&
+                  !hasDraftMetaResponse(item.expected_text))
+              )
+                return;
+              item.expected_text = "";
+              $("expectedText").value = "";
+              save();
+              renderList();
+              cleanup.disabled = true;
+              updateStatus("已清除当前未核对的无效正文；请重新对照原图转录");
+            };
+            textCard.append(cleanupWarning, cleanup);
+          }
+          container.append(textCard);
+          const questionHint = document.createElement("div");
+          questionHint.className = "hint";
+          questionHint.textContent = suggestion.question_numbers.length
+            ? `题号建议：${suggestion.question_numbers.join("、")}（请核对后手动填写）`
+            : "本页没有生成题号建议。";
+          container.append(questionHint);
+          if (!suggestion.formula_drafts.length) {
+            const empty = document.createElement("div");
+            empty.className = "hint";
+            empty.textContent = "本页没有生成公式建议。";
+            container.append(empty);
+          }
+          suggestion.formula_drafts.forEach((formula, index) => {
+            const card = document.createElement("div");
+            card.className = "formula-card";
+            const heading = document.createElement("strong");
+            heading.textContent = `建议 ${index + 1}${formula.uncertain ? "（结构不确定）" : ""}`;
+            const location = document.createElement("div");
+            location.className = "hint";
+            location.textContent = `位置提示：${formula.location_hint || "未提供"}`;
+            const linearLabel = document.createElement("label");
+            linearLabel.textContent = "线性文本（可选择复制）";
+            const linear = document.createElement("textarea");
+            linear.readOnly = true;
+            linear.value = formula.linear_text;
+            const latexLabel = document.createElement("label");
+            latexLabel.textContent = "LaTeX 草稿（可选择复制）";
+            const latex = document.createElement("textarea");
+            latex.readOnly = true;
+            latex.value = formula.latex;
+            card.append(
+              heading,
+              location,
+              linearLabel,
+              linear,
+              latexLabel,
+              latex,
+            );
+            container.append(card);
+          });
+          if (suggestion.uncertainties.length) {
+            const warning = document.createElement("div");
+            warning.className = "hint";
+            warning.textContent = `不确定项（${suggestion.uncertainties.length} 处，逐项对照原图）：`;
+            container.append(warning);
+            const list = document.createElement("ul");
+            for (const uncertainty of suggestion.uncertainties) {
+              const item = document.createElement("li");
+              item.textContent = uncertainty;
+              list.append(item);
+            }
+            container.append(list);
+          }
+        }
+        function appendMathPreview(parent, node) {
+          const appendText = (value) =>
+            parent.append(document.createTextNode(value));
+          if (node.type === "atom") {
+            appendText(node.value);
+            return;
+          }
+          if (node.type === "group") {
+            appendText(node.bracket);
+            appendMathPreview(parent, node.body);
+            appendText(node.bracket === "(" ? ")" : "]");
+            return;
+          }
+          if (node.type === "sequence") {
+            node.items.forEach((item, index) => {
+              if (index) appendText(",");
+              appendMathPreview(parent, item);
+            });
+            return;
+          }
+          if (node.type === "binary") {
+            appendMathPreview(parent, node.left);
+            appendText(
+              node.operator === "*"
+                ? "·"
+                : node.operator === "<="
+                  ? "≤"
+                  : node.operator === ">="
+                    ? "≥"
+                    : node.operator,
+            );
+            appendMathPreview(parent, node.right);
+            return;
+          }
+          if (node.type === "unary") {
+            appendText(node.operator === "-" ? "−" : "+");
+            appendMathPreview(parent, node.body);
+            return;
+          }
+          if (node.type === "product") {
+            appendMathPreview(parent, node.left);
+            appendMathPreview(parent, node.right);
+            return;
+          }
+          if (node.type === "fraction") {
+            const fraction = document.createElement("span"),
+              numerator = document.createElement("span"),
+              denominator = document.createElement("span");
+            fraction.className = "math-fraction";
+            numerator.className = "math-numerator";
+            denominator.className = "math-denominator";
+            appendMathPreview(numerator, node.numerator);
+            appendMathPreview(denominator, node.denominator);
+            fraction.append(numerator, denominator);
+            parent.append(fraction);
+            return;
+          }
+          if (node.type === "sqrt") {
+            const radical = document.createElement("span"),
+              radicand = document.createElement("span");
+            radical.className = "math-radical";
+            radical.textContent = "√";
+            radicand.className = "math-radicand";
+            appendMathPreview(radicand, node.body);
+            parent.append(radical, radicand);
+            return;
+          }
+          if (node.type === "script") {
+            const wrapper = document.createElement("span");
+            appendMathPreview(wrapper, node.base);
+            if (node.subscript) {
+              const sub = document.createElement("sub");
+              appendMathPreview(sub, node.subscript);
+              wrapper.append(sub);
+            }
+            if (node.superscript) {
+              const sup = document.createElement("sup");
+              appendMathPreview(sup, node.superscript);
+              wrapper.append(sup);
+            }
+            parent.append(wrapper);
+            return;
+          }
+          if (node.type === "limit" || node.type === "largeOperator") {
+            const operator = document.createElement("span"),
+              body = document.createElement("span"),
+              sub = document.createElement("span");
+            operator.className = "math-operator";
+            body.className = "math-operator-body";
+            sub.className = "math-operator-sub";
+            body.textContent =
+              node.type === "limit"
+                ? "lim"
+                : node.operator === "int"
+                  ? "∫"
+                  : node.operator === "iint"
+                    ? "∬"
+                    : "Σ";
+            if (node.type === "limit") {
+              appendMathPreview(sub, node.from);
+              sub.append(document.createTextNode("→"));
+              appendMathPreview(sub, node.to);
+            } else {
+              appendMathPreview(sub, node.lower);
+              if (node.upper) {
+                const sup = document.createElement("span");
+                sup.className = "math-operator-sup";
+                appendMathPreview(sup, node.upper);
+                operator.append(sup);
+              }
+            }
+            operator.append(body, sub);
+            parent.append(operator);
+            return;
+          }
+          if (node.type === "matrix" || node.type === "cases") {
+            const wrapper = document.createElement("span"),
+              table = document.createElement("table"),
+              body = document.createElement("tbody");
+            wrapper.className =
+              node.type === "matrix" ? "math-matrix" : "math-cases";
+            table.className = "math-table";
+            for (const row of node.rows) {
+              const tr = document.createElement("tr");
+              for (const cell of row) {
+                const td = document.createElement("td");
+                appendMathPreview(td, cell);
+                tr.append(td);
+              }
+              body.append(tr);
+            }
+            table.append(body);
+            wrapper.append(table);
+            parent.append(wrapper);
+          }
+        }
+
+        function renderStructurePreview(container, result, existingLatex = "") {
+          container.innerHTML = "";
+          if (!result) {
+            container.textContent = existingLatex.trim()
+              ? `已有 LaTeX 草稿；可展开高级编辑查看，或用普通输入重新生成：${existingLatex}`
+              : "等待从普通输入生成结构草稿";
+            return;
+          }
+          const root = document.createElement("span");
+          root.className = "math-preview-root";
+          appendMathPreview(root, result.ast);
+          container.append(root);
+        }
+
+        function renderFormulaEditors() {
+          const container = $("formulaSpans"),
+            c = current();
+          container.innerHTML = "";
+          if (!c || !c.formula_spans.length) {
+            const empty = document.createElement("div");
+            empty.className = "hint";
+            empty.textContent = "尚未框选公式。";
+            container.append(empty);
+            return;
+          }
+          c.formula_spans.forEach((span, index) => {
+            const card = document.createElement("div");
+            card.className = `formula-card${selectedFormula === span.formula_id ? " selected" : ""}`;
+            card.onclick = (event) => {
+              if (
+                event.target.closest("textarea,button,select,details,summary")
+              )
+                return;
+              selectedFormula = span.formula_id;
+              selectedRegion = null;
+              renderFormulaEditors();
+              renderRegions();
+            };
+
+            const heading = document.createElement("div");
+            heading.className = "row";
+            const title = document.createElement("strong");
+            title.textContent = `公式 ${index + 1}`;
+            const reviewBadge = document.createElement("span");
+            reviewBadge.className = "formula-review-badge";
+            const updateReviewBadge = () => {
+              reviewBadge.className = `formula-review-badge ${span.review_status}`;
+              reviewBadge.textContent =
+                span.review_status === "reviewed"
+                  ? "已人工核对"
+                  : span.review_status === "unreadable"
+                    ? "局部无法转写"
+                    : "待核对";
+            };
+            updateReviewBadge();
+            const remove = document.createElement("button");
+            remove.type = "button";
+            remove.className = "danger";
+            remove.textContent = "删除公式框";
+            remove.onclick = (event) => {
+              event.stopPropagation();
+              c.formula_spans = c.formula_spans.filter(
+                (item) => item.formula_id !== span.formula_id,
+              );
+              plainInputs.delete(span.formula_id);
+              readyPlainInputs.delete(span.formula_id);
+              clearTimeout(conversionTimers.get(span.formula_id));
+              conversionTimers.delete(span.formula_id);
+              selectedFormula = null;
+              save();
+              renderFormulaEditors();
+              renderRegions();
+            };
+            heading.append(title, reviewBadge, remove);
+
+            const plainLabel = document.createElement("label");
+            plainLabel.textContent = "按平时写法输入公式";
+            const plain = document.createElement("textarea");
+            plain.className = "formula-plain";
+            plain.spellcheck = false;
+            plain.placeholder = "例如：lim (x,y)->(0,0) [sqrt(xy+1)-1]/(x+y)";
+            plain.value = plainInputs.get(span.formula_id) || "";
+
+            const help = document.createElement("details"),
+              helpSummary = document.createElement("summary"),
+              helpIntro = document.createElement("div");
+            help.className = "formula-help";
+            helpSummary.textContent = "怎么输入？查看可复制示例";
+            helpIntro.textContent =
+              "只支持明确、有限的写法；有歧义时会停止，不会猜测。";
+            help.append(helpSummary, helpIntro);
+            for (const example of [
+              "[a]/[b]    sqrt(x+1)    x^2    x_(i+1)",
+              "lim (x,y)->(0,0) [sqrt(xy+1)-1]/(x+y)",
+              "int_a^b    sum_(i=1)^n",
+              "iint_S    ∫∫_S    ∬_S",
+              "matrix([a,b];[c,d])",
+              "cases([f(x),x>=0];[g(x),x<0])",
+            ]) {
+              const code = document.createElement("code");
+              code.textContent = example;
+              help.append(code);
+            }
+
+            const tools = document.createElement("div");
+            tools.className = "formula-tools";
+            for (const [text, buildTemplate, focusToken] of [
+              [
+                "分式",
+                (selection) => `[${selection || "a"}]/[b]`,
+                (selection) => (selection ? "b" : "a"),
+              ],
+              [
+                "根号",
+                (selection) => `sqrt(${selection || "a"})`,
+                (selection) => (selection ? null : "a"),
+              ],
+              ["上标", (selection) => `${selection || "x"}^2`, () => "2"],
+              ["下标", (selection) => `${selection || "x"}_(i)`, () => "i"],
+              ["极限", () => "lim x->0 ", () => "x"],
+              ["积分", () => "int_a^b ", () => "a"],
+              ["重积分", () => "iint_S ", () => "S"],
+              ["求和", () => "sum_(i=1)^n ", () => "i"],
+              ["矩阵", () => "matrix([a,b];[c,d])", () => "a"],
+              ["分段函数", () => "cases([f(x),x>=0];[g(x),x<0])", () => "f(x)"],
+            ]) {
+              const button = document.createElement("button");
+              button.type = "button";
+              button.textContent = text;
+              button.onclick = () => {
+                const start = plain.selectionStart,
+                  end = plain.selectionEnd,
+                  selection = plain.value.slice(start, end),
+                  template = buildTemplate(selection),
+                  token = focusToken(selection);
+                plain.setRangeText(template, start, end, "end");
+                if (token) {
+                  const tokenStart = template.lastIndexOf(token);
+                  plain.setSelectionRange(
+                    start + tokenStart,
+                    start + tokenStart + token.length,
+                  );
+                }
+                plain.dispatchEvent(new Event("input", { bubbles: true }));
+                plain.focus();
+              };
+              tools.append(button);
+            }
+
+            const actionRow = document.createElement("div"),
+              generate = document.createElement("button"),
+              shortcut = document.createElement("span"),
+              conversionMessage = document.createElement("div");
+            actionRow.className = "row";
+            generate.type = "button";
+            generate.className = "primary formula-generate";
+            generate.textContent = "立即生成草稿";
+            shortcut.className = "formula-shortcut";
+            shortcut.textContent = "停止输入后会自动更新 · Ctrl+Enter 立即生成";
+            conversionMessage.className = "formula-conversion-message";
+            actionRow.append(generate, shortcut);
+
+            const latex = document.createElement("textarea");
+            latex.className = "formula-latex";
+            latex.spellcheck = false;
+            latex.value = span.latex;
+            const preview = document.createElement("div");
+            preview.className = "formula-preview";
+            renderStructurePreview(preview, null, span.latex);
+
+            const statusLabel = document.createElement("label");
+            statusLabel.textContent = "公式核对状态";
+            const status = document.createElement("select");
+            status.className = "formula-status";
+            for (const [value, text] of [
+              ["pending", "待核对"],
+              ["reviewed", "已对照原图核对"],
+              ["unreadable", "局部公式无法可靠转写"],
+            ]) {
+              const option = document.createElement("option");
+              option.value = value;
+              option.textContent = text;
+              status.append(option);
+            }
+            status.value = span.review_status;
+            let currentDraftReady =
+              Boolean(span.latex.trim() && span.linear_text.trim()) &&
+              (!plain.value.trim() ||
+                readyPlainInputs.get(span.formula_id) === plain.value);
+
+            const setFeedback = (message, tone = "warning") => {
+              conversionMessage.textContent = message;
+              conversionMessage.dataset.tone = tone;
+            };
+            setFeedback(
+              span.latex.trim()
+                ? "已有结构草稿；可以重新输入自动更新，或直接对照原图确认。"
+                : "输入停止后会自动生成结构草稿。",
+              span.latex.trim() ? "warning" : "success",
+            );
+
+            const markPending = () => {
+              if (span.review_status !== "pending") {
+                span.review_status = "pending";
+                status.value = "pending";
+                updateReviewBadge();
+              }
+            };
+            const generateDraft = ({ automatic = false } = {}) => {
+              try {
+                const result = window.AhaMarkMathInput.convert(plain.value);
+                span.latex = result.latex;
+                span.linear_text = result.linearText;
+                span.review_status = "pending";
+                currentDraftReady = true;
+                readyPlainInputs.set(span.formula_id, plain.value);
+                latex.value = span.latex;
+                linear.value = span.linear_text;
+                status.value = "pending";
+                updateReviewBadge();
+                renderStructurePreview(preview, result);
+                setFeedback(
+                  automatic
+                    ? "草稿已自动更新，仍需对照原图确认。"
+                    : "草稿已生成，仍需对照原图确认。",
+                  "success",
+                );
+                save();
+                return true;
+              } catch (error) {
+                currentDraftReady = false;
+                renderStructurePreview(preview, null);
+                setFeedback(
+                  automatic
+                    ? "输入尚未形成明确结构；可继续输入，或点击“立即生成草稿”查看原因。"
+                    : `停止转换：${error.message}`,
+                  automatic ? "warning" : "error",
+                );
+                return false;
+              }
+            };
+            plain.oninput = (event) => {
+              plainInputs.set(span.formula_id, event.target.value);
+              readyPlainInputs.delete(span.formula_id);
+              currentDraftReady = false;
+              markPending();
+              renderStructurePreview(preview, null);
+              setFeedback("正在检查输入结构…", "warning");
+              clearTimeout(conversionTimers.get(span.formula_id));
+              const timer = setTimeout(() => {
+                conversionTimers.delete(span.formula_id);
+                if (plain.value.trim()) generateDraft({ automatic: true });
+              }, 450);
+              conversionTimers.set(span.formula_id, timer);
+              save();
+            };
+            plain.onkeydown = (event) => {
+              if (event.ctrlKey && event.key === "Enter") {
+                event.preventDefault();
+                clearTimeout(conversionTimers.get(span.formula_id));
+                conversionTimers.delete(span.formula_id);
+                generateDraft();
+              }
+            };
+            generate.onclick = () => {
+              clearTimeout(conversionTimers.get(span.formula_id));
+              conversionTimers.delete(span.formula_id);
+              generateDraft();
+            };
+            latex.oninput = (event) => {
+              span.latex = event.target.value.replace(/\r\n/g, "\n");
+              currentDraftReady = true;
+              readyPlainInputs.set(span.formula_id, plain.value);
+              markPending();
+              setFeedback("高级 LaTeX 已修改，请重新对照原图核对。", "warning");
+              save();
+            };
+
+            const advanced = document.createElement("details"),
+              advancedSummary = document.createElement("summary"),
+              latexLabel = document.createElement("label");
+            advanced.className = "advanced-latex";
+            advancedSummary.textContent = "高级编辑：LaTeX、线性文本与特殊状态";
+            latexLabel.textContent = "LaTeX（保留二维结构）";
+            advanced.append(advancedSummary, latexLabel, latex);
+
+            const linearLabel = document.createElement("label");
+            linearLabel.textContent = "线性替代文本（搜索与兼容）";
+            const linear = document.createElement("textarea");
+            linear.className = "formula-linear";
+            linear.spellcheck = false;
+            linear.value = span.linear_text;
+            linear.oninput = (event) => {
+              span.linear_text = event.target.value.replace(/\r\n/g, "\n");
+              currentDraftReady = true;
+              readyPlainInputs.set(span.formula_id, plain.value);
+              markPending();
+              setFeedback(
+                "线性替代文本已修改，请重新对照原图核对。",
+                "warning",
+              );
+              save();
+            };
+
+            status.onchange = (event) => {
+              span.review_status = event.target.value;
+              updateReviewBadge();
+              save();
+            };
+            advanced.append(linearLabel, linear, statusLabel, status);
+
+            const decisions = document.createElement("div");
+            decisions.className = "row formula-decisions";
+            for (const [text, action] of [
+              ["与原图一致", "reviewed"],
+              ["需要修改", "modify"],
+              ["需要辅助转写", "assist"],
+            ]) {
+              const button = document.createElement("button");
+              button.type = "button";
+              button.textContent = text;
+              button.onclick = () => {
+                if (action === "reviewed") {
+                  if (plain.value.trim() && !currentDraftReady) {
+                    setFeedback(
+                      "普通输入已经变化，请先生成有效草稿再确认。",
+                      "error",
+                    );
+                    return;
+                  }
+                  if (!span.latex.trim() || !span.linear_text.trim()) {
+                    setFeedback(
+                      "尚无完整草稿，不能标记为与原图一致。",
+                      "error",
+                    );
+                    return;
+                  }
+                  span.review_status = "reviewed";
+                  status.value = "reviewed";
+                  updateReviewBadge();
+                  setFeedback("已记录人工对照确认。", "success");
+                } else {
+                  span.review_status = "pending";
+                  status.value = "pending";
+                  updateReviewBadge();
+                  setFeedback(
+                    action === "assist"
+                      ? "保持待核对：请请求辅助转写；看不清时可单独标记局部无法可靠转写。"
+                      : "保持待核对：请修改普通输入或展开高级编辑。",
+                    "warning",
+                  );
+                  if (action === "modify") advanced.open = true;
+                }
+                save();
+              };
+              decisions.append(button);
+            }
+
+            const makeStep = (number, text) => {
+                const section = document.createElement("section"),
+                  stepTitle = document.createElement("div"),
+                  stepNumber = document.createElement("span");
+                section.className = "formula-step";
+                stepTitle.className = "formula-step-title";
+                stepNumber.className = "formula-step-number";
+                stepNumber.textContent = number;
+                stepTitle.append(stepNumber, document.createTextNode(text));
+                section.append(stepTitle);
+                return section;
+              },
+              inputStep = makeStep("1", "输入或套用常用结构"),
+              previewStep = makeStep("2", "查看结构草稿"),
+              reviewStep = makeStep("3", "对照原图作出判断");
+            inputStep.append(
+              plainLabel,
+              plain,
+              help,
+              tools,
+              actionRow,
+              conversionMessage,
+            );
+            previewStep.append(preview);
+            reviewStep.append(decisions);
+            card.append(heading, inputStep, previewStep, reviewStep, advanced);
+            container.append(card);
+          });
+        }
+        function renderRegions() {
+          const svg = $("overlay"),
+            c = current();
+          svg.innerHTML = "";
+          if (!c) return;
+          for (const region of c.expected_regions) {
+            const rect = document.createElementNS(
+                "http://www.w3.org/2000/svg",
+                "rect",
+              ),
+              b = region.bbox;
+            for (const [name, value] of Object.entries({
+              x: b.x * c.page_width,
+              y: b.y * c.page_height,
+              width: b.width * c.page_width,
+              height: b.height * c.page_height,
+            }))
+              rect.setAttribute(name, value);
+            rect.setAttribute(
+              "class",
+              `box${selectedRegion === region.region_id ? " selected" : ""}`,
+            );
+            rect.onclick = (event) => {
+              event.stopPropagation();
+              selectedRegion = region.region_id;
+              renderRegions();
+            };
+            svg.append(rect);
+          }
+          for (const span of c.formula_spans) {
+            const rect = document.createElementNS(
+                "http://www.w3.org/2000/svg",
+                "rect",
+              ),
+              b = span.bbox;
+            for (const [name, value] of Object.entries({
+              x: b.x * c.page_width,
+              y: b.y * c.page_height,
+              width: b.width * c.page_width,
+              height: b.height * c.page_height,
+            }))
+              rect.setAttribute(name, value);
+            rect.setAttribute(
+              "class",
+              `formula-box${selectedFormula === span.formula_id ? " selected" : ""}`,
+            );
+            rect.onclick = (event) => {
+              event.stopPropagation();
+              selectedFormula = span.formula_id;
+              selectedRegion = null;
+              renderRegions();
+              renderFormulaEditors();
+            };
+            svg.append(rect);
+          }
+          if (draft) {
+            const rect = document.createElementNS(
+              "http://www.w3.org/2000/svg",
+              "rect",
+            );
+            for (const [name, value] of Object.entries(draft))
+              rect.setAttribute(name, value);
+            rect.setAttribute(
+              "class",
+              drawMode === "formula" ? "formula-box" : "draft",
+            );
+            svg.append(rect);
+          }
+          $("regionCount").textContent = `${c.expected_regions.length} 个区域`;
+        }
+        function point(event) {
+          const bounds = $("overlay").getBoundingClientRect(),
+            c = current();
+          return {
+            x: Math.max(
+              0,
+              Math.min(
+                c.page_width,
+                ((event.clientX - bounds.left) * c.page_width) / bounds.width,
+              ),
+            ),
+            y: Math.max(
+              0,
+              Math.min(
+                c.page_height,
+                ((event.clientY - bounds.top) * c.page_height) / bounds.height,
+              ),
+            ),
+          };
+        }
+        $("overlay").onpointerdown = (event) => {
+          if (!current()) return;
+          selectedRegion = null;
+          selectedFormula = null;
+          dragStart = point(event);
+          draft = { x: dragStart.x, y: dragStart.y, width: 0, height: 0 };
+          $("overlay").setPointerCapture(event.pointerId);
+          renderRegions();
+        };
+        $("overlay").onpointermove = (event) => {
+          if (!dragStart) return;
+          const p = point(event);
+          draft = {
+            x: Math.min(dragStart.x, p.x),
+            y: Math.min(dragStart.y, p.y),
+            width: Math.abs(p.x - dragStart.x),
+            height: Math.abs(p.y - dragStart.y),
+          };
+          renderRegions();
+        };
+        $("overlay").onpointerup = () => {
+          const c = current();
+          if (c && draft && draft.width >= 4 && draft.height >= 4) {
+            const bbox = {
+              x: draft.x / c.page_width,
+              y: draft.y / c.page_height,
+              width: draft.width / c.page_width,
+              height: draft.height / c.page_height,
+            };
+            if (drawMode === "formula") {
+              const span = {
+                formula_id: crypto.randomUUID(),
+                bbox,
+                latex: "",
+                linear_text: "",
+                review_status: "pending",
+              };
+              c.formula_spans.push(span);
+              selectedFormula = span.formula_id;
+            } else {
+              const region = {
+                region_id: crypto.randomUUID(),
+                bbox,
+              };
+              c.expected_regions.push(region);
+              selectedRegion = region.region_id;
+            }
+          }
+          dragStart = null;
+          draft = null;
+          save();
+          renderRegions();
+          renderFormulaEditors();
+        };
+        $("deleteRegion").onclick = () => {
+          const c = current();
+          if (!c || !selectedRegion) return;
+          c.expected_regions = c.expected_regions.filter(
+            (row) => row.region_id !== selectedRegion,
+          );
+          selectedRegion = null;
+          save();
+          renderRegions();
+        };
+        for (const input of document.querySelectorAll('input[name="drawMode"]'))
+          input.onchange = (event) => {
+            drawMode = event.target.value;
+            selectedRegion = null;
+            selectedFormula = null;
+            renderRegions();
+            renderFormulaEditors();
+          };
+        $("seed").onchange = async (event) => {
+          try {
+            const file = event.target.files[0];
+            if (!file) return;
+            const loaded = validateSeed(JSON.parse(await file.text()));
+            codexSuggestions.clear();
+            const saved = localStorage.getItem(
+              `ahamark-recognition-private-gold-${loaded.dataset_id}`,
+            );
+            state = saved ? validateSeed(JSON.parse(saved)) : loaded;
+            let clearedMetaResponses = 0;
+            for (const item of state.cases) {
+              if (
+                !item.text_reviewed &&
+                hasDraftMetaResponse(item.expected_text)
+              ) {
+                item.expected_text = "";
+                clearedMetaResponses += 1;
+              }
+            }
+            $("datasetId").textContent = state.dataset_id;
+            active = state.cases[0].case_id;
+            buildChecks(
+              $("degradations"),
+              DEGRADATIONS,
+              "degradation_tags",
+              DEGRADATION_LABELS,
+            );
+            buildChecks(
+              $("contentTags"),
+              CONTENT,
+              "content_tags",
+              CONTENT_LABELS,
+            );
+            selectCase(active);
+            save();
+            if (clearedMetaResponses)
+              updateStatus(
+                `已自动清除 ${clearedMetaResponses} 页尚未核对的助手元话术；请重新转录这些页面`,
+              );
+          } catch (error) {
+            updateStatus(`载入失败：${error.message}`);
+          }
+        };
+        $("images").onchange = (event) => {
+          for (const file of event.target.files) {
+            if (/^[0-9a-f-]{36}\.png$/i.test(file.name))
+              imageUrls.set(file.name, URL.createObjectURL(file));
+          }
+          if (active) selectCase(active);
+        };
+        $("drafts").onchange = async (event) => {
+          try {
+            if (!state) throw new Error("请先载入标注种子");
+            const file = event.target.files[0];
+            if (!file) return;
+            const data = JSON.parse(await file.text());
+            if (
+              !exactKeys(data, [
+                "schema_version",
+                "private",
+                "dataset_id",
+                "cases",
+              ]) ||
+              ![DRAFT_VERSION, CODEX_DRAFT_VERSION].includes(
+                data.schema_version,
+              ) ||
+              data.private !== true ||
+              data.dataset_id !== state.dataset_id ||
+              !Array.isArray(data.cases)
+            )
+              throw new Error("识别草稿格式或数据集不匹配");
+            const isCodex = data.schema_version === CODEX_DRAFT_VERSION;
+            const drafts = new Map();
+            for (const row of data.cases) {
+              const validLegacy =
+                !isCodex && exactKeys(row, ["case_id", "draft_text"]);
+              const validCodex =
+                isCodex &&
+                exactKeys(row, [
+                  "case_id",
+                  "draft_text",
+                  "question_numbers",
+                  "formula_drafts",
+                  "uncertainties",
+                  "manual_review_required",
+                ]) &&
+                Array.isArray(row.question_numbers) &&
+                row.question_numbers.every(
+                  (value) => typeof value === "string",
+                ) &&
+                Array.isArray(row.formula_drafts) &&
+                row.formula_drafts.every(
+                  (formula) =>
+                    exactKeys(formula, [
+                      "linear_text",
+                      "latex",
+                      "location_hint",
+                      "uncertain",
+                    ]) &&
+                    typeof formula.linear_text === "string" &&
+                    typeof formula.latex === "string" &&
+                    typeof formula.location_hint === "string" &&
+                    typeof formula.uncertain === "boolean",
+                ) &&
+                Array.isArray(row.uncertainties) &&
+                row.uncertainties.every((value) => typeof value === "string") &&
+                row.manual_review_required === true;
+              if (
+                (!validLegacy && !validCodex) ||
+                !validUuid(row.case_id) ||
+                typeof row.draft_text !== "string" ||
+                drafts.has(row.case_id)
+              )
+                throw new Error("识别草稿页面格式不正确");
+              drafts.set(row.case_id, row);
+            }
+            if (
+              drafts.size !== state.cases.length ||
+              state.cases.some((item) => !drafts.has(item.case_id))
+            )
+              throw new Error("识别草稿必须完整覆盖当前标注页");
+            codexSuggestions.clear();
+            let filled = 0,
+              questionNumbersFilled = 0,
+              unsafeSkipped = 0;
+            for (const item of state.cases) {
+              if (!isCodex && !item.expected_text && !item.text_reviewed) {
+                item.expected_text = drafts.get(item.case_id).draft_text;
+                filled += 1;
+              }
+              if (isCodex) {
+                const suggestion = drafts.get(item.case_id);
+                codexSuggestions.set(item.case_id, suggestion);
+                if (!item.expected_text && !item.text_reviewed) {
+                  if (
+                    suggestion.draft_text.trim() &&
+                    !hasDraftMarkup(suggestion.draft_text) &&
+                    !hasDraftMetaResponse(suggestion.draft_text)
+                  ) {
+                    item.expected_text = suggestion.draft_text;
+                    filled += 1;
+                  } else if (suggestion.draft_text.trim()) {
+                    unsafeSkipped += 1;
+                  }
+                }
+                if (
+                  !item.expected_question_numbers.length &&
+                  suggestion.question_numbers.length
+                ) {
+                  item.expected_question_numbers = [
+                    ...suggestion.question_numbers,
+                  ];
+                  questionNumbersFilled += 1;
+                }
+              }
+            }
+            selectCase(active);
+            save();
+            updateStatus(
+              isCodex
+                ? `已载入 ${drafts.size} 页 Codex 建议；自动填入 ${filled} 页空白正文和 ${questionNumbersFilled} 页题号，全部仍待人工核对${unsafeSkipped ? `；另有 ${unsafeSkipped} 页含不安全标记未填入` : ""}`
+                : `已填入 ${filled} 页 OCR 草稿；仍须逐页对照图片核对`,
+            );
+          } catch (error) {
+            updateStatus(`草稿载入失败：${error.message}`);
+          }
+        };
+        function applyZoom() {
+          const c = current();
+          if (!c) return;
+          const scale = Number($("zoom").value) / 100,
+            width = Math.round(c.page_width * scale),
+            height = Math.round(c.page_height * scale);
+          $("image").style.width = `${width}px`;
+          $("image").style.height = `${height}px`;
+          $("overlay").style.width = `${width}px`;
+          $("overlay").style.height = `${height}px`;
+          $("overlay").setAttribute("width", width);
+          $("overlay").setAttribute("height", height);
+          $("zoomText").textContent = `${$("zoom").value}%`;
+        }
+        $("zoom").oninput = applyZoom;
+        for (const [id, field] of [
+          ["modality", "modality"],
+          ["annotationStatus", "annotation_status"],
+          ["privacyStatus", "privacy_status"],
+        ])
+          $(id).onchange = (event) => {
+            const c = current();
+            if (c) {
+              c[field] = event.target.value;
+              save();
+            }
+          };
+        $("expectedText").oninput = (event) => {
+          const c = current();
+          if (c) {
+            c.expected_text = event.target.value.replace(/\r\n/g, "\n");
+            c.text_reviewed = false;
+            $("textReviewed").checked = false;
+            save();
+          }
+        };
+        $("textReviewed").onchange = (event) => {
+          const c = current();
+          if (c) {
+            c.text_reviewed = event.target.checked;
+            save();
+          }
+        };
+        $("confirmText").onclick = () => {
+          const c = current();
+          if (!c) return;
+          if (!c.expected_text.trim()) {
+            updateStatus("正文为空，不能标记为一致；请转录或插入 ⟦不清⟧");
+            $("expectedText").focus();
+            return;
+          }
+          c.text_reviewed = true;
+          c.annotation_status = "annotated";
+          $("textReviewed").checked = true;
+          $("annotationStatus").value = "annotated";
+          save();
+          const index = state.cases.findIndex(
+            (item) => item.case_id === active,
+          );
+          const next = state.cases[index + 1];
+          if (next) {
+            selectCase(next.case_id);
+            updateStatus(`第 ${index + 1} 页正文已核对，已进入下一页`);
+          } else {
+            updateStatus(
+              `正文快速核对完成 ${state.cases.filter((item) => item.text_reviewed).length}/${state.cases.length} 页`,
+            );
+          }
+        };
+        $("editText").onclick = () => {
+          const c = current();
+          if (!c) return;
+          c.text_reviewed = false;
+          $("textReviewed").checked = false;
+          save();
+          $("expectedText").focus();
+          updateStatus("保持待核对；请直接修改正文草稿");
+        };
+        $("insertUnreadable").onclick = () => {
+          const c = current(),
+            textarea = $("expectedText");
+          if (!c) return;
+          textarea.setRangeText(
+            "⟦不清⟧",
+            textarea.selectionStart,
+            textarea.selectionEnd,
+            "end",
+          );
+          textarea.dispatchEvent(new Event("input", { bubbles: true }));
+          textarea.focus();
+          updateStatus("已插入 ⟦不清⟧；不会猜测原图字符，请继续核对");
+        };
+        $("questionNumbers").oninput = (event) => {
+          const c = current();
+          if (c) {
+            c.expected_question_numbers = event.target.value
+              .split(/\r?\n/)
+              .map((value) => value.trim())
+              .filter(Boolean);
+            $("quickQuestionHint").textContent = c.expected_question_numbers
+              .length
+              ? `题号：${c.expected_question_numbers.join("、")}`
+              : "题号：本页未识别到明确题号，可忽略或在高级区修改";
+            save();
+          }
+        };
+        $("integrityReject").onchange = (event) => {
+          const c = current();
+          if (c) {
+            c.expect_integrity_rejection = event.target.checked;
+            save();
+          }
+        };
+        function validateForExport() {
+          if (!state) throw new Error("尚未载入标注种子");
+          for (const [index, c] of state.cases.entries()) {
+            if (!imageUrls.has(c.image_file))
+              throw new Error(`第 ${index + 1} 页未载入匿名图片`);
+            if (!c.degradation_tags.length || !c.content_tags.length)
+              throw new Error(`第 ${index + 1} 页缺少标签`);
+            if (!["annotated", "unjudgeable"].includes(c.annotation_status))
+              throw new Error(`第 ${index + 1} 页尚未完成标注`);
+            if (c.annotation_status === "annotated" && !c.text_reviewed)
+              throw new Error(`第 ${index + 1} 页正文尚未逐字核对`);
+            if (c.formula_spans.length && !c.content_tags.includes("math"))
+              throw new Error(`第 ${index + 1} 页有公式框但缺少数学内容标签`);
+            for (const [formulaIndex, span] of c.formula_spans.entries()) {
+              if (span.review_status === "pending")
+                throw new Error(
+                  `第 ${index + 1} 页公式 ${formulaIndex + 1} 尚未核对`,
+                );
+              if (
+                span.review_status === "reviewed" &&
+                (!span.latex.trim() || !span.linear_text.trim())
+              )
+                throw new Error(
+                  `第 ${index + 1} 页公式 ${formulaIndex + 1} 缺少 LaTeX 或线性替代文本`,
+                );
+              const formulaText = `${span.latex}\n${span.linear_text}`;
+              if (
+                EMAIL.test(formulaText) ||
+                PHONE.test(formulaText) ||
+                IDENTITY.test(formulaText) ||
+                ABSOLUTE_PATH.test(formulaText)
+              )
+                throw new Error(
+                  `第 ${index + 1} 页公式 ${formulaIndex + 1} 疑似包含身份信息或路径`,
+                );
+            }
+            if (
+              !["no_identity_visible", "redacted_copy"].includes(
+                c.privacy_status,
+              )
+            )
+              throw new Error(`第 ${index + 1} 页尚未完成隐私复核`);
+            const text = c.expected_text;
+            if (
+              EMAIL.test(text) ||
+              PHONE.test(text) ||
+              IDENTITY.test(text) ||
+              ABSOLUTE_PATH.test(text)
+            )
+              throw new Error(`第 ${index + 1} 页正文疑似包含身份信息或路径`);
+            if (
+              c.annotation_status === "unjudgeable" &&
+              (text ||
+                c.expected_question_numbers.length ||
+                c.expected_regions.length ||
+                c.formula_spans.length)
+            )
+              throw new Error(`第 ${index + 1} 页不可判定时必须清空 gold 内容`);
+          }
+        }
+        function validateTextReviewExport() {
+          if (!state) throw new Error("尚未载入标注种子");
+          for (const [index, c] of state.cases.entries()) {
+            if (!c.text_reviewed)
+              throw new Error(`第 ${index + 1} 页正文尚未核对`);
+            if (!c.expected_text.trim())
+              throw new Error(`第 ${index + 1} 页正文为空`);
+            const text = `${c.expected_text}\n${c.expected_question_numbers.join("\n")}`;
+            if (
+              EMAIL.test(text) ||
+              PHONE.test(text) ||
+              IDENTITY.test(text) ||
+              ABSOLUTE_PATH.test(text)
+            )
+              throw new Error(`第 ${index + 1} 页正文疑似包含身份信息或路径`);
+          }
+        }
+        $("exportTextReview").onclick = () => {
+          try {
+            validateTextReviewExport();
+            const review = {
+              schema_version: "recognition-private-text-review-v1",
+              private: true,
+              dataset_id: state.dataset_id,
+              cases: state.cases.map((c) => ({
+                case_id: c.case_id,
+                expected_text: c.expected_text,
+                expected_question_numbers: c.expected_question_numbers,
+                review_status: "reviewed",
+              })),
+            };
+            const blob = new Blob([`${JSON.stringify(review, null, 2)}\n`], {
+                type: "application/json",
+              }),
+              link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = "text-review.json";
+            link.click();
+            URL.revokeObjectURL(link.href);
+            updateStatus(
+              "正文校对集已导出；不含图片、文件名、来源映射或结构化 Gold",
+            );
+          } catch (error) {
+            updateStatus(`禁止导出正文校对集：${error.message}`);
+          }
+        };
+        $("export").onclick = () => {
+          try {
+            validateForExport();
+            const gold = {
+              schema_version: GOLD_VERSION,
+              dataset_id: state.dataset_id,
+              annotator_decision_version: state.annotator_decision_version,
+              cases: state.cases.map((c) => ({
+                case_id: c.case_id,
+                document_id: c.document_id,
+                split: c.split,
+                modality: c.modality,
+                image_file: c.image_file,
+                page_width: c.page_width,
+                page_height: c.page_height,
+                degradation_tags: c.degradation_tags,
+                content_tags: c.content_tags,
+                annotation_status: c.annotation_status,
+                expected_text: c.expected_text,
+                expected_question_numbers: c.expected_question_numbers,
+                expected_regions: c.expected_regions,
+                formula_spans: c.formula_spans,
+                expect_integrity_rejection: c.expect_integrity_rejection,
+                annotator_decision_version: c.annotator_decision_version,
+              })),
+            };
+            const blob = new Blob([`${JSON.stringify(gold, null, 2)}\n`], {
+                type: "application/json",
+              }),
+              link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = "gold.json";
+            link.click();
+            URL.revokeObjectURL(link.href);
+            updateStatus("Gold JSON 已导出；图片仍只在本机");
+          } catch (error) {
+            updateStatus(`禁止导出：${error.message}`);
+          }
+        };
+        $("reset").onclick = () => {
+          if (
+            !state ||
+            !confirm("确认清除当前数据集的本地标注进度？不会删除图片文件。")
+          )
+            return;
+          localStorage.removeItem(storageKey());
+          location.reload();
+        };
+      })();
+    </script>
+  </body>
+</html>

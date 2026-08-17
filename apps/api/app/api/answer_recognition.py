@@ -9,6 +9,7 @@ from app.math_validation.stale import stale_for_answer
 from app.models import (
     QuestionRecognitionEvidence,
     RecognitionRevision,
+    RegionEvidenceImage,
     StudentAnswer,
     StudentAnswerRegion,
     Submission,
@@ -85,7 +86,26 @@ def _block(
     return row
 
 
-def _json(block: SubmissionRecognitionBlock, storage: ObjectStorage) -> dict[str, Any]:
+def _display_evidence_key(
+    db: Session, block: SubmissionRecognitionBlock
+) -> str | None:
+    if block.region_evidence_image_id is None:
+        return block.evidence_image_key
+    evidence = db.get(RegionEvidenceImage, block.region_evidence_image_id)
+    if (
+        evidence is None
+        or evidence.source_kind != "processed"
+        or evidence.submission_page_id != block.submission_page_id
+        or evidence.student_answer_region_id != block.student_answer_region_id
+    ):
+        return None
+    return evidence.object_key
+
+
+def _json(
+    db: Session, block: SubmissionRecognitionBlock, storage: ObjectStorage
+) -> dict[str, Any]:
+    evidence_image_key = _display_evidence_key(db, block)
     return {
         "id": str(block.id),
         "job_id": str(block.submission_recognition_job_id),
@@ -114,9 +134,9 @@ def _json(block: SubmissionRecognitionBlock, storage: ObjectStorage) -> dict[str
         "recognition_version": block.recognition_version,
         "stale": block.stale_at is not None,
         "confirmed_at": block.confirmed_at,
-        "evidence_image_key": block.evidence_image_key,
-        "evidence_image_url": storage.presigned_get(block.evidence_image_key)
-        if block.evidence_image_key
+        "evidence_image_key": evidence_image_key,
+        "evidence_image_url": storage.presigned_get(evidence_image_key)
+        if evidence_image_key
         else None,
     }
 
@@ -175,7 +195,7 @@ def list_blocks(
         query = query.where(SubmissionRecognitionBlock.student_answer_region_id == region_id)
     if status:
         query = query.where(SubmissionRecognitionBlock.status == status)
-    return [_json(block, storage) for block in db.scalars(query).all()]
+    return [_json(db, block, storage) for block in db.scalars(query).all()]
 
 
 @router.get("/submissions/{submission_id}/question-recognition-evidence")
@@ -241,7 +261,7 @@ def edit_block(
     _human_revision(db, block, actor.id)
     audit(db, actor.id, "recognition_block.edit", "submission_recognition_block", block.id)
     db.commit()
-    return _json(block, storage)
+    return _json(db, block, storage)
 
 
 @router.post("/submissions/{submission_id}/recognition-blocks/{block_id}/split")
@@ -303,7 +323,7 @@ def split_block(
     _human_revision(db, new, actor.id)
     audit(db, actor.id, "recognition_block.split", "submission_recognition_block", block.id)
     db.commit()
-    return [_json(block, storage), _json(new, storage)]
+    return [_json(db, block, storage), _json(db, new, storage)]
 
 
 @router.post("/submissions/{submission_id}/recognition-blocks/merge")
@@ -332,7 +352,7 @@ def merge_blocks(
     _human_revision(db, target, actor.id)
     audit(db, actor.id, "recognition_block.merge", "submission_recognition_block", target.id)
     db.commit()
-    return _json(target, storage)
+    return _json(db, target, storage)
 
 
 @router.put("/submissions/{submission_id}/recognition-blocks/order")
@@ -378,6 +398,7 @@ def confirm_answer(
     evidence.status, evidence.requires_review = "confirmed", False
     stale_for_answer(db, answer.id, "RECOGNITION_CONFIRMATION_CHANGED")
     evidence.confirmed_at, evidence.confirmed_by = now_utc(), actor.id
+    evidence.confirmation_origin = "teacher_explicit"
     evidence.confirmed_revision = (evidence.confirmed_revision or 0) + 1
     region_ids = select(StudentAnswerRegion.id).where(
         StudentAnswerRegion.student_answer_id == answer.id

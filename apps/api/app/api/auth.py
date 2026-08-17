@@ -1,11 +1,13 @@
 import hashlib
 import hmac
+import re
 import secrets
 import threading
 import time
+import unicodedata
 from collections import defaultdict, deque
 from datetime import timedelta
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 
 import structlog
 from app.api.actor import authenticated_session, digest
@@ -13,7 +15,7 @@ from app.core.config import get_settings
 from app.db.session import get_db
 from app.models import Status, User, UserSession, now_utc
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, EmailStr, Field, TypeAdapter, field_validator
+from pydantic import BaseModel, EmailStr, Field, TypeAdapter, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -43,14 +45,29 @@ def normalize_email(value: str) -> str:
     return str(TypeAdapter(EmailStr).validate_python(normalized))
 
 
+def normalize_username(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).strip().lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{2,63}", normalized):
+        raise ValueError("用户名须为 3–64 位小写字母、数字、点、下划线或连字符")
+    return normalized
+
+
 class LoginInput(BaseModel):
-    email: str
+    username: str | None = None
+    email: str | None = None
     password: str = Field(min_length=8, max_length=256)
 
-    @field_validator("email")
-    @classmethod
-    def validate_email(cls, value: str) -> str:
-        return normalize_email(value)
+    @model_validator(mode="after")
+    def validate_identifier(self) -> "LoginInput":
+        if self.username is not None and self.email is not None:
+            raise ValueError("只能提交用户名")
+        if self.username is not None:
+            self.username = normalize_username(self.username)
+            return self
+        if self.email is not None:
+            self.email = normalize_email(self.email)
+            return self
+        raise ValueError("请输入用户名")
 
 
 def hash_password(password: str) -> str:
@@ -112,28 +129,33 @@ def check_rate_limit(key: str) -> None:
         attempts.append(time.monotonic())
 
 
-def user_view(user: User, csrf_token: str | None = None) -> dict[str, str | None]:
+def user_view(user: User, csrf_token: str | None = None) -> dict[str, Any]:
     return {
         "id": str(user.id),
+        "username": user.username,
         "email": user.email,
         "display_name": user.display_name,
+        "roles": sorted(role.name for role in user.roles),
         "csrf_token": csrf_token,
     }
 
 
 @router.post("/login")
-def login(
-    payload: LoginInput, request: Request, response: Response, db: Db
-) -> dict[str, str | None]:
-    email = payload.email.lower().strip()
-    check_rate_limit(f"{request.client.host if request.client else 'unknown'}:{email}")
-    user = db.scalar(select(User).where(User.email == email))
+def login(payload: LoginInput, request: Request, response: Response, db: Db) -> dict[str, Any]:
+    identifier = payload.username or payload.email or ""
+    check_rate_limit(f"{request.client.host if request.client else 'unknown'}:{identifier}")
+    if payload.username is not None:
+        user = db.scalar(select(User).where(User.username == payload.username))
+    elif get_settings().app_env.lower() != "production" and payload.email is not None:
+        user = db.scalar(select(User).where(User.email == payload.email))
+    else:
+        user = None
     if (
         user is None
         or user.status != Status.active
         or not verify_password(payload.password, user.password_hash)
     ):
-        raise HTTPException(401, "邮箱或密码错误")
+        raise HTTPException(401, "用户名或密码错误")
     token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
     settings = get_settings()
     session = UserSession(
@@ -166,7 +188,7 @@ def login(
 
 
 @router.get("/me")
-def me(request: Request, db: Db) -> dict[str, str | None]:
+def me(request: Request, db: Db) -> dict[str, Any]:
     authenticated = authenticated_session(request, db)
     if not authenticated:
         raise HTTPException(401, "请先登录")

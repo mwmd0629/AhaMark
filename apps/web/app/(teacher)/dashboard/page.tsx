@@ -24,6 +24,7 @@ import {
   type AssignmentRecord,
   type ClassRecord,
 } from "@/lib/api";
+import { useSmartRefresh } from "@/lib/use-smart-refresh";
 
 export default function DashboardPage() {
   const user = useAuthUser();
@@ -32,9 +33,11 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  const load = async () => {
-    setLoading(true);
-    setError("");
+  const load = async (background = false) => {
+    if (!background) {
+      setLoading(true);
+      setError("");
+    }
     try {
       const [classPage, assignmentPage] = await Promise.all([
         classesApi.list("page_size=100&status=active"),
@@ -43,15 +46,18 @@ export default function DashboardPage() {
       setClasses(classPage.items);
       setAssignments(assignmentPage.items);
     } catch (reason) {
-      setError(
-        reason instanceof ApiError ? reason.message : "工作台数据加载失败",
-      );
+      if (!background) {
+        setError(
+          reason instanceof ApiError ? reason.message : "工作台数据加载失败",
+        );
+      }
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
     }
   };
 
   useEffect(() => void load(), []);
+  useSmartRefresh(() => load(true), { intervalMs: 60_000 });
 
   const activeStudents = classes.reduce(
     (total, item) => total + item.active_student_count,

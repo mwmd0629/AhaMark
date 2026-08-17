@@ -1,10 +1,62 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).parents[1].resolve()
+
+
+def _private_ocr_artifact(path: str) -> bool:
+    normalized = path.replace("\\", "/").lower()
+    parts = tuple(part for part in normalized.split("/") if part)
+    name = parts[-1] if parts else ""
+    suffix = Path(name).suffix
+    private_directory = any(
+        part
+        in {
+            ".rapidocr-artifacts",
+            "rapidocr-artifacts",
+            "rapidocr-bundle",
+            "rapidocr_bundle",
+            "ocr-artifacts",
+            "ocr-bundle",
+            "ocr_bundle",
+        }
+        for part in parts[:-1]
+    )
+    if suffix in {".onnx", ".pdmodel", ".pdiparams"}:
+        return True
+    if name == "fzytk.ttf" or (private_directory and suffix in {".ttf", ".otf"}):
+        return True
+    if name == "rec_keys.txt" or ("ppocr" in name and "dict" in name and suffix == ".txt"):
+        return True
+    if name == "manifest.json" and (private_directory or "models" in parts[:-1]):
+        return True
+    return "approval" in name and any(
+        marker in name for marker in ("rapidocr", "ocr", "model", "artifact", "license")
+    )
+
+
+def _docker_context_files() -> list[str]:
+    excluded_directories = {
+        ".git",
+        ".mypy_cache",
+        ".next",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "__pycache__",
+        "node_modules",
+    }
+    files: list[str] = []
+    for root, directories, names in os.walk(REPOSITORY_ROOT, topdown=True):
+        directories[:] = [name for name in directories if name not in excluded_directories]
+        root_path = Path(root)
+        files.extend((root_path / name).relative_to(REPOSITORY_ROOT).as_posix() for name in names)
+    return files
 
 
 def test_docker_build_context_excludes_sensitive_runtime_artifacts() -> None:
@@ -55,14 +107,50 @@ def test_docker_build_context_excludes_sensitive_runtime_artifacts() -> None:
     assert not {rule for rule in rules if rule.startswith("!")}
 
 
-def test_web_docker_swc_matches_the_exact_next_version() -> None:
-    package = json.loads((REPOSITORY_ROOT / "apps/web/package.json").read_text(encoding="utf-8"))
-    next_version = package["dependencies"]["next"]
-    assert re.fullmatch(r"\d+\.\d+\.\d+", next_version)
+def test_git_tree_and_docker_context_contain_no_private_ocr_artifacts() -> None:
+    tracked = (
+        subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=REPOSITORY_ROOT,
+            check=True,
+            capture_output=True,
+        )
+        .stdout.decode("utf-8")
+        .split("\0")
+    )
+    tracked_findings = sorted(path for path in tracked if path and _private_ocr_artifact(path))
+    context_findings = sorted(
+        path for path in _docker_context_files() if _private_ocr_artifact(path)
+    )
+
+    assert tracked_findings == []
+    assert context_findings == []
+
+
+def test_tesseract_image_is_explicit_pinned_and_not_the_default_image() -> None:
+    default = (REPOSITORY_ROOT / "apps" / "api" / "Dockerfile").read_text(encoding="utf-8")
+    tesseract = (REPOSITORY_ROOT / "apps" / "api" / "Dockerfile.tesseract").read_text(
+        encoding="utf-8"
+    )
+
+    assert "tesseract-ocr" not in default.lower()
+    assert "python:3.12-slim-bookworm@sha256:" in tesseract
+    assert "tesseract-ocr=5.3.0-2" in tesseract
+    assert "libtesseract5=5.3.0-2" in tesseract
+    assert "tesseract-ocr-chi-sim=1:4.1.0-2" in tesseract
+    assert "tesseract-ocr-eng=1:4.1.0-2" in tesseract
+    assert "curl " not in tesseract and "wget " not in tesseract
+
+
+def test_web_docker_swc_matches_the_version_declared_by_next() -> None:
+    lock = json.loads((REPOSITORY_ROOT / "package-lock.json").read_text(encoding="utf-8"))
+    next_package = lock["packages"]["node_modules/next"]
+    swc_version = next_package["optionalDependencies"]["@next/swc-linux-x64-musl"]
+    assert re.fullmatch(r"\d+\.\d+\.\d+", swc_version)
     dockerfile = (REPOSITORY_ROOT / "apps/web/Dockerfile").read_text(encoding="utf-8")
     match = re.search(r"@next/swc-linux-x64-musl@(\d+\.\d+\.\d+)", dockerfile)
     assert match is not None
-    assert match.group(1) == next_version
+    assert match.group(1) == swc_version
 
 
 def test_migration_tests_contain_no_machine_specific_repository_path() -> None:

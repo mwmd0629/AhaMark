@@ -1,18 +1,24 @@
 import uuid
 from decimal import Decimal
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, overload
 
 from app.api.actor import Actor
 from app.api.domain import ApiProblem, audit
 from app.assignment_generation.answer_rubric import (
     CriterionDraftSchema,
+    MaterializationConflict,
     materialize_reference,
     materialize_rubric,
     question_version,
     validate_candidate_structure,
 )
+from app.assignment_generation.reference_bindings import (
+    ReferenceTextExtractionError,
+    extract_reference_answer_candidate,
+)
 from app.assignment_generation.service import owned_revision
 from app.assignment_generation.snapshot import source_snapshot_hash
+from app.assignment_generation.textbook_sources import auto_match_available_solutions
 from app.db.session import get_db
 from app.models import (
     Assignment,
@@ -22,6 +28,7 @@ from app.models import (
     AssignmentRubricDraftCandidate,
     AssignmentRubricValidationResult,
     Question,
+    ReferenceAnswerSourceBinding,
     now_utc,
 )
 from fastapi import APIRouter, Depends, Query
@@ -94,6 +101,13 @@ class EligibleInput(BaseModel):
     expected_source_snapshot: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class ExtractBoundReferenceInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_binding_edit_version: int = Field(ge=0)
+    expected_draft_revision_edit_version: int = Field(ge=0)
+    expected_source_snapshot: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 def _criteria(db: Session, rubric_id: uuid.UUID) -> list[AssignmentRubricCriterionDraft]:
     return list(
         db.scalars(
@@ -104,7 +118,28 @@ def _criteria(db: Session, rubric_id: uuid.UUID) -> list[AssignmentRubricCriteri
     )
 
 
+def _materialize_reference_or_conflict(
+    db: Session, row: AssignmentAnswerDraftCandidate, actor_id: uuid.UUID
+) -> None:
+    try:
+        materialize_reference(db, row, actor_id)
+    except MaterializationConflict as exc:
+        raise ApiProblem(409, exc.code, "答案候选与既有物化版本不再一致") from exc
+
+
+def _materialize_rubric_or_conflict(
+    db: Session, row: AssignmentRubricDraftCandidate, actor_id: uuid.UUID
+) -> None:
+    try:
+        materialize_rubric(db, row, actor_id)
+    except MaterializationConflict as exc:
+        raise ApiProblem(409, exc.code, "Rubric 候选与既有物化版本不再一致") from exc
+    except ValueError as exc:
+        raise ApiProblem(422, str(exc), "Rubric 结构或分值仍需修正") from exc
+
+
 def _answer_json(row: AssignmentAnswerDraftCandidate) -> dict[str, Any]:
+    ineligibility_reasons = _answer_ineligibility_reasons(row)
     return {
         "id": str(row.id),
         "question_id": str(row.question_id),
@@ -115,6 +150,9 @@ def _answer_json(row: AssignmentAnswerDraftCandidate) -> dict[str, Any]:
         if row.source_file_analysis_id
         else None,
         "source_page_id": str(row.source_page_id) if row.source_page_id else None,
+        "source_reference_binding_id": str(row.source_reference_binding_id)
+        if row.source_reference_binding_id
+        else None,
         "source_region": row.source_region,
         "raw_content": row.raw_content,
         "normalized_content": row.normalized_content,
@@ -132,6 +170,8 @@ def _answer_json(row: AssignmentAnswerDraftCandidate) -> dict[str, Any]:
         else None,
         "reviewed_at": row.reviewed_at,
         "review_note": row.review_note,
+        "server_eligible": not ineligibility_reasons,
+        "ineligibility_reasons": ineligibility_reasons,
     }
 
 
@@ -159,6 +199,7 @@ def _criterion_json(row: AssignmentRubricCriterionDraft) -> dict[str, Any]:
 
 
 def _rubric_json(db: Session, row: AssignmentRubricDraftCandidate) -> dict[str, Any]:
+    ineligibility_reasons = _rubric_ineligibility_reasons(db, row)
     return {
         "id": str(row.id),
         "question_id": str(row.question_id),
@@ -185,6 +226,8 @@ def _rubric_json(db: Session, row: AssignmentRubricDraftCandidate) -> dict[str, 
         "reviewed_at": row.reviewed_at,
         "review_note": row.review_note,
         "criteria": [_criterion_json(item) for item in _criteria(db, row.id)],
+        "server_eligible": not ineligibility_reasons,
+        "ineligibility_reasons": ineligibility_reasons,
     }
 
 
@@ -214,41 +257,176 @@ def _owned_rubric(
     return row
 
 
+@router.post("/reference-answer-bindings/{binding_id}/extract-answer-candidate")
+def extract_bound_reference_answer(
+    binding_id: uuid.UUID,
+    data: ExtractBoundReferenceInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    binding = db.scalar(
+        select(ReferenceAnswerSourceBinding)
+        .where(
+            ReferenceAnswerSourceBinding.id == binding_id,
+            ReferenceAnswerSourceBinding.owner_id == actor.id,
+        )
+        .with_for_update()
+    )
+    if binding is None:
+        raise ApiProblem(404, "REFERENCE_BINDING_NOT_FOUND", "参考答案来源绑定不存在")
+    revision = owned_revision(db, actor.id, binding.draft_revision_id, for_update=True)
+    assignment = db.scalar(
+        select(Assignment)
+        .where(Assignment.id == binding.assignment_id, Assignment.owner_id == actor.id)
+        .with_for_update()
+    )
+    if assignment is None:
+        raise ApiProblem(404, "ASSIGNMENT_NOT_FOUND", "作业不存在")
+    if assignment.status.value != "draft":
+        raise ApiProblem(409, "ASSIGNMENT_LOCKED", "只能为草稿作业生成答案候选")
+    if binding.status != "confirmed" or binding.question_id is None:
+        raise ApiProblem(409, "REFERENCE_BINDING_NOT_CONFIRMED", "请先确认参考答案来源绑定")
+    if (
+        binding.edit_version != data.expected_binding_edit_version
+        or revision.teacher_edit_version != data.expected_draft_revision_edit_version
+        or binding.draft_revision_id != revision.id
+        or binding.assignment_id != assignment.id
+        or revision.assignment_id != assignment.id
+        or binding.paper_version_id != assignment.active_paper_version_id
+        or binding.source_snapshot_hash != data.expected_source_snapshot
+        or revision.source_snapshot_hash != data.expected_source_snapshot
+        or source_snapshot_hash(db, assignment) != data.expected_source_snapshot
+    ):
+        raise ApiProblem(409, "REFERENCE_BINDING_STALE", "参考答案来源已变化，请刷新后重试")
+    try:
+        candidate = extract_reference_answer_candidate(db, binding)
+    except ReferenceTextExtractionError as exc:
+        raise ApiProblem(422, str(exc), "确认区域内没有可安全提取的 PDF 文本") from exc
+    auto_match_available_solutions(
+        db,
+        assignment=assignment,
+        revision=revision,
+    )
+    audit(
+        db,
+        actor.id,
+        "extract_answer_candidate",
+        "reference_answer_source_binding",
+        binding.id,
+        {
+            "answer_candidate_id": str(candidate.id),
+            "deterministic_pdf_text_only": True,
+            "teacher_confirmation_required": True,
+        },
+    )
+    db.commit()
+    return _answer_json(candidate)
+
+
+@overload
 def _ensure_current(
     db: Session,
-    row: AssignmentAnswerDraftCandidate | AssignmentRubricDraftCandidate,
+    row: AssignmentAnswerDraftCandidate,
+    actor_id: uuid.UUID,
     expected_draft_version: int,
     expected_question_version: str,
     expected_snapshot: str,
-) -> tuple[AssignmentDraftRevision, Question]:
+) -> tuple[AssignmentDraftRevision, Question, AssignmentAnswerDraftCandidate]: ...
+
+
+@overload
+def _ensure_current(
+    db: Session,
+    row: AssignmentRubricDraftCandidate,
+    actor_id: uuid.UUID,
+    expected_draft_version: int,
+    expected_question_version: str,
+    expected_snapshot: str,
+) -> tuple[AssignmentDraftRevision, Question, AssignmentRubricDraftCandidate]: ...
+
+
+def _ensure_current(
+    db: Session,
+    row: AssignmentAnswerDraftCandidate | AssignmentRubricDraftCandidate,
+    actor_id: uuid.UUID,
+    expected_draft_version: int,
+    expected_question_version: str,
+    expected_snapshot: str,
+) -> tuple[
+    AssignmentDraftRevision,
+    Question,
+    AssignmentAnswerDraftCandidate | AssignmentRubricDraftCandidate,
+]:
+    # The initial candidate read only locates its owning rows. Actual row locks
+    # are always acquired in this order to serialize materialization safely.
     revision = db.scalar(
         select(AssignmentDraftRevision)
         .where(AssignmentDraftRevision.id == row.draft_revision_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
-    question = db.get(Question, row.question_id)
+    question = db.scalar(
+        select(Question)
+        .where(Question.id == row.question_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if isinstance(row, AssignmentAnswerDraftCandidate):
+        locked: AssignmentAnswerDraftCandidate | AssignmentRubricDraftCandidate | None = db.scalar(
+            select(AssignmentAnswerDraftCandidate)
+            .where(
+                AssignmentAnswerDraftCandidate.id == row.id,
+                AssignmentAnswerDraftCandidate.owner_id == actor_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    else:
+        locked = db.scalar(
+            select(AssignmentRubricDraftCandidate)
+            .where(
+                AssignmentRubricDraftCandidate.id == row.id,
+                AssignmentRubricDraftCandidate.owner_id == actor_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
     assignment = db.get(Assignment, row.assignment_id)
-    assert revision is not None and question is not None and assignment is not None
+    if revision is None or question is None or locked is None or assignment is None:
+        raise ApiProblem(409, "CANDIDATE_CONTEXT_CHANGED", "候选关联内容已变化，请刷新后重试")
+    if (
+        locked.draft_revision_id != revision.id
+        or locked.question_id != question.id
+        or locked.assignment_id != assignment.id
+        or revision.assignment_id != assignment.id
+        or question.paper_version_id != assignment.active_paper_version_id
+    ):
+        raise ApiProblem(409, "CANDIDATE_CONTEXT_CHANGED", "候选关联内容已变化，请刷新后重试")
     if revision.teacher_edit_version != expected_draft_version:
         raise ApiProblem(409, "CANDIDATE_EDIT_CONFLICT", "草稿已被其他教师修改")
+    if revision.status not in {"draft", "partial", "review_required"} or locked.status in {
+        "stale",
+        "superseded",
+    }:
+        raise ApiProblem(409, "CANDIDATE_STALE", "候选或草稿版本已失效")
     if (
-        row.question_version != expected_question_version
+        locked.question_version != expected_question_version
         or question_version(question) != expected_question_version
     ):
-        row.status = "stale"
+        locked.status = "stale"
         db.commit()
         raise ApiProblem(409, "QUESTION_VERSION_STALE", "题目版本已变化")
     if (
-        row.source_snapshot_hash != expected_snapshot
+        locked.source_snapshot_hash != expected_snapshot
         or revision.source_snapshot_hash != expected_snapshot
         or source_snapshot_hash(db, assignment) != expected_snapshot
     ):
-        row.status = "stale"
+        locked.status = "stale"
         db.commit()
         raise ApiProblem(409, "CANDIDATE_STALE", "来源快照已变化")
     if assignment.status.value != "draft":
         raise ApiProblem(409, "ASSIGNMENT_LOCKED", "只能物化到草稿作业")
-    return revision, question
+    return revision, question, locked
 
 
 @router.get("/assignment-draft-revisions/{revision_id}/answer-draft-candidates")
@@ -297,18 +475,20 @@ def get_answer_evidence(candidate_id: uuid.UUID, db: Db, actor: Actor) -> dict[s
 def disposition_answer(
     candidate_id: uuid.UUID, data: AnswerDispositionInput, db: Db, actor: Actor
 ) -> dict[str, Any]:
-    row = _owned_answer(db, actor.id, candidate_id, lock=True)
-    if data.action in {"accept", "modify"} and row.materialized_reference_answer_id:
-        return _answer_json(row)
-    if row.teacher_edit_version != data.expected_teacher_edit_version:
-        raise ApiProblem(409, "CANDIDATE_EDIT_CONFLICT", "答案候选已被其他教师修改")
-    revision, _ = _ensure_current(
+    probe = _owned_answer(db, actor.id, candidate_id)
+    revision, _, row = _ensure_current(
         db,
-        row,
+        probe,
+        actor.id,
         data.expected_draft_revision_edit_version,
         data.expected_question_version,
         data.expected_source_snapshot,
     )
+    if row.teacher_edit_version != data.expected_teacher_edit_version:
+        raise ApiProblem(409, "CANDIDATE_EDIT_CONFLICT", "答案候选已被其他教师修改")
+    if data.action in {"accept", "modify"} and row.materialized_reference_answer_id:
+        _materialize_reference_or_conflict(db, row, actor.id)
+        return _answer_json(row)
     if data.action in {"accept", "modify"} and row.source_type == "unknown":
         raise ApiProblem(422, "ANSWER_SOURCE_UNCONFIRMED", "未知来源答案不能接受为标准答案草稿")
     if data.action == "modify":
@@ -326,7 +506,7 @@ def disposition_answer(
     row.teacher_edit_version += 1
     revision.teacher_edit_version += 1
     if data.action in {"accept", "modify"}:
-        materialize_reference(db, row, actor.id)
+        _materialize_reference_or_conflict(db, row, actor.id)
     audit(
         db,
         actor.id,
@@ -417,7 +597,7 @@ def _apply_rubric_value(
             db.delete(old)
         db.flush()
         for order, criterion in enumerate(value.criteria):
-            data = criterion.model_dump(exclude={"evidence"})
+            data = criterion.model_dump(exclude={"evidence", "degradation_reason"})
             db.add(
                 AssignmentRubricCriterionDraft(
                     rubric_candidate_id=row.id,
@@ -432,18 +612,20 @@ def _apply_rubric_value(
 def disposition_rubric(
     candidate_id: uuid.UUID, data: RubricDispositionInput, db: Db, actor: Actor
 ) -> dict[str, Any]:
-    row = _owned_rubric(db, actor.id, candidate_id, lock=True)
-    if data.action in {"accept", "modify"} and row.materialized_structured_rubric_id:
-        return _rubric_json(db, row)
-    if row.teacher_edit_version != data.expected_teacher_edit_version:
-        raise ApiProblem(409, "CANDIDATE_EDIT_CONFLICT", "Rubric 候选已被其他教师修改")
-    revision, _ = _ensure_current(
+    probe = _owned_rubric(db, actor.id, candidate_id)
+    revision, _, row = _ensure_current(
         db,
-        row,
+        probe,
+        actor.id,
         data.expected_draft_revision_edit_version,
         data.expected_question_version,
         data.expected_source_snapshot,
     )
+    if row.teacher_edit_version != data.expected_teacher_edit_version:
+        raise ApiProblem(409, "CANDIDATE_EDIT_CONFLICT", "Rubric 候选已被其他教师修改")
+    if data.action in {"accept", "modify"} and row.materialized_structured_rubric_id:
+        _materialize_rubric_or_conflict(db, row, actor.id)
+        return _rubric_json(db, row)
     if data.action == "modify":
         assert data.teacher_value is not None
         row.teacher_value = data.teacher_value.model_dump(mode="json")
@@ -463,10 +645,7 @@ def disposition_rubric(
         answer = db.get(AssignmentAnswerDraftCandidate, row.answer_candidate_id)
         if answer is None or answer.status not in {"accepted", "modified"}:
             raise ApiProblem(422, "ANSWER_CANDIDATE_NOT_ACCEPTED", "必须先接受标准答案草稿")
-        try:
-            materialize_rubric(db, row, actor.id)
-        except ValueError as exc:
-            raise ApiProblem(422, str(exc), "Rubric 结构或分值仍需修正") from exc
+        _materialize_rubric_or_conflict(db, row, actor.id)
     audit(
         db,
         actor.id,
@@ -479,21 +658,70 @@ def disposition_rubric(
     return _rubric_json(db, row)
 
 
-def _eligible_answer(row: AssignmentAnswerDraftCandidate) -> bool:
+def _answer_ineligibility_reasons(row: AssignmentAnswerDraftCandidate) -> list[str]:
     blocked = {
         "PROMPT_INJECTION_CONTENT_DETECTED",
         "FORMULA_ANSWER_REVIEW_REQUIRED",
         "MANUAL_ANSWER_REQUIRED",
         "ANSWER_SCHEMA_INVALID",
+        "PROVIDER_OUTPUT_DEGRADED",
     }
-    return (
-        row.status == "suggested"
-        and row.source_type != "unknown"
-        and float(row.confidence) >= 0.8
-        and not row.manual_required
-        and bool(row.evidence)
-        and not blocked.intersection(row.warning_codes)
+    reasons: list[str] = []
+    if row.status != "suggested":
+        reasons.append("CANDIDATE_NOT_SUGGESTED")
+    if row.source_type == "unknown":
+        reasons.append("ANSWER_SOURCE_UNKNOWN")
+    if float(row.confidence) < 0.8:
+        reasons.append("ANSWER_CONFIDENCE_LOW")
+    if row.manual_required:
+        reasons.append("MANUAL_REVIEW_REQUIRED")
+    if not row.evidence:
+        reasons.append("ANSWER_EVIDENCE_MISSING")
+    reasons.extend(sorted(blocked.intersection(row.warning_codes)))
+    return sorted(set(reasons))
+
+
+def _eligible_answer(row: AssignmentAnswerDraftCandidate) -> bool:
+    return not _answer_ineligibility_reasons(row)
+
+
+def _rubric_ineligibility_reasons(db: Session, row: AssignmentRubricDraftCandidate) -> list[str]:
+    answer = db.get(AssignmentAnswerDraftCandidate, row.answer_candidate_id)
+    structural = validate_candidate_structure(
+        Decimal(row.total_points) if row.total_points is not None else None,
+        row.scoring_mode,
+        _criteria(db, row.id),
     )
+    latest_validation = db.scalar(
+        select(AssignmentRubricValidationResult.status)
+        .where(AssignmentRubricValidationResult.rubric_candidate_id == row.id)
+        .order_by(AssignmentRubricValidationResult.created_at.desc())
+        .limit(1)
+    )
+    reasons: list[str] = []
+    if row.status != "suggested":
+        reasons.append("CANDIDATE_NOT_SUGGESTED")
+    if answer is None:
+        reasons.append("ANSWER_CANDIDATE_MISSING")
+    elif answer.status not in {"accepted", "modified", "system_prepared"}:
+        reasons.append("ANSWER_CANDIDATE_NOT_ACCEPTED")
+    reasons.extend(structural.blocking)
+    if float(row.confidence) < 0.8:
+        reasons.append("RUBRIC_CONFIDENCE_LOW")
+    if not row.evidence:
+        reasons.append("RUBRIC_EVIDENCE_MISSING")
+    if {"PROVIDER_OUTPUT_DEGRADED", "PROVIDER_CRITERION_DEGRADED"}.intersection(row.warning_codes):
+        reasons.append("PROVIDER_OUTPUT_DEGRADED")
+    if row.manual_required:
+        reasons.append("MANUAL_REVIEW_REQUIRED")
+    if row.scoring_mode != "deterministic":
+        reasons.append("SCORING_MODE_NOT_DETERMINISTIC")
+    if latest_validation != "verified":
+        if latest_validation is None or latest_validation == "indeterminate":
+            reasons.append("VALIDATION_INDETERMINATE")
+        else:
+            reasons.append(f"VALIDATION_{latest_validation.upper()}")
+    return sorted(set(reasons))
 
 
 @router.post("/assignment-draft-revisions/{revision_id}/answer-draft-candidates/accept-eligible")
@@ -507,18 +735,28 @@ def accept_eligible_answers(
     ):
         raise ApiProblem(409, "CANDIDATE_EDIT_CONFLICT", "草稿版本已变化")
     accepted: list[str] = []
-    for row in db.scalars(
-        select(AssignmentAnswerDraftCandidate)
-        .where(
+    skipped: list[dict[str, Any]] = []
+    probes = db.scalars(
+        select(AssignmentAnswerDraftCandidate).where(
             AssignmentAnswerDraftCandidate.draft_revision_id == revision.id,
             AssignmentAnswerDraftCandidate.owner_id == actor.id,
+            AssignmentAnswerDraftCandidate.status == "suggested",
         )
-        .with_for_update()
-    ).all():
-        if _eligible_answer(row):
+    ).all()
+    for probe in probes:
+        _, _, row = _ensure_current(
+            db,
+            probe,
+            actor.id,
+            data.expected_draft_revision_edit_version,
+            probe.question_version,
+            data.expected_source_snapshot,
+        )
+        reasons = _answer_ineligibility_reasons(row)
+        if not reasons:
             row.status, row.reviewed_by, row.reviewed_at = "accepted", actor.id, now_utc()
             row.teacher_edit_version += 1
-            materialize_reference(db, row, actor.id)
+            _materialize_reference_or_conflict(db, row, actor.id)
             accepted.append(str(row.id))
             audit(
                 db,
@@ -528,11 +766,22 @@ def accept_eligible_answers(
                 row.id,
                 {"source_type": row.source_type},
             )
+        else:
+            skipped.append(
+                {
+                    "candidate_id": str(row.id),
+                    "question_id": str(row.question_id),
+                    "reason_codes": reasons,
+                }
+            )
     revision.teacher_edit_version += len(accepted)
     db.commit()
     return {
         "accepted_ids": accepted,
         "accepted_count": len(accepted),
+        "considered_count": len(probes),
+        "skipped_count": len(skipped),
+        "skipped": skipped,
         "source_labels_unchanged": True,
     }
 
@@ -548,41 +797,28 @@ def accept_eligible_rubrics(
     ):
         raise ApiProblem(409, "CANDIDATE_EDIT_CONFLICT", "草稿版本已变化")
     accepted: list[str] = []
-    rows = db.scalars(
-        select(AssignmentRubricDraftCandidate)
-        .where(
+    skipped: list[dict[str, Any]] = []
+    probes = db.scalars(
+        select(AssignmentRubricDraftCandidate).where(
             AssignmentRubricDraftCandidate.draft_revision_id == revision.id,
             AssignmentRubricDraftCandidate.owner_id == actor.id,
             AssignmentRubricDraftCandidate.status == "suggested",
         )
-        .with_for_update()
     ).all()
-    for row in rows:
-        answer = db.get(AssignmentAnswerDraftCandidate, row.answer_candidate_id)
-        criteria = _criteria(db, row.id)
-        structural = validate_candidate_structure(
-            Decimal(row.total_points) if row.total_points is not None else None,
-            row.scoring_mode,
-            criteria,
+    for probe in probes:
+        _, _, row = _ensure_current(
+            db,
+            probe,
+            actor.id,
+            data.expected_draft_revision_edit_version,
+            probe.question_version,
+            data.expected_source_snapshot,
         )
-        validations = list(
-            db.scalars(
-                select(AssignmentRubricValidationResult.status).where(
-                    AssignmentRubricValidationResult.rubric_candidate_id == row.id
-                )
-            )
-        )
-        if (
-            answer
-            and answer.status in {"accepted", "modified"}
-            and structural.valid
-            and not row.manual_required
-            and row.scoring_mode == "deterministic"
-            and "indeterminate" not in validations
-        ):
+        reasons = _rubric_ineligibility_reasons(db, row)
+        if not reasons:
             row.status, row.reviewed_by, row.reviewed_at = "accepted", actor.id, now_utc()
             row.teacher_edit_version += 1
-            materialize_rubric(db, row, actor.id)
+            _materialize_rubric_or_conflict(db, row, actor.id)
             accepted.append(str(row.id))
             audit(
                 db,
@@ -592,6 +828,20 @@ def accept_eligible_rubrics(
                 row.id,
                 {"scoring_mode": row.scoring_mode},
             )
+        else:
+            skipped.append(
+                {
+                    "candidate_id": str(row.id),
+                    "question_id": str(row.question_id),
+                    "reason_codes": reasons,
+                }
+            )
     revision.teacher_edit_version += len(accepted)
     db.commit()
-    return {"accepted_ids": accepted, "accepted_count": len(accepted)}
+    return {
+        "accepted_ids": accepted,
+        "accepted_count": len(accepted),
+        "considered_count": len(probes),
+        "skipped_count": len(skipped),
+        "skipped": skipped,
+    }

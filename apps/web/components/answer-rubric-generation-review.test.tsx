@@ -1,10 +1,16 @@
 import "@testing-library/jest-dom/vitest";
-import { render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AnswerRubricGenerationReview } from "./answer-rubric-generation-review";
 
-const api = vi.hoisted(() => ({
+const generationApi = vi.hoisted(() => ({
   listRevisions: vi.fn(),
   listAnswerCandidates: vi.fn(),
   listRubricCandidates: vi.fn(),
@@ -13,145 +19,583 @@ const api = vi.hoisted(() => ({
   dispositionRubricCandidate: vi.fn(),
   acceptEligibleAnswers: vi.fn(),
   acceptEligibleRubrics: vi.fn(),
+  regenerateQuestion: vi.fn(),
 }));
+const reviewApi = vi.hoisted(() => ({ bundle: vi.fn() }));
+const formalApi = vi.hoisted(() => ({
+  confirmQuestionPackage: vi.fn(),
+  confirmAllQuestionPackages: vi.fn(),
+  confirmAllCandidateQuestionPackages: vi.fn(),
+}));
+
 vi.mock("@/lib/api", async (load) => ({
   ...(await load()),
-  assignmentGenerationApi: api,
+  assignmentGenerationApi: generationApi,
+  assignmentReviewApi: reviewApi,
+  structuredRubricApi: formalApi,
 }));
 
-describe("AnswerRubricGenerationReview", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    api.listRevisions.mockResolvedValue([
-      {
-        id: "revision-1",
-        assignment_id: "assignment-1",
-        generation_job_id: "job-1",
-        revision: 1,
-        source_snapshot_hash: "a".repeat(64),
-        status: "review_required",
-        draft_payload: {},
-        risk_summary: { info: 0, warning: 2, blocking: 0 },
-        teacher_edit_version: 0,
-        created_at: "2026-01-01",
-        updated_at: "2026-01-01",
+const source = (kind: string, label: string) => ({ kind, label });
+const answerVersion = (
+  id: string,
+  status: "draft" | "confirmed" | "retired",
+  version: number,
+  content: string,
+) => ({
+  id,
+  status,
+  version,
+  content_hash: id.repeat(8).slice(0, 64),
+  source: source("teacher_authored", "教师编写答案"),
+  content,
+  content_payload: {
+    source_type: "teacher_authored",
+    source_file: null,
+    source_page: null,
+    source_region: null,
+    raw_content: content,
+    normalized_content: content,
+    structured_content: {},
+    provenance: {},
+  },
+  visibility: "teacher",
+});
+const structuredRubricVersion = (
+  id: string,
+  status: "draft" | "confirmed" | "retired",
+  version: number,
+  title: string,
+) => ({
+  id,
+  status,
+  version,
+  content_hash: id.repeat(8).slice(0, 64),
+  reference_answer_version_id: "answer-1",
+  source: source("structured_rubric", "结构化评分标准"),
+  title,
+  total_points: "20.00",
+  criteria: [
+    {
+      id: `${id}-criterion`,
+      key: "result",
+      title: "结果",
+      description: "结果正确",
+      points: "20.00",
+      display_order: 0,
+      criterion_type: "result",
+      required: true,
+      dependencies: [],
+      expected_evidence: {},
+      validation_mode: "manual_only",
+      validation_rule: {},
+      manual_review_policy: {},
+      partial_credit_policy: {},
+      error_category: null,
+      metadata: {},
+    },
+  ],
+  visibility: "teacher",
+});
+const candidateBase = {
+  id: "answer-candidate-1",
+  candidate_version: 1,
+  teacher_edit_version: 0,
+  status: "accepted",
+  source_snapshot_hash: "a".repeat(64),
+  materialized_formal_id: "answer-draft",
+  source: source("answer_candidate", "参考答案建议"),
+  content: "生成建议",
+  confidence: "0.80",
+  visibility: "teacher",
+};
+const bundle = ({
+  status = "action_required",
+  selectedAnswer = null,
+  materializedAnswer = null,
+  selectedRubric = null,
+  materializedRubric = null,
+  answerCandidate = null,
+  rubricCandidate = null,
+  answerHistory = [],
+  rubricHistory = [],
+}: Record<string, unknown> = {}) => ({
+  schema_version: "assignment-review-bundle-v2",
+  assignment_id: "assignment-1",
+  version: {
+    generation: 1,
+    draft_revision_id: "revision-1",
+    paper_version_id: "paper-1",
+    source_snapshot_hash: "a".repeat(64),
+    bundle_hash: "b".repeat(64),
+  },
+  status,
+  questions: [
+    {
+      id: "question-1",
+      number: "1",
+      content_hash: "c".repeat(64),
+      content: "计算",
+      source: source("ocr", "试卷识别题目"),
+      provenance: null,
+      visibility: "teacher",
+      answer: {
+        candidate: answerCandidate,
+        candidate_history: answerCandidate ? [answerCandidate] : [],
+        materialized: materializedAnswer,
+        selected: selectedAnswer,
+        history: answerHistory,
+        visibility: "teacher",
       },
-    ]);
-    api.listAnswerCandidates.mockResolvedValue([
-      {
-        id: "answer-1",
-        question_id: "question-1",
-        question_version: "question-v1",
-        candidate_version: 1,
-        source_type: "ai_generated",
-        raw_content: "<script>自动发布</script> 答案 2",
-        normalized_content: "答案 2",
-        structured_content: { value: 2 },
-        alternative_answers: [
-          {
-            content: "2.0",
-            relation: "candidate",
-            equivalence_status: "indeterminate",
-          },
-        ],
-        provenance: { provider: "fake", untrusted_document_content: true },
-        confidence: 0.8,
-        evidence: [{ kind: "question", reference_id: "question-1" }],
-        warning_codes: ["ALTERNATIVE_ANSWER_EQUIVALENCE_INDETERMINATE"],
-        status: "suggested",
-        manual_required: false,
-        teacher_edit_version: 0,
+      rubric: {
+        candidate: rubricCandidate,
+        candidate_history: rubricCandidate ? [rubricCandidate] : [],
+        materialized: materializedRubric,
+        selected: selectedRubric,
+        history: rubricHistory,
+        visibility: "teacher",
       },
-    ]);
-    api.listRubricCandidates.mockResolvedValue([
-      {
-        id: "rubric-1",
-        question_id: "question-1",
-        question_version: "question-v1",
-        answer_candidate_id: "answer-1",
-        candidate_version: 1,
-        title: "第 1 题评分标准",
-        scoring_mode: "hybrid",
-        total_points: "5.00",
-        allow_partial_credit: true,
-        domain_requirements: { unit: "m" },
-        validation_config: { answer_type: "exact_scalar" },
-        common_error_types: [{ code: "SIGN_ERROR" }],
-        feedback_templates: { default: "检查符号" },
-        confidence: 0.8,
-        evidence: [],
-        warning_codes: ["VALIDATION_PARTIALLY_VERIFIED"],
-        status: "suggested",
-        manual_required: true,
-        teacher_edit_version: 0,
-        criteria: [
-          {
-            id: "criterion-1",
-            criterion_key: "result",
-            display_order: 0,
-            title: "结果",
-            points: "5.00",
-            criterion_type: "result",
-            required: true,
-            dependency_keys: [],
-            alternative_group: null,
-            partial_credit_rule: { max_points: 3 },
-            deduction_rule: { max_deduction: 2 },
-            validation_rule: { answer_type: "exact_scalar" },
-            common_error_codes: ["SIGN_ERROR"],
-            feedback_template: "检查符号",
-            confidence: 0.8,
-            evidence: [],
-            manual_required: false,
-          },
-        ],
-      },
-    ]);
-    api.rubricCandidateValidation.mockResolvedValue([
-      {
-        id: "validation-1",
-        status: "indeterminate",
-        validation_mode: "hybrid",
-        deterministic_result: {},
-        structural_result: { valid: true },
-        issue_codes: ["VALIDATION_INDETERMINATE"],
-        validator_version: "v1",
-      },
-    ]);
-  });
+    },
+  ],
+  blockers: [],
+  confirmations: [],
+  binding: null,
+});
 
-  it("shows non-official source, structured criteria and indeterminate safely", async () => {
+const revision = {
+  id: "revision-1",
+  teacher_edit_version: 0,
+  source_snapshot_hash: "a".repeat(64),
+};
+const props = {
+  assignmentId: "assignment-1",
+  questions: [
+    {
+      id: "question-1",
+      question_number: "1",
+      content_text: "计算",
+      max_score: 20,
+    },
+  ],
+};
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  window.localStorage.clear();
+  generationApi.listRevisions.mockResolvedValue([revision]);
+  generationApi.listAnswerCandidates.mockResolvedValue([]);
+  generationApi.listRubricCandidates.mockResolvedValue([]);
+  generationApi.rubricCandidateValidation.mockResolvedValue([]);
+  generationApi.regenerateQuestion.mockResolvedValue({
+    request_id: "request-1",
+    question_id: "question-1",
+    status: "queued",
+    draft_only: true,
+    replaces_confirmed_content: false,
+  });
+  reviewApi.bundle.mockResolvedValue(bundle());
+  formalApi.confirmQuestionPackage.mockResolvedValue({});
+  formalApi.confirmAllQuestionPackages.mockResolvedValue({});
+  formalApi.confirmAllCandidateQuestionPackages.mockResolvedValue({});
+});
+afterEach(cleanup);
+
+describe("AnswerRubricGenerationReview Bundle lifecycle", () => {
+  it("从现有题目安全请求重新生成本题建议", async () => {
     render(
       <AnswerRubricGenerationReview
         assignmentId="assignment-1"
-        questions={[
-          {
-            id: "question-1",
-            question_number: "1",
-            content_text: "计算",
-            max_score: 5,
-          },
-        ]}
+        questions={[]}
       />,
     );
+
+    expect(await screen.findByText(/你现在在：/)).toBeInTheDocument();
+    fireEvent.click(screen.getByText("更多"));
+    fireEvent.click(screen.getByRole("button", { name: "重新生成本题" }));
+
     await waitFor(() =>
-      expect(screen.getByText("来源：AI 生成")).toBeInTheDocument(),
+      expect(generationApi.regenerateQuestion).toHaveBeenCalledWith(
+        "revision-1",
+        "question-1",
+        {
+          expected_source_snapshot: "a".repeat(64),
+          expected_draft_revision_edit_version: 0,
+        },
+      ),
     );
-    expect(screen.getByText(/此答案不显示为官方答案/)).toBeInTheDocument();
+    expect(screen.getByText(/旧内容和已确认内容保持不变/)).toBeInTheDocument();
+  });
+
+  it("把人工核对候选显示为可由教师单题确认，而不是已处理或失效", async () => {
+    generationApi.listAnswerCandidates.mockResolvedValue([
+      {
+        id: "answer-candidate-1",
+        question_id: "question-1",
+        raw_content: "x=2，y=1",
+        structured_content: {},
+        alternative_answers: [],
+        status: "manual_required",
+        confidence: 0.99,
+        teacher_edit_version: 0,
+        question_version: "q1",
+        source_snapshot_hash: "a".repeat(64),
+        provenance: {},
+        evidence: [],
+        warning_codes: ["PROVIDER_OUTPUT_DEGRADED"],
+        server_eligible: false,
+        ineligibility_reasons: [
+          "CANDIDATE_NOT_SUGGESTED",
+          "MANUAL_REVIEW_REQUIRED",
+          "PROVIDER_OUTPUT_DEGRADED",
+        ],
+      },
+    ]);
+
+    render(<AnswerRubricGenerationReview {...props} />);
+
+    const notice = (await screen.findByText("此答案需要教师核对")).closest(
+      "div",
+    );
+    expect(notice).toBeInTheDocument();
+    expect(
+      screen.getByText("请核对答案内容、推导过程和部分分要求"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("这项建议已经处理或已失效"),
+    ).not.toBeInTheDocument();
+    expect(notice).not.toHaveTextContent("PROVIDER_OUTPUT_DEGRADED");
+    expect(screen.getByRole("button", { name: "接受答案" })).toBeEnabled();
+  });
+
+  it("shows a formal draft even when no review session exists", async () => {
+    generationApi.listRevisions.mockResolvedValue([]);
+    const draftAnswer = answerVersion("answer-draft", "draft", 1, "答案 2");
+    reviewApi.bundle.mockResolvedValue(
+      bundle({
+        status: "missing_review",
+        selectedAnswer: draftAnswer,
+        answerHistory: [draftAnswer],
+      }),
+    );
+
+    render(<AnswerRubricGenerationReview {...props} />);
+    expect(await screen.findByText("答案 2")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认本题" })).toBeDisabled();
+  });
+
+  it("does not let an accepted suggestion hide its saved formal draft", async () => {
+    const draftAnswer = answerVersion("answer-draft", "draft", 1, "已保存答案");
+    reviewApi.bundle.mockResolvedValue(
+      bundle({
+        materializedAnswer: draftAnswer,
+        answerCandidate: candidateBase,
+        answerHistory: [draftAnswer],
+      }),
+    );
+    generationApi.listAnswerCandidates.mockResolvedValue([
+      {
+        id: "answer-candidate-1",
+        question_id: "question-1",
+        raw_content: "生成建议",
+        alternative_answers: [],
+        teacher_edit_version: 0,
+        question_version: "q1",
+      },
+    ]);
+
+    render(<AnswerRubricGenerationReview {...props} />);
+    expect(await screen.findByText("已保存答案")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认本题" })).toBeDisabled();
+    expect(screen.getByText("查看生成建议并处理")).toBeInTheDocument();
+  });
+
+  it("keeps newer unpaired answer visible but prevents independent confirmation", async () => {
+    const confirmed = answerVersion(
+      "answer-confirmed",
+      "confirmed",
+      1,
+      "当前确认答案",
+    );
+    const draft = answerVersion("answer-draft", "draft", 2, "较新待确认答案");
+    const retired = answerVersion("answer-retired", "retired", 0, "历史答案");
+    reviewApi.bundle.mockResolvedValue(
+      bundle({
+        selectedAnswer: confirmed,
+        materializedAnswer: draft,
+        answerHistory: [draft, confirmed, retired],
+      }),
+    );
+
+    render(<AnswerRubricGenerationReview {...props} />);
+    expect(await screen.findByText("当前确认答案")).toBeInTheDocument();
+    expect(screen.getByText("较新待确认答案")).toBeInTheDocument();
+    expect(
+      screen.getByText("查看历史参考答案").closest("details"),
+    ).not.toHaveAttribute("open");
+    expect(
+      screen.queryByRole("button", { name: "确认这份参考答案" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认本题" })).toBeDisabled();
+    expect(
+      screen.getByText("请在左侧对应题目卡片中与评分标准一并确认。"),
+    ).toBeInTheDocument();
+  });
+
+  it("confirms the exact question answer and rubric package from its question card", async () => {
+    const answer = answerVersion("answer-1", "draft", 1, "待确认答案");
+    const draft = structuredRubricVersion(
+      "rubric-draft",
+      "draft",
+      2,
+      "待确认评分标准",
+    );
+    const retired = structuredRubricVersion(
+      "rubric-retired",
+      "retired",
+      1,
+      "历史评分标准",
+    );
+    reviewApi.bundle.mockResolvedValue(
+      bundle({
+        selectedAnswer: answer,
+        selectedRubric: draft,
+        answerHistory: [answer],
+        rubricHistory: [draft, retired],
+      }),
+    );
+
+    render(<AnswerRubricGenerationReview {...props} />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "确认本题",
+      }),
+    );
+    await waitFor(() =>
+      expect(formalApi.confirmQuestionPackage).toHaveBeenCalledWith(
+        "assignment-1",
+        "question-1",
+        expect.objectContaining({
+          expected_bundle_hash: "b".repeat(64),
+          expected_question_content_hash: "c".repeat(64),
+          reference_answer_version_id: "answer-1",
+          structured_rubric_version_id: "rubric-draft",
+          explicit_confirmation: true,
+        }),
+      ),
+    );
+    expect(
+      screen.getByText("查看历史评分标准").closest("details"),
+    ).not.toHaveAttribute("open");
+  });
+
+  it("confirms the complete displayed bundle with one atomic request", async () => {
+    const answer = answerVersion("answer-1", "draft", 1, "待确认答案");
+    const rubric = structuredRubricVersion(
+      "rubric-draft",
+      "draft",
+      1,
+      "待确认评分标准",
+    );
+    reviewApi.bundle.mockResolvedValue(
+      bundle({ selectedAnswer: answer, selectedRubric: rubric }),
+    );
+
+    render(<AnswerRubricGenerationReview {...props} />);
+    const confirmAllButton = await screen.findByRole("button", {
+      name: "确认全部",
+    });
+    await waitFor(() => expect(confirmAllButton).not.toBeDisabled());
+    fireEvent.click(confirmAllButton);
+
+    await waitFor(() =>
+      expect(formalApi.confirmAllQuestionPackages).toHaveBeenCalledWith(
+        "assignment-1",
+        {
+          expected_bundle_hash: "b".repeat(64),
+          packages: [
+            expect.objectContaining({
+              question_id: "question-1",
+              expected_question_content_hash: "c".repeat(64),
+              reference_answer_version_id: "answer-1",
+              structured_rubric_version_id: "rubric-draft",
+            }),
+          ],
+          explicit_confirmation: true,
+        },
+      ),
+    );
+    expect(formalApi.confirmQuestionPackage).not.toHaveBeenCalled();
+  });
+
+  it("accepts, materializes, and confirms a complete candidate bundle with one request", async () => {
+    const answerCandidate = {
+      ...candidateBase,
+      question_id: "question-1",
+      question_version: "question-version-1",
+      teacher_edit_version: 0,
+      status: "manual_required",
+      alternative_answers: [],
+      structured_content: {},
+      provenance: {},
+      evidence: [],
+      warning_codes: [],
+      manual_required: true,
+      confidence: 0.8,
+    };
+    const rubricCandidate = {
+      id: "rubric-candidate-1",
+      question_id: "question-1",
+      question_version: "question-version-1",
+      answer_candidate_id: answerCandidate.id,
+      candidate_version: 1,
+      title: "评分标准建议",
+      scoring_mode: "manual_only",
+      total_points: "20.00",
+      allow_partial_credit: true,
+      domain_requirements: {},
+      validation_config: {},
+      common_error_types: [],
+      feedback_templates: {},
+      confidence: 0.7,
+      evidence: [],
+      warning_codes: [],
+      status: "manual_required",
+      manual_required: true,
+      teacher_edit_version: 0,
+      criteria: [],
+    };
+    generationApi.listAnswerCandidates.mockResolvedValue([answerCandidate]);
+    generationApi.listRubricCandidates.mockResolvedValue([rubricCandidate]);
+    reviewApi.bundle.mockResolvedValue(
+      bundle({
+        answerCandidate: { id: answerCandidate.id },
+        rubricCandidate: { id: rubricCandidate.id },
+      }),
+    );
+
+    render(<AnswerRubricGenerationReview {...props} />);
+    const confirmCandidatesButton = await screen.findByRole("button", {
+      name: "确认全部",
+    });
+    await waitFor(() => expect(confirmCandidatesButton).not.toBeDisabled());
+    fireEvent.click(confirmCandidatesButton);
+
     await waitFor(() =>
       expect(
-        screen.getByDisplayValue("<script>自动发布</script> 答案 2"),
-      ).toBeInTheDocument(),
+        formalApi.confirmAllCandidateQuestionPackages,
+      ).toHaveBeenCalledWith(
+        "assignment-1",
+        expect.objectContaining({
+          expected_bundle_hash: "b".repeat(64),
+          expected_draft_revision_id: "revision-1",
+          expected_draft_revision_edit_version: 0,
+          expected_source_snapshot_hash: "a".repeat(64),
+          packages: [
+            expect.objectContaining({
+              question_id: "question-1",
+              answer_candidate_id: answerCandidate.id,
+              rubric_candidate_id: rubricCandidate.id,
+            }),
+          ],
+          explicit_confirmation: true,
+        }),
+      ),
     );
-    expect(document.querySelector("script")).toBeNull();
-    await waitFor(() =>
-      expect(screen.getByText(/无法确定（不是已验证）/)).toBeInTheDocument(),
-    );
-    expect(screen.getByText(/部分分/)).toBeInTheDocument();
-    expect(screen.getByText(/常见错误/)).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "发布作业" })).toBeNull();
+  });
+
+  it("fails closed when a Bundle reload fails after authoritative content loaded", async () => {
+    const draftAnswer = answerVersion("answer-draft", "draft", 1, "旧正式答案");
+    reviewApi.bundle
+      .mockResolvedValueOnce(
+        bundle({
+          materializedAnswer: draftAnswer,
+          answerCandidate: candidateBase,
+          answerHistory: [draftAnswer],
+        }),
+      )
+      .mockRejectedValueOnce(new Error("network"));
+    generationApi.listAnswerCandidates.mockResolvedValue([
+      {
+        id: "answer-candidate-1",
+        question_id: "question-1",
+        raw_content: "旧生成建议",
+        alternative_answers: [],
+        teacher_edit_version: 0,
+        question_version: "q1",
+      },
+    ]);
+
+    render(<AnswerRubricGenerationReview {...props} />);
+    expect(await screen.findByText("旧正式答案")).toBeInTheDocument();
+    expect(screen.getByText("查看生成建议并处理")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "重新载入" }));
+
     expect(
-      screen.getByRole("button", { name: "批量接受 eligible 答案" }),
-    ).toBeEnabled();
+      await screen.findByText("无法取得当前审查内容，请重试后再确认。"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("旧正式答案")).not.toBeInTheDocument();
+    expect(screen.queryByText("查看生成建议并处理")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "确认本题" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "处理可用答案" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("explains when bulk rubric acceptance succeeds with zero accepted items", async () => {
+    generationApi.acceptEligibleRubrics.mockResolvedValue({
+      accepted_ids: [],
+      accepted_count: 0,
+      considered_count: 1,
+      skipped_count: 1,
+      skipped: [
+        {
+          candidate_id: "rubric-candidate-1",
+          question_id: "question-1",
+          reason_codes: ["RUBRIC_VALIDATION_CONFIG_INVALID"],
+        },
+      ],
+    });
+
+    render(<AnswerRubricGenerationReview {...props} />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "处理可用评分标准",
+      }),
+    );
+
+    expect(
+      await screen.findByText(
+        /没有可自动接受的评分标准.*第 1 题：确定性校验规则不完整/,
+      ),
+    ).toBeInTheDocument();
+    expect(generationApi.acceptEligibleRubrics).toHaveBeenCalledWith(
+      "revision-1",
+      {
+        expected_draft_revision_edit_version: 0,
+        expected_source_snapshot: "a".repeat(64),
+      },
+    );
+  });
+
+  it("fails visibly when an older bulk endpoint omits skip diagnostics", async () => {
+    generationApi.acceptEligibleRubrics.mockResolvedValue({
+      accepted_ids: [],
+      accepted_count: 0,
+    });
+
+    render(<AnswerRubricGenerationReview {...props} />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "处理可用评分标准",
+      }),
+    );
+
+    expect(
+      await screen.findByText(
+        "没有接受任何评分标准，但服务端未返回跳过原因；请刷新页面后重试",
+      ),
+    ).toBeInTheDocument();
   });
 });

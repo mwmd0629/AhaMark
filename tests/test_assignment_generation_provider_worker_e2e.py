@@ -1,6 +1,7 @@
 import io
 import json
 import uuid
+from decimal import Decimal
 
 from app.assignment_generation.question_extraction import materialize
 from app.assignment_generation.service import transition
@@ -65,6 +66,14 @@ def configured() -> Settings:
     )
 
 
+def fake_configured() -> Settings:
+    return Settings(
+        _env_file=None,
+        app_env="test",
+        assignment_generation_provider="fake",
+    )
+
+
 def source_assignment() -> tuple[Assignment, StoredFile, PaperPage]:
     TestClient(app).get("/api/classes")
     with SessionLocal() as db:
@@ -125,6 +134,7 @@ def answer_rubric_output(question_id: str) -> dict[str, object]:
         "feedback_templates": {},
         "confidence": 0.95,
         "evidence": evidence,
+        "degradation_reason": None,
         "warning_codes": [],
         "criteria": [
             {
@@ -143,6 +153,7 @@ def answer_rubric_output(question_id: str) -> dict[str, object]:
                 "feedback_template": "检查计算结果",
                 "confidence": 0.95,
                 "evidence": evidence,
+                "degradation_reason": None,
                 "manual_required": False,
             }
         ],
@@ -296,6 +307,12 @@ def test_mocked_http_provider_worker_materializes_only_versioned_drafts(monkeypa
             )
         )
         assert candidate is not None
+        current_assignment = db.get(Assignment, assignment.id)
+        current_job = db.get(AssignmentGenerationJob, job_id)
+        assert current_assignment is not None and current_job is not None
+        assert current_assignment.total_score == Decimal("5")
+        assert candidate.source_snapshot_hash == current_job.source_snapshot_hash
+        assert revision.source_snapshot_hash == current_job.source_snapshot_hash
         regions = list(
             db.scalars(
                 select(AssignmentQuestionExtractionRegion).where(
@@ -348,3 +365,104 @@ def test_mocked_http_provider_worker_materializes_only_versioned_drafts(monkeypa
             AssignmentPublishReadinessSnapshot,
         ):
             assert db.scalar(select(func.count()).select_from(forbidden)) == 0
+
+
+def test_fake_worker_uses_provider_dispatch_audit_and_never_legacy_candidates(
+    monkeypatch,
+) -> None:
+    assignment, _stored, _page = source_assignment()
+    settings = fake_configured()
+    monkeypatch.setattr("app.api.assignment_generation.dispatch_job", lambda *_args: None)
+    monkeypatch.setattr("app.assignment_generation.service.get_settings", lambda: settings)
+    monkeypatch.setattr("workers.tasks.assignment_generation.get_settings", lambda: settings)
+
+    def legacy_candidates_forbidden(*_args, **_kwargs):
+        raise AssertionError("worker fake must not call legacy generate_candidates")
+
+    monkeypatch.setattr(
+        "workers.tasks.assignment_generation.generate_candidates",
+        legacy_candidates_forbidden,
+    )
+    response = TestClient(app).post(
+        f"/api/assignments/{assignment.id}/generation-jobs",
+        json={
+            "idempotency_key": "fake-provider-worker-e2e-0001",
+            "provider_mode": "fake",
+        },
+    )
+    assert response.status_code == 201
+    job_id = uuid.UUID(response.json()["id"])
+
+    with SessionLocal() as db:
+        job, revision, claim = _claim_job(db, job_id, None)
+        assert claim is None and job is not None and revision is not None
+        assert assignment.active_paper_version_id is not None
+        question = Question(
+            paper_version_id=assignment.active_paper_version_id,
+            question_number="1",
+            display_order=1,
+            question_type="calculation",
+            content_text="计算 1+1。",
+            max_score=5,
+            source="test_fixture",
+        )
+        db.add(question)
+        db.flush()
+        db.add(
+            AssignmentQuestionExtractionCandidate(
+                owner_id=job.owner_id,
+                assignment_id=job.assignment_id,
+                generation_job_id=job.id,
+                draft_revision_id=revision.id,
+                paper_version_id=assignment.active_paper_version_id,
+                candidate_version=1,
+                question_number="1",
+                question_type="calculation",
+                content_text="计算 1+1。",
+                max_score=5,
+                field_confidences={},
+                overall_confidence=1,
+                extraction_method="test_fixture",
+                evidence={},
+                warning_codes=[],
+                status="accepted",
+                manual_required=False,
+                source_snapshot_hash=job.source_snapshot_hash,
+                materialized_question_id=question.id,
+            )
+        )
+        transition(job, "processing_pages")
+        transition(job, "extracting_questions")
+        db.commit()
+
+        assert _execute_stage(db, job_id, "generating_rubrics") == "completed"
+        invocations = list(
+            db.scalars(
+                select(AssignmentGenerationProviderInvocation)
+                .where(AssignmentGenerationProviderInvocation.job_id == job_id)
+                .order_by(AssignmentGenerationProviderInvocation.created_at)
+            )
+        )
+        assert len(invocations) == 2
+        assert all(item.provider == "fake" for item in invocations)
+        assert all(item.endpoint_mode == "deterministic_test_only" for item in invocations)
+        assert all(item.status == "completed" for item in invocations)
+        assert all(item.model_snapshot == "deterministic-test-only" for item in invocations)
+        assert all(len(item.request_hash) == 64 for item in invocations)
+        assert all(item.response_hash and len(item.response_hash) == 64 for item in invocations)
+
+        answer = db.scalar(
+            select(AssignmentAnswerDraftCandidate).where(
+                AssignmentAnswerDraftCandidate.generation_job_id == job_id
+            )
+        )
+        rubric = db.scalar(
+            select(AssignmentRubricDraftCandidate).where(
+                AssignmentRubricDraftCandidate.generation_job_id == job_id
+            )
+        )
+        assert answer is not None and rubric is not None
+        assert answer.provenance["provider"] == "fake"
+        assert answer.provenance["model_snapshot"] == "deterministic-test-only"
+        assert answer.evidence and rubric.evidence
+        assert rubric.answer_candidate_id == answer.id

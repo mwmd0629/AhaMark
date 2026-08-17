@@ -319,11 +319,9 @@ function SuggestionCard({
 
 export function AIGradingReview({
   answerId,
-  rubricVersionId,
   finalized = false,
 }: {
   answerId: string;
-  rubricVersionId?: string;
   finalized?: boolean;
 }) {
   const [jobs, setJobs] = useState<AIScoringJob[]>([]);
@@ -352,25 +350,19 @@ export function AIGradingReview({
   }, [current?.id, current?.feedback]);
   const validationMismatch = Boolean(
     current?.validation &&
-    (current.validation.rubric_version_id !== current.rubric_version_id ||
+    (current.validation.structured_rubric_set_id !==
+      current.structured_rubric_set_id ||
+      current.validation.structured_rubric_version_id !==
+        current.structured_rubric_version_id ||
       current.validation.reference_answer_version_id !==
         current.reference_answer_version_id),
   );
   const readOnly = finalized || Boolean(current?.stale) || validationMismatch;
-  const effectiveRubricVersionId =
-    rubricVersionId ?? current?.rubric_version_id;
-
   const create = async () => {
-    if (!effectiveRubricVersionId) {
-      setMessage(
-        "当前页没有可用的结构化评分标准版本，请先打开数学验证页创建任务。",
-      );
-      return;
-    }
     setCreating(true);
     setMessage("");
     try {
-      await aiGradingApi.create(answerId, effectiveRubricVersionId);
+      await aiGradingApi.create(answerId);
       await load();
       setMessage("AI 建议任务已创建；结果仍需教师确认。");
     } catch (error) {
@@ -397,7 +389,7 @@ export function AIGradingReview({
         </div>
         <button
           type="button"
-          disabled={finalized || creating || !effectiveRubricVersionId}
+          disabled={finalized || creating}
           onClick={() => void create()}
           className="rounded bg-violet-700 px-3 py-2 text-white disabled:opacity-50"
         >
@@ -420,7 +412,8 @@ export function AIGradingReview({
             <span>状态：{statusLabels[current.status] ?? current.status}</span>
             <span>评分来源：{providerLabel(current.provider)}</span>
             <span>生成代次：第 {current.generation} 代</span>
-            <span>评分标准版本：{current.rubric_version_id}</span>
+            <span>评分标准集：{current.structured_rubric_set_id}</span>
+            <span>评分标准版本：{current.structured_rubric_version_id}</span>
             <span>标准答案：{current.reference_answer_version_id}</span>
             <span>
               验证代次：第 {current.validation?.generation ?? "无"} 代

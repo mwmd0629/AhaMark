@@ -110,6 +110,7 @@ class ValidationContext(BaseModel):
     criterion_maxima: dict[str, Decimal]
     evidence_ids: set[str]
     manual_only: set[str] = Field(default_factory=set)
+    score_required: set[str] = Field(default_factory=set)
     deterministic: dict[str, str] = Field(default_factory=dict)
     step_sizes: dict[str, Decimal] = Field(default_factory=dict)
     question_max_points: Decimal | None = None
@@ -139,6 +140,8 @@ def validate_output(raw: object, context: ValidationContext) -> AIGradingOutput:
             raise ValueError(str(exc)) from exc
         if key in context.manual_only and item.status != "manual_required":
             raise ValueError("manual-only criterion must remain manual")
+        if key in context.score_required and item.suggested_points is None:
+            raise ValueError("AI-suggestion criterion must include suggested points")
         expected_validation_refs = context.validation_refs.get(key, set())
         if (
             len(item.validation_refs) != len(set(item.validation_refs))

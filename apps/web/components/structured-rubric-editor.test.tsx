@@ -103,4 +103,25 @@ describe("StructuredRubricEditor", () => {
       screen.queryByRole("button", { name: "保存草稿" }),
     ).not.toBeInTheDocument();
   });
+
+  it("offers AI suggestion scoring and clears deterministic-only rules", async () => {
+    const save = vi.fn().mockResolvedValue(undefined);
+    render(
+      <StructuredRubricEditor
+        initial={rubric}
+        onSave={save}
+        onConfirm={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("评分项 1 验证模式"), {
+      target: { value: "ai_suggestion" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+    await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save.mock.calls[0][0].criteria[0]).toMatchObject({
+      validation_mode: "ai_suggestion",
+      validation_rule: {},
+    });
+  });
 });

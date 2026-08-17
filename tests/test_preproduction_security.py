@@ -32,6 +32,8 @@ def production_settings(**overrides: object) -> dict[str, object]:
     [
         ("demo_actor_enabled", True),
         ("recognition_provider", "fake"),
+        ("formula_recognition_provider", "fake"),
+        ("answer_recognition_provider", "fake"),
         ("grading_provider", "fake"),
         ("assignment_generation_provider", "fake"),
         ("assignment_generation_suggestion_only", False),
@@ -54,6 +56,27 @@ def test_production_configuration_rejects_unsafe_values(field: str, value: objec
 
 def test_production_configuration_accepts_explicit_safe_values() -> None:
     assert Settings(**production_settings()).app_env == "production"
+
+
+def test_production_formula_http_provider_requires_strong_token_and_host_allowlist() -> None:
+    with pytest.raises(ValidationError, match="FORMULA_RECOGNITION_API_KEY"):
+        Settings(
+            **production_settings(
+                formula_recognition_provider="http",
+                formula_recognition_base_url="https://formula.internal",
+                formula_recognition_api_key="weak",
+                formula_recognition_allowed_hosts=["formula.internal"],
+            )
+        )
+    configured = Settings(
+        **production_settings(
+            formula_recognition_provider="http",
+            formula_recognition_base_url="https://formula.internal",
+            formula_recognition_api_key="f" * 48,
+            formula_recognition_allowed_hosts=["formula.internal"],
+        )
+    )
+    assert configured.formula_recognition_provider == "http"
 
 
 def test_rate_limit_key_is_namespaced_hmac_without_plaintext() -> None:

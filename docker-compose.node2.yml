@@ -1,0 +1,43 @@
+x-node2-app-env: &node2-app-env
+  CORS_ORIGINS: '["https://${NODE2_PUBLIC_HOST:?set NODE2_PUBLIC_HOST}:${PREPROD_HTTPS_PORT:?set PREPROD_HTTPS_PORT}","https://${NODE2_INTERNAL_HOST:?set NODE2_INTERNAL_HOST}:${PREPROD_HTTPS_PORT:?set PREPROD_HTTPS_PORT}"]'
+  TRUSTED_HOSTS: '["${NODE2_PUBLIC_HOST:?set NODE2_PUBLIC_HOST}","${NODE2_INTERNAL_HOST:?set NODE2_INTERNAL_HOST}","localhost","127.0.0.1"]'
+  CSRF_TRUSTED_ORIGINS: '["https://${NODE2_PUBLIC_HOST:?set NODE2_PUBLIC_HOST}:${PREPROD_HTTPS_PORT:?set PREPROD_HTTPS_PORT}","https://${NODE2_INTERNAL_HOST:?set NODE2_INTERNAL_HOST}:${PREPROD_HTTPS_PORT:?set PREPROD_HTTPS_PORT}"]'
+  MINIO_PUBLIC_ENDPOINT: ${NODE2_PUBLIC_HOST:?set NODE2_PUBLIC_HOST}:${PREPROD_HTTPS_PORT:?set PREPROD_HTTPS_PORT}
+  MINIO_PUBLIC_SECURE: "true"
+  FORMULA_RECOGNITION_PROVIDER: unavailable
+  ANSWER_RECOGNITION_PROVIDER: unavailable
+  CODEX_LOCAL_ENABLED: "false"
+  SYNTHETIC_DEMO_RESET_ENABLED: "false"
+
+services:
+  postgres:
+    image: ${AHAMARK_POSTGRES_IMAGE:-postgres:16-alpine}
+  redis:
+    image: ${AHAMARK_REDIS_IMAGE:-redis:7-alpine}
+  minio:
+    image: ${AHAMARK_MINIO_IMAGE:-minio/minio:RELEASE.2025-04-22T22-12-26Z}
+  migrate:
+    image: ${AHAMARK_API_IMAGE:?set AHAMARK_API_IMAGE}
+    build: !reset null
+    environment: *node2-app-env
+  api-a:
+    image: ${AHAMARK_API_IMAGE:?set AHAMARK_API_IMAGE}
+    build: !reset null
+    environment: *node2-app-env
+  api-b:
+    image: ${AHAMARK_API_IMAGE:?set AHAMARK_API_IMAGE}
+    build: !reset null
+    environment: *node2-app-env
+  worker:
+    image: ${AHAMARK_API_IMAGE:?set AHAMARK_API_IMAGE}
+    build: !reset null
+    environment: *node2-app-env
+  web:
+    image: ${AHAMARK_WEB_IMAGE:?set AHAMARK_WEB_IMAGE}
+    build: !reset null
+  nginx:
+    image: ${AHAMARK_NGINX_IMAGE:-nginx:1.27-alpine}
+    ports: !override
+      - "0.0.0.0:${PREPROD_HTTPS_PORT:?set PREPROD_HTTPS_PORT}:8443"
+    volumes:
+      - ./deploy/nginx/node2.conf:/etc/nginx/conf.d/default.conf:ro

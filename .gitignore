@@ -11,6 +11,8 @@ __pycache__/
 *.egg-info/
 node_modules/
 .next/
+pnpm-lock.yaml
+pnpm-workspace.yaml
 coverage/
 .coverage
 .coverage.*

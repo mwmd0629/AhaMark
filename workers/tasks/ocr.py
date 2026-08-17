@@ -1,9 +1,12 @@
 import uuid
 from typing import Any
 
-from app.api.recognition import run_recognition_job
+from app.api.recognition import (
+    _claim_recognition_attempt,
+    _mark_recognition_failed,
+    run_recognition_job,
+)
 from app.db.session import SessionLocal
-from app.models import RecognitionJob, RecognitionStatus, now_utc
 from app.storage.dependencies import get_storage
 
 from workers.celery_app import celery_app
@@ -17,23 +20,30 @@ def run_recognition(task: Any, job_id: str) -> None:
     def operation() -> None:
         with SessionLocal() as db:
             parsed_id = uuid.UUID(job_id)
+            delivery = task.request.delivery_info or {}
+            claim = _claim_recognition_attempt(
+                db,
+                parsed_id,
+                allow_running_resume=bool(delivery.get("redelivered")),
+            )
+            if claim is None:
+                return
             try:
-                delivery = task.request.delivery_info or {}
+                storage = get_storage()
                 run_recognition_job(
                     db,
-                    get_storage(),
+                    storage,
                     parsed_id,
-                    allow_running_resume=bool(delivery.get("redelivered")),
+                    claimed_attempt=claim,
                 )
             except Exception:
-                db.rollback()
-                job = db.get(RecognitionJob, parsed_id)
-                if job is not None:
-                    job.status = RecognitionStatus.failed
-                    job.error_code = "RECOGNITION_FAILED"
-                    job.error_message = "Worker encountered an unexpected recognition error"
-                    job.failed_at = now_utc()
-                    db.commit()
+                _mark_recognition_failed(
+                    db,
+                    parsed_id,
+                    claim.attempt,
+                    "RECOGNITION_FAILED",
+                    "Worker encountered an unexpected recognition error",
+                )
                 raise
 
     run_traced_task(task, job_id, operation)

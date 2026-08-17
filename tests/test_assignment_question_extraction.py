@@ -85,6 +85,32 @@ def test_formula_review_cannot_carry_fabricated_latex_and_proof_is_manual() -> N
     assert parsed.candidates[0].manual_required is True
 
 
+@pytest.mark.parametrize(
+    "damaged_text",
+    [
+        "???? x?+xy+y?=7",
+        "中文题干的??号与数学?号大比例?失",
+        "含有替换字符\ufffd的题干",
+        "含有 NUL\x00 的题干",
+        "含有控制符\x1b的题干",
+    ],
+)
+def test_schema_rejects_character_encoding_corruption(damaged_text: str) -> None:
+    payload = candidate_payload()
+    payload["content_text"] = damaged_text
+    with pytest.raises(ValidationError, match="CHARACTER_ENCODING_CORRUPTION_DETECTED"):
+        ExtractionOutput.model_validate({"candidates": [payload]})
+
+
+def test_schema_allows_normal_question_marks_latex_and_unicode_math() -> None:
+    payload = candidate_payload()
+    payload["content_text"] = "这道题成立吗？ Is the answer unique? 求 ∂u/∂x 与 ∫₀¹f(x)dx。"
+    payload["content_latex"] = r"\frac{x^2+y^2}{\sqrt{2}} \in \mathbb{R}"
+    parsed = ExtractionOutput.model_validate({"candidates": [payload]})
+    assert parsed.candidates[0].content_text == payload["content_text"]
+    assert parsed.candidates[0].content_latex == payload["content_latex"]
+
+
 def test_server_eligibility_excludes_structural_risks() -> None:
     candidate = SimpleNamespace(
         status="suggested",
@@ -100,6 +126,8 @@ def test_server_eligibility_excludes_structural_risks() -> None:
     region = SimpleNamespace(confidence=Decimal("0.95"), paper_page_id="p1")
     assert eligible(candidate, [region])
     candidate.warning_codes = ["CROSS_PAGE_REVIEW_REQUIRED"]
+    assert not eligible(candidate, [region])
+    candidate.warning_codes = ["OCR_TEXT_LOW_CONFIDENCE_REVIEW_REQUIRED"]
     assert not eligible(candidate, [region])
     candidate.warning_codes = []
     candidate.max_score = None

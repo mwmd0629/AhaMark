@@ -16,15 +16,34 @@ export function useAuthUser() {
   return useContext(AuthUserContext);
 }
 
-export function AuthGate({ children }: { children: ReactNode }) {
+export function AuthGate({
+  children,
+  audience = "teacher",
+}: {
+  children: ReactNode;
+  audience?: "teacher" | "student";
+}) {
   const router = useRouter();
   const [user, setUser] = useState<AuthUser | null>(null);
   useEffect(() => {
     authApi
       .me()
-      .then(setUser)
+      .then((nextUser) => {
+        const roles = nextUser.roles ?? [];
+        const studentOnly =
+          roles.includes("student") && !roles.includes("teacher");
+        if (audience === "student" && !roles.includes("student")) {
+          router.replace("/dashboard");
+          return;
+        }
+        if (audience === "teacher" && studentOnly) {
+          router.replace("/student");
+          return;
+        }
+        setUser(nextUser);
+      })
       .catch(() => router.replace("/login"));
-  }, [router]);
+  }, [audience, router]);
   if (!user)
     return (
       <div

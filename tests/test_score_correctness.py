@@ -1,3 +1,4 @@
+import ast
 import json
 import uuid
 from datetime import UTC, datetime
@@ -11,6 +12,31 @@ from openpyxl import load_workbook
 GOLDEN = json.loads(
     Path("tests/fixtures/score_correctness/golden.json").read_text(encoding="utf-8")
 )
+
+
+def test_score_correctness_seed_uses_structured_rubric_authority() -> None:
+    path = Path("scripts/verify_score_correctness.py")
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(path))
+    model_imports = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "app.models"
+        for alias in node.names
+    }
+    assert {"StructuredRubricSet", "StructuredRubricSetItem"} <= model_imports
+    assert {"RubricVersion", "QuestionRubric", "RubricItem"}.isdisjoint(model_imports)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id == "SubmissionScoreSnapshot":
+            fields = {keyword.arg for keyword in node.keywords}
+            assert "structured_rubric_set_id" in fields
+            assert "rubric_version_id" not in fields
+    assert "active_structured_rubric_set_id" in source
+    assert "active_rubric_version_id" not in source
+    assert "question_version_token" in source
+    assert "semantic_hash" in source
 
 
 def _rows(version: str) -> list[ValidatedScore]:

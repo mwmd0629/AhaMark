@@ -46,6 +46,91 @@ const copies: Record<string, ReviewCopy> = {
       "当前作业选择了设置截止时间，请选择具体日期和时间；也可以改为无截止时间。",
     action: "返回修改",
   },
+  CONFIRM_CLASSES_REQUIRED: {
+    title: "发布班级尚未确认",
+    message: "班级已经选择，但还需要在本页点击“确认班级”。",
+    action: "检查班级",
+  },
+  CONFIRM_DUE_AT_REQUIRED: {
+    title: "截止时间尚未确认",
+    message: "请核对截止时间，然后在本页点击“确认截止时间”。",
+    action: "检查截止时间",
+  },
+  CONFIRM_TOTAL_SCORE_REQUIRED: {
+    title: "作业总分尚未确认",
+    message: "请先确保作业总分等于所有题目分值之和，再点击“确认总分”。",
+    action: "检查总分",
+  },
+  TOTAL_SCORE_MISMATCH: {
+    title: "作业总分与题目合计不一致",
+    message: "请修改作业总分或题目分值，使二者完全一致。",
+    action: "修改分值",
+  },
+  CONFIRM_FILE_ROLES_REQUIRED: {
+    title: "试卷文件角色尚未确认",
+    message: "请确认哪些文件是试卷、参考答案或其他附件。",
+    action: "检查文件",
+  },
+  FILE_ROLE_UNCONFIRMED: {
+    title: "有文件尚未指定用途",
+    message: "至少一个上传文件还没有确认是试卷、参考答案还是附件。",
+    action: "确认文件用途",
+  },
+  CONFIRM_ANSWER_SOURCES_REQUIRED: {
+    title: "参考答案文件信息待核对",
+    message: "系统会自动核对；如仍未完成，请重新确认文件用途。",
+    action: "检查答案文件",
+  },
+  ANSWER_SOURCE_UNCONFIRMED: {
+    title: "参考答案文件信息不完整",
+    message: "请重新确认该文件的用途，或替换为内容明确的参考答案文件。",
+    action: "检查答案文件",
+  },
+  ANSWER_SOURCE_CONFIRMATION_REQUIRED: {
+    title: "参考答案文件需要核对",
+    message: "请返回文件分析并确认文件用途。",
+    action: "检查答案文件",
+  },
+  ANSWER_SOURCE_REVIEW: {
+    title: "参考答案内容需要复核",
+    message: "请检查答案内容是否正确，确认后再继续发布。",
+    action: "检查参考答案",
+  },
+  CONFIRM_PAPER_VERSION_REQUIRED: {
+    title: "当前试卷版本尚未确认",
+    message: "请核对页面顺序和旋转方向，再确认当前试卷版本。",
+    action: "检查试卷页面",
+  },
+  CONFIRM_REFERENCE_ANSWERS_REQUIRED: {
+    title: "参考答案版本尚未确认",
+    message: "参考答案已经生成，但还需要确认本次发布使用这些版本。",
+    action: "检查参考答案",
+  },
+  CONFIRM_STRUCTURED_RUBRICS_REQUIRED: {
+    title: "评分标准版本尚未确认",
+    message: "结构化评分标准已经生成，但还需要确认本次发布使用这些版本。",
+    action: "检查评分标准",
+  },
+  STRUCTURED_SET_REQUIRED: {
+    title: "正在固定待发布评分标准",
+    message: "系统正在把当前试卷、答案、评分标准和分值固定为待发布集合。",
+    action: "重新扫描",
+  },
+  STRUCTURED_SET_STALE: {
+    title: "待发布评分标准需要重新准备",
+    message: "题目、答案、评分标准或分值已经变化，系统将按最新内容重新固定。",
+    action: "重新扫描",
+  },
+  FILE_ROLE_REVIEW_REQUIRED: {
+    title: "文件用途需要人工复核",
+    message: "自动分析无法替你确认文件用途，请核对试卷和答案文件。",
+    action: "检查文件",
+  },
+  MANUAL_REVIEW_REQUIRED: {
+    title: "生成内容需要人工复核",
+    message: "请检查生成的题目、参考答案和评分标准后再继续发布。",
+    action: "检查生成内容",
+  },
 };
 
 export function getReviewCopy(code: string): ReviewCopy {

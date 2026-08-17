@@ -12,7 +12,7 @@ SUPPORTED_TYPES = {
     "computation",
     "presentation",
 }
-SUPPORTED_MODES = {"deterministic", "manual_only"}
+SUPPORTED_MODES = {"deterministic", "ai_suggestion", "manual_only"}
 SUPPORTED_ANSWERS = {
     "exact_scalar",
     "approximate_scalar",

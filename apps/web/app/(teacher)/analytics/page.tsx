@@ -17,19 +17,23 @@ type Metrics = {
   highest_score: number | null;
   lowest_score: number | null;
   median_score: number | null;
+  average_score_rate: number | null;
   score_distribution: Record<string, number>;
   questions: Array<{
     question_id: string;
     question_number: string;
     participants: number;
-    score_rate: number;
+    average_score: number;
+    average_max_score: number;
+    score_rate: number | null;
     full_rate: number;
     zero_rate: number;
     correct_rate: number | null;
   }>;
   knowledge_points: Array<{
     knowledge_point_id: string;
-    mastery_rate: number;
+    knowledge_point_name: string;
+    mastery_rate: number | null;
     sample_count: number;
   }>;
   error_types: Array<{ code: string; count: number }>;
@@ -181,7 +185,7 @@ export default function AnalyticsPage() {
             </Card>
           )}
           <div
-            className="grid gap-4 md:grid-cols-5"
+            className="grid gap-4 md:grid-cols-3 xl:grid-cols-6"
             data-testid="analytics-metrics"
             data-snapshot-id={snapshotId}
             data-release-id={releaseId}
@@ -192,6 +196,12 @@ export default function AnalyticsPage() {
               ["最高分", metrics.highest_score],
               ["最低分", metrics.lowest_score],
               ["中位数", metrics.median_score],
+              [
+                "平均得分率",
+                metrics.average_score_rate === null
+                  ? null
+                  : percent(metrics.average_score_rate),
+              ],
             ].map(([label, value]) => (
               <Card className="p-4" key={String(label)}>
                 <div className="text-sm text-slate-500">{label}</div>
@@ -199,6 +209,7 @@ export default function AnalyticsPage() {
               </Card>
             ))}
           </div>
+          <AssignmentBrief metrics={metrics} />
           <DataCard
             title="分数分布"
             headers={["分数段", "人数", "分布图（0–100%）"]}
@@ -224,7 +235,15 @@ export default function AnalyticsPage() {
           />
           <DataCard
             title="题目分析"
-            headers={["题号", "样本", "得分率", "满分率", "零分率", "正确率"]}
+            headers={[
+              "题号",
+              "平均得分",
+              "样本",
+              "得分率",
+              "满分率",
+              "零分率",
+              "正确率",
+            ]}
             rows={metrics.questions.map((q) => [
               <DrillButton
                 key={q.question_id}
@@ -236,8 +255,9 @@ export default function AnalyticsPage() {
                   )
                 }
               />,
+              `${formatNumber(q.average_score)} / ${formatNumber(q.average_max_score)}`,
               q.participants,
-              percent(q.score_rate),
+              q.score_rate === null ? "无数据" : percent(q.score_rate),
               percent(q.full_rate),
               percent(q.zero_rate),
               q.correct_rate === null
@@ -247,14 +267,19 @@ export default function AnalyticsPage() {
           />
           <DataCard
             title="知识点掌握率"
-            headers={["知识点 ID", "掌握率", "样本"]}
+            headers={["知识点", "掌握率", "样本"]}
             rows={metrics.knowledge_points.map((kp) => [
               <DrillButton
                 key={kp.knowledge_point_id}
-                label={kp.knowledge_point_id}
-                onClick={() => loadKnowledge(kp.knowledge_point_id)}
+                label={kp.knowledge_point_name || kp.knowledge_point_id}
+                onClick={() =>
+                  loadKnowledge(
+                    kp.knowledge_point_id,
+                    kp.knowledge_point_name || kp.knowledge_point_id,
+                  )
+                }
               />,
-              percent(kp.mastery_rate),
+              kp.mastery_rate === null ? "无数据" : percent(kp.mastery_rate),
               kp.sample_count,
             ])}
           />
@@ -328,26 +353,7 @@ export default function AnalyticsPage() {
                   关闭
                 </button>
               </div>
-              <div className="max-h-96 space-y-2 overflow-auto text-xs">
-                {drilldown.rows.map((row, index) => (
-                  <div
-                    className="rounded border p-2"
-                    key={String(row.student_id ?? index)}
-                  >
-                    {row.student_id ? (
-                      <Link
-                        className="font-medium text-blue-700 underline"
-                        href={`/analytics/students/${String(row.student_id)}`}
-                      >
-                        查看学生详情
-                      </Link>
-                    ) : null}
-                    <pre className="mt-1 whitespace-pre-wrap">
-                      {JSON.stringify(row, null, 2)}
-                    </pre>
-                  </div>
-                ))}
-              </div>
+              <DrilldownTable rows={drilldown.rows} />
             </Card>
           )}
         </>
@@ -367,10 +373,13 @@ export default function AnalyticsPage() {
       setError("下钻加载失败或无权访问。");
     }
   }
-  async function loadKnowledge(knowledgePointId: string) {
+  async function loadKnowledge(
+    knowledgePointId: string,
+    knowledgePointName: string,
+  ) {
     const selected = releases.find((item) => item.id === releaseId);
     await loadDrill(
-      "知识点下钻",
+      `知识点：${knowledgePointName}`,
       analyticsApi.knowledgePoint(snapshotId, knowledgePointId),
     );
     if (selected) {
@@ -386,6 +395,161 @@ export default function AnalyticsPage() {
 
 function percent(value: number) {
   return `${(value * 100).toFixed(1)}%`;
+}
+
+function formatNumber(value: number) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+function AssignmentBrief({ metrics }: { metrics: Metrics }) {
+  const weakestQuestions = [...metrics.questions]
+    .filter(
+      (item): item is typeof item & { score_rate: number } =>
+        item.score_rate !== null,
+    )
+    .sort((left, right) => left.score_rate - right.score_rate)
+    .slice(0, 3);
+  const weakestKnowledge = [...metrics.knowledge_points]
+    .filter(
+      (item): item is typeof item & { mastery_rate: number } =>
+        item.mastery_rate !== null,
+    )
+    .sort((left, right) => left.mastery_rate - right.mastery_rate)
+    .slice(0, 3);
+  const commonErrors = metrics.error_types.slice(0, 3);
+  return (
+    <Card className="p-5">
+      <h2 className="text-lg font-bold">本次作业讲评重点</h2>
+      <p className="mt-1 text-sm text-slate-600">
+        按本次正式发布成绩汇总，用于备课讲评，不形成学生画像。
+      </p>
+      <div className="mt-4 grid gap-5 md:grid-cols-3">
+        <BriefList
+          title="薄弱题目"
+          empty="暂无题目数据"
+          items={weakestQuestions.map(
+            (item) =>
+              `第 ${item.question_number} 题 · ${percent(item.score_rate)}`,
+          )}
+        />
+        <BriefList
+          title="薄弱知识点"
+          empty="本次作业未绑定知识点"
+          items={weakestKnowledge.map(
+            (item) =>
+              `${item.knowledge_point_name || item.knowledge_point_id} · ${percent(item.mastery_rate)}`,
+          )}
+        />
+        <BriefList
+          title="常见错误"
+          empty="暂无教师确认的错误类型"
+          items={commonErrors.map((item) => `${item.code} · ${item.count} 次`)}
+        />
+      </div>
+    </Card>
+  );
+}
+
+function BriefList({
+  title,
+  items,
+  empty,
+}: {
+  title: string;
+  items: string[];
+  empty: string;
+}) {
+  return (
+    <section>
+      <h3 className="font-semibold">{title}</h3>
+      {items.length ? (
+        <ol className="mt-2 list-inside list-decimal space-y-1 text-sm">
+          {items.map((item) => (
+            <li key={item}>{item}</li>
+          ))}
+        </ol>
+      ) : (
+        <p className="mt-2 text-sm text-slate-500">{empty}</p>
+      )}
+    </section>
+  );
+}
+
+function DrilldownTable({ rows }: { rows: Record<string, unknown>[] }) {
+  return (
+    <div className="max-h-96 overflow-auto">
+      <table className="w-full min-w-[44rem] text-left text-sm">
+        <thead className="sticky top-0 bg-white">
+          <tr>
+            {["学号", "姓名", "题号", "得分", "得分率", "错误类型", "操作"].map(
+              (header) => (
+                <th className="border-b p-2" key={header}>
+                  {header}
+                </th>
+              ),
+            )}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, index) => {
+            const score = row.score ?? row.total_score;
+            const maximum = row.max_score;
+            const rate =
+              typeof row.score_rate === "number"
+                ? row.score_rate
+                : typeof score === "number" &&
+                    typeof maximum === "number" &&
+                    maximum > 0
+                  ? score / maximum
+                  : undefined;
+            return (
+              <tr key={`${String(row.student_id ?? "row")}-${index}`}>
+                <td className="border-b p-2">
+                  {String(row.student_number ?? "—")}
+                </td>
+                <td className="border-b p-2">
+                  {String(row.student_name ?? "—")}
+                </td>
+                <td className="border-b p-2">
+                  {String(row.question_number ?? "—")}
+                </td>
+                <td className="border-b p-2">
+                  {score == null
+                    ? "—"
+                    : `${String(score)} / ${String(maximum ?? "—")}`}
+                </td>
+                <td className="border-b p-2">
+                  {typeof rate === "number" ? percent(rate) : "—"}
+                </td>
+                <td className="border-b p-2">
+                  {String(row.final_error_type ?? "—")}
+                </td>
+                <td className="border-b p-2">
+                  {row.student_id ? (
+                    <Link
+                      className="font-medium text-blue-700 underline"
+                      href={`/analytics/students/${String(row.student_id)}`}
+                    >
+                      查看
+                    </Link>
+                  ) : (
+                    "—"
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+          {!rows.length && (
+            <tr>
+              <td className="p-3 text-slate-500" colSpan={7}>
+                没有符合条件的学生
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 function DataCard({
   title,

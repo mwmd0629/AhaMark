@@ -77,8 +77,8 @@ export default function AssignmentDetailPage({
         <div>
           <small>版本</small>
           <p>
-            试卷 v{item.paper_version?.version} · 评分 v
-            {item.rubric_version?.version}
+            试卷 v{item.paper_version?.version} · Structured Rubric Set
+            {item.active_structured_rubric_set_id ? " 已启用" : " 未启用"}
           </p>
         </div>
       </Card>

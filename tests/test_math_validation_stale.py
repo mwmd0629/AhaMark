@@ -10,11 +10,17 @@ from app.math_validation.stale import (
     stale_for_rubric,
 )
 from app.models import (
+    Assignment,
+    AssignmentDraftRevision,
+    AssignmentGenerationJob,
+    AssignmentReviewSession,
     CriterionValidationResult,
     MathValidationJob,
     QuestionRecognitionEvidence,
     ReferenceAnswerVersion,
     RubricCriterion,
+    StructuredRubricSet,
+    StructuredRubricSetItem,
     StructuredRubricVersion,
     StudentAnswer,
     Submission,
@@ -28,7 +34,9 @@ from workers.tasks.math_validation import run_math_validation
 
 
 def validation_fixture() -> tuple[object, MathValidationJob, CriterionValidationResult]:
-    db, _storage, _batch_id, submission_id, question_id = workflow()
+    db, _storage, _batch_id, submission_id, question_id = workflow(
+        criterion_validation_mode="deterministic"
+    )
     question_uuid = uuid.UUID(str(question_id))
     answer = db.scalar(select(StudentAnswer).where(StudentAnswer.submission_id == submission_id))
     submission = db.get(Submission, submission_id)
@@ -41,46 +49,71 @@ def validation_fixture() -> tuple[object, MathValidationJob, CriterionValidation
         )
         db.add(answer)
         db.flush()
-    reference = ReferenceAnswerVersion(
-        question_id=question_uuid,
-        source_type="teacher_authored",
-        raw_content="1",
-        normalized_content="1",
-        content_hash="r" * 64,
-        version=1,
-        created_by=submission.owner_id,
-        status="confirmed",
+    assignment = db.get(Assignment, submission.assignment_id)
+    assert assignment is not None and assignment.active_structured_rubric_set_id is not None
+    set_item = db.scalar(
+        select(StructuredRubricSetItem).where(
+            StructuredRubricSetItem.rubric_set_id
+            == assignment.active_structured_rubric_set_id,
+            StructuredRubricSetItem.question_id == question_uuid,
+        )
     )
-    db.add(reference)
+    assert set_item is not None
+    reference = db.get(ReferenceAnswerVersion, set_item.reference_answer_version_id)
+    rubric = db.get(StructuredRubricVersion, set_item.structured_rubric_version_id)
+    criterion = db.scalar(
+        select(RubricCriterion).where(RubricCriterion.rubric_version_id == rubric.id)
+    ) if rubric is not None else None
+    assert reference is not None and rubric is not None and criterion is not None
+    answer.question_version_reference = rubric.question_version
+    generation_job = AssignmentGenerationJob(
+        owner_id=submission.owner_id,
+        assignment_id=assignment.id,
+        generation=1,
+        status="completed",
+        current_stage="validating",
+        progress=100,
+        idempotency_key=uuid.uuid4().hex,
+        request_fingerprint="g" * 64,
+        source_snapshot_hash="s" * 64,
+        provider_config_version="fixture-v1",
+        prompt_version="fixture-v1",
+        schema_version="fixture-v1",
+    )
+    db.add(generation_job)
     db.flush()
-    rubric = StructuredRubricVersion(
-        question_id=question_uuid,
-        question_version=answer.question_version_reference,
-        reference_answer_version_id=reference.id,
-        rubric_version=1,
-        title="test",
-        total_points=Decimal("5"),
-        status="confirmed",
-        content_hash="u" * 64,
+    revision = AssignmentDraftRevision(
+        owner_id=submission.owner_id,
+        assignment_id=assignment.id,
+        generation_job_id=generation_job.id,
+        revision=1,
+        source_snapshot_hash=generation_job.source_snapshot_hash,
+        created_by_type="teacher",
         created_by=submission.owner_id,
     )
-    db.add(rubric)
+    db.add(revision)
     db.flush()
-    criterion = RubricCriterion(
-        rubric_version_id=rubric.id,
-        stable_key="result",
-        title="result",
-        max_points=Decimal("5"),
-        display_order=0,
-        criterion_type="final_answer",
-        validation_mode="deterministic",
-        validation_rule={
-            "answer_type": "exact_scalar",
-            "domain": "rational",
-            "limits": {"timeout_ms": 500},
-        },
+    rubric_set = db.get(StructuredRubricSet, assignment.active_structured_rubric_set_id)
+    assert rubric_set is not None
+    generation_job.source_snapshot_hash = rubric_set.source_snapshot_hash
+    revision.source_snapshot_hash = rubric_set.source_snapshot_hash
+    review = AssignmentReviewSession(
+        owner_id=submission.owner_id,
+        assignment_id=assignment.id,
+        generation_job_id=generation_job.id,
+        draft_revision_id=revision.id,
+        generation=1,
+        source_snapshot_hash=generation_job.source_snapshot_hash,
+        review_version=1,
+        status="published",
+        risk_ledger_hash="r" * 64,
+        expected_assignment_updated_at=assignment.updated_at,
+        paper_version_id=assignment.active_paper_version_id,
+        structured_set_hash=rubric_set.content_hash,
+        structured_rubric_set_id=assignment.active_structured_rubric_set_id,
+        created_by=submission.owner_id,
     )
-    db.add(criterion)
+    db.add(review)
     db.flush()
     recognition_job = SubmissionRecognitionJob(
         owner_id=submission.owner_id,
@@ -116,6 +149,7 @@ def validation_fixture() -> tuple[object, MathValidationJob, CriterionValidation
         recognition_evidence_id=recognition_evidence.id,
         scoring_input_version="evidence:1:1",
         reference_answer_version_id=reference.id,
+        structured_rubric_set_id=assignment.active_structured_rubric_set_id,
         rubric_version_id=rubric.id,
         engine_version="ahamark-safe-math-2",
         config_version="safe-math-limits-v2",

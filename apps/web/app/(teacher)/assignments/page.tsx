@@ -15,6 +15,7 @@ import {
   Table,
 } from "@/components/ui";
 import { ApiError, assignmentsApi, type AssignmentRecord } from "@/lib/api";
+import { useSmartRefresh } from "@/lib/use-smart-refresh";
 
 export default function AssignmentsPage() {
   const [items, setItems] = useState<AssignmentRecord[]>([]);
@@ -23,21 +24,29 @@ export default function AssignmentsPage() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [deletingId, setDeletingId] = useState("");
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    try {
-      const query = new URLSearchParams({ page_size: "100" });
-      if (search) query.set("search", search);
-      if (status) query.set("status", status);
-      setItems((await assignmentsApi.list(query.toString())).items);
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : "无法连接作业服务");
-    } finally {
-      setLoading(false);
-    }
-  }, [search, status]);
+  const load = useCallback(
+    async (background = false) => {
+      if (!background) {
+        setLoading(true);
+        setError("");
+      }
+      try {
+        const query = new URLSearchParams({ page_size: "100" });
+        if (search) query.set("search", search);
+        if (status) query.set("status", status);
+        setItems((await assignmentsApi.list(query.toString())).items);
+      } catch (e) {
+        if (!background) {
+          setError(e instanceof ApiError ? e.message : "无法连接作业服务");
+        }
+      } finally {
+        if (!background) setLoading(false);
+      }
+    },
+    [search, status],
+  );
   useEffect(() => void load(), [load]);
+  useSmartRefresh(() => load(true), { intervalMs: 60_000 });
   async function deleteAssignment(item: AssignmentRecord) {
     if (
       !window.confirm(

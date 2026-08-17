@@ -26,10 +26,16 @@ from app.models import (
     TeachingInsight,
     now_utc,
 )
-from app.results.services import FinalScoreService, create_analytics, release_scores
+from app.results.services import (
+    FinalScoreService,
+    create_analytics,
+    release_scores,
+    serialize_grade_release_mutation,
+)
 from app.storage.base import ObjectStorage
 from app.storage.dependencies import get_storage
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -37,18 +43,6 @@ from sqlalchemy.orm import Session
 router = APIRouter(prefix="/api", tags=["results"])
 Db = Annotated[Session, Depends(get_db)]
 Storage = Annotated[ObjectStorage, Depends(get_storage)]
-
-
-class ReleaseInput(BaseModel):
-    assignment_id: uuid.UUID
-    class_id: uuid.UUID
-    release_mode: Literal["score_and_feedback", "feedback_only", "score_only", "internal_only"] = (
-        "score_and_feedback"
-    )
-    exclude_student_ids: list[uuid.UUID] = Field(default_factory=list)
-    scheduled_at: datetime | None = None
-    notes: str | None = Field(None, max_length=2000)
-    idempotency_key: str | None = Field(None, max_length=100)
 
 
 class InsightEdit(BaseModel):
@@ -116,15 +110,17 @@ def released_release(db: Session, actor_id: uuid.UUID, release_id: uuid.UUID) ->
     return release
 
 
-@router.get("/assignments/{assignment_id}/classes/{class_id}/grade-readiness")
-def readiness(
-    assignment_id: uuid.UUID, class_id: uuid.UUID, db: Db, actor: Actor
+def _readiness_data(
+    assignment_id: uuid.UUID,
+    class_id: uuid.UUID,
+    db: Session,
+    actor_id: uuid.UUID,
 ) -> dict[str, Any]:
     assignment = db.scalar(
-        select(Assignment).where(Assignment.id == assignment_id, Assignment.owner_id == actor.id)
+        select(Assignment).where(Assignment.id == assignment_id, Assignment.owner_id == actor_id)
     )
     school_class = db.scalar(
-        select(SchoolClass).where(SchoolClass.id == class_id, SchoolClass.owner_id == actor.id)
+        select(SchoolClass).where(SchoolClass.id == class_id, SchoolClass.owner_id == actor_id)
     )
     linked = db.scalar(
         select(AssignmentClass).where(
@@ -142,7 +138,7 @@ def readiness(
     )
     submissions = db.scalars(
         select(Submission).where(
-            Submission.owner_id == actor.id,
+            Submission.owner_id == actor_id,
             Submission.assignment_id == assignment_id,
             Submission.class_id == class_id,
         )
@@ -152,7 +148,7 @@ def readiness(
         if submission.student_id in student_ids:
             submissions_by_student.setdefault(submission.student_id, []).append(submission)
     valid, invalid = [], []
-    service = FinalScoreService(db, actor.id)
+    service = FinalScoreService(db, actor_id)
     latest_complete_by_student: dict[uuid.UUID, Any] = {}
     for score_row in service.latest(assignment_id, class_id):
         student_id = score_row.payload.student_id
@@ -194,15 +190,6 @@ def readiness(
                 }
             )
     missing = sorted(str(x) for x in student_ids - set(submissions_by_student))
-    audit(
-        db,
-        actor.id,
-        "grade_release.check",
-        "assignment",
-        assignment_id,
-        {"ready": len(valid), "invalid": len(invalid), "missing": len(missing)},
-    )
-    db.commit()
     return {
         "releasable_count": len(valid),
         "unreleasable_count": len(invalid) + len(missing),
@@ -212,65 +199,59 @@ def readiness(
     }
 
 
-@router.post("/grade-releases", status_code=201)
-def create_release(data: ReleaseInput, db: Db, actor: Actor) -> dict[str, Any]:
-    if data.idempotency_key:
-        existing = db.scalar(
-            select(GradeRelease).where(
-                GradeRelease.idempotency_key == data.idempotency_key,
-                GradeRelease.owner_id == actor.id,
-            )
-        )
-        if existing:
-            return release_view(db, existing)
-    check = readiness(data.assignment_id, data.class_id, db, actor)
-    excluded = set(data.exclude_student_ids)
-    ready = [x for x in check["ready"] if uuid.UUID(x["student_id"]) not in excluded]
-    if not ready:
-        raise ApiProblem(422, "NO_RELEASABLE_SCORES", "没有可发布的完整成绩")
-    version = (
-        db.scalar(
-            select(func.max(GradeRelease.version)).where(
-                GradeRelease.assignment_id == data.assignment_id,
-                GradeRelease.class_id == data.class_id,
-            )
-        )
-        or 0
-    ) + 1
-    release = GradeRelease(
-        owner_id=actor.id,
-        assignment_id=data.assignment_id,
-        class_id=data.class_id,
-        version=version,
-        status="scheduled" if data.scheduled_at else "released",
-        release_mode=data.release_mode,
-        scheduled_at=data.scheduled_at,
-        released_at=None if data.scheduled_at else now_utc(),
-        created_by=actor.id,
-        notes=data.notes,
-        idempotency_key=data.idempotency_key,
-    )
-    db.add(release)
-    db.flush()
-    for row in ready:
-        db.add(
-            GradeReleaseItem(
-                grade_release_id=release.id,
-                student_id=uuid.UUID(row["student_id"]),
-                submission_id=uuid.UUID(row["submission_id"]),
-                score_snapshot_id=uuid.UUID(row["score_snapshot_id"]),
-            )
-        )
+@router.get("/assignments/{assignment_id}/classes/{class_id}/grade-readiness")
+def readiness(
+    assignment_id: uuid.UUID, class_id: uuid.UUID, db: Db, actor: Actor
+) -> dict[str, Any]:
+    result = _readiness_data(assignment_id, class_id, db, actor.id)
     audit(
         db,
         actor.id,
-        "grade_release.create",
-        "grade_release",
-        release.id,
-        {"version": version, "item_count": len(ready), "status": release.status},
+        "grade_release.check",
+        "assignment",
+        assignment_id,
+        {
+            "ready": result["releasable_count"],
+            "invalid": len(result["errors"]),
+            "missing": len(result["missing_student_ids"]),
+        },
     )
     db.commit()
-    return release_view(db, release)
+    return result
+
+
+@router.post("/grade-releases", deprecated=True)
+def create_release(request: Request, db: Db, actor: Actor) -> JSONResponse:
+    replacement = "POST /api/grading-batches/{batch_id}/confirm-results"
+    audit(
+        db,
+        actor.id,
+        "grade_release.legacy_create_attempt",
+        "api_endpoint",
+        actor.id,
+        {
+            "endpoint": "POST /api/grade-releases",
+            "replacement": replacement,
+            "client": request.headers.get("x-ahamark-client", "")[:160] or None,
+            "user_agent": request.headers.get("user-agent", "")[:500] or None,
+            "referer": request.headers.get("referer", "")[:500] or None,
+            "request_id": getattr(request.state, "request_id", None),
+        },
+    )
+    db.commit()
+    return JSONResponse(
+        {
+            "code": "GRADE_RELEASE_CREATION_RETIRED",
+            "message": "成绩发布创建入口已退役，请通过批改批次的“确认结果”完成正式授权",
+            "details": {"replacement": replacement},
+            "request_id": getattr(request.state, "request_id", None),
+        },
+        status_code=410,
+        headers={
+            "Deprecation": "true",
+            "X-AhaMark-Replacement": replacement,
+        },
+    )
 
 
 def release_view(db: Session, release: GradeRelease) -> dict[str, Any]:
@@ -285,6 +266,8 @@ def release_view(db: Session, release: GradeRelease) -> dict[str, Any]:
         "status": release.status,
         "release_mode": release.release_mode,
         "released_at": release.released_at,
+        "student_visible_at": release.student_visible_at,
+        "student_visible": release.student_visible_at is not None,
         "scheduled_at": release.scheduled_at,
         "meaning": "已确认发布数据，尚未发送到学生端。",
         "items": [
@@ -312,6 +295,46 @@ def list_releases(
 @router.get("/grade-releases/{release_id}")
 def get_release(release_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
     return release_view(db, owned_release(db, actor.id, release_id))
+
+
+@router.post("/grade-releases/{release_id}/publish-to-students")
+def publish_release_to_students(release_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
+    release = released_release(db, actor.id, release_id)
+    if not serialize_grade_release_mutation(db, actor.id, release.assignment_id):
+        raise ApiProblem(404, "GRADE_RELEASE_NOT_FOUND", "成绩发布批次不存在")
+    db.refresh(release)
+    if release.status != "released":
+        raise ApiProblem(409, "GRADE_RELEASE_NOT_ACTIVE", "只有已发布版本可向学生公开")
+    if release.student_visible_at is None:
+        newer_release_id = db.scalar(
+            select(GradeRelease.id).where(
+                GradeRelease.owner_id == release.owner_id,
+                GradeRelease.assignment_id == release.assignment_id,
+                GradeRelease.class_id == release.class_id,
+                GradeRelease.status == "released",
+                GradeRelease.version > release.version,
+            )
+        )
+        if newer_release_id is not None:
+            raise ApiProblem(
+                409,
+                "GRADE_RELEASE_SUPERSEDED",
+                "已有更新的正式成绩版本，旧版本不能再向学生公开",
+                {"newer_grade_release_id": str(newer_release_id)},
+            )
+        release.student_visible_at = now_utc()
+        release.student_visible_by = actor.id
+        audit(
+            db,
+            actor.id,
+            "grade_release.publish_to_students",
+            "grade_release",
+            release.id,
+            {"version": release.version, "student_count": len(release_view(db, release)["items"])},
+        )
+        db.commit()
+        db.refresh(release)
+    return release_view(db, release)
 
 
 @router.post("/grade-releases/{release_id}/cancel")
@@ -518,7 +541,7 @@ def generate_analytics(release_id: uuid.UUID, db: Db, actor: Actor) -> dict[str,
         .where(
             AnalyticsSnapshot.owner_id == actor.id,
             AnalyticsSnapshot.grade_release_id == release.id,
-            AnalyticsSnapshot.schema_version == "1.0",
+            AnalyticsSnapshot.schema_version == "1.1",
             AnalyticsSnapshot.status == "complete",
         )
         .order_by(AnalyticsSnapshot.created_at.asc(), AnalyticsSnapshot.id.asc())
@@ -560,27 +583,56 @@ def generate_insight(analytics_id: uuid.UUID, db: Db, actor: Actor) -> dict[str,
         snapshot.metrics.get("questions", []),
         key=lambda x: x.get("score_rate") if x.get("score_rate") is not None else 2,
     )[:3]
-    evidence = [
-        {
-            "metric": "question_score_rate",
-            "question_id": x["question_id"],
-            "value": x["score_rate"],
-            "participants": x["participants"],
-        }
+    knowledge_points = sorted(
+        snapshot.metrics.get("knowledge_points", []),
+        key=lambda x: x.get("mastery_rate") if x.get("mastery_rate") is not None else 2,
+    )[:2]
+    errors = snapshot.metrics.get("error_types", [])[:2]
+    evidence = (
+        [
+            {
+                "metric": "question_score_rate",
+                "question_id": x["question_id"],
+                "value": x["score_rate"],
+                "participants": x["participants"],
+            }
+            for x in questions
+        ]
+        + [
+            {
+                "metric": "knowledge_point_mastery_rate",
+                "knowledge_point_id": x["knowledge_point_id"],
+                "value": x["mastery_rate"],
+                "participants": x["sample_count"],
+            }
+            for x in knowledge_points
+        ]
+        + [
+            {"metric": "confirmed_error_type_count", "error_type": x["code"], "value": x["count"]}
+            for x in errors
+        ]
+    )
+    recommendations = [
+        "优先讲评第"
+        f"{x['question_number']}题（平均得分率 {x['score_rate']:.1%}，"
+        f"样本 {x['participants']} 人）"
         for x in questions
     ]
+    recommendations.extend(
+        f"复习知识点“{x.get('knowledge_point_name') or x['knowledge_point_id']}”"
+        f"（掌握率 {x['mastery_rate']:.1%}，样本 {x['sample_count']} 人）"
+        for x in knowledge_points
+    )
+    recommendations.extend(
+        f"讲评时针对教师确认的“{x['code']}”错误补充示例（{x['count']} 次）" for x in errors
+    )
     content = {
         "title": "课堂讲评建议",
         "generation_method": "rule_based",
         "disclaimer": "这是基于固定 AnalyticsSnapshot 的规则型教学建议，不是 AI 自动评分或诊断。",
         "rules_version": "rules-v1",
         "sample_warning": snapshot.source_snapshot_count < 5,
-        "recommendations": [
-            "优先讲评第"
-            f"{x['question_number']}题（平均得分率 {x['score_rate']:.1%}，"
-            f"样本 {x['participants']} 人）"
-            for x in questions
-        ],
+        "recommendations": recommendations,
     }
     insight = TeachingInsight(
         owner_id=actor.id, analytics_snapshot_id=snapshot.id, content=content, evidence=evidence

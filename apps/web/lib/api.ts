@@ -12,10 +12,11 @@ export type AssignmentReviewSessionRecord = {
   generation: number;
   draft_revision_id: string;
   paper_version_id: string;
-  legacy_rubric_version_id: string | null;
+  structured_rubric_set_id: string | null;
   review_version: number;
   status: string;
   counts: { blocking: number; warning: number; info: number };
+  confirmations?: string[];
 };
 
 export type AssignmentReviewItemRecord = {
@@ -38,6 +39,7 @@ export type AssignmentReviewItemRecord = {
 };
 
 export type AssignmentReadinessRecord = {
+  preparation_status?: "ready";
   id: string;
   readiness_hash: string;
   status: string;
@@ -46,7 +48,238 @@ export type AssignmentReadinessRecord = {
   due_at: string | null;
   total_score: string;
   paper_version_id: string;
-  legacy_rubric_version_id: string;
+  structured_rubric_set_id: string;
+};
+
+export type AssignmentPreparationRecord =
+  | AssignmentReadinessRecord
+  | {
+      preparation_status: "preparing";
+      assignment_id: string;
+      review_session_id: string;
+      review_version: number;
+      stage: string;
+      progress: number;
+      retryable: true;
+    }
+  | {
+      preparation_status: "exception_required";
+      assignment_id: string;
+      review_session_id: string;
+      review_version: number;
+      retryable: boolean;
+      bundle_hash: string;
+      exceptions: Array<{
+        code: string;
+        severity: "blocking" | "warning";
+        message: string;
+        entity_type?: string | null;
+        entity_id?: string | null;
+      }>;
+    };
+
+export type StructuredRubricSetRecord = {
+  id: string;
+  assignment_id: string;
+  paper_version_id: string;
+  version: number;
+  status: "draft" | "active" | "retired" | "stale" | string;
+  content_hash: string;
+  source_snapshot_hash: string;
+  total_points: string;
+  current?: boolean;
+  reason?: string | null;
+  created?: boolean;
+  review_version?: number;
+  confirmed_by?: string | null;
+  confirmed_at?: string | null;
+  activated_at?: string | null;
+  items?: Array<{
+    id: string;
+    question_id: string;
+    question_version: string;
+    reference_answer_version_id: string;
+    structured_rubric_version_id: string;
+    answer_content_hash: string;
+    rubric_content_hash: string;
+    criteria_hash: string;
+    display_order: number;
+    max_points: string;
+  }>;
+};
+
+/** Read-only, teacher-facing review contract returned by review-bundle v1. */
+export type AssignmentReviewBundleVersion = {
+  generation: number;
+  draft_revision_id: string;
+  paper_version_id: string;
+  source_snapshot_hash: string;
+  bundle_hash: string;
+};
+
+export type AssignmentReviewBundleSource = {
+  kind: string;
+  label: string;
+};
+
+export type AssignmentReviewBundleQuestionProvenance = {
+  id: string;
+  status: string;
+  candidate_version: number;
+  source_snapshot_hash: string;
+  materialized_question_id: string | null;
+  source: AssignmentReviewBundleSource;
+  visibility: "teacher";
+};
+
+export type AssignmentReviewBundleCandidateBase = {
+  id: string;
+  candidate_version: number;
+  teacher_edit_version: number;
+  status: string;
+  source_snapshot_hash: string;
+  materialized_formal_id: string | null;
+  source: AssignmentReviewBundleSource;
+  confidence: string;
+  visibility: "teacher";
+};
+
+export type AssignmentReviewBundleAnswerCandidate =
+  AssignmentReviewBundleCandidateBase & {
+    content: string;
+  };
+
+export type AssignmentReviewBundleRubricCandidate =
+  AssignmentReviewBundleCandidateBase & {
+    title: string;
+    total_points: string | null;
+  };
+
+export type AssignmentReviewBundleAnswer = {
+  id: string;
+  status: "draft" | "confirmed" | "retired" | string;
+  version: number;
+  content_hash: string;
+  source: AssignmentReviewBundleSource;
+  content: string;
+  content_payload: {
+    source_type: string;
+    source_file: string | null;
+    source_page: number | null;
+    source_region: Record<string, unknown> | null;
+    raw_content: string;
+    normalized_content: string;
+    structured_content: Record<string, unknown>;
+    provenance: Record<string, unknown>;
+  };
+  visibility: "teacher";
+};
+
+export type AssignmentReviewBundleCriterion = {
+  id: string;
+  key: string;
+  title: string;
+  description: string | null;
+  points: string;
+  display_order: number;
+  criterion_type: string;
+  required: boolean;
+  dependencies: string[];
+  expected_evidence: Record<string, unknown>;
+  validation_mode: string;
+  validation_rule: Record<string, unknown>;
+  manual_review_policy: Record<string, unknown>;
+  partial_credit_policy: Record<string, unknown>;
+  error_category: string | null;
+  metadata: Record<string, unknown>;
+};
+
+export type AssignmentReviewBundleRubric = {
+  id: string;
+  status: "draft" | "confirmed" | "retired" | string;
+  version: number;
+  content_hash: string;
+  reference_answer_version_id: string;
+  source: AssignmentReviewBundleSource;
+  title: string;
+  total_points: string;
+  criteria: AssignmentReviewBundleCriterion[];
+  visibility: "teacher";
+};
+
+export type AssignmentReviewBundleLifecycle<T, C> = {
+  candidate: C | null;
+  candidate_history: C[];
+  materialized: T | null;
+  selected: T | null;
+  history: T[];
+  visibility: "teacher";
+};
+
+export type AssignmentReviewBundleQuestion = {
+  id: string;
+  number: string;
+  content_hash: string;
+  content: string | null;
+  source: AssignmentReviewBundleSource;
+  provenance: AssignmentReviewBundleQuestionProvenance | null;
+  visibility: "teacher";
+  answer: AssignmentReviewBundleLifecycle<
+    AssignmentReviewBundleAnswer,
+    AssignmentReviewBundleAnswerCandidate
+  >;
+  rubric: AssignmentReviewBundleLifecycle<
+    AssignmentReviewBundleRubric,
+    AssignmentReviewBundleRubricCandidate
+  >;
+};
+
+export type AssignmentReviewBundleBlocker = {
+  id: string | null;
+  code: string;
+  section: string;
+  message: string;
+  entity: string;
+  entity_id: string | null;
+  severity: "blocking" | "warning";
+  source_hash: string;
+  status: string;
+  visibility: "teacher";
+};
+
+export type AssignmentReviewBundleConfirmation = {
+  id: string;
+  type: string;
+  status: "confirmed";
+  source_hash: string;
+  origin: "origin" | "inherited" | "system_auto" | string;
+  inherited: boolean;
+  fingerprint_schema_version: string | null;
+  confirmed_at: string;
+  visibility: "teacher";
+};
+
+export type AssignmentReviewBundleStructuredRubricSet = {
+  id: string;
+  status: "draft" | "active" | "retired" | "stale" | string;
+  version: number;
+  content_hash: string;
+  source_snapshot_hash: string;
+  total_points: string;
+  current: boolean;
+  reason: string | null;
+  visibility: "teacher";
+};
+
+export type AssignmentReviewBundle = {
+  schema_version: "assignment-review-bundle-v2";
+  assignment_id: string;
+  version: AssignmentReviewBundleVersion;
+  status: "missing_review" | "action_required" | "ready_to_publish";
+  questions: AssignmentReviewBundleQuestion[];
+  blockers: AssignmentReviewBundleBlocker[];
+  confirmations: AssignmentReviewBundleConfirmation[];
+  structured_rubric_set: AssignmentReviewBundleStructuredRubricSet | null;
 };
 
 const reviewAction = (reviewVersion: number) => ({
@@ -55,6 +288,10 @@ const reviewAction = (reviewVersion: number) => ({
 });
 
 export const assignmentReviewApi = {
+  bundle: (assignmentId: string) =>
+    request<AssignmentReviewBundle>(
+      `/api/assignments/${assignmentId}/review-bundle`,
+    ),
   list: (assignmentId: string) =>
     request<{ items: AssignmentReviewSessionRecord[] }>(
       `/api/assignments/${assignmentId}/review-sessions`,
@@ -82,6 +319,15 @@ export const assignmentReviewApi = {
       `/api/assignment-review-sessions/${sessionId}/confirm/${kind}`,
       { method: "POST", body: JSON.stringify(reviewAction(reviewVersion)) },
     ),
+  autoConfirm: (sessionId: string, reviewVersion: number) =>
+    request<{
+      confirmed: string[];
+      skipped: Record<string, string>;
+      review_version: number;
+    }>(`/api/assignment-review-sessions/${sessionId}/auto-confirm`, {
+      method: "POST",
+      body: JSON.stringify(reviewAction(reviewVersion)),
+    }),
   disposition: (
     itemId: string,
     reviewVersion: number,
@@ -97,20 +343,24 @@ export const assignmentReviewApi = {
         }),
       },
     ),
-  createBinding: (sessionId: string, reviewVersion: number) =>
-    request<{ id: string; status: string; mapping: unknown[] }>(
-      `/api/assignment-review-sessions/${sessionId}/rubric-binding`,
+  createStructuredRubricSet: (sessionId: string, reviewVersion: number) =>
+    request<StructuredRubricSetRecord>(
+      `/api/assignment-review-sessions/${sessionId}/structured-rubric-set`,
       { method: "POST", body: JSON.stringify(reviewAction(reviewVersion)) },
     ),
-  confirmBinding: (bindingId: string, reviewVersion: number) =>
-    request<{ review_version: number }>(
-      `/api/assignment-rubric-publication-bindings/${bindingId}/confirm`,
-      { method: "POST", body: JSON.stringify(reviewAction(reviewVersion)) },
+  getStructuredRubricSet: (sessionId: string) =>
+    request<StructuredRubricSetRecord>(
+      `/api/assignment-review-sessions/${sessionId}/structured-rubric-set`,
     ),
   prepare: (sessionId: string, reviewVersion: number) =>
     request<AssignmentReadinessRecord>(
       `/api/assignment-review-sessions/${sessionId}/prepare-publication`,
       { method: "POST", body: JSON.stringify(reviewAction(reviewVersion)) },
+    ),
+  prepareAssignment: (assignmentId: string) =>
+    request<AssignmentPreparationRecord>(
+      `/api/assignments/${assignmentId}/prepare-publication`,
+      { method: "POST" },
     ),
   publish: (
     assignmentId: string,
@@ -146,32 +396,60 @@ function csrfToken(): string | undefined {
 }
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_URL}${path}`, {
-    cache: "no-store",
-    credentials: "include",
-    ...init,
-    headers:
-      init?.body instanceof FormData
-        ? { "X-CSRF-Token": csrfToken() ?? "", ...init.headers }
-        : {
-            "Content-Type": "application/json",
-            "X-CSRF-Token": csrfToken() ?? "",
-            ...init?.headers,
-          },
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${path}`, {
+      cache: "no-store",
+      credentials: "include",
+      ...init,
+      headers:
+        init?.body instanceof FormData
+          ? { "X-CSRF-Token": csrfToken() ?? "", ...init.headers }
+          : {
+              "Content-Type": "application/json",
+              "X-CSRF-Token": csrfToken() ?? "",
+              ...init?.headers,
+            },
+    });
+  } catch {
+    throw new Error("暂时无法连接服务，请稍后重试");
+  }
   if (!response.ok) {
-    const body = (await response.json()) as ApiErrorBody;
+    let body: ApiErrorBody;
+    try {
+      const parsed = (await response.json()) as Partial<ApiErrorBody>;
+      body = {
+        code: parsed.code ?? "HTTP_REQUEST_FAILED",
+        message: parsed.message?.trim() || `请求失败（${response.status}）`,
+        details: parsed.details ?? {},
+        request_id:
+          parsed.request_id ?? response.headers.get("x-request-id") ?? "",
+      };
+    } catch {
+      body = {
+        code: "HTTP_REQUEST_FAILED",
+        message: `请求失败（${response.status}），请稍后重试`,
+        details: {},
+        request_id: response.headers.get("x-request-id") ?? "",
+      };
+    }
     throw new ApiError(response.status, body);
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
-export type AuthUser = { id: string; email: string; display_name: string };
+export type AuthUser = {
+  id: string;
+  username: string;
+  email: string;
+  display_name: string;
+  roles: string[];
+};
 export const authApi = {
-  login: (email: string, password: string) =>
+  login: (username: string, password: string) =>
     request<AuthUser>("/auth/login", {
       method: "POST",
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ username, password }),
     }),
   me: () => request<AuthUser>("/auth/me"),
   logout: () => request<void>("/auth/logout", { method: "POST" }),
@@ -209,6 +487,19 @@ export type ClassInput = Pick<ClassRecord, "name"> &
       "grade" | "subject" | "academic_year" | "semester" | "description"
     >
   >;
+export type ClassResource = {
+  id: string;
+  class_id: string;
+  title: string;
+  resource_type: "exercise" | "handout" | "reference" | "other";
+  page_count: number;
+  status: "ready" | "archived";
+  file_name: string;
+  content_type: string;
+  size: number;
+  checksum: string;
+  created_at: string;
+};
 export const classesApi = {
   list: (query = "") =>
     request<Page<ClassRecord>>(`/api/classes${query ? `?${query}` : ""}`),
@@ -227,6 +518,22 @@ export const classesApi = {
     request<ClassRecord>(`/api/classes/${id}/archive`, { method: "POST" }),
   restore: (id: string) =>
     request<ClassRecord>(`/api/classes/${id}/restore`, { method: "POST" }),
+  resources: (id: string) =>
+    request<ClassResource[]>(`/api/classes/${id}/resources`),
+  uploadResource: (
+    id: string,
+    file: File,
+    data: { title?: string; resource_type: ClassResource["resource_type"] },
+  ) => {
+    const body = new FormData();
+    body.append("file", file);
+    body.append("resource_type", data.resource_type);
+    if (data.title) body.append("title", data.title);
+    return request<ClassResource>(`/api/classes/${id}/resources`, {
+      method: "POST",
+      body,
+    });
+  },
 };
 export type Group = {
   id: string;
@@ -242,6 +549,7 @@ export type Student = {
   email?: string;
   phone?: string;
   status: "active" | "archived";
+  account_linked: boolean;
   membership_status: "active" | "removed";
   joined_at: string;
   groups: Group[];
@@ -264,6 +572,14 @@ export const studentsApi = {
     request<Student>(`/api/students/${studentId}`, {
       method: "PATCH",
       body: JSON.stringify(data),
+    }),
+  linkAccount: (studentId: string) =>
+    request<Student>(`/api/students/${studentId}/account-link`, {
+      method: "POST",
+    }),
+  unlinkAccount: (studentId: string) =>
+    request<void>(`/api/students/${studentId}/account-link`, {
+      method: "DELETE",
     }),
   remove: (classId: string, studentId: string) =>
     request<{ status: string }>(
@@ -346,9 +662,26 @@ export type QuestionRecord = {
   knowledge_points: { id: string; name: string }[];
   regions: RegionRecord[];
 };
+export type QuestionInput = {
+  question_number: string;
+  question_type: string;
+  max_score: number;
+  content_text?: string;
+  difficulty?: "easy" | "medium" | "hard";
+  knowledge_points: string[];
+};
+export type QuestionRegionInput = {
+  paper_page_id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  region_type: "question";
+};
 export type AssignmentRecord = {
   id: string;
   title: string;
+  delivery_mode?: "class_assignment" | "joint_exam";
   subject?: string;
   grade?: string;
   description?: string;
@@ -357,8 +690,15 @@ export type AssignmentRecord = {
   total_score?: string;
   due_at?: string | null;
   published_at?: string;
+  active_structured_rubric_set_id?: string | null;
   updated_at: string;
   classes: Pick<ClassRecord, "id" | "name" | "status">[];
+  participant_snapshot?: {
+    frozen: boolean;
+    frozen_at?: string | null;
+    total: number;
+    by_class: Record<string, number>;
+  };
   question_count?: number;
   paper_version?: {
     id: string;
@@ -377,18 +717,6 @@ export type AssignmentRecord = {
     }[];
     questions: QuestionRecord[];
   };
-  rubric_version?: {
-    id: string;
-    version: number;
-    status: string;
-    question_rubrics: {
-      id: string;
-      question_id: string;
-      standard_answer?: string;
-      scoring_notes?: string;
-      items: { id: string; title: string; points: string }[];
-    }[];
-  };
   completeness: {
     ready: boolean;
     next_step: number;
@@ -402,6 +730,7 @@ export type AssignmentRecord = {
 };
 export type AssignmentInput = {
   title: string;
+  delivery_mode?: "class_assignment" | "joint_exam";
   subject?: string;
   grade?: string;
   description?: string;
@@ -409,6 +738,38 @@ export type AssignmentInput = {
   total_score?: number;
   due_at?: string | null;
   class_ids: string[];
+};
+export type JointExamTeam = {
+  assignment_id: string;
+  title: string;
+  status: AssignmentStatus;
+  is_owner: boolean;
+  owner: { id: string; display_name: string; email?: string | null };
+  collaborators: Array<{
+    id: string;
+    display_name: string;
+    email: string;
+    role: string;
+  }>;
+  classes: Array<{
+    id: string;
+    name: string;
+    owner_id: string;
+    owner_name: string;
+    authorized_by?: string | null;
+    authorized: boolean;
+    mine: boolean;
+  }>;
+};
+export type ManualPublishReadiness = {
+  mode: "manual";
+  ready: boolean;
+  issues: AssignmentRecord["completeness"]["issues"];
+  state_hash: string;
+  expected_assignment_updated_at: string;
+  class_ids: string[];
+  due_at: string | null;
+  total_score: string | null;
 };
 export const assignmentsApi = {
   list: (query = "") =>
@@ -426,6 +787,29 @@ export const assignmentsApi = {
       method: "PATCH",
       body: JSON.stringify({ ...data, updated_at }),
     }),
+  setClasses: (id: string, classIds: string[], updatedAt: string) =>
+    request<AssignmentRecord>(`/api/assignments/${id}/classes`, {
+      method: "PUT",
+      body: JSON.stringify({ class_ids: classIds, updated_at: updatedAt }),
+    }),
+  jointInvitations: () =>
+    request<JointExamTeam[]>("/api/assignments/joint-exams/invitations"),
+  jointTeam: (id: string) =>
+    request<JointExamTeam>(`/api/assignments/${id}/joint-team`),
+  inviteJointCollaborator: (id: string, email: string) =>
+    request<JointExamTeam>(`/api/assignments/${id}/joint-team/collaborators`, {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+  authorizeJointClasses: (id: string, classIds: string[]) =>
+    request<JointExamTeam>(`/api/assignments/${id}/joint-classes`, {
+      method: "POST",
+      body: JSON.stringify({ class_ids: classIds }),
+    }),
+  removeJointClass: (id: string, classId: string) =>
+    request<JointExamTeam>(`/api/assignments/${id}/joint-classes/${classId}`, {
+      method: "DELETE",
+    }),
   upload: (id: string, file: File) => {
     const body = new FormData();
     body.append("file", file);
@@ -434,10 +818,34 @@ export const assignmentsApi = {
       { method: "POST", body },
     );
   },
+  availableClassResources: (id: string) =>
+    request<ClassResource[]>(
+      `/api/assignments/${id}/available-class-resources`,
+    ),
+  addClassResources: (id: string, resourceIds: string[]) =>
+    request<{ files_created: number; pages_created: number }>(
+      `/api/assignments/${id}/class-resources`,
+      {
+        method: "POST",
+        body: JSON.stringify({ resource_ids: resourceIds }),
+      },
+    ),
   preview: (id: string, fileId: string) =>
     request<{ url: string }>(`/api/assignments/${id}/files/${fileId}/preview`, {
       method: "POST",
     }),
+  pagePreview: (id: string, pageId: string) =>
+    request<{
+      url: string;
+      width: number;
+      height: number;
+      rotation: 0 | 90 | 180 | 270;
+    }>(`/api/assignments/${id}/pages/${pageId}/preview`, { method: "POST" }),
+  removeFile: (id: string, fileId: string) =>
+    request<{ id: string; pages_deleted: number }>(
+      `/api/assignments/${id}/files/${fileId}`,
+      { method: "DELETE" },
+    ),
   page: (id: string, pageId: string, data: Record<string, unknown>) =>
     request(`/api/assignments/${id}/pages/${pageId}`, {
       method: "PATCH",
@@ -448,6 +856,20 @@ export const assignmentsApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  cutQuestion: (
+    id: string,
+    pageId: string,
+    data:
+      | { question: QuestionInput; region: QuestionRegionInput }
+      | { question_id: string; region: QuestionRegionInput },
+  ) =>
+    request<QuestionRecord>(
+      `/api/assignments/${id}/pages/${pageId}/question-cuts`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    ),
   updateQuestion: (
     id: string,
     questionId: string,
@@ -471,9 +893,19 @@ export const assignmentsApi = {
     request<AssignmentRecord["completeness"]>(
       `/api/assignments/${id}/publish-check`,
     ),
-  publish: (id: string) =>
-    request<AssignmentRecord>(`/api/assignments/${id}/publish`, {
+  manualPublishReadiness: (id: string) =>
+    request<ManualPublishReadiness>(
+      `/api/assignments/${id}/manual-publish-readiness`,
+    ),
+  publishManual: (id: string, readiness: ManualPublishReadiness) =>
+    request<AssignmentRecord>(`/api/assignments/${id}/manual-publish`, {
       method: "POST",
+      body: JSON.stringify({
+        state_hash: readiness.state_hash,
+        expected_assignment_updated_at:
+          readiness.expected_assignment_updated_at,
+        explicit_confirmation: true,
+      }),
     }),
   copy: (id: string) =>
     request<AssignmentRecord>(`/api/assignments/${id}/copy`, {
@@ -489,6 +921,15 @@ export type RecognitionProviderStatus = {
   provider: string;
   version: string;
   available: boolean;
+  can_start: boolean;
+  text_readiness: {
+    mode: "ready" | "pdf_fallback_only" | "blocked";
+    action_code:
+      | "START_AND_REVIEW"
+      | "PDF_TEXT_MAY_REQUIRE_RESCAN_OR_MANUAL"
+      | "OCR_REQUIRED";
+    limitations: ("SCANNED_PDF_MAY_REQUIRE_OCR" | "IMAGE_PAGES_REQUIRE_OCR")[];
+  };
   demo: boolean;
   reason?: string;
   formula: { provider: string; available: boolean; reason?: string };
@@ -521,11 +962,44 @@ export type RecognitionPage = {
   status: string;
   stage: string;
   progress: number;
-  quality_score?: string;
+  quality?: {
+    version: "pil-page-quality-v1" | null;
+    level: "good" | "review_required" | "rescan_required";
+    issues: (
+      | "low_resolution"
+      | "blur"
+      | "low_contrast"
+      | "shadow"
+      | "skew"
+      | "crop_risk"
+    )[];
+  };
+  math_structure?: {
+    version: "math-structure-risk-v1" | null;
+    risk_codes: (
+      | "FORMULA_REVIEW_REQUIRED"
+      | "MATH_LAYOUT_REVIEW_REQUIRED"
+      | "READING_ORDER_CONFLICT"
+    )[];
+    evidence: {
+      block_indexes: number[];
+      region: [number, number, number, number];
+    }[];
+  };
   error_message?: string;
   rendered_url?: string;
   processed_url?: string;
   thumbnail_url?: string;
+  processing_parameters?: {
+    page_quality: NonNullable<RecognitionPage["quality"]>;
+    math_structure: NonNullable<RecognitionPage["math_structure"]>;
+    source_review: {
+      source_conflict_count: number;
+      math_symbol_conflict_count: number;
+      missing_region_count: number;
+      source_agreement_ratio: number | null;
+    };
+  };
 };
 export type RecognitionCandidate = {
   id: string;
@@ -546,6 +1020,30 @@ export type RecognitionCandidate = {
     height: string;
   }[];
 };
+export type FormulaCandidate = {
+  id: string;
+  rank: number;
+  latex: string;
+  confidence?: string | null;
+  warning_codes: string[];
+  status: string;
+};
+export type FormulaRegion = {
+  id: string;
+  paper_page_id: string;
+  region_kind: "inline" | "display" | "unknown";
+  region: { x: string; y: string; width: string; height: string };
+  status: string;
+  has_alternatives: boolean;
+  candidates: FormulaCandidate[];
+};
+export type FormulaUnreadableReason =
+  | "severe_overwriting_or_occlusion"
+  | "crop_incomplete"
+  | "blurred_or_too_faint"
+  | "subscript_ambiguous"
+  | "ruled_paper_line_ambiguous"
+  | "other_image_quality_issue";
 export const recognitionApi = {
   providers: (assignmentId: string) =>
     request<RecognitionProviderStatus>(
@@ -596,6 +1094,62 @@ export const recognitionApi = {
     request<RecognitionJob>(
       `/api/assignments/${assignmentId}/recognition/jobs/${jobId}/pages/${pageId}/retry`,
       { method: "POST" },
+    ),
+  formulaRegions: (
+    assignmentId: string,
+    jobId: string,
+    includeAlternatives = false,
+  ) =>
+    request<FormulaRegion[]>(
+      `/api/assignments/${assignmentId}/recognition/jobs/${jobId}/formulas/regions?include_alternatives=${includeAlternatives}`,
+    ),
+  createFormulaRegion: (
+    assignmentId: string,
+    jobId: string,
+    data: Record<string, unknown>,
+  ) =>
+    request<FormulaRegion>(
+      `/api/assignments/${assignmentId}/recognition/jobs/${jobId}/formulas/regions`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+  updateFormulaRegion: (
+    assignmentId: string,
+    jobId: string,
+    regionId: string,
+    data: Record<string, unknown>,
+  ) =>
+    request<FormulaRegion>(
+      `/api/assignments/${assignmentId}/recognition/jobs/${jobId}/formulas/regions/${regionId}`,
+      { method: "PATCH", body: JSON.stringify(data) },
+    ),
+  recognizeFormula: (assignmentId: string, jobId: string, regionId: string) =>
+    request<FormulaRegion>(
+      `/api/assignments/${assignmentId}/recognition/jobs/${jobId}/formulas/regions/${regionId}/recognize`,
+      { method: "POST" },
+    ),
+  disposeFormulaCandidate: (
+    assignmentId: string,
+    jobId: string,
+    regionId: string,
+    candidateId: string,
+    data: Record<string, unknown>,
+  ) =>
+    request<FormulaRegion>(
+      `/api/assignments/${assignmentId}/recognition/jobs/${jobId}/formulas/regions/${regionId}/candidates/${candidateId}/disposition`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+  markFormulaUnreadable: (
+    assignmentId: string,
+    jobId: string,
+    regionId: string,
+    reason: FormulaUnreadableReason,
+  ) =>
+    request<FormulaRegion & { unreadable_reason: FormulaUnreadableReason }>(
+      `/api/assignments/${assignmentId}/recognition/jobs/${jobId}/formulas/regions/${regionId}/unreadable`,
+      {
+        method: "POST",
+        body: JSON.stringify({ reason, explicit_confirmation: true }),
+      },
     ),
 };
 
@@ -654,7 +1208,141 @@ export type GradingBatch = {
   };
   actions: string[];
 };
+
+export type JointGradingPool = {
+  assignment_id: string;
+  delivery_mode: "joint_exam";
+  class_count: number;
+  batch_count: number;
+  submission_count: number;
+  recognized_count: number;
+  graded_count: number;
+  reviewed_count: number;
+  items: Array<GradingBatch & { class_name: string }>;
+  questions: Array<{
+    id: string;
+    number: string;
+    total: number;
+    reviewed: number;
+    assignee_id?: string | null;
+    assignment_mixed: boolean;
+  }>;
+};
+export type JointGradingWork = {
+  assignment_id: string;
+  assignment_title: string;
+  question_id: string;
+  question_number: string;
+  first_batch_id: string;
+  class_count: number;
+  total: number;
+  reviewed: number;
+};
+
+export type ProcessingStep = {
+  id: string;
+  submission_id: string;
+  student_answer_id?: string | null;
+  scope_key: string;
+  kind: "recognition" | "codex_suggestion" | "review_readiness";
+  status:
+    | "pending"
+    | "dispatched"
+    | "running"
+    | "succeeded"
+    | "blocked_review"
+    | "retryable_failed"
+    | "terminal_failed"
+    | "stale"
+    | "cancelled";
+  generation: number;
+  attempt: number;
+  max_attempts: number;
+  retryable: boolean;
+  error_code?: string | null;
+  error_message?: string | null;
+};
+
+export type ProcessingRun = {
+  id: string;
+  grading_batch_id: string;
+  generation: number;
+  status:
+    | "queued"
+    | "running"
+    | "waiting_input"
+    | "waiting_codex"
+    | "awaiting_teacher_review"
+    | "partially_failed"
+    | "failed"
+    | "stale"
+    | "cancelled";
+  provider: "codex_local";
+  provider_label: "Codex-assisted";
+  suggestion_only: true;
+  target_state: "awaiting_teacher_review";
+  input_version: string;
+  request_hash: string;
+  input_manifest: Record<string, unknown>;
+  submission_count: number;
+  step_count: number;
+  completed_step_count: number;
+  failed_step_count: number;
+  pending_codex_count: number;
+  retryable: boolean;
+  error_code?: string | null;
+  error_message?: string | null;
+  steps: ProcessingStep[];
+};
+
+export type ConfirmResultsBlocker = {
+  code: string;
+  submission_id?: string | null;
+  question_id?: string | null;
+  answer_id?: string | null;
+  message?: string | null;
+};
+
+export type ConfirmResultsReadiness = {
+  ready: boolean;
+  review_hash: string;
+  blockers: ConfirmResultsBlocker[];
+  submission_count?: number;
+  new_snapshot_count?: number;
+  reused_snapshot_count?: number;
+  previous_grade_release_id?: string | null;
+  plan?: Array<{
+    submission_id: string;
+    student_id?: string | null;
+    student_name?: string | null;
+    student_number?: string | null;
+    action: "create_snapshot" | "reuse_snapshot";
+    snapshot_id?: string | null;
+    snapshot_version?: number | null;
+    changed_questions?: Array<{
+      question_id: string;
+      question_number: string;
+    }>;
+  }>;
+  confirmed_result?: ConfirmResultsResult | null;
+};
+
+export type ConfirmResultsResult = {
+  status: "released";
+  review_hash: string;
+  submission_count: number;
+  auto_accepted_count: number;
+  new_snapshot_count?: number;
+  reused_snapshot_count?: number;
+  previous_grade_release_id?: string | null;
+  teacher_review_ids: string[];
+  snapshot_ids: string[];
+  grade_release_id: string;
+  grade_release_version?: number | null;
+};
+
 export const gradingApi = {
+  jointWork: () => request<JointGradingWork[]>("/api/joint-grading-work"),
   batches: (assignmentId: string, query = "") =>
     request<Page<GradingBatch>>(
       `/api/assignments/${assignmentId}/grading-batches${query ? `?${query}` : ""}`,
@@ -667,6 +1355,18 @@ export const gradingApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  jointPool: (assignmentId: string) =>
+    request<JointGradingPool>(
+      `/api/assignments/${assignmentId}/joint-grading-pool`,
+    ),
+  ensureJointPool: (
+    assignmentId: string,
+    data: { name?: string; description?: string } = {},
+  ) =>
+    request<JointGradingPool>(
+      `/api/assignments/${assignmentId}/joint-grading-pool`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
   getBatch: (batchId: string) =>
     request<GradingBatch>(`/api/grading-batches/${batchId}`),
   upload: (batchId: string, files: File[]) => {
@@ -761,22 +1461,89 @@ export const gradingApi = {
   grade: (answerId: string) =>
     request(`/api/student-answers/${answerId}/grade`, { method: "POST" }),
   review: (answerId: string, data: Record<string, unknown>) =>
-    request(`/api/student-answers/${answerId}/review`, {
+    request<{
+      id: string;
+      decision: string;
+      final_score?: string;
+      review_version: number;
+    }>(`/api/student-answers/${answerId}/review`, {
       method: "PUT",
       body: JSON.stringify(data),
     }),
-  saveCodexSuggestion: (
-    answerId: string,
+  collaboration: (batchId: string) =>
+    request<GradingCollaboration>(
+      `/api/grading-batches/${batchId}/collaboration`,
+    ),
+  addCollaborator: (batchId: string, email: string) =>
+    request<GradingCollaboration>(
+      `/api/grading-batches/${batchId}/collaborators`,
+      { method: "POST", body: JSON.stringify({ email }) },
+    ),
+  removeCollaborator: (batchId: string, userId: string) =>
+    request<void>(`/api/grading-batches/${batchId}/collaborators/${userId}`, {
+      method: "DELETE",
+    }),
+  assignQuestion: (batchId: string, questionId: string, assigneeId?: string) =>
+    request<GradingCollaboration>(
+      `/api/grading-batches/${batchId}/question-assignments/${questionId}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ assignee_id: assigneeId ?? null }),
+      },
+    ),
+  assignJointQuestion: (
+    assignmentId: string,
+    questionId: string,
+    assigneeId?: string,
+  ) =>
+    request<JointGradingPool>(
+      `/api/assignments/${assignmentId}/joint-question-assignments/${questionId}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ assignee_id: assigneeId ?? null }),
+      },
+    ),
+  continueProcessing: (batchId: string, idempotencyKey: string) =>
+    request<ProcessingRun>(`/api/grading-batches/${batchId}/processing-runs`, {
+      method: "POST",
+      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    }),
+  latestProcessingRun: (batchId: string) =>
+    request<ProcessingRun | null>(
+      `/api/grading-batches/${batchId}/processing-runs/latest`,
+    ),
+  processingRun: (batchId: string, runId: string) =>
+    request<ProcessingRun>(
+      `/api/grading-batches/${batchId}/processing-runs/${runId}`,
+    ),
+  retryProcessing: (
+    batchId: string,
+    runId: string,
     data: {
-      score: string;
-      reasoning: string;
-      criterion_scores: Record<string, string>;
+      idempotency_key: string;
+      expected_generation: number;
+      step_ids: string[];
     },
   ) =>
-    request(`/api/student-answers/${answerId}/codex-suggestion`, {
-      method: "PUT",
-      body: JSON.stringify(data),
-    }),
+    request<ProcessingRun>(
+      `/api/grading-batches/${batchId}/processing-runs/${runId}/retry`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    ),
+  reconcileProcessing: (
+    batchId: string,
+    runId: string,
+    data: { idempotency_key: string; expected_generation: number },
+  ) =>
+    request<ProcessingRun>(
+      `/api/grading-batches/${batchId}/processing-runs/${runId}/reconcile`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    ),
   bulkAcceptEligibility: (batchId: string) =>
     request<BulkAcceptEligibility>(
       `/api/grading-batches/${batchId}/bulk-accept-eligibility`,
@@ -789,13 +1556,53 @@ export const gradingApi = {
       method: "POST",
       body: JSON.stringify({ answer_ids: answerIds }),
     }),
+  safeAcceptPreview: (batchId: string, submissionId: string) =>
+    request<SafeAcceptPreview>(
+      `/api/grading-batches/${batchId}/submissions/${submissionId}/safe-accept-preview`,
+    ),
+  safeAcceptSubmission: (
+    batchId: string,
+    submissionId: string,
+    data: {
+      answer_ids: string[];
+      expected_review_hash: string;
+      idempotency_key: string;
+    },
+  ) =>
+    request<SafeAcceptResult>(
+      `/api/grading-batches/${batchId}/submissions/${submissionId}/safe-accept`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+  reopenReview: (
+    answerId: string,
+    data: { expected_review_version: number; reason: string },
+  ) =>
+    request<{ id: string; decision: string; review_version: number }>(
+      `/api/student-answers/${answerId}/review/reopen`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+  confirmResultsReadiness: (batchId: string) =>
+    request<ConfirmResultsReadiness>(
+      `/api/grading-batches/${batchId}/confirm-results/readiness`,
+    ),
+  confirmResults: (
+    batchId: string,
+    data: { idempotency_key: string; expected_review_hash: string },
+  ) =>
+    request<ConfirmResultsResult>(
+      `/api/grading-batches/${batchId}/confirm-results`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    ),
   finalize: (submissionId: string) =>
     request(`/api/submissions/${submissionId}/finalize`, { method: "POST" }),
   snapshots: (assignmentId: string) =>
     request(`/api/assignments/${assignmentId}/score-snapshots?status=complete`),
-  reviewWorkspace: (batchId: string) =>
+  reviewWorkspace: (batchId: string, questionId?: string) =>
     request<ReviewWorkspace>(
-      `/api/grading-batches/${batchId}/review-workspace`,
+      `/api/grading-batches/${batchId}/review-workspace${questionId ? `?question_id=${questionId}` : ""}`,
     ),
 };
 
@@ -810,9 +1617,30 @@ export type BulkAcceptEligibility = {
   }>;
 };
 
+export type SafeAcceptPreview = {
+  submission_id: string;
+  review_hash: string;
+  eligible_count: number;
+  suggested_total: string;
+  answer_ids: string[];
+  excluded: Array<{ answer_id: string; reasons: string[] }>;
+};
+
+export type SafeAcceptResult = {
+  submission_id: string;
+  accepted_answer_ids: string[];
+  teacher_review_ids: string[];
+  accepted_count: number;
+  suggested_total: string;
+  review_hash: string;
+  published: false;
+};
+
 export type SubmissionRecord = {
   id: string;
-  student_id?: string;
+  student_id?: string | null;
+  student_name?: string | null;
+  student_number?: string | null;
   status: string;
   attempt_number: number;
   page_count: number;
@@ -846,6 +1674,11 @@ export type ReviewWorkspace = {
   batch: GradingBatch;
   progress: { total: number; reviewed: number };
   provider_notice: string;
+  collaboration: GradingCollaboration;
+  joint_navigation?: {
+    assignment_id: string;
+    batches: Array<{ id: string; class_id: string; class_name: string }>;
+  } | null;
   items: Array<{
     submission_id: string;
     student_id?: string;
@@ -876,26 +1709,35 @@ export type ReviewWorkspace = {
       result?: {
         id: string;
         status: string;
-        rubric_version_id: string;
+        structured_rubric_set_id: string;
+        structured_rubric_version_id: string;
         score?: string;
         provider: string;
         provider_version: string;
         confidence?: string;
         requires_review: boolean;
         reasoning?: string;
+        quality_flags?: string[];
       };
       review?: {
+        id?: string;
         decision: string;
         final_score?: string;
         feedback?: string;
         error_type?: string;
+        reviewer_id: string;
+        review_version: number;
+        confirmed_at?: string;
       };
       criteria: Array<{
-        rubric_item_id: string;
+        criterion_id: string;
+        title?: string;
+        description?: string;
         status: string;
         awarded_points?: string;
         max_points: string;
         reason?: string;
+        evidence_quotes?: string[];
       }>;
       evidence: Array<{
         id: string;
@@ -921,6 +1763,25 @@ export type ReviewWorkspace = {
   }>;
 };
 
+export type GradingCollaboration = {
+  is_owner: boolean;
+  can_confirm_results: boolean;
+  owner: { id: string; display_name: string; email?: string };
+  collaborators: Array<{
+    id: string;
+    display_name: string;
+    email: string;
+    role: "grader";
+  }>;
+  questions: Array<{
+    id: string;
+    number: string;
+    assignee_id?: string;
+    total: number;
+    reviewed: number;
+  }>;
+};
+
 export type GradeRelease = {
   id: string;
   assignment_id: string;
@@ -928,6 +1789,8 @@ export type GradeRelease = {
   version: number;
   status: "draft" | "scheduled" | "released" | "cancelled" | "superseded";
   release_mode: string;
+  student_visible: boolean;
+  student_visible_at?: string | null;
   meaning: string;
   items: Array<{
     student_id: string;
@@ -963,15 +1826,15 @@ export const analyticsApi = {
     request<GradeRelease[]>(
       `/api/grade-releases?assignment_id=${assignmentId}`,
     ),
+  publishToStudents: (releaseId: string) =>
+    request<GradeRelease>(
+      `/api/grade-releases/${releaseId}/publish-to-students`,
+      { method: "POST" },
+    ),
   readiness: (assignmentId: string, classId: string) =>
     request<GradeReadiness>(
       `/api/assignments/${assignmentId}/classes/${classId}/grade-readiness`,
     ),
-  createRelease: (data: Record<string, unknown>) =>
-    request<GradeRelease>("/api/grade-releases", {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
   createReport: (
     releaseId: string,
     reportType: ReportJob["report_type"],
@@ -1056,6 +1919,64 @@ export const analyticsApi = {
     }),
   reportDownload: (jobId: string) =>
     request<{ url: string }>(`/api/report-jobs/${jobId}/download`),
+};
+
+export type StudentPortalAssignment = {
+  release_id: string;
+  release_version: number;
+  student_visible_at: string;
+  assignment_id: string;
+  assignment_title: string;
+  class_id: string;
+  class_name: string;
+  subject?: string | null;
+  student_id: string;
+  student_name: string;
+  student_number: string;
+  score_snapshot_id: string;
+};
+
+export type StudentPortalAssignmentDetail = StudentPortalAssignment & {
+  total_score: number;
+  max_score: number;
+  score_rate: number;
+  questions: Array<{
+    question_id: string;
+    question_number: string;
+    question_type: string;
+    score: number;
+    max_score: number;
+    feedback?: string | null;
+    error_type?: string | null;
+    knowledge_points: Array<{ id: string; name: string }>;
+  }>;
+  versions: Array<{
+    release_id: string;
+    version: number;
+    student_visible_at: string;
+    current: boolean;
+  }>;
+};
+
+export const studentPortalApi = {
+  me: () =>
+    request<{
+      account_id: string;
+      email: string;
+      profiles: Array<{
+        student_id: string;
+        name: string;
+        student_number: string;
+      }>;
+    }>("/api/student/me"),
+  assignments: () =>
+    request<StudentPortalAssignment[]>("/api/student/assignments"),
+  assignment: (releaseId: string) =>
+    request<StudentPortalAssignmentDetail>(
+      `/api/student/assignments/${releaseId}`,
+    ),
+  reportUrl: (releaseId: string) =>
+    `${API_URL}/api/student/assignments/${releaseId}/report.pdf`,
 };
 
 export type SubmissionProcessingJob = {
@@ -1155,9 +2076,15 @@ export const submissionProcessingApi = {
       `/api/submissions/${submissionId}/region-candidates`,
     ),
   incomplete: (submissionId: string) =>
-    request<{ complete: boolean; question_ids: string[] }>(
-      `/api/submissions/${submissionId}/segmentation-incomplete`,
-    ),
+    request<{
+      complete: boolean;
+      question_ids: string[];
+      questions: {
+        id: string;
+        question_number: string;
+        display_order: number;
+      }[];
+    }>(`/api/submissions/${submissionId}/segmentation-incomplete`),
   addRegion: (submissionId: string, data: SubmissionRegionMutation) =>
     request<SubmissionRegionCandidate>(
       `/api/submissions/${submissionId}/region-candidates`,
@@ -1274,7 +2201,7 @@ export type StructuredCriterion = {
   criterion_type: string;
   required: boolean;
   dependencies: string[];
-  validation_mode: "deterministic" | "manual_only";
+  validation_mode: "deterministic" | "ai_suggestion" | "manual_only";
   validation_rule: Record<string, unknown>;
 };
 
@@ -1288,6 +2215,133 @@ export type StructuredRubric = {
   total_points: string;
   status: "draft" | "confirmed" | "retired";
   criteria: StructuredCriterion[];
+};
+
+export type RubricTemplateCriterion = {
+  stable_key: string;
+  title: string;
+  description?: string | null;
+  max_points: string;
+  criterion_type: string;
+  required: boolean;
+  dependencies: string[];
+  validation_mode: "deterministic" | "ai_suggestion" | "manual_only";
+  manual_review_policy: Record<string, unknown>;
+  partial_credit_policy: Record<string, unknown>;
+  error_category?: string | null;
+  validation_rule: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+};
+
+export type RubricTemplateVersion = {
+  id: string;
+  version: number;
+  title: string;
+  scoring_basis: "proportional" | "fixed";
+  total_points: string;
+  status: "draft" | "confirmed" | "archived";
+  content_hash: string;
+  created_at: string;
+  updated_at: string;
+  confirmed_at?: string | null;
+  criteria: RubricTemplateCriterion[];
+};
+
+export type RubricTemplate = {
+  id: string;
+  name: string;
+  subject?: string | null;
+  grade?: string | null;
+  question_type?: string | null;
+  status: "draft" | "confirmed" | "archived";
+  criterion_count: number;
+  created_at: string;
+  updated_at: string;
+  current_version: RubricTemplateVersion;
+  versions?: RubricTemplateVersion[];
+};
+
+type RubricTemplateWrite = {
+  name: string;
+  subject?: string | null;
+  grade?: string | null;
+  question_type?: string | null;
+  scoring_basis: "proportional" | "fixed";
+  total_points: string;
+  criteria: RubricTemplateCriterion[];
+};
+
+export const rubricTemplateApi = {
+  list: (filters?: Record<string, string>) => {
+    const query = new URLSearchParams(filters).toString();
+    return request<RubricTemplate[]>(
+      `/api/rubric-templates${query ? `?${query}` : ""}`,
+    );
+  },
+  get: (id: string) => request<RubricTemplate>(`/api/rubric-templates/${id}`),
+  create: (data: RubricTemplateWrite) =>
+    request<RubricTemplate>("/api/rubric-templates", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  update: (
+    id: string,
+    data: Partial<RubricTemplateWrite> & { expected_content_hash: string },
+  ) =>
+    request<RubricTemplate>(`/api/rubric-templates/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
+  createVersion: (id: string, sourceVersionId?: string) =>
+    request<RubricTemplate>(`/api/rubric-templates/${id}/versions`, {
+      method: "POST",
+      body: JSON.stringify({ source_version_id: sourceVersionId ?? null }),
+    }),
+  confirm: (id: string, expectedContentHash: string) =>
+    request<RubricTemplate>(`/api/rubric-templates/${id}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ expected_content_hash: expectedContentHash }),
+    }),
+  archive: (id: string) =>
+    request<RubricTemplate>(`/api/rubric-templates/${id}/archive`, {
+      method: "POST",
+    }),
+  duplicate: (id: string) =>
+    request<RubricTemplate>(`/api/rubric-templates/${id}/duplicate`, {
+      method: "POST",
+    }),
+  preview: (questionId: string, templateVersionId: string) =>
+    request<{
+      template_content_hash: string;
+      question_version: string;
+      reference_answer_version_id: string;
+      reference_answer_content_hash: string;
+      total_points: string;
+      criteria: RubricTemplateCriterion[];
+      blockers: Array<{ code: string; message: string }>;
+    }>(`/api/questions/${questionId}/rubric-template-preview`, {
+      method: "POST",
+      body: JSON.stringify({ template_version_id: templateVersionId }),
+    }),
+  apply: (questionId: string, data: Record<string, unknown>) =>
+    request<{ structured_rubric_version_id: string; replayed: boolean }>(
+      `/api/questions/${questionId}/apply-rubric-template`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+  saveStructured: (
+    rubricId: string,
+    data: {
+      name: string;
+      scoring_basis: "proportional" | "fixed";
+      subject?: string | null;
+      grade?: string | null;
+      question_type?: string | null;
+    },
+  ) =>
+    request<RubricTemplate>(
+      `/api/structured-rubrics/${rubricId}/save-as-template`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
 };
 
 export type ReferenceAnswerVersion = {
@@ -1339,6 +2393,81 @@ export const structuredRubricApi = {
     request<ReferenceAnswerVersion>(
       `/api/reference-answers/${referenceId}/confirm`,
       { method: "POST" },
+    ),
+  confirmQuestionPackage: (
+    assignmentId: string,
+    questionId: string,
+    data: {
+      expected_bundle_hash: string;
+      expected_question_content_hash: string;
+      reference_answer_version_id: string;
+      expected_reference_answer_content_hash: string;
+      structured_rubric_version_id: string;
+      expected_structured_rubric_content_hash: string;
+      explicit_confirmation: true;
+    },
+  ) =>
+    request<{
+      answer: ReferenceAnswerVersion;
+      rubric: StructuredRubric;
+      already_confirmed: boolean;
+    }>(
+      `/api/assignments/${assignmentId}/questions/${questionId}/confirm-answer-rubric`,
+      {
+        method: "POST",
+        body: JSON.stringify(data),
+      },
+    ),
+  confirmAllQuestionPackages: (
+    assignmentId: string,
+    data: {
+      expected_bundle_hash: string;
+      packages: Array<{
+        question_id: string;
+        expected_question_content_hash: string;
+        reference_answer_version_id: string;
+        expected_reference_answer_content_hash: string;
+        structured_rubric_version_id: string;
+        expected_structured_rubric_content_hash: string;
+      }>;
+      explicit_confirmation: true;
+    },
+  ) =>
+    request<{
+      confirmed_count: number;
+      already_confirmed_count: number;
+      packages: Array<{
+        answer: ReferenceAnswerVersion;
+        rubric: StructuredRubric;
+        already_confirmed: boolean;
+      }>;
+    }>(`/api/assignments/${assignmentId}/confirm-all-answer-rubrics`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  confirmAllCandidateQuestionPackages: (
+    assignmentId: string,
+    data: {
+      expected_bundle_hash: string;
+      expected_draft_revision_id: string;
+      expected_draft_revision_edit_version: number;
+      expected_source_snapshot_hash: string;
+      packages: Array<{
+        question_id: string;
+        expected_question_content_hash: string;
+        answer_candidate_id: string;
+        expected_answer_candidate_edit_version: number;
+        expected_answer_question_version: string;
+        rubric_candidate_id: string;
+        expected_rubric_candidate_edit_version: number;
+        expected_rubric_question_version: string;
+      }>;
+      explicit_confirmation: true;
+    },
+  ) =>
+    request<{ confirmed_count: number; already_confirmed_count: number }>(
+      `/api/assignments/${assignmentId}/confirm-all-candidate-answer-rubrics`,
+      { method: "POST", body: JSON.stringify(data) },
     ),
   list: (questionId: string) =>
     request<StructuredRubric[]>(
@@ -1392,7 +2521,8 @@ export type MathValidationJob = {
   status: string;
   stale: boolean;
   scoring_input_version: string;
-  rubric_version_id: string;
+  structured_rubric_set_id: string;
+  structured_rubric_version_id: string;
   reference_answer_version_id: string;
   suggested_total: string;
   results: Array<{
@@ -1468,7 +2598,8 @@ export type AIScoringJob = {
   stale: boolean;
   error_code?: string;
   scoring_input_version: string;
-  rubric_version_id: string;
+  structured_rubric_set_id: string;
+  structured_rubric_version_id: string;
   reference_answer_version_id: string;
   evidence: Array<{
     id: string;
@@ -1491,7 +2622,8 @@ export type AIScoringJob = {
     status: string;
     generation: number;
     stale: boolean;
-    rubric_version_id: string;
+    structured_rubric_set_id: string;
+    structured_rubric_version_id: string;
     reference_answer_version_id: string;
     results: Array<{
       id: string;
@@ -1535,26 +2667,31 @@ export type AIScoringJob = {
   }>;
 };
 
+export type AIRetryInput = {
+  idempotency_key: string;
+  expected_generation: number;
+};
+
 export const aiGradingApi = {
   listForAnswer: (answerId: string) =>
     request<AIScoringJob[]>(`/api/ai-grading/student-answers/${answerId}/jobs`),
-  create: (answerId: string, rubricVersionId: string) =>
+  create: (answerId: string) =>
     request<AIScoringJob>("/api/ai-grading/jobs", {
       method: "POST",
       body: JSON.stringify({
         student_answer_id: answerId,
-        rubric_version_id: rubricVersionId,
         idempotency_key: `web:${answerId}:${crypto.randomUUID()}`,
       }),
     }),
-  retry: (jobId: string) =>
+  retry: (jobId: string, data: AIRetryInput) =>
     request<AIScoringJob>(`/api/ai-grading/jobs/${jobId}/retry`, {
       method: "POST",
+      body: JSON.stringify(data),
     }),
-  retryCriterion: (jobId: string, criterionKey: string) =>
+  retryCriterion: (jobId: string, criterionKey: string, data: AIRetryInput) =>
     request<AIScoringJob>(
       `/api/ai-grading/jobs/${jobId}/criteria/${encodeURIComponent(criterionKey)}/retry`,
-      { method: "POST" },
+      { method: "POST", body: JSON.stringify(data) },
     ),
   cancel: (jobId: string) =>
     request<AIScoringJob>(`/api/ai-grading/jobs/${jobId}/cancel`, {
@@ -1666,6 +2803,7 @@ export type AnswerDraftCandidate = {
   question_id: string;
   question_version: string;
   candidate_version: number;
+  source_reference_binding_id?: string | null;
   source_type:
     | "teacher_official"
     | "publisher_official"
@@ -1685,6 +2823,8 @@ export type AnswerDraftCandidate = {
   manual_required: boolean;
   teacher_edit_version: number;
   materialized_reference_answer_id?: string | null;
+  server_eligible?: boolean;
+  ineligibility_reasons?: string[];
 };
 export type RubricCriterionDraft = {
   id: string;
@@ -1728,6 +2868,22 @@ export type RubricDraftCandidate = {
   teacher_edit_version: number;
   materialized_structured_rubric_id?: string | null;
   criteria: RubricCriterionDraft[];
+  server_eligible?: boolean;
+  ineligibility_reasons?: string[];
+};
+
+export type BulkCandidateSkip = {
+  candidate_id: string;
+  question_id: string;
+  reason_codes: string[];
+};
+
+export type BulkCandidateAcceptance = {
+  accepted_ids: string[];
+  accepted_count: number;
+  considered_count?: number;
+  skipped_count?: number;
+  skipped?: BulkCandidateSkip[];
 };
 export type RubricDraftValidation = {
   id: string;
@@ -1769,6 +2925,9 @@ export type AssignmentFileAnalysis = {
   file_name?: string;
   file_size?: number;
   page_count?: number;
+  content_mode: "text" | "scanned" | "mixed" | "unknown";
+  text_source: "pdf_text" | "ocr" | "mixed" | "unavailable";
+  content_mode_confidence: number;
   suggested_role: string;
   role_confidence: number;
   suggested_answer_source: string;
@@ -1785,6 +2944,10 @@ export type AssignmentPageAnalysis = {
   id: string;
   paper_page_id: string;
   status: string;
+  content_mode: "text" | "scanned" | "mixed" | "unknown";
+  text_source: "pdf_text" | "ocr" | "mixed" | "unavailable";
+  content_mode_confidence: number;
+  text_character_count: number;
   quality_score?: number;
   blank_probability?: number;
   missing_page_suspected: boolean;
@@ -1840,6 +3003,17 @@ export type QuestionExtractionCandidate = {
   field_confidences: Record<string, number>;
   overall_confidence: number;
   evidence: Record<string, unknown>;
+  quality_stats?: {
+    character_count: number;
+    text_source: string;
+    low_confidence_block_count: number;
+    suspicious_character_count: number;
+    ascii_question_mark_count: number;
+    suspicious_reason_counts: Record<string, number>;
+    has_formula_region: boolean;
+    has_figure_region: boolean;
+    has_table_region: boolean;
+  };
   warning_codes: string[];
   status: string;
   manual_required: boolean;
@@ -1847,6 +3021,119 @@ export type QuestionExtractionCandidate = {
   materialized_question_id?: string;
   regions: QuestionExtractionRegion[];
   server_eligible: boolean;
+};
+export type ReferenceAnswerSourceBinding = {
+  id: string;
+  draft_revision_id: string;
+  paper_version_id: string;
+  source_file_analysis_id: string;
+  source_file_name?: string | null;
+  source_recognition_block_id: string;
+  detected_number: string;
+  question_id?: string | null;
+  question_number?: string | null;
+  binding_version: number;
+  edit_version: number;
+  status: string;
+  confidence: number;
+  warning_codes: string[];
+  source_snapshot_hash: string;
+  regions: Array<{
+    id: string;
+    paper_page_id: string;
+    display_order: number;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    source: string;
+    confidence: number;
+    evidence: Record<string, unknown>;
+  }>;
+};
+
+export type TextbookSourceMatch = {
+  id: string;
+  draft_revision_id: string;
+  paper_version_id: string;
+  question_id?: string | null;
+  question_number?: string | null;
+  solution_number?: string | null;
+  answer_candidate_id?: string | null;
+  source_reference_binding_id?: string | null;
+  source_file_analysis_id?: string | null;
+  source_file_name?: string | null;
+  source_page_id?: string | null;
+  library_id?: string | null;
+  library_question_id?: string | null;
+  detected_number?: string | null;
+  chapter_label?: string | null;
+  section_label?: string | null;
+  exercise_label?: string | null;
+  pdf_page_number: number;
+  printed_page_number?: number | null;
+  match_version: number;
+  rank: number;
+  edit_version: number;
+  status: string;
+  confidence: number;
+  matching_method: string;
+  source_snapshot_hash: string;
+  evidence: {
+    recognition_block_ids?: string[];
+    shared_signals?: string[];
+    solution_candidate_id?: string;
+  };
+  warning_codes: string[];
+};
+
+export type TextbookLibrary = {
+  id: string;
+  title: string;
+  volume_label?: string | null;
+  question_count: number;
+  usable_question_count: number;
+  review_question_count: number;
+  status: string;
+};
+
+export type QuestionStructureItem = {
+  question_id: string;
+  display_number: string;
+  parent_number?: string | null;
+  sub_number?: string | null;
+  display_order: number;
+  action: "keep" | "remove";
+  max_score?: string | null;
+  source_kind: "pdf_text" | "ocr" | "manual" | "existing";
+  confidence?: string | null;
+  regions?: {
+    id: string;
+    paper_page_id: string;
+    page_number: number;
+    x: string;
+    y: string;
+    width: string;
+    height: string;
+    source: string;
+    confidence?: string | null;
+  }[];
+  region_count?: number;
+  page_count?: number;
+  spans_pages?: boolean;
+};
+
+export type QuestionStructureReview = {
+  id?: string | null;
+  version: number;
+  edit_version: number;
+  status: "unreviewed" | "draft" | "confirmed";
+  score_policy: "unconfirmed" | "equal_weight" | "manual" | "template";
+  content_hash: string;
+  items: QuestionStructureItem[];
+  answer_unit_count: number;
+  has_missing_scores: boolean;
+  can_confirm: boolean;
 };
 
 export const assignmentGenerationApi = {
@@ -1980,6 +3267,69 @@ export const assignmentGenerationApi = {
       `/api/question-extraction-candidates/${candidateId}/disposition`,
       { method: "PATCH", body: JSON.stringify(data) },
     ),
+  updateQuestionRegions: (candidateId: string, data: Record<string, unknown>) =>
+    request<QuestionExtractionCandidate>(
+      `/api/question-extraction-candidates/${candidateId}/regions`,
+      { method: "PUT", body: JSON.stringify(data) },
+    ),
+  listReferenceAnswerBindings: (revisionId: string) =>
+    request<ReferenceAnswerSourceBinding[]>(
+      `/api/draft-revisions/${revisionId}/reference-answer-bindings`,
+    ),
+  dispositionReferenceAnswerBinding: (
+    bindingId: string,
+    data: Record<string, unknown>,
+  ) =>
+    request<ReferenceAnswerSourceBinding>(
+      `/api/reference-answer-bindings/${bindingId}/disposition`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+  extractReferenceAnswerCandidate: (
+    bindingId: string,
+    data: Record<string, unknown>,
+  ) =>
+    request<AnswerDraftCandidate>(
+      `/api/reference-answer-bindings/${bindingId}/extract-answer-candidate`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+  listTextbookSourceMatches: (revisionId: string) =>
+    request<TextbookSourceMatch[]>(
+      `/api/draft-revisions/${revisionId}/textbook-source-matches`,
+    ),
+  searchTextbookSourceMatches: (
+    revisionId: string,
+    data: Record<string, unknown>,
+  ) =>
+    request<TextbookSourceMatch[]>(
+      `/api/draft-revisions/${revisionId}/textbook-source-matches/search`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+  listTextbookLibraries: () =>
+    request<TextbookLibrary[]>("/api/textbook-libraries"),
+  listTextbookLibrarySelections: (assignmentId: string) =>
+    request<string[]>(
+      `/api/assignments/${assignmentId}/textbook-library-selections`,
+    ),
+  replaceTextbookLibrarySelections: (
+    assignmentId: string,
+    data: Record<string, unknown>,
+  ) =>
+    request<{
+      selected_library_ids: string[];
+      created_matches: number;
+      draft_revision_edit_version: number;
+    }>(`/api/assignments/${assignmentId}/textbook-library-selections`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  dispositionTextbookSourceMatch: (
+    matchId: string,
+    data: Record<string, unknown>,
+  ) =>
+    request<TextbookSourceMatch>(
+      `/api/textbook-source-matches/${matchId}/disposition`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
   acceptEligibleQuestions: (
     revisionId: string,
     data: Record<string, unknown>,
@@ -1992,9 +3342,77 @@ export const assignmentGenerationApi = {
       `/api/assignment-draft-revisions/${revisionId}/question-extraction-candidates/accept-eligible`,
       { method: "POST", body: JSON.stringify(data) },
     ),
+  getQuestionStructure: (assignmentId: string) =>
+    request<QuestionStructureReview>(
+      `/api/assignments/${assignmentId}/question-structure`,
+    ),
+  saveQuestionStructure: (
+    assignmentId: string,
+    data: {
+      expected_content_hash: string;
+      score_policy: QuestionStructureReview["score_policy"];
+      items: QuestionStructureItem[];
+    },
+  ) =>
+    request<QuestionStructureReview>(
+      `/api/assignments/${assignmentId}/question-structure`,
+      { method: "PUT", body: JSON.stringify(data) },
+    ),
+  confirmQuestionStructure: (
+    assignmentId: string,
+    data: { expected_content_hash: string; explicit_confirmation: true },
+  ) =>
+    request<QuestionStructureReview>(
+      `/api/assignments/${assignmentId}/question-structure/confirm`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+  splitQuestionStructure: (
+    assignmentId: string,
+    data: {
+      expected_content_hash: string;
+      source_question_id: string;
+      parts: { display_number: string; region_ids: string[] }[];
+      explicit_confirmation: true;
+    },
+  ) =>
+    request<QuestionStructureReview>(
+      `/api/assignments/${assignmentId}/question-structure/split`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+  mergeQuestionStructure: (
+    assignmentId: string,
+    data: {
+      expected_content_hash: string;
+      question_ids: string[];
+      display_number: string;
+      explicit_confirmation: true;
+    },
+  ) =>
+    request<QuestionStructureReview>(
+      `/api/assignments/${assignmentId}/question-structure/merge`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
   listAnswerCandidates: (revisionId: string) =>
     request<AnswerDraftCandidate[]>(
       `/api/assignment-draft-revisions/${revisionId}/answer-draft-candidates`,
+    ),
+  regenerateQuestion: (
+    revisionId: string,
+    questionId: string,
+    data: {
+      expected_source_snapshot: string;
+      expected_draft_revision_edit_version: number;
+    },
+  ) =>
+    request<{
+      request_id: string;
+      question_id: string;
+      status: "queued";
+      draft_only: true;
+      replaces_confirmed_content: false;
+    }>(
+      `/api/assignment-draft-revisions/${revisionId}/questions/${questionId}/regenerate-answer-rubric`,
+      { method: "POST", body: JSON.stringify(data) },
     ),
   dispositionAnswerCandidate: (
     candidateId: string,
@@ -2021,12 +3439,12 @@ export const assignmentGenerationApi = {
       `/api/rubric-draft-candidates/${candidateId}/validation`,
     ),
   acceptEligibleAnswers: (revisionId: string, data: Record<string, unknown>) =>
-    request<{ accepted_ids: string[]; accepted_count: number }>(
+    request<BulkCandidateAcceptance & { source_labels_unchanged: true }>(
       `/api/assignment-draft-revisions/${revisionId}/answer-draft-candidates/accept-eligible`,
       { method: "POST", body: JSON.stringify(data) },
     ),
   acceptEligibleRubrics: (revisionId: string, data: Record<string, unknown>) =>
-    request<{ accepted_ids: string[]; accepted_count: number }>(
+    request<BulkCandidateAcceptance>(
       `/api/assignment-draft-revisions/${revisionId}/rubric-draft-candidates/accept-eligible`,
       { method: "POST", body: JSON.stringify(data) },
     ),

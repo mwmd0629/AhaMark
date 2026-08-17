@@ -68,7 +68,11 @@ def test_0021_upgrade_downgrade_upgrade_round_trip(tmp_path: Path) -> None:
             migrated = {
                 column["name"] for column in sa.inspect(connection).get_columns(model.__tablename__)
             }
-            assert migrated == set(model.__table__.columns.keys())
+            expected = set(model.__table__.columns.keys())
+            if model is AssignmentAnswerDraftCandidate:
+                # Added later by 0042_answer_candidate_source_binding.
+                expected.remove("source_reference_binding_id")
+            assert migrated == expected
         migration.downgrade()
         assert "assignment_answer_draft_candidates" not in sa.inspect(connection).get_table_names()
         migration.upgrade()

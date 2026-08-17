@@ -32,3 +32,10 @@ def test_deterministic_configuration_and_manual_boundary() -> None:
     item["validation_mode"] = "manual_only"
     item["validation_rule"] = {"answer_type": "matrix"}
     assert validate_rubric(Decimal("5"), [item])[0]["code"] == "MANUAL_ONLY_AUTOMATION_FORBIDDEN"
+
+
+def test_ai_suggestion_allows_a_descriptive_criterion_without_deterministic_rule() -> None:
+    item = criterion("reasoning", "5")
+    item["validation_mode"] = "ai_suggestion"
+    item["validation_rule"] = {}
+    assert validate_rubric(Decimal("5"), [item]) == []

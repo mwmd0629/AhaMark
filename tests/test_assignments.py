@@ -1,17 +1,25 @@
 import io
+import uuid
 from decimal import Decimal
 
 from app.api.assignments import detail
-from app.db.session import SessionLocal, engine
+from app.db.session import SessionLocal, engine, get_db
 from app.main import app
 from app.models import (
     ArchiveStatus,
     Assignment,
     AssignmentClass,
+    AssignmentDraftRevision,
+    AssignmentGenerationJob,
+    AssignmentSourceFileAnalysis,
+    AssignmentStatus,
     AuditLog,
+    FileStatus,
+    PaperPage,
     PaperVersion,
     Question,
     SchoolClass,
+    StoredFile,
     User,
 )
 from app.storage.base import ObjectMetadata
@@ -33,6 +41,7 @@ def actor_and_db():
 class FakeStorage:
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}
+        self.delete_calls: list[str] = []
 
     def ensure_bucket(self) -> None:
         pass
@@ -48,6 +57,7 @@ class FakeStorage:
         return io.BytesIO(self.objects[key])
 
     def delete(self, key: str) -> None:
+        self.delete_calls.append(key)
         self.objects.pop(key, None)
 
     def presigned_get(self, key: str, expires_seconds: int = 900) -> str:
@@ -125,6 +135,149 @@ def test_class_ownership_active_and_duplicates():
     )
 
 
+def test_rotation_preview_atomic_question_cut_and_duplicate_guards():
+    actor, db = actor_and_db()
+    from app.storage.dependencies import get_storage
+
+    fake = FakeStorage()
+    app.dependency_overrides[get_storage] = lambda: fake
+    try:
+        cls = active_class(db, actor.id)
+        assignment = create(client, cls.id)
+        assignment_id = assignment["id"]
+        for name, color in (("first.png", "white"), ("second.png", "gray")):
+            image = io.BytesIO()
+            Image.new("RGB", (100, 200), color).save(image, "PNG")
+            response = client.post(
+                f"/api/assignments/{assignment_id}/files",
+                files={"file": (name, image.getvalue(), "image/png")},
+            )
+            assert response.status_code == 201, response.text
+
+        pages = client.get(f"/api/assignments/{assignment_id}").json()["paper_version"]["pages"]
+        first_page, second_page = pages
+        rotated = client.patch(
+            f"/api/assignments/{assignment_id}/pages/{first_page['id']}",
+            json={"rotation": 90},
+        )
+        assert rotated.status_code == 200, rotated.text
+        preview = client.post(f"/api/assignments/{assignment_id}/pages/{first_page['id']}/preview")
+        assert preview.status_code == 200, preview.text
+        assert preview.json()["rotation"] == 90
+        assert (preview.json()["width"], preview.json()["height"]) == (200, 100)
+        preview_keys = [key for key in fake.objects if "assignment-page-previews" in key]
+        assert len(preview_keys) == 1
+        assert (
+            client.post(
+                f"/api/assignments/{assignment_id}/pages/{first_page['id']}/preview"
+            ).status_code
+            == 200
+        )
+        assert [key for key in fake.objects if "assignment-page-previews" in key] == preview_keys
+
+        region = {
+            "paper_page_id": first_page["id"],
+            "x": 0.1,
+            "y": 0.2,
+            "width": 0.6,
+            "height": 0.25,
+            "region_type": "question",
+        }
+        created = client.post(
+            f"/api/assignments/{assignment_id}/pages/{first_page['id']}/question-cuts",
+            json={
+                "question": {
+                    "question_number": " 1 ",
+                    "question_type": "calculation",
+                    "max_score": 10,
+                    "content_text": "计算",
+                    "difficulty": "medium",
+                    "knowledge_points": ["一次函数"],
+                },
+                "region": region,
+            },
+        )
+        assert created.status_code == 201, created.text
+        question = created.json()
+        assert question["question_number"] == "1"
+        assert len(question["regions"]) == 1
+
+        duplicate_number = client.post(
+            f"/api/assignments/{assignment_id}/pages/{first_page['id']}/question-cuts",
+            json={
+                "question": {
+                    "question_number": "1",
+                    "question_type": "calculation",
+                    "max_score": 5,
+                    "knowledge_points": [],
+                },
+                "region": {**region, "x": 0.75, "width": 0.2},
+            },
+        )
+        assert duplicate_number.status_code == 409
+        assert duplicate_number.json()["code"] == "QUESTION_NUMBER_CONFLICT"
+
+        overlap = client.post(
+            f"/api/assignments/{assignment_id}/pages/{first_page['id']}/question-cuts",
+            json={"question_id": question["id"], "region": region},
+        )
+        assert overlap.status_code == 409
+        assert overlap.json()["code"] == "QUESTION_REGION_OVERLAP"
+
+        attached = client.post(
+            f"/api/assignments/{assignment_id}/pages/{second_page['id']}/question-cuts",
+            json={
+                "question_id": question["id"],
+                "region": {**region, "paper_page_id": second_page["id"]},
+            },
+        )
+        assert attached.status_code == 201, attached.text
+        assert len(attached.json()["regions"]) == 2
+
+        mismatch = client.post(
+            f"/api/assignments/{assignment_id}/pages/{first_page['id']}/question-cuts",
+            json={
+                "question_id": question["id"],
+                "region": {**region, "paper_page_id": second_page["id"], "x": 0.3},
+            },
+        )
+        assert mismatch.status_code == 422
+        assert mismatch.json()["code"] == "REGION_PAGE_MISMATCH"
+        ambiguous_target = client.post(
+            f"/api/assignments/{assignment_id}/pages/{first_page['id']}/question-cuts",
+            json={
+                "question_id": question["id"],
+                "question": {
+                    "question_number": "2",
+                    "question_type": "calculation",
+                    "max_score": 5,
+                    "knowledge_points": [],
+                },
+                "region": {**region, "x": 0.75, "width": 0.2},
+            },
+        )
+        assert ambiguous_target.status_code == 422
+        assert len(db.scalars(select(Question)).all()) == 1
+
+        persisted_assignment = db.get(Assignment, uuid.UUID(assignment_id))
+        assert persisted_assignment is not None
+        persisted_assignment.status = AssignmentStatus.published
+        db.commit()
+        locked_preview = client.post(
+            f"/api/assignments/{assignment_id}/pages/{first_page['id']}/preview"
+        )
+        assert locked_preview.status_code == 409
+        assert locked_preview.json()["code"] == "ASSIGNMENT_LOCKED"
+        locked_cut = client.post(
+            f"/api/assignments/{assignment_id}/pages/{first_page['id']}/question-cuts",
+            json={"question_id": question["id"], "region": {**region, "x": 0.3}},
+        )
+        assert locked_cut.status_code == 409
+        assert locked_cut.json()["code"] == "ASSIGNMENT_LOCKED"
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+
+
 def test_file_pages_question_region_rubric_and_publish():
     actor, db = actor_and_db()
     from app.storage.dependencies import get_storage
@@ -180,17 +333,271 @@ def test_file_pages_question_region_rubric_and_publish():
     assert bad.status_code == 422
     before = client.get(f"/api/assignments/{aid}/publish-check").json()
     assert not before["ready"]
-    rubric = client.put(
+    retired_rubric = client.put(
         f"/api/assignments/{aid}/rubrics/{question['id']}",
         json={"standard_answer": "答案", "items": [{"title": "正确", "points": 10}]},
     )
-    assert rubric.status_code == 200
-    # Publishing is intentionally unavailable without a teacher-created,
-    # server-side readiness snapshot from the central review workflow.
-    published = client.post(f"/api/assignments/{aid}/publish")
-    assert published.status_code == 422
-    assert client.get(f"/api/assignments/{aid}").json()["status"] == "draft"
+    assert retired_rubric.status_code == 404
+    assert client.get(f"/api/assignments/{aid}/manual-publish-readiness").status_code == 404
+    assert client.post(f"/api/assignments/{aid}/manual-publish").status_code == 404
+    # The only publication endpoint requires a server-created Structured Set readiness snapshot.
+    assert client.post(f"/api/assignments/{aid}/publish").status_code == 422
     app.dependency_overrides.pop(get_storage, None)
+
+
+def test_delete_draft_file_removes_object_pages_and_renumbers_remaining_pages():
+    actor, db = actor_and_db()
+    from app.storage.dependencies import get_storage
+
+    fake = FakeStorage()
+    app.dependency_overrides[get_storage] = lambda: fake
+    try:
+        aid = create(client, active_class(db, actor.id, "删除文件测试班").id)["id"]
+        file_ids: list[str] = []
+        for name in ("first.png", "second.png"):
+            image = io.BytesIO()
+            Image.new("RGB", (100, 200), "white").save(image, "PNG")
+            response = client.post(
+                f"/api/assignments/{aid}/files",
+                files={"file": (name, image.getvalue(), "image/png")},
+            )
+            assert response.status_code == 201, response.text
+            file_ids.append(response.json()["id"])
+
+        assert len(fake.objects) == 2
+        job = AssignmentGenerationJob(
+            owner_id=actor.id,
+            assignment_id=uuid.UUID(aid),
+            generation=1,
+            status="review_required",
+            current_stage="validating",
+            progress=100,
+            idempotency_key=f"delete-file-{aid}",
+            request_fingerprint="a" * 64,
+            source_snapshot_hash="b" * 64,
+            provider_mode="unavailable",
+            provider_config_version="test-unavailable-v1",
+            prompt_version="test-v1",
+            schema_version="test-v1",
+        )
+        db.add(job)
+        db.flush()
+        revision = AssignmentDraftRevision(
+            owner_id=actor.id,
+            assignment_id=uuid.UUID(aid),
+            generation_job_id=job.id,
+            revision=1,
+            source_snapshot_hash=job.source_snapshot_hash,
+            status="review_required",
+        )
+        db.add(revision)
+        db.flush()
+        analysis = AssignmentSourceFileAnalysis(
+            owner_id=actor.id,
+            assignment_id=uuid.UUID(aid),
+            generation_job_id=job.id,
+            draft_revision_id=revision.id,
+            stored_file_id=uuid.UUID(file_ids[0]),
+            source_snapshot_hash=job.source_snapshot_hash,
+            detected_mime_type="image/png",
+            checksum="a" * 64,
+            page_count=1,
+            role_confidence=1,
+            suggested_role="question_paper",
+            answer_source_confidence=1,
+            suggested_answer_source="not_applicable",
+            analysis_status="confirmed",
+            teacher_confirmed_role="question_paper",
+            teacher_confirmed_answer_source="not_applicable",
+        )
+        db.add(analysis)
+        db.commit()
+        deleted = client.delete(f"/api/assignments/{aid}/files/{file_ids[0]}")
+        assert deleted.status_code == 200, deleted.text
+        assert deleted.json() == {"id": file_ids[0], "pages_deleted": 1}
+        assert len(fake.objects) == 1
+        pages = client.get(f"/api/assignments/{aid}").json()["paper_version"]["pages"]
+        assert [(page["file_name"], page["page_number"]) for page in pages] == [("second.png", 1)]
+        db.expire_all()
+        assert job.status == "stale"
+        assert revision.status == "stale"
+        assert analysis.analysis_status == "superseded"
+        repeated = client.delete(f"/api/assignments/{aid}/files/{file_ids[0]}")
+        assert repeated.status_code == 404
+        assert repeated.json()["code"] == "FILE_NOT_FOUND"
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_delete_file_does_not_touch_object_when_pending_marker_commit_fails():
+    actor, db = actor_and_db()
+    from app.storage.dependencies import get_storage
+
+    fake = FakeStorage()
+    app.dependency_overrides[get_storage] = lambda: fake
+    try:
+        aid = create(client, active_class(db, actor.id, "删除标记失败班").id)["id"]
+        image = io.BytesIO()
+        Image.new("RGB", (100, 200), "white").save(image, "PNG")
+        uploaded = client.post(
+            f"/api/assignments/{aid}/files",
+            files={"file": ("prepare.png", image.getvalue(), "image/png")},
+        ).json()
+        storage_key = next(iter(fake.objects))
+
+        def failing_db():
+            with SessionLocal() as session:
+                original_commit = session.commit
+
+                def fail_first_commit() -> None:
+                    session.commit = original_commit  # type: ignore[method-assign]
+                    raise RuntimeError("synthetic pending-marker commit failure")
+
+                session.commit = fail_first_commit  # type: ignore[method-assign]
+                yield session
+
+        app.dependency_overrides[get_db] = failing_db
+        failed = client.delete(f"/api/assignments/{aid}/files/{uploaded['id']}")
+        assert failed.status_code == 503
+        assert failed.json()["code"] == "FILE_DELETE_PREPARE_FAILED"
+        assert fake.delete_calls == []
+        assert storage_key in fake.objects
+
+        db.expire_all()
+        stored = db.get(StoredFile, uuid.UUID(uploaded["id"]))
+        assert stored is not None and stored.status == FileStatus.ready
+        assert db.scalar(select(PaperPage).where(PaperPage.stored_file_id == stored.id)) is not None
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_delete_file_storage_failure_is_recoverable_and_retry_is_idempotent():
+    actor, db = actor_and_db()
+    from app.storage.dependencies import get_storage
+
+    class FailingDeleteStorage(FakeStorage):
+        fail_delete = True
+
+        def delete(self, key: str) -> None:
+            self.delete_calls.append(key)
+            if self.fail_delete:
+                raise RuntimeError("synthetic object delete failure")
+            self.objects.pop(key, None)
+
+    fake = FailingDeleteStorage()
+    app.dependency_overrides[get_storage] = lambda: fake
+    try:
+        aid = create(client, active_class(db, actor.id, "对象删除重试班").id)["id"]
+        image = io.BytesIO()
+        Image.new("RGB", (100, 200), "white").save(image, "PNG")
+        uploaded = client.post(
+            f"/api/assignments/{aid}/files",
+            files={"file": ("retry.png", image.getvalue(), "image/png")},
+        ).json()
+        storage_key = next(iter(fake.objects))
+
+        failed = client.delete(f"/api/assignments/{aid}/files/{uploaded['id']}")
+        assert failed.status_code == 503
+        assert failed.json()["code"] == "STORAGE_UNAVAILABLE"
+        assert fake.delete_calls == [storage_key]
+        assert storage_key in fake.objects
+        db.expire_all()
+        stored = db.get(StoredFile, uuid.UUID(uploaded["id"]))
+        assert stored is not None and stored.status == FileStatus.pending
+        assert db.scalar(select(PaperPage).where(PaperPage.stored_file_id == stored.id)) is not None
+
+        fake.fail_delete = False
+        retried = client.delete(f"/api/assignments/{aid}/files/{uploaded['id']}")
+        assert retried.status_code == 200, retried.text
+        assert fake.delete_calls == [storage_key, storage_key]
+        assert storage_key not in fake.objects
+        db.expire_all()
+        assert stored.status == FileStatus.deleted
+        assert db.scalar(select(PaperPage).where(PaperPage.stored_file_id == stored.id)) is None
+    finally:
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_delete_file_object_success_then_finalize_commit_failure_can_retry():
+    actor, db = actor_and_db()
+    from app.storage.dependencies import get_storage
+
+    fake = FakeStorage()
+    app.dependency_overrides[get_storage] = lambda: fake
+    try:
+        aid = create(client, active_class(db, actor.id, "数据库收尾重试班").id)["id"]
+        image = io.BytesIO()
+        Image.new("RGB", (100, 200), "white").save(image, "PNG")
+        uploaded = client.post(
+            f"/api/assignments/{aid}/files",
+            files={"file": ("finalize.png", image.getvalue(), "image/png")},
+        ).json()
+        storage_key = next(iter(fake.objects))
+
+        def failing_db():
+            with SessionLocal() as session:
+                original_commit = session.commit
+                commit_count = 0
+
+                def fail_second_commit() -> None:
+                    nonlocal commit_count
+                    commit_count += 1
+                    if commit_count == 2:
+                        raise RuntimeError("synthetic final commit failure")
+                    original_commit()
+
+                session.commit = fail_second_commit  # type: ignore[method-assign]
+                yield session
+
+        app.dependency_overrides[get_db] = failing_db
+        failed = client.delete(f"/api/assignments/{aid}/files/{uploaded['id']}")
+        assert failed.status_code == 503
+        assert failed.json()["code"] == "FILE_DELETE_FINALIZE_FAILED"
+        assert fake.delete_calls == [storage_key]
+        assert storage_key not in fake.objects
+        db.expire_all()
+        stored = db.get(StoredFile, uuid.UUID(uploaded["id"]))
+        assert stored is not None and stored.status == FileStatus.pending
+        assert db.scalar(select(PaperPage).where(PaperPage.stored_file_id == stored.id)) is not None
+
+        app.dependency_overrides.pop(get_db, None)
+        retried = client.delete(f"/api/assignments/{aid}/files/{uploaded['id']}")
+        assert retried.status_code == 200, retried.text
+        assert fake.delete_calls == [storage_key, storage_key]
+        db.expire_all()
+        assert stored.status == FileStatus.deleted
+        assert db.scalar(select(PaperPage).where(PaperPage.stored_file_id == stored.id)) is None
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(get_storage, None)
+
+
+def test_manual_publish_bypass_routes_are_removed():
+    actor, db = actor_and_db()
+    item = create(client, active_class(db, actor.id, "AI 作业班").id)
+    db.add(
+        AssignmentGenerationJob(
+            owner_id=actor.id,
+            assignment_id=uuid.UUID(item["id"]),
+            generation=1,
+            status="completed",
+            current_stage="completed",
+            progress=100,
+            idempotency_key=f"test-ai-review-{item['id']}",
+            request_fingerprint="a" * 64,
+            source_snapshot_hash="b" * 64,
+            provider_mode="unavailable",
+            provider_config_version="test-unavailable-v1",
+            prompt_version="test-v1",
+            schema_version="test-v1",
+        )
+    )
+    db.commit()
+
+    response = client.get(f"/api/assignments/{item['id']}/manual-publish-readiness")
+    assert response.status_code == 404
+    assert client.post(f"/api/assignments/{item['id']}/manual-publish").status_code == 404
 
 
 def test_upload_rejections():

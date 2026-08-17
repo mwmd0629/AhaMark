@@ -1,289 +1,246 @@
 # AhaMark
 
-> **当前仓库状态（2026-07-28）：** 本地 `master` 功能基线位于
-> `2377cd3`（包含线性代数批改第 1–4 部分），尚未 push；Alembic
-> 唯一 head 为 `0025_ai_grading_audit_contract`。第 5 部分离线评测命令见
-> `scripts/linear_algebra_offline_evaluate.py`；所有样本均为本地 Codex 生成的合成数据。
-> Assignment Generation（编排、元数据/文件分析、题目提取、答案与 Rubric 草稿、集中复核发布、
-> Provider 调用审计）已按受控、仅建议方式落地。Provider 默认 `unavailable`，外部请求默认
-> `false`，`suggestion-only=true`；AI 不能自动发布作业，也不能写入最终成绩。
-> **REAL-PROVIDER QUALITY PENDING**。本地开发阶段由 Codex 代为执行需要 API 的草稿生成，
-> 结果仍需教师确认。合入 `master` 不代表已部署，
-> 本次合并也没有自动执行任何数据库迁移。本项目仍不代表 Production Ready。
+AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。核心原则是：自动化只生成候选或建议，正式题目、答案、评分标准和成绩均由教师确认。
 
-> 原定第一至第八部分均已正式关闭，并已形成连续、可追溯的八提交链。第八部分功能基线为
-> `cc9146a5edf001817915c020f7aa26bc8053b989`；本地预生产门禁 8A–8E 及 Edge 已 PASS，正式 Run 为
-> `v8-final-20260725-c6568104`，证据入口见
-> [`docs/PREPRODUCTION-READINESS.md`](docs/PREPRODUCTION-READINESS.md)。该门禁只证明本地 API
-> 层故障切换，不建立生产高可用或灾备，项目等级仍为 C。
->
-> 批改闭环最终集成基线包含 `4c6266b` 与 `8746e18`：Structured Rubric 使用题目真实满分，
-> `manual_only` 可绑定空 `validation_rule`，集中审查过滤 stale/superseded 并限制人工解决动作，
-> 浏览器门禁有界；failed ReportJob 只能创建新任务重试，XLSX 所有外部文本列均防公式注入。
+> 新接手任务先读[“接手必读：当前状态、问题与下一步”](#接手必读当前状态问题与下一步)。它是仓库唯一状态账本；历史细节以 Git 提交和 `docs/` 中的验收材料为准。
 
-AhaMark 是面向教师的 AI 作业批改与学情分析平台。当前已实现数据库会话认证、Submission OCR 工程链路、教师评分复核、不可变成绩发布、异步 Excel/中文 PDF 报告和版本化学情统计。RapidOCR 是真实本地印刷体 OCR；当前没有真实主观题 AI Provider，主观题必须人工评分。第五部分权限与文件安全、第六部分开发机有界容量及第七部分开发环境备份/故障恢复均已完成定义范围内验收。整体等级仍为 **C（内部演示或开发测试）**，不适合真实学生数据、真实教学试点、生产部署或公网开放。
+## 目录
 
-## 当前可用的教师流程
+- [接手必读：当前状态、问题与下一步](#接手必读当前状态问题与下一步)
+- [产品能力与边界](#产品能力与边界)
+- [系统结构](#系统结构)
+- [快速开始](#快速开始)
+- [账号与登录](#账号与登录)
+- [教师主流程](#教师主流程)
+- [OCR、公式与 AI 边界](#ocr公式与-ai-边界)
+- [成绩发布与分析](#成绩发布与分析)
+- [测试与质量门禁](#测试与质量门禁)
+- [部署与运维](#部署与运维)
+- [文档索引](#文档索引)
+- [精简变更账本](#精简变更账本)
 
-- 作业创建向导支持试卷拖拽/点击上传、文件状态展示、页面缩略图预览和当前页切换。
-- 截止时间支持“无截止时间”或手动设置日期与时间。
-- 已发布作业详情页提供“上传学生作业”入口；教师可创建批改批次并上传 PDF/PNG/JPG/JPEG。
-- 学生作业文件会按文件名中的学号或班级内唯一姓名自动匹配，歧义匹配需教师确认。
-- 集中审查将问题翻译为教师可理解的说明，已解决问题默认收起，未解决阻塞项优先展示。
-- AI Provider 当前默认不可用；由 Codex 代跑草稿生成时，结果仍作为待教师确认的建议，不自动发布或写入最终成绩。
+## 接手必读：当前状态、问题与下一步
 
-## 本地运行与数据位置
+### 30 秒摘要
 
-推荐在 D 盘工作区运行：
+| 项目              | 当前事实（2026-08-17）                                                                                       |
+| ----------------- | ------------------------------------------------------------------------------------------------------------ |
+| 正确工作区        | `C:\Users\Lenovo\.codex\worktrees\06f7\AhaMark`                                                              |
+| 目标分支          | `codex/integrate-question-page-cutter`                                                                       |
+| 应用基线          | `9b129bc43961d296642b6fcb6cb461907f70a367`；后续 README 与合并门禁修复不改变运行逻辑                         |
+| 远端状态          | 本地与 `origin/codex/integrate-question-page-cutter` 为 `0 ahead / 0 behind`                                 |
+| 数据库迁移        | Alembic 单 head：`0049_usernames`                                                                            |
+| 最新开发          | 管理员发布用户名账号；代码、迁移和本地镜像已完成，**尚未部署**                                               |
+| node2 在线版本    | 仍运行 `ahamark/api:5eda608`、`ahamark/web:5eda608` 和 schema `0048_class_resources`                         |
+| node2 入口        | `https://222.195.89.236:13300`；自签名证书；公网可达，无来源白名单                                           |
+| 部署范围          | 只发布 Nginx `0.0.0.0:13300 -> 8443`；数据库、Redis、MinIO、API、Web、Worker、Docker socket 均无宿主发布端口 |
+| 私有识别工作      | 暂停；不得继续处理、上传或提交私有 OCR/Gold、图片、正文或来源映射，除非用户再次明确授权                      |
+| GitHub 合作者任务 | 已交由另一 Codex 任务处理；本任务不继续合并候选代码                                                          |
+
+### 当前开发事实
+
+管理员账号登录已经从邮箱改为用户名：
+
+- `User.username` 唯一、索引化，登录时执行 NFKC、转小写和格式校验。
+- 用户名为 3–64 位，以字母或数字开头，只允许小写字母、数字、点、下划线和连字符。
+- production `/auth/login` 只接受用户名；邮箱载荷返回统一认证失败，不泄漏账号是否存在。
+- Web 登录页只显示用户名和密码，不提供公共注册、自助找回或账号申请。
+- 教师和学生账号由服务器交互式 CLI 创建；密码输入两次且不回显，数据库只保存 scrypt 哈希。
+- 迁移 `0049_usernames` 使用与邮箱无关的确定性占位用户名回填既有账号，避免泄漏邮箱。
+
+本轮认证开发的验证结果：认证专项 `7 passed`，登录页 Vitest `1 passed`；Ruff、strict mypy（127 个源文件）、Prettier、目标 ESLint、TypeScript、Alembic 单 head 和 `git diff --check` 均通过；`ahamark.db` 不存在且未变化。
+
+2026-08-17 合入 `master` 前的独立门禁发现并修正两处用户名提交遗留的测试契约：AI worker 迁移链测试仍把当前 head 写死为 `0048_class_resources`，现显式验证 `0049_usernames -> 0048_class_resources`；用户名迁移测试的两处常量 `setattr` 改为等价模块属性赋值，以满足 Ruff B010。认证、0049 升降级、AI worker 迁移契约、报表迁移和 orchestrator 模型链联合为 `31 passed, 4 skipped`，数据库守卫为 `ahamark.db unchanged`；全仓 Ruff lint、strict mypy（127 个源文件）和 Alembic 单 head `0049_usernames` 通过。前端 Git 跟踪文件 Prettier、ESLint、TypeScript、`38 files / 234 tests` 通过，本轮 Docker production build 成功生成 19 页；Windows 原生 build 仍受既有额外 `pnpm-lock.yaml` 与 symlink 权限影响。后端全量共收集 1067 项，首轮准确发现旧 head 断言，修复后改用独立 `--basetemp` 重跑至 6% 无失败后停止，因此不得称为本轮后端全量通过；全仓 Ruff format-check 仍只报告 12 个历史文件的既有 CRLF/新版 formatter 机械差异，本轮未接受无关大格式化。
+
+本地已构建但未上传的镜像：
+
+- `ahamark/api:9b129bc`：`sha256:394396195bed52243a7cc9638df3450609e73e53f96e1403a387becf8777be3f`
+- `ahamark/web:9b129bc`：`sha256:d83b5a3db58347ec83b91e459e17d2f26ab73c98f66eedec741a976f72fe9688`
+- 归档 SHA-256：`39a634a70db84837adb6107a38dad3dd8df4909812fb7700952cf72d8dec5f3a`
+
+### node2 当前事实
+
+公网入口已经部署并实测：
+
+- iKuai 将 `222.195.89.236:13300` 转发到 `192.168.2.5:13300`。
+- Rootless Docker 的 Nginx 监听 `0.0.0.0:13300`；其余业务服务只在 Compose 网络内通信。
+- 服务器端和外部客户端对 `/`、`/health`、`/ready` 的最近验收均为 HTTP 200。
+- 证书为自签名证书，SAN 包含 `localhost`、`127.0.0.1`、`192.168.2.5` 和 `222.195.89.236`；浏览器会显示信任警告。
+- 当前映射没有源 IP 白名单，因此这是公网入口，不应再描述为“仅校园网访问”。登录限速和应用鉴权不构成网络边界。
+- 历史健康检查只证明检查当时的状态；任何后续部署前都必须重新检查容器、迁移、端口、卷和备份。
+
+可用回滚基线：
+
+- 实验室高位端口切换前：`/data/shr/ahamark-backups/lab-port-20260817T115028Z`
+- 公网 Host 切换前：`/data/shr/ahamark-backups/public-host-before-20260817T123633Z`
+- 账号创建后的 PostgreSQL 备份：`/data/shr/ahamark-backups/post-account-20260815T075913Z-5eda608`
+
+### 安全边界
+
+- 不把私有图片、正文、姓名、学号、原文件名、来源映射、密码、令牌或连接串写入 Git、数据库迁移、公开日志或聊天。
+- 不把 OCR confidence、合成评测或 Fake Provider 指标称为真实准确率。
+- AI/Codex 只能生成 suggestion；不得自动确认答案、评分标准、最终成绩或成绩发布。
+- RapidOCR runtime/download 继续 hard-off；公式区域自动检测默认关闭。
+- 不暴露 PostgreSQL、Redis、MinIO、内部 API、Web 开发端口或 Docker socket。
+- 不使用 `git reset --hard`、`git checkout --`、强制推送、`docker compose down -v` 或 `docker system prune`。
+- 不处理未知卷、非空 Bucket、其他用户容器或 node2 上既有的 80/81/443/8080/8081 服务。
+- SSH 密码和验证码只能由用户在可见终端输入；不得读取、记录或回显。
+
+### 已知未完成项
+
+1. 用户名登录尚未同步 node2：未上传镜像、未执行 0049 迁移、未切换容器、未创建用户名账号。
+2. 公网入口仍使用自签名证书；手机 Safari 登录和完整教师流程尚未验收。
+3. 公网端口无来源限制；若后续恢复“仅校园网”目标，需要由 iKuai/防火墙实施边界并做内外双向实测。
+4. 私有 OCR/Gold 的两页修复输出位于仓库外，未合并或覆盖原 60 页草稿；保持暂停。
+5. 真实 OCR、手写、公式、复杂版面和真实 Provider 质量没有生产证据。
+
+### 下一步顺序
+
+若用户明确要求部署用户名版本：
+
+1. 实时核对 node2 服务、schema、端口、磁盘和备份目录。
+2. 新建 PostgreSQL custom-format 备份并验证 `pg_restore --list`。
+3. 上传并校验本地镜像归档，加载固定标签。
+4. 使用新 API 镜像执行 `alembic upgrade head`，确认唯一 head 为 `0049_usernames`。
+5. 只重建 API A/B、Worker 和 Web；保持 Nginx 13300 边界不变。
+6. 交互式创建用户名账号，密码只由用户输入。
+7. 验收 `/`、`/health`、`/ready`、用户名登录、退出和教师核心流程；确认 production 邮箱登录失败。
+8. 更新本状态账本，记录备份、镜像、迁移、验收和回滚事实后再提交。
+
+当前用户已明确“不急着同步服务器”，所以以上步骤均未执行。
+
+## 产品能力与边界
+
+AhaMark 已实现教师侧的作业创建、资料整理、题目与区域确认、学生答卷上传、批改建议、教师复核、最终成绩快照、成绩发布记录、报表和学情分析。
+
+产品始终区分三层数据：
+
+1. **候选或建议**：OCR、规则或 AI 产出的草稿，可失败、过期或被替换。
+2. **教师确认内容**：教师明确确认后的题目、答案、Structured Rubric 和评分决定。
+3. **正式结果**：满足版本与完整性门禁后生成的 `SubmissionScoreSnapshot` 和 `GradeRelease`。
+
+任何候选都不能绕过教师确认直接进入正式结果。没有完整快照表示“未完成”，不得按零分处理。
+
+## 系统结构
+
+| 组件       | 技术与职责                                                             |
+| ---------- | ---------------------------------------------------------------------- |
+| Web        | Next.js 15、React 19、TypeScript、Tailwind CSS 4；教师工作台与分析页面 |
+| API        | FastAPI、SQLAlchemy 2、Alembic；认证、权限、工作流与正式数据契约       |
+| Worker     | Celery；文件处理、识别、生成、报表等异步任务                           |
+| PostgreSQL | 生产关系数据库和审计事实来源                                           |
+| Redis      | Celery broker/result backend 与 production 登录共享限速                |
+| MinIO      | 原文件、衍生图片与报表对象存储                                         |
+| Nginx      | node2 唯一对外 HTTPS 入口                                              |
+
+```text
+浏览器 → Nginx → Web / API → PostgreSQL
+                         ├→ Redis → Worker
+                         └→ MinIO
+```
+
+## 快速开始
+
+### Docker Compose（推荐）
 
 ```powershell
-cd D:\OpenAIData\Workspaces\AhaMark
 Copy-Item .env.example .env
+# 编辑 .env，替换开发环境专用凭据
 docker compose up --build -d
+docker compose ps
 Invoke-WebRequest -UseBasicParsing http://localhost:8000/health
+Invoke-WebRequest -UseBasicParsing http://localhost:8000/ready
 ```
 
-Web 地址为 <http://localhost:3000>，API 健康检查为 <http://localhost:8000/health>。
-Docker 数据、项目工作区和桌面交付文件已迁移到 `D:\OpenAIData`；C 盘保留的路径只是兼容性目录联接。
-不要提交 `.env`、数据库文件、`node_modules` 或 `.next`。
+默认开发入口：Web <http://localhost:3000>，API <http://localhost:8000>。
 
-## 第七部分：开发环境恢复验收
+不要提交 `.env`、数据库文件、`node_modules`、`.next`、运行密钥或对象存储数据。
 
-第七部分 7A–7D 为 PASS：
+### 本机进程
 
-- PostgreSQL 独立逻辑备份恢复：开发环境 PASS
-- MinIO 独立对象恢复、metadata、引用、文件解析及孤儿对账：开发环境 PASS
-- 单 API/单 Worker 的 Worker、Redis、MinIO 故障恢复：开发环境 PASS
-- 运维文档、脱敏摘要和证据收口：PASS
-
-正式证据入口：
-
-- [备份恢复手册](docs/BACKUP-RESTORE.md)
-- [故障恢复手册](docs/FAILURE-RECOVERY.md)
-- [备份恢复摘要](docs/backup-restore-verification.json)
-- [故障恢复摘要](docs/failure-recovery-verification.json)
-
-本结论不建立生产灾备、生产高可用、生产 RPO/RTO、SLA 或多实例恢复能力。异地、加密、
-增量和长期备份均未验证。观察 RPO 为 0 秒仅因备份窗口无源写入；2.314 秒仅是独立数据库
-恢复耗时。Broker visibility timeout 为 15 秒，正式重投完成观察值为 102.230 秒。
-
-第一部分基线入口：`docs/PROJECT-BASELINE.md`。能力证据、数据安全边界和统一产品措辞分别见 `docs/CAPABILITY-EVIDENCE-MATRIX.md`、`docs/DATA-SECURITY-BOUNDARIES.md`、`docs/PRODUCT-CAPABILITY-STATEMENTS.md`。这些文档严格区分实现、自动化验证、真实环境证据和生产可用性。
-
-## 教师认证与安全边界
-
-正式会话认证位于 `app/api/auth.py`：密码使用标准库 scrypt（独立随机盐），登录创建随机数据库会话，浏览器只保存 HttpOnly `ahamark_session` Cookie；另有 SameSite=Lax CSRF Cookie，带会话的写请求必须发送 `X-CSRF-Token`。会话默认 12 小时，支持撤销、过期、当前用户与退出。production 登录限速使用 Redis 共享固定窗口状态，已验证双 API 实例累计失败次数；默认窗口 300 秒、阈值 5 次，Redis 不可用时 fail closed。限速 key 使用 HMAC，不包含明文密码。生产环境 Cookie 自动 Secure，且 `APP_ENV=production` 时绝不回退到 demo actor。
-
-当前未开放公共注册。管理员在受控环境中执行 `python -m app.cli.create_teacher --email teacher@example.com --display-name 教师姓名`，按不回显提示输入密码，然后访问 `/login`。前端使用 Cookie，不把长期令牌写入 localStorage；教师布局通过 `/auth/me` 保护。开发期 demo actor 只有 `DEMO_ACTOR_ENABLED=true` 且非 production 时可用。共享限速仅在本地预生产式双 API 环境验证，不代表公网 DDoS、WAF 或生产攻击面能力。
-
-## 线性代数主观题批改（第 1–5 部分）
-
-当前闭环是“本地 Codex/离线建议 → 数学验证与证据约束 → 教师复核 → TeacherReview/最终成绩”，
-AI 不自动定分、不创建 GradeRelease。题型 registry、严格引用/版本护栏、Worker 审计闭环和教师复核
-页面已实现；默认 Provider 仍为 `unavailable`，测试 Fake 仅限 `APP_ENV=test`，不代表真实 Provider。
-
-离线评测只使用合成数据，不上传文件、不调用外部 API：
-
-```powershell
-$env:PYTHONPATH='apps/api;.'
-python scripts/linear_algebra_offline_evaluate.py data/linear_algebra_evaluation_v1.json `
-  --output docs/linear-algebra-evaluation-v1-report.json
-```
-
-评测集覆盖 24 例和全部 registry 题型；当前报告要求 `false_verified=0`、引用拦截率与
-manual/unsupported 遵从率 100%、状态准确率至少 95%，并保留人工复核证据、隐私、成本和延迟
-作为未来真实 Provider 的前置门槛。当前安全模式 gate 通过不等于生产可用或真实质量验证。
-
-## 最终成绩、发布与分析
-
-唯一最终成绩入口是 `FinalScoreService`：Submission 必须属于当前教师且为 `finalized`，每个 Submission 只取版本最高的 `SubmissionScoreSnapshot.status=complete`，并严格校验 details。绝不回退到 GradingResult、AI 建议、临时 TeacherReview、incomplete 或 superseded 数据。没有快照是“未完成”，不是零分。
-
-新版 details schema 包含题目 ID/题号/题型、最终分/满分、TeacherReview ID、最终错误代码/评语、知识点 ID、评分方法和确认时间；校验题目不重复、分值范围、题目存在、顶层分数与分题和一致。旧快照缺少必填字段时不会进入发布或统计。
-
-`GradeRelease` 以作业/班级递增 version 保存发布记录，`GradeReleaseItem` 固定具体 ScoreSnapshot ID。released 的产品含义仅是“教师已确认发布数据，尚未发送到学生端”，不是学生已收到。修改成绩后需生成新快照和新发布版本，旧版本不变。
-
-Excel 是真实 `.xlsx`，包含“成绩总表、题目统计、知识点统计、导出说明”。学号强制文本，缺失成绩不写零，外部文本防公式注入。API 只创建 ReportJob 并派发 job ID；`workers/tasks/reports.py` 幂等生成、写对象存储、登记 StoredFile。该边界已有自动化测试及真实 Celery/MinIO 冒烟。个人与批量学生 PDF 使用仓库内 Noto Sans SC TTF，来源、许可证和校验值见 `apps/api/assets/fonts/SOURCE.md`。
-
-AnalyticsSnapshot 固定 GradeRelease，旧快照不覆盖。后端统一计算参与人数、平均/最高/最低/中位数、归一化分数段、题目得分率/满分率/零分率、客观题正确率、知识点掌握率、教师确认错误频次和透明 A/B/C/D 临时分层。未完成学生不进入分母；一题多知识点时完整计入每个知识点并明确样本。主观题不显示“正确率”。RuleBased 教学建议只引用快照 metrics 的题目 ID、得分率和样本数；没有真实 AI 教学助手。
-
-主要 API：
-
-- `GET /api/assignments/{assignment}/classes/{class}/grade-readiness`
-- `POST/GET /api/grade-releases`、`GET /api/grade-releases/{id}`、`POST .../cancel`
-- `POST /api/grade-releases/{id}/reports`、`GET /api/report-jobs/{id}`、`GET .../download`
-- `POST /api/grade-releases/{id}/analytics`
-- `POST /api/analytics/{id}/insights`
-
-当前仓库 Alembic 唯一 head 为 `0024_nullable_publish_readiness_due_at`；`0010_report_student`
-是下述报告与学情功能对应的历史迁移节点。`/analytics` 已包含加载、空、错误、小样本、0–100%
-图表、键盘可访问表格和数据版本选择。分数段、题目、知识点、最终错误类型均可分页下钻；班级、
-学生及知识点历史趋势只读取每份作业最新有效发布版本，缺失作业不记零。学生详情路由为
-`/analytics/students/{studentId}`，展示发布成绩、各题最终值、知识点、教师确认评语、
-ScoreRevision 与真实 ReportJob 状态。
-
-Analytics 7.1 新增 API：
-
-- `GET /api/analytics/{snapshot}/score-bands/{band}/students`
-- `GET /api/analytics/{snapshot}/questions/{question}/students`
-- `GET /api/analytics/{snapshot}/knowledge-points/{knowledge_point}`
-- `GET /api/analytics/{snapshot}/errors/{error_type}`
-- `GET /api/classes/{class}/analytics/trends`
-- `GET /api/students/{student}/analytics/trends`、`GET /api/students/{student}/analytics`
-- `GET /api/classes/{class}/knowledge-points/{knowledge_point}/trend`
-- `GET /api/students/{student}/knowledge-points/{knowledge_point}/trend`
-- `GET /api/students/{student}/report-jobs`
-- `GET/PATCH /api/teaching-insights/{insight}`、`POST .../confirm`、`POST .../regenerate`、`POST .../invalidate`
-
-所有下钻使用 CurrentUser，并校验 AnalyticsSnapshot、Assignment、Class 与固定 GradeRelease 的所有权；列表默认 20 条、最多 100 条并稳定排序。教学建议明确标记为“规则型教学建议”，保留原始内容及编辑历史，确认后不可静默修改，evidence 数字在确认时与固定 AnalyticsSnapshot 再校验。前端未引入图表库，使用原生 HTML/CSS，因此无新增许可证和锁文件变化。
-
-历史上的后续接手条件包含浏览器闭环、性能、安全专项、代理和隔离矩阵；第五部分权限与
-文件安全、第六部分开发机容量和第七部分开发环境恢复现已完成定义范围内验收。生产容量、
-生产灾备、高可用、正式部署和运维体系仍未建立。当前仍没有真实主观题 AI Provider，
-主观题必须教师人工评分。
-
-## 验收与交付入口
-
-- 最终验收：`docs/FINAL-ACCEPTANCE.md`
-- 安全与文件策略：`docs/SECURITY-AUDIT.md`、`docs/FILE-SECURITY.md`
-- 性能结果：`docs/PERFORMANCE.md`、`docs/performance-results.json`
-- 部署、代理、备份恢复和排障：`docs/OPERATIONS.md`
-- 最终交接：`docs/HANDOFF.md`
-
-本地生产样式代理（不含 TLS）使用：
-
-```powershell
-docker compose -f docker-compose.yml -f docker-compose.proxy.yml up --build -d
-Invoke-WebRequest -UseBasicParsing http://localhost:8080/health
-```
-
-50 人合成数据可重复初始化与安全清理：
-
-```powershell
-docker compose exec -T api python -m app.cli.seed_performance_demo
-python scripts/performance_smoke.py
-docker compose exec -T api python -m app.cli.cleanup_performance_demo --confirm-marker performance50.synthetic.invalid
-```
-
-清理命令只接受固定 marker，并在事务中校验固定教师 ID/邮箱、打印范围；不会删除结构、Bucket、未知对象或 Docker Volume。
-
-### Analytics 7.2 真实验证与 UI
-
-非破坏性更新测试栈（保留 PostgreSQL、Redis、MinIO 命名卷）：
-
-```powershell
-docker compose up --build -d api worker web
-docker compose exec -T api alembic upgrade head
-docker compose exec -T api python -m app.cli.seed_analytics_demo
-python scripts/verify_analytics_http.py docs/analytics72-http-verification.json
-node scripts/analytics_browser_smoke.mjs
-```
-
-`seed_analytics_demo` 使用固定 UUID 和 `analytics72.synthetic.invalid` 标记，幂等创建两名合成教师、两个隔离班级、三名主场景学生、三份不同满分作业、三次 GradeRelease、一次缺交、两个 KnowledgePoint、两种最终错误类型、ScoreRevision、completed/failed ReportJob 和规则型 TeachingInsight。数据均为合成值；重复执行不会重复插入。验证完成后，只能用明确标记清理：
-
-```powershell
-docker compose exec -T api python -m app.cli.cleanup_analytics_demo --confirm-marker analytics72.synthetic.invalid
-```
-
-清理命令先验证固定教师 ID 与合成邮箱，只删除这两个 owner 的数据；不要用 `docker compose down -v`。真实 HTTP 脚本使用 Cookie+CSRF，验证四类分页下钻、稳定排序、三类趋势、学生详情、ScoreRevision、报告重新生成、TeachingInsight 生命周期、404/422 和 Teacher B 隔离，并将无密码、Cookie 或 CSRF 的结果写入 `docs/analytics72-http-verification.json`。
-
-Analytics UI 现提供规则建议查看、evidence、编辑、草稿、确认、重新生成、失效、状态、loading/disabled 和成功/错误提示；明确标记为规则型建议。学生详情提供 0–100% 学生得分率折线图、按 KnowledgePoint ID 的掌握率折线图及等价表格。failed、expired、partially_completed 报告按钮调用 `POST /api/report-jobs/{id}/retry` 创建新 ReportJob；不是恢复原任务。completed 报告每次重新请求短期签名 URL。
-
-Analytics 范围的无头 Edge 冒烟覆盖 Teacher A 登录、选择真实发布、分数段下钻、
-Insight 编辑确认、学生和知识点趋势，以及 Teacher B 学生详情拒绝。完整业务浏览器
-E2E、第五部分安全专项和第六部分开发机有界容量现已完成。第六部分在单 API/单 Worker
-合成环境覆盖 50 名不同学生报告、Fake/RapidOCR 至 250 页及 200 人/100 题 Analytics；
-最大规模 Analytics 学生读取约 8 秒。生产容量、SLA、多实例扩展、故障恢复和生产部署
-验收仍属于后续范围。
-
-## 学生作业与批改流程
-
-教师为已发布且 PaperVersion/RubricVersion 完整的作业创建 GradingBatch，上传 PDF/PNG/JPG/JPEG。后端使用随机对象键保存文件，学号精确匹配优先，其次是班级内唯一姓名；重名、多个标识或无标识只生成待确认记录。一个学生的多张图片或 PDF 页面按文件顺序归并为同一 Submission，原文件和 SubmissionPage 均保留，不静默覆盖重复校验值。
-
-Submission OCR 数据与试卷 RecognitionJob/PaperPage 隔离：学生域使用 SubmissionRecognitionJob、SubmissionPage、StudentAnswer 和 StudentAnswerRegion，坐标仍为未旋转原始页左上角 0–1。`recognized_*` 永久保留原始值，`corrected_*` 有值时评分优先读取修正值。空白、低置信、公式不可用和失败是不同状态。现有 RapidOCR 转换/预处理组件可复用于学生页；第六部分已完成 Fake OCR 的 Celery/MinIO 150/200/250 页编排和独立 RapidOCR 清晰印刷体 100/150/250 页吞吐阶梯，但二者不能互相替代，也不证明真实学生答卷准确率、手写或公式能力。
-
-客观题 `single_choice`、`multiple_choice`、`true_false`、`fill_blank` 采用大小写与空格规范化后的确定性精确匹配，使用标准答案及可接受答案。单位/精度等无法由明确规则判断时应进入人工复核。主观题使用统一 GradingProvider；默认 UnavailableProvider 返回 `score=null`。FakeGradingProvider 只允许非 production 自动化测试，production 配置 fake 会安全降级为 unavailable，绝不能作为真实 AI 成绩。
-
-教师复核支持接受、修改、拒绝、手动评分和需要更多信息。修正答案会使旧建议 superseded；每次最终分数/评语变化写 ScoreRevision。低置信、OCR/公式异常、`score=null`、Provider unavailable、修正答案和 Rubric 版本变化均不能直接成为最终成绩。当前 API 未开放“一键无条件接受”，批量接受必须在后续 UI 完善时复用同一后端资格规则。
-
-`POST /api/submissions/{id}/finalize` 会逐题检查答案、教师最终分、分值范围、强制复核和当前 RubricVersion，并生成新的 SubmissionScoreSnapshot 版本而不覆盖旧版本。第七部分只能读取最新 `status=complete` 快照；`details` 保存每题 question/answer/review ID、最终分、满分、错误类型和评语。AI/规则 GradingResult 不是最终成绩来源。
-
-学生作业与批改子系统对应迁移为 `0006_submissions_grading_review`；仓库当前 Alembic 唯一 head
-为 `0023_assignment_provider_invocation_audit`：
-
-```powershell
-python -m alembic upgrade head
-python -m alembic upgrade head --sql
-python -m pytest -q
-npm.cmd run format
-npm.cmd run lint
-npm.cmd run typecheck
-npm.cmd run test
-npm.cmd run build
-```
-
-## 技术栈与本地运行
-
-- Web：Next.js 15、React 19、TypeScript、Tailwind CSS 4。
-- API：FastAPI、SQLAlchemy 2、Alembic；生产数据库为 PostgreSQL。
-- Worker：Celery + Redis；对象存储：MinIO。
-- 文字 OCR：RapidOCR 3.9.2 + ONNX Runtime 1.27.0（本地处理，不上传第三方）。
+要求 Python 3.11+ 和 Node.js/npm：
 
 ```powershell
 Copy-Item .env.example .env
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev,ocr]"
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 npm.cmd install
 .\.venv\Scripts\python.exe -m alembic upgrade head
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir apps/api --reload
+```
+
+另开终端启动 Worker 和 Web：
+
+```powershell
 .\.venv\Scripts\python.exe -m celery -A workers.celery_app:celery_app worker --loglevel=INFO
 npm.cmd run dev
 ```
 
-复制 `.env.example` 为 `.env`、替换专用凭据后运行 `docker compose up --build -d`。Compose 定义 PostgreSQL 16、Redis 7、MinIO、API、Worker 和 Web；2026-07-22 已完成空库迁移、六服务启动、Celery 往返和 MinIO 上传/读取/签名 URL 冒烟。
+## 账号与登录
 
-## 分值完整性规则
+正式认证使用数据库会话和 HttpOnly Cookie。密码使用带随机盐的 scrypt；写请求同时需要 SameSite=Lax CSRF Cookie 与 `X-CSRF-Token`。production 默认会话 12 小时、Cookie 为 Secure，Redis 登录限速默认 300 秒内 5 次失败，Redis 不可用时 fail closed。
 
-迁移 `0005_nullable_question_score` 允许草稿/OCR 题目的 `Question.max_score` 为 `null`。未知分值不会写入 0、1 或其他哨兵值：候选可保留 `suggested_score=null`，确认后成为“分值未设置”的待完善题目。此类题目不能保存 Rubric、不能发布；发布检查返回题目 ID、题号和步骤：`QUESTION_SCORE_REQUIRED` 与 `ASSIGNMENT_TOTAL_SCORE_INCOMPLETE`。总分只汇总已知值，同时报告完整性错误。手工题目输入仍要求正数。
-
-## OCR Provider 与边界
-
-配置 `RECOGNITION_PROVIDER`：
-
-- `rapidocr`：真实本地印刷体文字 OCR。安装 `pip install -e ".[ocr]"`；随 RapidOCR 包使用 `PP-OCRv6_det_small.onnx`、`ch_ppocr_mobile_v2.0_cls_mobile.onnx`、`PP-OCRv6_rec_small.onnx`。输出文字、0–1 页面坐标、0–1 置信度、provider/version/source/status；不生成 LaTeX。
-- `fake`：只允许非生产自动化测试。`APP_ENV=production` 时选择 fake 会降级为 unavailable，不能用它评估准确率或宣称真实 OCR 可用。
-- `unavailable`（默认）：明确禁用识别，但转换/预处理仍可用。
-
-真实最小验证使用运行时合成、无个人信息的小图：清晰中文印刷体、中英数字、空白、低对比度和损坏字节；验证了文本、坐标、置信度、空结果、错误映射和 RecognitionBlock 持久化。样本极小，未计算 CER/WER，不代表真实教学、手写、公式、表格或几何能力。公式 provider 独立为 unavailable；普通数学字符只保留为 text 并进入人工复核。DOCX 仍因缺少 LibreOffice headless 返回 `DOCX_CONVERTER_UNAVAILABLE`。
-
-## 文件与异步链路
-
-API 创建 RecognitionJob 后只向 Celery 发送 job ID；派发失败会把数据库任务标为 `failed/WORKER_UNAVAILABLE`。Worker 从数据库和对象存储重新读取输入，写入 rendered/processed/thumbnail 键及页面、Block、Candidate。任务和页面重试复用数据库页面记录；状态以数据库为用户可见真相。
-
-MinIO 原始键位于 `assignments/...`，衍生键位于 `recognition/{owner}/{job}/{page}/{kind}-{uuid}.png`，API 逐级校验 owner 后返回短期签名 URL。当前实现只按明确对象键操作，没有宽泛孤儿清理。2026-07-22 已在专用 Docker 测试栈完成 PostgreSQL 在线迁移与回滚再升级、Redis/Celery 消费、MinIO 上传/读取和签名 URL 生成；这是开发环境连通性证据，不是生产容量或安全证明。
-
-## 健康与验证
-
-`/health` 保持轻量；`/ready` 在短超时内分别报告 `postgresql`、`redis`、`celery_worker`、`minio`、`text_ocr`、`formula_ocr` 的 available/unavailable/degraded 状态，不返回凭据。FakeProvider 只会让文字 OCR 显示 degraded。
-
-PostgreSQL 专用测试库示例（执行 downgrade 前必须再次确认目标不是生产库）：
+当前代码创建账号：
 
 ```powershell
-$env:DATABASE_URL='postgresql+psycopg://ahamark:<password>@localhost:5432/ahamark_55_migration_test'
-python -m alembic upgrade head
-python -m alembic current
-python -m alembic downgrade 0004_recognition_pipeline
-python -m alembic upgrade head
+python -m app.cli.create_teacher --username teacher01 --display-name "教师"
+python -m app.cli.create_student --username student01 --display-name "学生"
 ```
 
-离线 DDL 与完整质量命令：
+命令会在终端中两次询问密码且不回显。仓库不提供公共注册。`DEMO_ACTOR_ENABLED` 只允许非 production 开发环境使用。
+
+注意：node2 尚未部署本次用户名版本，线上界面仍保持旧镜像行为；不要在迁移和切换完成前按上述新契约操作线上实例。
+
+## 教师主流程
+
+1. 创建作业，填写名称、截止时间和发布班级。
+2. 一次选择或拖入多个 PDF/PNG/JPG；前端先做格式、空文件和单文件大小校验，再按顺序上传。
+3. 系统整理试卷并生成题目、答案和 Structured Rubric 候选。
+4. 教师逐题核对；必要时旋转页面、手动框选或追加跨页区域。
+5. 发布检查只接受当前 active paper、完整分值、确认答案和 active Structured Rubric Set。
+6. 已发布作业可创建批改批次并上传学生答卷。
+7. 系统匹配学生、处理页面并生成识别与评分建议；歧义、低置信、stale 或 Provider unavailable 均进入人工复核。
+8. 教师接受或修改建议，最终生成版本化成绩快照，再明确发布成绩记录。
+
+手动切题默认关闭，只有教师点击“开始手动切题”后才接受一次拖框；切页、旋转或退出会丢弃未保存框。自动切题和重跑保留历史区域，但只有当前 confirmed region 可进入后续证据链。
+
+## OCR、公式与 AI 边界
+
+`RECOGNITION_PROVIDER` 支持以下状态：
+
+- `unavailable`（默认）：禁用识别，但文件转换和预处理仍可用。
+- `tesseract`：首选开源印刷体 OCR 基线；默认关闭，必须显式提供固定版本、路径、哈希和 NOTICE。只输出普通文字、坐标和置信度，不生成 LaTeX。
+- `rapidocr`：实验对照，产品 runtime 与模型下载继续 hard-off；不得因安装依赖而自动启用。
+- `fake`：只允许非 production 自动化测试；production 会安全降级为 unavailable。
+
+公式 Provider 默认 unavailable，公式区域自动检测默认关闭。当前合成与离线评测只验证合同、拒绝边界和可重复性，不代表真实试卷、手写、公式、表格或复杂版面准确率。
+
+私有 Gold 工具完全离线，输出必须人工复核。任何 Codex 草稿中的助手元话术、猜写、Markdown 或正文 LaTeX 都会 fail closed；轻量正文校对集不能称为结构化 Gold 或生产验证。
+
+## 成绩发布与分析
+
+唯一正式成绩来源是 `FinalScoreService` 读取的最新完整 `SubmissionScoreSnapshot`。系统不会回退到 AI 建议、临时 `TeacherReview`、不完整或已 superseded 数据。
+
+`GradeRelease` 固定具体快照并按作业/班级递增版本；released 只表示教师确认了发布数据，不表示学生已经收到。报表由 Worker 生成真实 `.xlsx` 或 PDF，学号按文本处理，外部文本防公式注入，缺失成绩不写零。
+
+AnalyticsSnapshot 固定 GradeRelease，提供分数段、题目、知识点、错误类型和趋势下钻。主观题展示得分率，不使用“正确率”；教学建议明确标记为规则型建议，不冒充 AI 教学助手。
+
+## 测试与质量门禁
+
+### 后端
 
 ```powershell
-$env:DATABASE_URL='postgresql+psycopg://ahamark:integration-only@127.0.0.1:5432/ahamark_55_migration_test'
-python -m alembic upgrade head --sql
-python -m alembic downgrade 0005_nullable_question_score:0004_recognition_pipeline --sql
 python -m ruff format --check apps/api workers tests
 python -m ruff check apps/api workers tests
 python -m mypy
 python -m pytest -q
+python -m alembic heads
+python -m alembic upgrade head --sql
+```
+
+### 前端
+
+```powershell
 npm.cmd run format
 npm.cmd run lint
 npm.cmd run typecheck
@@ -291,7 +248,68 @@ npm.cmd run test
 npm.cmd run build
 ```
 
-历史验证记录详见 `docs/HANDOFF.md`。第七部分关闭轮当时复用刚完成的后端门禁：
-113 passed、2 skipped，Ruff format/check 113 files，mypy 52 files；7D 另执行 JSON、原始
-证据哈希、Markdown UTF-8、相对链接、陈旧口径、敏感字段和 Git diff 门禁。该轮结束时
-第七部分工作树仍未暂存、未提交、未推送或部署；随后第一至第八部分均已提交。
+### 每次提交前
+
+```powershell
+git diff --check
+git status --short
+```
+
+同时必须：
+
+- 确认 `ahamark.db` 未变化或不存在。
+- 对新增 diff 做秘密、凭据、私有资料、身份字段、图片/正文和二进制聚合扫描。
+- 涉及迁移时确认 Alembic 只有一个 head，并在专用测试库验证升级；任何 downgrade 前先确认绝非生产库。
+- 涉及前端时运行 Prettier、ESLint、TypeScript、Vitest 和 production build。
+- 只报告本轮实际运行的结果，不沿用历史测试数字冒充当前验证。
+
+## 部署与运维
+
+node2 使用 `shr` 用户的 Rootless Docker。专用文件：
+
+- `docker-compose.preproduction.yml`
+- `docker-compose.node2.yml`
+- `deploy/nginx/node2.conf`
+- `deploy/node2/prepare-runtime.sh`
+
+部署前必须备份 Compose、Nginx、runtime、证书和 PostgreSQL，并验证备份可读；固定镜像标签和 SHA-256。只重建明确服务，不操作未知容器、卷、Bucket 或其他宿主端口。
+
+公网地址：<https://222.195.89.236:13300>。当前为自签名证书且无来源白名单。不要把通用 `docker-compose.yml` 或 `docker-compose.proxy.yml` 直接用于 node2：它们会发布开发端口，不符合 node2 的单入口边界。
+
+完整流程见：[运维手册](docs/OPERATIONS.md)、[备份恢复](docs/BACKUP-RESTORE.md)、[故障恢复](docs/FAILURE-RECOVERY.md)和[预生产就绪](docs/PREPRODUCTION-READINESS.md)。
+
+## 文档索引
+
+| 主题           | 文档                                                                                           |
+| -------------- | ---------------------------------------------------------------------------------------------- |
+| 项目基线       | [PROJECT-BASELINE.md](docs/PROJECT-BASELINE.md)                                                |
+| 能力证据       | [CAPABILITY-EVIDENCE-MATRIX.md](docs/CAPABILITY-EVIDENCE-MATRIX.md)                            |
+| 数据安全边界   | [DATA-SECURITY-BOUNDARIES.md](docs/DATA-SECURITY-BOUNDARIES.md)                                |
+| 产品口径       | [PRODUCT-CAPABILITY-STATEMENTS.md](docs/PRODUCT-CAPABILITY-STATEMENTS.md)                      |
+| 权限矩阵       | [AUTHORIZATION-MATRIX.md](docs/AUTHORIZATION-MATRIX.md)                                        |
+| 文件安全       | [FILE-SECURITY.md](docs/FILE-SECURITY.md)                                                      |
+| 作业生成       | [ASSIGNMENT-GENERATION-ORCHESTRATION.md](docs/ASSIGNMENT-GENERATION-ORCHESTRATION.md)          |
+| 中央审查与发布 | [ASSIGNMENT-CENTRAL-REVIEW-PUBLISH.md](docs/ASSIGNMENT-CENTRAL-REVIEW-PUBLISH.md)              |
+| 业务 E2E       | [BUSINESS-E2E.md](docs/BUSINESS-E2E.md)                                                        |
+| 成绩正确性     | [SCORE-CORRECTNESS.md](docs/SCORE-CORRECTNESS.md)                                              |
+| 性能与容量     | [PERFORMANCE.md](docs/PERFORMANCE.md)、[PERFORMANCE-CAPACITY.md](docs/PERFORMANCE-CAPACITY.md) |
+| 最终验收       | [FINAL-ACCEPTANCE.md](docs/FINAL-ACCEPTANCE.md)                                                |
+| 历史交接       | [HANDOFF.md](docs/HANDOFF.md) 与 Git 历史                                                      |
+
+## 精简变更账本
+
+这里只保留仍影响当前接手决策的记录；实现细节和历史测试证据使用 `git log --oneline`、对应提交 diff 与 `docs/` 验收材料追溯。
+
+| 日期       | 提交/状态        | 结论                                                                        |
+| ---------- | ---------------- | --------------------------------------------------------------------------- |
+| 2026-08-17 | `9b129bc`        | 管理员发布用户名账号；已推送，未部署，node2 仍为旧邮箱登录版本              |
+| 2026-08-17 | `0da6dd9`        | node2 允许公网 IP Host 与 origin；已部署                                    |
+| 2026-08-17 | `cfe2752`        | Rootless Docker 将唯一 Nginx 入口改为宿主 13300；已部署                     |
+| 2026-08-17 | `f050618`        | 拒绝 Codex 助手元话术草稿；未部署                                           |
+| 2026-08-17 | `4a2cf2a`        | 私有识别快速正文核对模式；未部署，私有工作已暂停                            |
+| 2026-08-15 | `5eda608`        | node2 当前应用镜像基线；schema 为 0048                                      |
+| 2026-08-07 | `5ae3a78` 及后续 | 选择性实现手动切题和当前 Structured-only 教师流程；没有整分支合并合作者代码 |
+
+GitHub 合作者审计最近结论：Draft PR #1 的 head 已是目标分支祖先，不重复合并；`gyh--001` 的旧迁移链、外部 OpenAI 调用、隐私面、依赖漂移和部署改动不能整分支合入。该任务现由另一 Codex 任务负责，后续以其最新独立审查结果为准。
+
+本次 README 整理只重组文档，不同步 node2、不运行迁移、不修改数据库、不创建账号，也不处理私有识别材料。

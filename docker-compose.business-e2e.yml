@@ -20,8 +20,10 @@ x-app-env: &app-env
   AUTH_COOKIE_SECURE: "false"
   RECOGNITION_PROVIDER: fake
   GRADING_PROVIDER: unavailable
-  AI_GRADING_PROVIDER: fake
+  AI_GRADING_PROVIDER: unavailable
   ASSIGNMENT_GENERATION_PROVIDER: fake
+  CODEX_LOCAL_ENABLED: "true"
+  CODEX_LOCAL_INTERNAL_TOKEN: ${BUSINESS_E2E_CODEX_LOCAL_INTERNAL_TOKEN:-phase3-business-e2e-codex-local-token-2026-only}
   BUSINESS_E2E_TEACHER_PASSWORD: Synthetic-Business-E2E-Only!
 
 services:
