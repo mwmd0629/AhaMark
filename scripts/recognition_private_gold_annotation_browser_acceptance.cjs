@@ -137,6 +137,27 @@ async function main() {
       })),
     }),
   );
+  const metaCodexDraftsPath = path.join(
+    temporaryRoot,
+    "codex-drafts-meta.json",
+  );
+  fs.writeFileSync(
+    metaCodexDraftsPath,
+    JSON.stringify({
+      schema_version: "recognition-private-codex-drafts-v1",
+      private: true,
+      dataset_id: datasetId,
+      cases: cases.map((item) => ({
+        case_id: item.case_id,
+        draft_text:
+          "已进入“私有数学页面识别草稿助手”模式。请继续指定需要我对该页执行的任务。",
+        question_numbers: [],
+        formula_drafts: [],
+        uncertainties: [],
+        manual_review_required: true,
+      })),
+    }),
+  );
   const imagePaths = cases.map((item, index) => {
     const filePath = path.join(temporaryRoot, item.image_file);
     syntheticPng(filePath, 245 - index * 5);
@@ -199,6 +220,21 @@ async function main() {
     await page.locator("#sidebarToggle").click();
     assert.equal(await page.locator("#sidebarContent").isVisible(), true);
     await page.locator("#seed").setInputFiles(seedPath);
+    await page.evaluate((id) => {
+      const key = `ahamark-recognition-private-gold-${id}`;
+      const saved = JSON.parse(localStorage.getItem(key));
+      saved.cases[0].expected_text =
+        "已进入“私有数学页面识别草稿助手”模式。请继续指定需要我对该页执行的任务。";
+      saved.cases[0].text_reviewed = false;
+      localStorage.setItem(key, JSON.stringify(saved));
+    }, datasetId);
+    await page.reload();
+    await page.locator("#seed").setInputFiles(seedPath);
+    assert.equal(await page.locator("#expectedText").inputValue(), "");
+    assert.match(
+      await page.locator("#status").textContent(),
+      /已自动清除 1 页尚未核对的助手元话术/,
+    );
     await page.locator("#images").setInputFiles(imagePaths);
     await page.locator("#drafts").setInputFiles(draftsPath);
     await page.waitForFunction(
@@ -287,6 +323,13 @@ async function main() {
       "Codex 第二页可见建议⟦不清⟧",
     );
     await page.locator("#expectedText").fill("");
+    await page.locator("#drafts").setInputFiles(metaCodexDraftsPath);
+    assert.equal(await page.locator("#expectedText").inputValue(), "");
+    assert.equal(await page.locator(".codex-adopt-text").isDisabled(), true);
+    assert.match(
+      await page.locator(".codex-draft-warning").textContent(),
+      /助手操作说明，不是图片正文，已禁止采用/,
+    );
     await page.locator("#pages .page").first().click();
     await page.locator("#expectedText").fill(String.raw`旧正文 \(x\)`);
     await page.locator("#drafts").setInputFiles(unsafeCodexDraftsPath);

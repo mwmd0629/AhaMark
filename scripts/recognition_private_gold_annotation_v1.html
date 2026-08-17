@@ -760,6 +760,16 @@
         const codexSuggestions = new Map();
         const hasDraftMarkup = (value) =>
           value.includes("\\") || value.includes("$") || value.includes("```");
+        const hasDraftMetaResponse = (value) =>
+          [
+            "已进入“私有数学页面识别草稿助手”模式",
+            "已进入「私有数学页面识别草稿助手」模式",
+            "请继续指定需要我对该页执行的任务",
+            "需要我对该页执行的任务",
+            "请提供需要识别的图片",
+            "未收到图片",
+            "无法查看图片",
+          ].some((marker) => value.includes(marker));
         const plainInputs = new Map();
         const readyPlainInputs = new Map();
         const conversionTimers = new Map();
@@ -1037,23 +1047,32 @@
           textDraft.className = "codex-draft-text";
           textDraft.readOnly = true;
           textDraft.value = suggestion.draft_text;
-          const unsafeMarkup = hasDraftMarkup(suggestion.draft_text);
+          const unsafeMarkup = hasDraftMarkup(suggestion.draft_text),
+            unsafeMetaResponse = hasDraftMetaResponse(suggestion.draft_text);
           const textWarning = document.createElement("div");
           textWarning.className = "hint codex-draft-warning";
           textWarning.textContent = unsafeMarkup
             ? "该旧建议含 LaTeX/Markdown 标记，禁止采用为正文；请人工改成线性 Unicode 或重新生成。"
-            : "空白正文会自动带入此草稿，但模型仍可能遗漏或补写；必须对照原图核对。";
+            : unsafeMetaResponse
+              ? "该建议是助手操作说明，不是图片正文，已禁止采用；请重新生成此页。"
+              : "空白正文会自动带入此草稿，但模型仍可能遗漏或补写；必须对照原图核对。";
           const adoptText = document.createElement("button");
           adoptText.type = "button";
           adoptText.className = "codex-adopt-text";
           adoptText.textContent = "人工采用为正文草稿";
           adoptText.disabled =
             unsafeMarkup ||
+            unsafeMetaResponse ||
             !suggestion.draft_text.trim() ||
             Boolean(current()?.expected_text);
           adoptText.onclick = () => {
             const item = current();
-            if (!item || hasDraftMarkup(suggestion.draft_text)) return;
+            if (
+              !item ||
+              hasDraftMarkup(suggestion.draft_text) ||
+              hasDraftMetaResponse(suggestion.draft_text)
+            )
+              return;
             if (item.expected_text) {
               updateStatus("正文已有内容，Codex 建议不会覆盖；请手动对照修改");
               return;
@@ -1075,23 +1094,31 @@
             adoptText,
           );
           const activeItem = current();
-          if (activeItem && hasDraftMarkup(activeItem.expected_text)) {
+          if (
+            activeItem &&
+            (hasDraftMarkup(activeItem.expected_text) ||
+              hasDraftMetaResponse(activeItem.expected_text))
+          ) {
+            const existingMetaResponse = hasDraftMetaResponse(
+              activeItem.expected_text,
+            );
             const cleanupWarning = document.createElement("div");
             cleanupWarning.className = "hint codex-existing-markup-warning";
             cleanupWarning.textContent = activeItem.text_reviewed
-              ? "当前正文含 LaTeX/Markdown 且已标记核对，不能自动清除；请人工复查。"
-              : "当前未核对正文含旧 LaTeX/Markdown，可清除后重新对照原图。";
+              ? `当前正文含${existingMetaResponse ? "助手元话术" : "LaTeX/Markdown"}且已标记核对，不能自动清除；请人工复查。`
+              : `当前未核对正文含${existingMetaResponse ? "助手元话术" : "旧 LaTeX/Markdown"}，可清除后重新对照原图。`;
             const cleanup = document.createElement("button");
             cleanup.type = "button";
             cleanup.className = "codex-clear-existing-markup";
-            cleanup.textContent = "清除当前未核对的 LaTeX 正文";
+            cleanup.textContent = "清除当前未核对的无效正文";
             cleanup.disabled = activeItem.text_reviewed;
             cleanup.onclick = () => {
               const item = current();
               if (
                 !item ||
                 item.text_reviewed ||
-                !hasDraftMarkup(item.expected_text)
+                (!hasDraftMarkup(item.expected_text) &&
+                  !hasDraftMetaResponse(item.expected_text))
               )
                 return;
               item.expected_text = "";
@@ -1099,7 +1126,7 @@
               save();
               renderList();
               cleanup.disabled = true;
-              updateStatus("已清除当前未核对的 LaTeX 正文；请重新对照原图转录");
+              updateStatus("已清除当前未核对的无效正文；请重新对照原图转录");
             };
             textCard.append(cleanupWarning, cleanup);
           }
@@ -1854,6 +1881,16 @@
               `ahamark-recognition-private-gold-${loaded.dataset_id}`,
             );
             state = saved ? validateSeed(JSON.parse(saved)) : loaded;
+            let clearedMetaResponses = 0;
+            for (const item of state.cases) {
+              if (
+                !item.text_reviewed &&
+                hasDraftMetaResponse(item.expected_text)
+              ) {
+                item.expected_text = "";
+                clearedMetaResponses += 1;
+              }
+            }
             $("datasetId").textContent = state.dataset_id;
             active = state.cases[0].case_id;
             buildChecks(
@@ -1870,6 +1907,10 @@
             );
             selectCase(active);
             save();
+            if (clearedMetaResponses)
+              updateStatus(
+                `已自动清除 ${clearedMetaResponses} 页尚未核对的助手元话术；请重新转录这些页面`,
+              );
           } catch (error) {
             updateStatus(`载入失败：${error.message}`);
           }
@@ -1967,7 +2008,8 @@
                 if (!item.expected_text && !item.text_reviewed) {
                   if (
                     suggestion.draft_text.trim() &&
-                    !hasDraftMarkup(suggestion.draft_text)
+                    !hasDraftMarkup(suggestion.draft_text) &&
+                    !hasDraftMetaResponse(suggestion.draft_text)
                   ) {
                     item.expected_text = suggestion.draft_text;
                     filled += 1;

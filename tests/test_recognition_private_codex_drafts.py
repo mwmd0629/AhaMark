@@ -156,12 +156,29 @@ def test_validate_result_rejects_latex_outside_formula_latex(
         validate_result(payload)
 
 
+@pytest.mark.parametrize(
+    "draft_text",
+    [
+        "已进入“私有数学页面识别草稿助手”模式。请继续指定需要我对该页执行的任务。",
+        "请继续指定需要我对该页执行的任务，例如逐行转写。",
+        "未收到图片，请提供需要识别的图片。",
+        "无法查看图片，请重新上传。",
+    ],
+)
+def test_validate_result_rejects_assistant_meta_responses(draft_text: str) -> None:
+    payload = result_for(Path(f"{uid(100)}.png"))
+    payload["draft_text"] = draft_text
+    with pytest.raises(ValueError, match="assistant meta-response"):
+        validate_result(payload)
+
+
 def test_prompt_forbids_inference_and_keeps_latex_out_of_draft_text() -> None:
     for requirement in (
         "不得根据题号、公式逻辑、教材常识或上下文补写",
         "不得包含 Markdown、美元定界符、反斜杠",
         "LaTeX 只允许出现在 formula_drafts.latex",
         "宁可留不清标记，也不要补全合理文本",
+        "不得介绍助手模式、要求用户继续指定任务",
     ):
         assert requirement in PROMPT
 

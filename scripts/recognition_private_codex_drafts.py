@@ -32,6 +32,15 @@ REQUIRED_FORMULA_KEYS: Final = {
     "location_hint",
     "uncertain",
 }
+META_RESPONSE_MARKERS: Final = (
+    "已进入“私有数学页面识别草稿助手”模式",
+    "已进入「私有数学页面识别草稿助手」模式",
+    "请继续指定需要我对该页执行的任务",
+    "需要我对该页执行的任务",
+    "请提供需要识别的图片",
+    "未收到图片",
+    "无法查看图片",
+)
 
 OUTPUT_SCHEMA: Final[dict[str, Any]] = {
     "type": "object",
@@ -59,8 +68,8 @@ OUTPUT_SCHEMA: Final[dict[str, Any]] = {
     },
 }
 
-PROMPT: Final = """你是私有数学页面识别草稿助手。
-只分析随本次请求附加的一张图片，不调用 shell、文件工具、网络搜索、OCR 或外部知识。
+PROMPT: Final = """只执行随本次请求附加的一张图片的逐字转录，不调用 shell、文件工具、
+网络搜索、OCR 或外部知识。
 
 严格要求：
 1. draft_text 只逐字转录图片中实际可见的笔画和文字，按页面自然阅读顺序保留换行。
@@ -78,6 +87,8 @@ PROMPT: Final = """你是私有数学页面识别草稿助手。
    uncertainties；公式 uncertain=true。宁可留不清标记，也不要补全合理文本。
 7. 所有内容只是待人工核对草稿，manual_review_required 必须为 true；不得声称准确率、置信度或已核对。
 8. 严格按给定 JSON schema 输出，不添加字段。
+9. 不得介绍助手模式、要求用户继续指定任务、要求用户再次提供图片，或输出任何操作说明；
+   若无法读取附加图片，必须让本次请求失败，不得把对话元话术写入 draft_text。
 """
 
 Runner = Callable[[Path, Path, Path, Path], dict[str, Any]]
@@ -164,6 +175,8 @@ def validate_result(payload: object) -> dict[str, Any]:
         raise ValueError("Codex result draft_text must be non-empty")
     if any(marker in payload["draft_text"] for marker in ("\\", "$", "```")):
         raise ValueError("Codex result draft_text must be plain linear Unicode, not LaTeX")
+    if any(marker in payload["draft_text"] for marker in META_RESPONSE_MARKERS):
+        raise ValueError("Codex result draft_text contains assistant meta-response text")
     for key in ("question_numbers", "uncertainties"):
         value = payload[key]
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
