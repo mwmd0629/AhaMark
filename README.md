@@ -50,7 +50,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 本轮认证开发的验证结果：认证专项 `7 passed`，登录页 Vitest `1 passed`；Ruff、strict mypy（127 个源文件）、Prettier、目标 ESLint、TypeScript、Alembic 单 head 和 `git diff --check` 均通过；`ahamark.db` 不存在且未变化。
 
-2026-08-17 合入 `master` 前的独立门禁发现并修正两处用户名提交遗留的测试契约：AI worker 迁移链测试仍把当前 head 写死为 `0048_class_resources`，现显式验证 `0049_usernames -> 0048_class_resources`；用户名迁移测试的两处常量 `setattr` 改为等价模块属性赋值，以满足 Ruff B010。认证、0049 升降级、AI worker 迁移契约、报表迁移和 orchestrator 模型链联合为 `31 passed, 4 skipped`，数据库守卫为 `ahamark.db unchanged`；全仓 Ruff lint、strict mypy（127 个源文件）和 Alembic 单 head `0049_usernames` 通过。前端 Git 跟踪文件 Prettier、ESLint、TypeScript、`38 files / 234 tests` 通过，本轮 Docker production build 成功生成 19 页；Windows 原生 build 仍受既有额外 `pnpm-lock.yaml` 与 symlink 权限影响。后端全量共收集 1067 项，首轮准确发现旧 head 断言，修复后改用独立 `--basetemp` 重跑至 6% 无失败后停止，因此不得称为本轮后端全量通过；全仓 Ruff format-check 仍只报告 12 个历史文件的既有 CRLF/新版 formatter 机械差异，本轮未接受无关大格式化。
+2026-08-17 合入 `master` 前的独立门禁发现并修正两处用户名提交遗留的测试契约：AI worker 迁移链测试仍把当前 head 写死为 `0048_class_resources`，现显式验证 `0049_usernames -> 0048_class_resources`；用户名迁移测试的两处常量 `setattr` 改为等价模块属性赋值，以满足 Ruff B010。认证、0049 升降级、AI worker 迁移契约、报表迁移和 orchestrator 模型链联合为 `31 passed, 4 skipped`，数据库守卫为 `ahamark.db unchanged`；全仓 Ruff lint、strict mypy（127 个源文件）和 Alembic 单 head `0049_usernames` 通过。前端 Git 跟踪文件 Prettier、ESLint、TypeScript、`38 files / 234 tests` 通过，Docker production build 和清理忽略的本地 pnpm/Next 产物后的 Windows 原生 production build 均成功生成 19 页；原 symlink 权限错误和多 lockfile 警告已消失，Next 仍有不阻断构建的 SWC lockfile 修补警告。2026-08-18 将全部 117 个后端测试文件分为三个互不重叠的隔离组并使用独立 `--basetemp` 完整重跑，合计 `1048 passed, 19 skipped`（1067 项）、零失败，三组数据库守卫均为 `ahamark.db unchanged`。全仓 Ruff format-check 仍只报告 12 个历史文件的既有 CRLF/新版 formatter 机械差异，本轮未接受无关大格式化。
 
 本地已构建但未上传的镜像：
 
