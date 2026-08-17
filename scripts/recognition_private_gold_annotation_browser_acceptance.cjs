@@ -158,6 +158,12 @@ async function main() {
     });
     await page.goto(pathToFileURL(toolPath).href);
     assert.equal(
+      await page.locator("#advancedAnnotation").evaluate((node) => node.open),
+      false,
+    );
+    assert.equal(await page.locator("#expectedText").isVisible(), true);
+    assert.equal(await page.locator("#confirmText").isVisible(), true);
+    assert.equal(
       await page.locator("#sidebarToggle").getAttribute("aria-expanded"),
       "true",
     );
@@ -240,6 +246,8 @@ async function main() {
       await page.locator("#expectedText").inputValue(),
       "1. 求 x² 的极限",
     );
+    assert.equal(await page.locator("#codexSuggestions").isVisible(), false);
+    await page.locator("#advancedAnnotation > summary").click();
     assert.equal(await page.locator("#codexSuggestions").isVisible(), true);
     assert.match(
       await page.locator("#codexSuggestionsSummary").textContent(),
@@ -267,14 +275,17 @@ async function main() {
       /不确定项（1 处|合成不确定项/,
     );
     await page.locator("#pages .page").nth(1).click();
-    assert.equal(await page.locator("#expectedText").inputValue(), "");
-    assert.equal(await page.locator(".codex-adopt-text").isEnabled(), true);
-    await page.locator(".codex-adopt-text").click();
     assert.equal(
       await page.locator("#expectedText").inputValue(),
       "Codex 第二页可见建议",
     );
     assert.equal(await page.locator("#textReviewed").isChecked(), false);
+    assert.equal(await page.locator(".codex-adopt-text").isDisabled(), true);
+    await page.locator("#insertUnreadable").click();
+    assert.equal(
+      await page.locator("#expectedText").inputValue(),
+      "Codex 第二页可见建议⟦不清⟧",
+    );
     await page.locator("#expectedText").fill("");
     await page.locator("#pages .page").first().click();
     await page.locator("#expectedText").fill(String.raw`旧正文 \(x\)`);
@@ -300,6 +311,14 @@ async function main() {
       await page.locator("#contentTags").textContent(),
       /负例：本页没有应识别的题目区域/,
     );
+
+    await page.locator("#exportTextReview").click();
+    await page.waitForFunction(() =>
+      document
+        .querySelector("#status")
+        .textContent.includes("禁止导出正文校对集"),
+    );
+    assert.match(await page.locator("#status").textContent(), /正文尚未核对/);
 
     await page.locator("#export").click();
     await page.waitForFunction(() =>
@@ -485,11 +504,40 @@ async function main() {
     assert.deepEqual(networkRequests, []);
 
     await page.locator(".page").nth(1).click();
+    await page.locator("#expectedText").fill("合成第二页正文");
+    await page.locator("#editText").click();
+    assert.equal(await page.locator("#textReviewed").isChecked(), false);
+    await page.locator("#confirmText").click();
+    assert.equal(await page.locator("#textReviewed").isChecked(), true);
     await page.locator("#privacyStatus").selectOption("redacted_copy");
     await page.locator("#annotationStatus").selectOption("annotated");
     await page.locator('#degradations input[value="blurred"]').check();
     await page.locator('#contentTags input[value="negative"]').check();
     await page.locator("#textReviewed").check();
+
+    const textReviewDownloadPromise = page.waitForEvent("download");
+    await page.locator("#exportTextReview").click();
+    const textReviewDownload = await textReviewDownloadPromise;
+    const textReviewPath = path.join(temporaryRoot, "text-review.json");
+    await textReviewDownload.saveAs(textReviewPath);
+    const textReview = JSON.parse(fs.readFileSync(textReviewPath, "utf8"));
+    assert.equal(
+      textReview.schema_version,
+      "recognition-private-text-review-v1",
+    );
+    assert.equal(textReview.cases.length, 2);
+    assert.deepEqual(textReview.cases[0].expected_question_numbers, ["1"]);
+    assert.equal(textReview.cases[1].expected_text, "合成第二页正文");
+    const serializedTextReview = JSON.stringify(textReview);
+    for (const forbidden of [
+      "image_file",
+      "document_id",
+      "source_ref",
+      "formula_spans",
+      "privacy_status",
+    ]) {
+      assert(!serializedTextReview.includes(forbidden));
+    }
 
     const downloadPromise = page.waitForEvent("download");
     await page.locator("#export").click();
