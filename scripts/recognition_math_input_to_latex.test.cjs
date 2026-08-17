@@ -17,6 +17,10 @@ const cases = [
     "\\lim_{(x,y)\\to(0,0)}\\frac{\\sqrt{xy+1}-1}{x+y}",
   ],
   ["int_a^b sqrt(x)", "\\int_{a}^{b}\\sqrt{x}"],
+  ["∫_a^b x", "\\int_{a}^{b}x"],
+  ["iint_D f", "\\iint_{D}f"],
+  ["∫∫_D f", "\\iint_{D}f"],
+  ["∬_D f", "\\iint_{D}f"],
   ["sum_(i=1)^n [1]/(i^2)", "\\sum_{i=1}^{n}\\frac{1}{i^{2}}"],
   [
     "[sqrt([a]/[b])+x^2]/(y_(i+1))",
@@ -48,6 +52,7 @@ for (const source of [
   "lim x 0",
   "lim ->0",
   "int^b",
+  "iint^b",
   "int_a^b^c",
   "lim x->0_1",
   "x^",
@@ -60,5 +65,5 @@ for (const source of [
 }
 
 process.stdout.write(
-  `${JSON.stringify({ status: "passed", cases: cases.length, ambiguity_rejections: 15, network_used: false, private_data_used: false })}\n`,
+  `${JSON.stringify({ status: "passed", cases: cases.length, ambiguity_rejections: 16, network_used: false, private_data_used: false })}\n`,
 );

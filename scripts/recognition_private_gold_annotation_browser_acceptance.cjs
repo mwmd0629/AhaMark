@@ -286,6 +286,7 @@ async function main() {
         "下标",
         "极限",
         "积分",
+        "重积分",
         "求和",
         "矩阵",
         "分段函数",
@@ -315,6 +316,14 @@ async function main() {
       await page.locator(".advanced-latex .formula-status").count(),
       1,
     );
+    await page.locator(".formula-plain").fill("∫∫_D f");
+    await page.waitForFunction(
+      () => document.querySelector(".formula-latex").value === "\\iint_{D}f",
+    );
+    assert.equal(await page.locator(".math-operator-body").textContent(), "∬");
+    await page.locator(".formula-plain").fill("");
+    await page.getByRole("button", { name: "重积分", exact: true }).click();
+    assert.equal(await page.locator(".formula-plain").inputValue(), "iint_S ");
     await page.locator("#export").click();
     await page.waitForFunction(() =>
       document.querySelector("#status").textContent.includes("公式 1 尚未核对"),

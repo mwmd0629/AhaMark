@@ -1125,7 +1125,9 @@
                 ? "lim"
                 : node.operator === "int"
                   ? "∫"
-                  : "Σ";
+                  : node.operator === "iint"
+                    ? "∬"
+                    : "Σ";
             if (node.type === "limit") {
               appendMathPreview(sub, node.from);
               sub.append(document.createTextNode("→"));
@@ -1260,6 +1262,7 @@
               "[a]/[b]    sqrt(x+1)    x^2    x_(i+1)",
               "lim (x,y)->(0,0) [sqrt(xy+1)-1]/(x+y)",
               "int_a^b    sum_(i=1)^n",
+              "iint_S    ∫∫_S    ∬_S",
               "matrix([a,b];[c,d])",
               "cases([f(x),x>=0];[g(x),x<0])",
             ]) {
@@ -1285,6 +1288,7 @@
               ["下标", (selection) => `${selection || "x"}_(i)`, () => "i"],
               ["极限", () => "lim x->0 ", () => "x"],
               ["积分", () => "int_a^b ", () => "a"],
+              ["重积分", () => "iint_S ", () => "S"],
               ["求和", () => "sum_(i=1)^n ", () => "i"],
               ["矩阵", () => "matrix([a,b];[c,d])", () => "a"],
               ["分段函数", () => "cases([f(x),x>=0];[g(x),x<0])", () => "f(x)"],

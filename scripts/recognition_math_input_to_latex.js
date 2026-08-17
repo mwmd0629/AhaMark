@@ -18,7 +18,15 @@
     ["φ", "\\phi"],
     ["ω", "\\omega"],
   ]);
-  const RESERVED = new Set(["sqrt", "lim", "int", "sum", "matrix", "cases"]);
+  const RESERVED = new Set([
+    "sqrt",
+    "lim",
+    "int",
+    "iint",
+    "sum",
+    "matrix",
+    "cases",
+  ]);
 
   class MathInputError extends Error {
     constructor(message, position) {
@@ -34,6 +42,9 @@
       .replace(/\u2212/g, "-")
       .replace(/\u2192/g, "->")
       .replace(/\u221a/g, "sqrt")
+      .replace(/\u222c/g, "iint")
+      .replace(/\u222b\u222b/g, "iint")
+      .replace(/\u222b/g, "int")
       .replace(/\u2264/g, "<=")
       .replace(/\u2265/g, ">=");
   }
@@ -305,7 +316,7 @@
         this.index += 1;
         if (token.value === "sqrt") return this.parseSqrt(token.position);
         if (token.value === "lim") return this.parseLimit(token.position);
-        if (token.value === "int" || token.value === "sum")
+        if (["int", "iint", "sum"].includes(token.value))
           return this.parseLargeOperator(token);
         if (token.value === "matrix") return this.parseMatrix(token.position);
         if (token.value === "cases") return this.parseCases(token.position);
@@ -478,7 +489,7 @@
       case "limit":
         return `lim_{${renderLinear(node.from)}→${renderLinear(node.to)}}`;
       case "largeOperator":
-        return `${node.operator === "int" ? "∫" : "Σ"}_{${renderLinear(node.lower)}}${node.upper ? `^(${renderLinear(node.upper)})` : ""}`;
+        return `${node.operator === "int" ? "∫" : node.operator === "iint" ? "∬" : "Σ"}_{${renderLinear(node.lower)}}${node.upper ? `^(${renderLinear(node.upper)})` : ""}`;
       case "matrix":
         return `matrix(${node.rows.map((row) => `[${row.map(renderLinear).join(", ")}]`).join("; ")})`;
       case "cases":
