@@ -5,6 +5,8 @@ deploy_root="${1:-/data/shr/ahamark-node2}"
 expected_root="/data/shr/ahamark-node2"
 release="5eda608"
 run_id="node2-20260815-${release}"
+public_host="192.168.2.5"
+https_port="13300"
 runtime_env="${deploy_root}/runtime.env"
 evidence_root="${deploy_root}/.preproduction-v8"
 cert_dir="${evidence_root}/${run_id}/certs"
@@ -23,8 +25,8 @@ fail() {
 [ ! -e "$runtime_env" ] || fail "runtime.env already exists"
 [ ! -e "$cert_dir" ] || fail "certificate directory already exists"
 
-if ss -H -ltn | awk '$4 ~ /:3300$/ { found=1 } END { exit !found }'; then
-    fail "TCP port 3300 is already listening"
+if ss -H -ltn | awk -v port="$https_port" '$4 ~ (":" port "$") { found=1 } END { exit !found }'; then
+    fail "TCP port ${https_port} is already listening"
 fi
 
 [ -z "$(docker ps -aq --filter label=com.docker.compose.project=ahamark-node2)" ] || \
@@ -44,7 +46,7 @@ openssl req \
     -nodes \
     -days 365 \
     -subj "/CN=localhost" \
-    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
+    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:${public_host}" \
     -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
     -addext "extendedKeyUsage=serverAuth" \
     -keyout "$cert_dir/localhost.key" \
@@ -65,7 +67,8 @@ trap 'rm -f "$runtime_tmp"' EXIT HUP INT TERM
     printf 'POSTGRES_DB=ahamark\n'
     printf 'POSTGRES_USER=ahamark\n'
     printf 'POSTGRES_PASSWORD=%s\n' "$postgres_password"
-    printf 'PREPROD_HTTPS_PORT=3300\n'
+    printf 'PREPROD_HTTPS_PORT=%s\n' "$https_port"
+    printf 'NODE2_PUBLIC_HOST=%s\n' "$public_host"
     printf 'SESSION_HMAC_SECRET=%s\n' "$session_secret"
     printf 'MINIO_ACCESS_KEY=%s\n' "$minio_access_key"
     printf 'MINIO_SECRET_KEY=%s\n' "$minio_secret_key"

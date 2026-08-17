@@ -1,5 +1,8 @@
 x-node2-app-env: &node2-app-env
-  MINIO_PUBLIC_ENDPOINT: localhost:${PREPROD_HTTPS_PORT:?set PREPROD_HTTPS_PORT}
+  CORS_ORIGINS: '["https://${NODE2_PUBLIC_HOST:?set NODE2_PUBLIC_HOST}:${PREPROD_HTTPS_PORT:?set PREPROD_HTTPS_PORT}"]'
+  TRUSTED_HOSTS: '["${NODE2_PUBLIC_HOST:?set NODE2_PUBLIC_HOST}","localhost","127.0.0.1"]'
+  CSRF_TRUSTED_ORIGINS: '["https://${NODE2_PUBLIC_HOST:?set NODE2_PUBLIC_HOST}:${PREPROD_HTTPS_PORT:?set PREPROD_HTTPS_PORT}"]'
+  MINIO_PUBLIC_ENDPOINT: ${NODE2_PUBLIC_HOST:?set NODE2_PUBLIC_HOST}:${PREPROD_HTTPS_PORT:?set PREPROD_HTTPS_PORT}
   MINIO_PUBLIC_SECURE: "true"
   FORMULA_RECOGNITION_PROVIDER: unavailable
   ANSWER_RECOGNITION_PROVIDER: unavailable
@@ -34,5 +37,7 @@ services:
     build: !reset null
   nginx:
     image: ${AHAMARK_NGINX_IMAGE:-nginx:1.27-alpine}
+    ports: !override
+      - "0.0.0.0:${PREPROD_HTTPS_PORT:?set PREPROD_HTTPS_PORT}:8443"
     volumes:
       - ./deploy/nginx/node2.conf:/etc/nginx/conf.d/default.conf:ro
