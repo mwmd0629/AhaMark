@@ -292,6 +292,9 @@
 
 ### 当前事实（以当前工作树重新验证为准）
 
+- 2026-08-17：助手 13/14 校园网与 GitHub 合作者并行接手审计完成（只读审计，未合并、未部署）：GitHub 实时只见 `master=d4b398b`、Draft PR #1 `codex/grading-confirm-results=8a76715`、目标分支 `codex/integrate-question-page-cutter=f050618` 与合作者分支 `gyh--001=8ac3f8c`；目标本地与远端同点。PR #1 仍 OPEN/Draft、无评论/审查/checks，且其 head 已是目标分支祖先，不重复合并。`gyh--001` 无 PR、无 checks/status；`62024c0` 的切题设计此前已按当前基线选择性吸收，本轮不再整提交合入；新增 `8ac3f8c` 单提交涉及 87 个文件（`+12120/-313`），包含旧链 `0026_student_portal` 迁移、真实 OpenAI 外部调用、学生标识/原文件名与 presigned URL 新隐私面、Nginx/Compose/端口改动及 1019 行 lockfile 漂移，和当前 `0048+` 迁移链、外部请求硬边界及校园网发布方案均存在重大语义/部署冲突，因此拒绝整提交和整分支合并，接受 0。新增行聚合扫描未发现私钥、令牌字面值、私有图片/正文或二进制，但不能据此替代未来逐文件权限审计。
+- 同次校园网只读审计确认仓库 node2 入口仍只继承 `127.0.0.1:3300 -> nginx:8443`；PostgreSQL、Redis、MinIO、API、Web 与 Docker socket 均未发布到宿主，历史 2026-08-15 健康记录不代表服务器当前状态。现有 MinIO public endpoint、CORS/CSRF/Trusted Hosts、Nginx `server_name` 和自签证书均固定 localhost；仓库没有校园 CIDR、校园 DNS/正式 TLS、可信反代源或主机防火墙规则。另发现 node2 access log 使用 `$request`，可能记录 MinIO 预签名 URL 查询参数，校园开放前必须改为不记录 args。由于尚未确认精确校园网 CIDR（含 VPN 边界）、node2 校园网 IP/多宿主路由、校方 FQDN/反代固定源、TLS 终止与证书注入、主机/边界防火墙责任、入口端口、维护窗口及远端实时 Compose/备份状态，本轮按 fail-closed 停止，不改绑定、不连接 node2、不声称当前健康、不部署。确认后应新增独立 campus Compose/Nginx/运行校验与回滚文档，优先使用校方反代+校园 DNS/TLS+CIDR 白名单，仅暴露精确 HTTPS 入口，并从校园内外分别实测 `/`、`/health`、`/ready`、登录、签名下载和教师核心流程。
+
 - 2026-08-16：当前指定私有 Gold 标注草稿已按用户授权暂停 Tesseract，使用仓库外、逐页、可断点续跑的 Codex CLI 草稿生成；所有输出固定要求人工复核，公式只显示为内存建议，不自动建框、不写 Gold。产品识别 Provider 与默认开关未改变，未部署。
 
 - 2026-08-17：P29 已禁止 Codex 正文/线性公式携带 LaTeX 或 Markdown，并把 Codex 正文改为只读建议、默认不写入 Gold 工作区；只有纯线性 Unicode 建议可由人工显式采用，猜写与不清内容仍须逐字核对，未改 schema/API/数据库/模型/开关，未部署。
