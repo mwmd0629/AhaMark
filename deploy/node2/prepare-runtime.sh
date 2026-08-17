@@ -5,7 +5,8 @@ deploy_root="${1:-/data/shr/ahamark-node2}"
 expected_root="/data/shr/ahamark-node2"
 release="5eda608"
 run_id="node2-20260815-${release}"
-public_host="192.168.2.5"
+public_host="222.195.89.236"
+internal_host="192.168.2.5"
 https_port="13300"
 runtime_env="${deploy_root}/runtime.env"
 evidence_root="${deploy_root}/.preproduction-v8"
@@ -45,8 +46,8 @@ openssl req \
     -sha256 \
     -nodes \
     -days 365 \
-    -subj "/CN=localhost" \
-    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:${public_host}" \
+    -subj "/CN=${public_host}" \
+    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:${internal_host},IP:${public_host}" \
     -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
     -addext "extendedKeyUsage=serverAuth" \
     -keyout "$cert_dir/localhost.key" \
@@ -69,6 +70,7 @@ trap 'rm -f "$runtime_tmp"' EXIT HUP INT TERM
     printf 'POSTGRES_PASSWORD=%s\n' "$postgres_password"
     printf 'PREPROD_HTTPS_PORT=%s\n' "$https_port"
     printf 'NODE2_PUBLIC_HOST=%s\n' "$public_host"
+    printf 'NODE2_INTERNAL_HOST=%s\n' "$internal_host"
     printf 'SESSION_HMAC_SECRET=%s\n' "$session_secret"
     printf 'MINIO_ACCESS_KEY=%s\n' "$minio_access_key"
     printf 'MINIO_SECRET_KEY=%s\n' "$minio_secret_key"
