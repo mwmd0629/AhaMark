@@ -1,6 +1,8 @@
 from datetime import timedelta
 
+import pytest
 from app.api.auth import hash_password
+from app.cli.create_student import create_student_account
 from app.cli.create_teacher import create_teacher as initialize_teacher
 from app.core.config import get_settings
 from app.db.session import SessionLocal
@@ -13,6 +15,7 @@ from sqlalchemy import select
 def create_teacher(email: str = "teacher@example.com", password: str = "secure-pass-123") -> User:
     with SessionLocal() as db:
         user = User(
+            username=email.split("@", 1)[0],
             email=email,
             password_hash=hash_password(password),
             display_name="测试教师",
@@ -28,22 +31,19 @@ def create_teacher(email: str = "teacher@example.com", password: str = "secure-p
 def test_login_me_csrf_logout_and_expiry() -> None:
     create_teacher()
     client = TestClient(app)
-    login = client.post(
-        "/auth/login", json={"email": "teacher@example.com", "password": "secure-pass-123"}
-    )
+    login = client.post("/auth/login", json={"username": "teacher", "password": "secure-pass-123"})
     assert login.status_code == 200
     assert (
         "HttpOnly" in login.headers["set-cookie"] and "SameSite=lax" in login.headers["set-cookie"]
     )
     assert client.get("/auth/me").json()["email"] == "teacher@example.com"
+    assert client.get("/auth/me").json()["username"] == "teacher"
     assert client.post("/auth/logout").status_code == 403
     csrf = client.cookies.get("ahamark_csrf")
     assert csrf and client.post("/auth/logout", headers={"x-csrf-token": csrf}).status_code == 204
     assert client.get("/auth/me").status_code == 401
 
-    login = client.post(
-        "/auth/login", json={"email": "teacher@example.com", "password": "secure-pass-123"}
-    )
+    login = client.post("/auth/login", json={"username": "teacher", "password": "secure-pass-123"})
     with SessionLocal() as db:
         session = db.scalar(select(UserSession).where(UserSession.revoked_at.is_(None)))
         assert session is not None
@@ -66,10 +66,10 @@ def test_authenticated_teachers_are_isolated() -> None:
     create_teacher("one@example.com")
     create_teacher("two@example.com")
     one, two = TestClient(app), TestClient(app)
-    for client, email in [(one, "one@example.com"), (two, "two@example.com")]:
+    for client, username in [(one, "one"), (two, "two")]:
         assert (
             client.post(
-                "/auth/login", json={"email": email, "password": "secure-pass-123"}
+                "/auth/login", json={"username": username, "password": "secure-pass-123"}
             ).status_code
             == 200
         )
@@ -82,27 +82,61 @@ def test_authenticated_teachers_are_isolated() -> None:
 
 
 def test_admin_can_initialize_teacher_without_storing_plaintext() -> None:
-    user = initialize_teacher("NEW@EXAMPLE.COM", "新教师", "not-plain-password")
-    assert user.email == "new@example.com"
+    user = initialize_teacher("New-Teacher", "新教师", "not-plain-password")
+    assert user.username == "new-teacher"
+    assert user.email == "new-teacher@ahamark.local"
     assert user.password_hash != "not-plain-password"
     assert user.password_hash.startswith("scrypt$")
 
 
-def test_login_input_accepts_reserved_synthetic_fixture_domain() -> None:
+def test_admin_can_issue_student_username_and_public_registration_is_absent() -> None:
+    user = create_student_account("Student-01", "测试学生", "not-plain-password")
+    assert user.username == "student-01"
+    assert user.email == "student-01@ahamark.local"
+    login = TestClient(app).post(
+        "/auth/login",
+        json={"username": "student-01", "password": "not-plain-password"},
+    )
+    assert login.status_code == 200
+    assert login.json()["roles"] == ["student"]
+
+    response = TestClient(app).post(
+        "/auth/register",
+        json={"username": "self-register", "password": "not-allowed-password"},
+    )
+    assert response.status_code == 404
+
+
+def test_login_input_normalizes_username() -> None:
     from app.api.auth import LoginInput
 
     payload = LoginInput(
-        email="Teacher@business-e2e.synthetic.invalid",
+        username="Teacher-A",
         password="synthetic-only-password",
     )
-    assert payload.email == "teacher@business-e2e.synthetic.invalid"
+    assert payload.username == "teacher-a"
 
 
-def test_login_input_accepts_controlled_local_account_domain() -> None:
-    from app.api.auth import LoginInput
+def test_production_rejects_legacy_email_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.api import auth
 
-    payload = LoginInput(
-        email="TEACHER-AUTH-TEST@AHAMARK.LOCAL",
-        password="local-only-password",
-    )
-    assert payload.email == "teacher-auth-test@ahamark.local"
+    create_teacher("legacy@example.com")
+    monkeypatch.setattr(auth, "check_rate_limit", lambda _key: None)
+    settings = get_settings()
+    old_env = settings.app_env
+    settings.app_env = "production"
+    try:
+        response = TestClient(app).post(
+            "/auth/login",
+            json={"email": "legacy@example.com", "password": "secure-pass-123"},
+        )
+        assert response.status_code == 401
+        assert response.json()["message"] == "用户名或密码错误"
+        username_login = TestClient(app).post(
+            "/auth/login",
+            json={"username": "legacy", "password": "secure-pass-123"},
+        )
+        assert username_login.status_code == 200
+        assert username_login.json()["username"] == "legacy"
+    finally:
+        settings.app_env = old_env

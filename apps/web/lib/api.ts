@@ -440,15 +440,16 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 export type AuthUser = {
   id: string;
+  username: string;
   email: string;
   display_name: string;
   roles: string[];
 };
 export const authApi = {
-  login: (email: string, password: string) =>
+  login: (username: string, password: string) =>
     request<AuthUser>("/auth/login", {
       method: "POST",
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ username, password }),
     }),
   me: () => request<AuthUser>("/auth/me"),
   logout: () => request<void>("/auth/logout", { method: "POST" }),

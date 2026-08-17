@@ -222,7 +222,7 @@ def test_processing_orchestrator_metadata_contract() -> None:
 
 def test_repository_migrations_have_a_single_head() -> None:
     config = Config(str(Path(__file__).parents[1] / "alembic.ini"))
-    expected_head = "0048_class_resources"
+    expected_head = "0049_usernames"
     assert ScriptDirectory.from_config(config).get_heads() == [expected_head]
 
 

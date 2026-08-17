@@ -15,7 +15,7 @@ export default function LoginPage() {
     const data = new FormData(event.currentTarget);
     try {
       const user = await authApi.login(
-        String(data.get("email")),
+        String(data.get("username")),
         String(data.get("password")),
       );
       const roles = user.roles ?? [];
@@ -45,16 +45,14 @@ export default function LoginPage() {
             A
           </div>
           <h1 className="text-2xl font-bold">登录 AhaMark</h1>
-          <p className="mt-1 text-sm text-slate-500">
-            教师进入批改工作台，学生查看已正式开放的作业成绩
-          </p>
+          <p className="mt-1 text-sm text-slate-500">账号由管理员统一发放</p>
         </div>
         <label className="mb-4 block text-sm font-medium">
-          邮箱
+          用户名
           <input
-            name="email"
-            type="email"
-            autoComplete="off"
+            name="username"
+            type="text"
+            autoComplete="username"
             data-1p-ignore
             data-lpignore="true"
             required
@@ -66,7 +64,7 @@ export default function LoginPage() {
           <input
             name="password"
             type="password"
-            autoComplete="new-password"
+            autoComplete="current-password"
             data-1p-ignore
             data-lpignore="true"
             minLength={8}

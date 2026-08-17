@@ -19,7 +19,7 @@ from sqlalchemy.engine import Connection, Engine, make_url
 
 ROOT = Path(__file__).parents[1]
 MIGRATION_PATH = ROOT / "apps/api/alembic/versions/0007_grade_release_reports_analytics.py"
-EXPECTED_HEAD = "0048_class_resources"
+EXPECTED_HEAD = "0049_usernames"
 
 EXPECTED_COLUMNS = {
     "grade_releases": (

@@ -29,6 +29,10 @@ def now_utc() -> datetime:
     return datetime.now(UTC)
 
 
+def generated_username() -> str:
+    return f"user-{uuid.uuid4().hex}"
+
+
 class Status(enum.StrEnum):
     active = "active"
     inactive = "inactive"
@@ -127,6 +131,9 @@ class TimestampMixin:
 class User(TimestampMixin, Base):
     __tablename__ = "users"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    username: Mapped[str] = mapped_column(
+        String(64), unique=True, index=True, default=generated_username
+    )
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     display_name: Mapped[str] = mapped_column(String(120))
