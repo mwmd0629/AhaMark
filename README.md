@@ -1,872 +1,162 @@
 # AhaMark
 
-> **阅读顺序：** 当前可执行事实只看下方[“接手必读：当前状态、问题与下一步”](#接手必读当前状态问题与下一步)中的“当前事实”。本段之后、该章节之前的日期记录均为历史工作日志，只证明当时环境，不代表当前工作树仍通过相同验证。
-
-2026-08-07 累计试用修复与题目页面切题选择性移植（完成，已提交并推送 `codex/integrate-question-page-cutter`）：从 GitHub `gyh--001` 的 `62024c0` 仅吸收旋转感知页面预览、图片拖框和题目+区域原子保存的有效设计，没有合并其三步向导、Legacy Rubric 路径或对现有生成/集中审查流程的删除。当前仍是 Structured-only 六步教师流程；“手动框选题目”默认关闭，只有教师点击“开始手动切题”才生成当前旋转方向的 PNG 预览并接受一次拖框，保存成功后自动关闭，切页/旋转/退出会丢弃未保存框并拒绝过期预览。教师可原子新建题目+首个区域，也可把第二页区域追加到已有题目；服务端在 assignment 行锁内只允许 draft + active paper + ready page + active question，双目标/错页/越界均 422，重复题号和 90% 高重叠区域分别 409，发布后预览或修改同样 409。保留原有数值区域编辑作为后备，不自动生成、确认或发布正式题目、答案、评分标准或成绩。
-
-同一提交同时收口本轮试用已记录的批改页面过亮误报、PDF 题号锚点自动切题与幂等重跑、手动区域原子替换、历史 removed/旧 paper 答案隔离、blocker 去重与明确文案、题序稳定排序、Codex applied evidence 只接受 confirmed current region，以及答案识别校对截图使用 processed evidence 的方向修复；新增迁移保持 `0035_question_anchor_segmentation → 0034_structured_rubric_authority` 单线，不修改任何旧迁移。最终后端全量单次为 `646 passed, 18 skipped`，数据库守卫明确 `ahamark.db unchanged`；前端全量 `28 files / 173 tests passed`，Prettier、ESLint、TypeScript、Next production build（19 pages）、全仓 Ruff、strict mypy `109 source files`、Alembic single head、`git diff --check` 均通过。Next build 仍有既有可选 SWC lockfile patch 与 Windows standalone symlink 警告但退出码为 0；根 lockfile SHA-256 仍为 `8FAC7F389094E4978DDA7C04200D325C031565B3FFDC581ADA3295808C18EDFF`，Web lockfile、`ahamark.db` 与临时根 `node_modules` 均不存在。Docker context 为 `desktop-linux`；隔离 `ahamark-assistant6-preview-20260806` 六服务在最终只读审计时 healthy，`ahamark-user-test-ac7ceb6` 六容器 ID/Exited 状态及未知 volumes 未被修改或删除。本次没有为新手动切题功能重跑 fresh browser E2E，因此不能把 Vitest/production build 夸大为真实浏览器端到端证据；既有浏览器证据仍只使用 Fake/Codex local synthetic 数据，不代表真实 Provider 输出质量。GitHub 最终提交前复核仅有已审计的 `gyh--001` 新分支；Draft PR #1 仍 OPEN/Draft/CLEAN/MERGEABLE、head `8a76715`、无评论/审查/checks，本次不改变 PR #1、不合并、不部署。
-
-2026-08-06 答案识别校对截图方向修复（完成、未暂存/提交/推送）：教师反馈“答案识别与校对”的截图方向错误；当前 synthetic 页实际 `rotation=90`，5 个识别块的 `region_evidence_image_id` 均正确关联 `source_kind=processed` 的旋转后证据，但冗余 `evidence_image_key` 仍指向 original 截图，前端因此用处理图坐标覆盖未旋转原图。现识别块 API 以关联的 `RegionEvidenceImage` 为显示权威，只有 source 为 processed 且 page/region 均与 block 一致才返回图片，关联异常时 fail closed 不返回错图；新建识别块的冗余 key 也统一写 processed key。该兼容路径使已有批次无需重跑识别即可修复方向。答案识别完整文件 `20 passed`，Ruff lint 与两个产品文件 strict mypy 通过；新版 Ruff format-check 仍会要求重排三个已有历史大文件及统一其 CRLF，未接受该无关整文件 diff。隔离 API/worker 已重建，六服务 healthy，复核页 HTTP 200；线上只读回读为 current blocks 5、processed keys 5、missing URLs 0。未重新识别、修改答案文字、确认结果、写最终成绩或发布成绩。
-
-2026-08-06 结果确认未完成项明确显示（完成、未暂存/提交/推送）：当前 synthetic 批次的 readiness 实际返回 15 个阻塞项，即题号 1–5 各有 `CONFIDENCE_LOW`、`REQUIRES_REVIEW`、`CRITERION_INCOMPLETE`；前端缺少这三个错误码的文案映射，全部回退成同一句“请检查未完成项”，再经去重后只剩一条，导致教师无法判断待办。现补充明确中文说明：“评分建议置信度不足，需要教师逐题核对”“评分建议仍在待复核状态”“评分项尚未完成教师确认”，保持既有 fail-closed 门禁，不自动复核、确认或发布成绩。新增三类 blocker 不再落入通用回退的回归；批改复核页完整文件 `25 passed`，TypeScript、ESLint、两文件 Prettier 与 Next production build（19 pages）通过，`git diff --check` 通过。验证期间仅临时只读复用旧 worktree 依赖，Junction 已精确移除；未改动旧目录、依赖或 lockfile。隔离 Web 已重建，六服务 healthy，当前复核页 HTTP 200；未自动复核、确认或发布成绩。
-
-2026-08-06 批改复核题序稳定排序（完成、未暂存/提交/推送）：教师观察复核页题目未按题序排列；当前 API 实际返回首题为第 4 题，根因是 review-workspace 虽已严格筛选 active paper + active questions，但 StudentAnswer 查询没有 `ORDER BY`，PostgreSQL 因此按无保证的物理/UUID 顺序返回，前端导航与上一题/下一题逻辑忠实沿用该乱序。现后端统一按 `Question.display_order → Question.question_number → StudentAnswer.id` 稳定排序，所有复核页/协作过滤消费者获得同一顺序；不依赖题号字符串的字典序作为主排序，也不改变题目内容、答案、分数或复核状态。新增反向插入第 2 题后第 1 题仍返回 `[1,2]` 的回归；submission workflow 完整文件 `26 passed`，Ruff 与产品文件 strict mypy 通过。隔离 API 已重建，review-workspace 回读当前 synthetic 题序精确为 `1,2,3,4,5`，复核进度仍为 0/5，复核页与 API 均 HTTP 200；未自动复核、确认或发布成绩。
-
-2026-08-06 Codex apply 历史同坐标证据误冲突修复与当前批次处理（完成、未暂存/提交/推送）：教师要求继续处理当前 synthetic 批次；processing run `eeece75d-a07f-4bc8-b4c0-5ddb06ba326e` generation 3 正确只纳入 5 个 active answers、0 blocker，并产生 5 个 Codex local suggestion-only work items。5 项均 submit/apply 后，首次 reconcile 仅第 4 题 succeeded，其余 4 项被 fail closed 标为 `CODEX_APPLY_CONTRACT_CONFLICT / Evidence children do not match response`。只读核对确认建议 payload 与当前 region 均有效；真正原因是 applied child 审计按坐标反查 GradingEvidence 时未限定 region status，自动切题代际保留的 superseded 历史区域与当前 confirmed 区域同坐标，因此 actual evidence 集合被旧 ID 污染；第 4 题手动重框坐标不同所以未触发。现证据反查只接受 confirmed region，仍严格要求 answer/page/坐标/数量与响应引用完全一致，不接受 candidate、stale、superseded 或 rejected。新增同坐标 superseded 回归，Codex apply 完整文件 `10 passed`，Ruff 与产品文件 strict mypy 通过。隔离 API 已重建；修复后对同一 generation 3 幂等 reconcile，无需重建或删除 work item，最终状态 `awaiting_teacher_review`、5/5 succeeded、0 failed、0 pending Codex、无 error。所有结果仍为 synthetic Codex-assisted suggestions，必须由教师复核；未自动确认答案或成绩、未创建正式成绩快照、未发布或释放成绩。
-
-2026-08-06 当前识别仅校验 active answers（完成、未暂存/提交/推送）：批改页报 `all answers require a confirmed region`；只读核对确认当前 active 题号 1–5 均已有且仅有 1 个 confirmed region，真正阻塞者是同一 submission 内保留审计的 `removed` 历史第 3 题答案。此前仅在 processing orchestrator/review-workspace 隔离历史答案，识别启动 API、实际 OCR worker 与 recognition 自动确认仍查询全部 StudentAnswer。现三层统一限定为 assignment 的 `active_paper_version_id` 且 `QuestionStatus.active`，区域输入 hash 和证据生成同样只包含该集合；removed/旧 paper 答案继续保留但不再要求区域、不生成 OCR 证据、不阻塞当前识别。新增 worker 与自动确认回归；首轮 33 项聚焦测试准确暴露 API 门禁遗漏（`1 failed, 32 passed`），补齐后最终 `33 passed`；Ruff 与三个产品文件 strict mypy 通过。隔离 API/worker 已重建，六服务 healthy；使用 synthetic 教师和 Fake provider 重跑任务 `d8237178-982e-4bed-89db-af88e2d08de0` 已 completed、无 warning/error，数据库回读为 active 题号 1–5 各 1 个 confirmed region/1 条本任务 evidence，removed 历史答案为 0/0。该证据不代表真实 Provider 输出质量；未使用真实学生数据、未确认正式内容、未写最终成绩、未发布或释放成绩，未触碰旧用户测试栈。
-
-2026-08-06 手动框重复与提交级 blocker 去重（完成、未暂存/提交/推送）：教师看到 5 条 `Every answer must have exactly one current region`；只读实证并非五题均异常，而是第 1/2/3/5 题各 1 个 confirmed region，第 4 题因连续手动框选留下 2 个 `confirmed/manual/TEACHER_DRAWN/teacher_explicit`，同一个提交级 `SEGMENTATION_AMBIGUOUS` 又被复制到 5 个 answer-scoped processing steps。现将 POST 手动区域改为原子替换：跨题高重叠仍先 fail closed，同题现有 candidate/confirmed/manual_required 仅在新框可成功创建的同一事务内转为 `superseded` 并递增 version，审计记录被替换 ID；不会删除历史。自动确认门禁也对既有多 current 且含 teacher_explicit 的数据执行确定性教师优先：以 `created_at,id` 最新一次教师框为唯一 winner，其余转 superseded，并写 `processing.segmentation.teacher_region_precedence` 审计；没有教师显式框的歧义仍继续 fail closed。批改页按 submission + error code + message 去重 blocker，因此同一答卷同一问题只显示一次，不合并不同 submission。后端两个完整文件 `26 passed`，批改页完整文件 `12 passed`；Ruff、两个产品文件 strict mypy、Next production build（19 pages）通过。隔离 API/worker/Web 已重建；当前 synthetic 第 4 题已精确收敛，winner `02d23745-c8f4-44f0-9ef8-ed99ee8c99b2`，旧框 `8323201b-7f7f-46f8-83c0-0633129aa395` 保留为 superseded，最终题号 1–5 均恰好 1 个 current region，审计回读一致。未确认正式内容、未写最终成绩、未发布或释放成绩，未触碰旧用户测试栈。
-
-2026-08-06 手动框选显式启动门禁（完成、未暂存/提交/推送）：按教师要求，进入切题调整态或出现未完成题时不再自动启用图片拖框。新增独立“开始框选/退出框选”按钮，默认 `data-draw-enabled=false` 且普通拖动不会调用新增区域接口；启动后画布显示十字光标与明确提示，只允许当前所选题目/页面的一次拖框，成功保存为 `teacher_explicit` 后自动关闭。切换题目、切换页面或进入/退出调整态会清除未完成草稿并关闭框选，避免误拖和跨题落框；查看图片、缩放、旋转、确认和删除既有区域不受影响。组件聚焦测试 `4 passed`，其中覆盖未启动拖动零 mutation、启动后才写区域、完成态默认关闭及多页/并发 reload；ESLint、TypeScript 与 Next production build（19 pages）通过。隔离预览 Web 已重建，当前批改页 HTTP 200、六服务 healthy。未确认正式题目/答案/评分标准、未写或释放成绩。
-
-2026-08-06 active paper question 历史答案隔离（完成、未暂存/提交/推送）：当前 synthetic 批次报错 `Answer does not use the active paper question`，只读核对确认同一 submission 有 6 条 StudentAnswer：5 条指向 active paper 的 active questions，另 1 条指向同一 paper 内已 `removed` 的历史第 3 题；后端 input snapshot 的 fail-closed 拒绝正确，但处理 manifest、识别输入、识别完成后的 Codex suggestion 展开和 review-workspace 仍把历史答案纳入当前队列。现统一只选择 assignment.active_paper_version_id 下 `QuestionStatus.active` 的答案；confirmed regions 也按该 active answer 集合收窄，removed/旧 paper 答案保留数据库审计但不再创建处理步骤、阻塞当前 run 或显示给教师。active answer 的 question version、Structured Set、证据与发布门禁仍由原 snapshot 严格验证，没有放宽 `SUBMISSION_SCOPE_MISMATCH/PROCESSING_INPUT_STALE`。新增 manifest 与 review-workspace 回归；相关两文件首轮为 `28 passed, 1 failed`，唯一失败是新 review 夹具漏建 active 对照答案，补齐后两个新增回归 `2 passed`；完整 orchestrator 组首轮为 `34 passed, 13 skipped, 1 failed`，唯一失败是旧用例用随机 UUID 伪造题目，改为真实 active paper/questions 后受影响旧用例连同两个新增回归 `3 passed`。Ruff lint 与两个产品文件 strict mypy 通过；本机新 Ruff formatter 会建议重排整份历史大文件，未接受该无关机械 diff。隔离 API/worker 已重建；当前真实预览 manifest 为 5 个 active answer、无 scope-mismatch，review-workspace 为 1 submission/5 answers（题号 1–5），六服务保持隔离运行。未删除历史答案、未写正式成绩、未确认内容、未发布或释放成绩，也未触碰 `ahamark-user-test-ac7ceb6`。
-
-2026-08-06 批改切题工作台信息降噪（完成、未暂存/提交/推送）：教师反馈批改处理页信息量过大。现将正常完成态收敛为主画布、切题完成摘要、已识别题数和单一“调整切题”入口；默认隐藏重跑/批量确认、逐题下拉框、区域卡片、原始质量数值及单页无异常时的缩略导航，原图/处理图与缩放也合并为紧凑控制。存在未完成题、候选区域、页面质量告警或教师主动进入调整模式时，仍完整显示自动切题、逐题分配、确认/删除、旋转和异常说明，不删除人工修正能力；已确认区域在调整态只显示必要状态，诊断来源/置信度/原因仅留给未解决区域。浏览器 E2E 驱动同步兼容单页无缩略导航和默认折叠区域卡片。聚焦组件测试 `4 passed`，ESLint、TypeScript（禁用增量缓存的只读检查）、三文件 Prettier、Next production build（19 pages）通过；隔离预览 Web 已重建，当前批改页 HTTP 200、六服务 healthy，既有 `ahamark-user-test-ac7ceb6` 六容器 ID/Exited 状态未变。没有改动作业内容、切题结果、真实学生数据、正式成绩、发布或成绩释放状态。
-
-2026-08-06 自动切题重跑重复区域修复（完成、未暂存/提交/推送）：教师在首轮 5 个题号锚点区域已 `confirmed/system_auto` 后再次点击“处理并自动切题”，旧逻辑保留 confirmed 区域又创建 5 个新候选，新候选因坐标重叠被标为 `HIGH_OVERLAP_CONFLICT/manual_required`，因此前端同时显示 10 条；答案 recognition job/block 实际均为 0，重复不来自答案 OCR。现将 full segmentation 重跑改为幂等替换：仅旧 `ocr/alignment + confirmed + system_auto` 区域转为 `superseded` 历史并递增 region version，删除旧 transient candidate/manual_required 后生成并自动确认新一代；`teacher_explicit` 区域按原 ID/确认来源保留且不生成覆盖候选。当前区域 API 只返回 candidate/confirmed/manual_required，历史 superseded/rejected/stale 不再混入工作台；question-anchors API 只返回最新 processing job，仍保留最新任务的低置信拒绝锚点供审计。回归在同一答卷连续三次 `_segment`，验证 system_auto 代际替换后每题恰一 current、无 overlap conflict，随后把第 1 题改为 teacher_explicit 再重跑，确认原区域不变且两个接口均只返回最新 5 个 current 区域/锚点；两个相关完整文件仍为 `24 passed`，Ruff 与 strict mypy 通过。隔离预览最终 job `c36dae50-e953-4b98-8b8d-051d7d23df91` completed：前端区域接口 5 条，数据库为 5 confirmed/system_auto/QUESTION_ANCHOR、5 superseded 历史、current `HIGH_OVERLAP_CONFLICT=0`；最新 anchor 接口 6 条是 5 个正文题号加 1 个 `LOW_ANCHOR_CONFIDENCE` 页脚审计记录，该页脚不生成区域。未触碰旧用户测试栈、真实数据、正式内容或成绩状态。
-
-2026-08-06 PDF 题号锚点自动切题后备路径（完成、未暂存/提交/推送）：当前合成答卷虽有清晰的“第 1 题…第 5 题”PDF 文本层，但 Fake 预览按设计不给真实 OCR blocks；同时旧切题查询误把 status=removed 的历史测试题纳入当前题目，造成重复第 3 题，所以页面无候选区域并显示“需要人工切题”。现将分区升级为 `submission-seg-v2`：文本型 PDF 优先在本地读取内嵌文本层及归一化坐标，图像/扫描 PDF 仍只走配置的真实 OCR，不把 Fake 输出冒充真实识别；仅当前 active 题目参与映射，重复题号、重复锚点、乱序、低置信和高重叠均 fail closed。新增迁移 `0035_question_anchor_segmentation`，为每个区域持久绑定 source anchor FK，并在 anchor 上固定 `source_kind/page_version`；严格自动确认 v2 只接受当前处理 job、当前页版本、完整 active 题目序列、一题一锚点、顺序一致、置信度至少 0.95 且页面无质量告警的集合，缺失或漂移继续交给教师。处理任务完成时会直接确认满足上述条件的确定性区域并写 `processing.segmentation.auto_confirm` 审计，不再要求教师重画或点击批量确认；这只确认答题区域，不确认题目/答案/评分标准、最终成绩或发布状态。两个相关完整测试文件最终 `24 passed`；0035 SQLite 升降级与 Alembic 单 head 契约 `3 passed`，PostgreSQL `0034→0035→0034→0035` 通过，最终 single head 为 0035；Ruff 与改动运行时代码 strict mypy 通过。隔离预览对当前 PDF 的新 job `21d37e70-d31b-40ce-a386-944267ab0fc1` 已 completed：正文五个题号均为 `pdf_text`、置信度 0.99、page_version 9，并生成五个 `confirmed/system_auto/QUESTION_ANCHOR` 区域；页脚“第 1 页”以 0.54450 和 `LOW_ANCHOR_CONFIDENCE` 留作拒绝证据，未污染题号 1；审计 resource 为该 processing job、policy `strict-auto-confirm-v2`、region_count 5。API 与批改页 HTTP 200，六服务 healthy。准确边界：当前实跑只证明带文本层 PDF；纯扫描件需要可用的真实 OCR，低置信时仍需教师处理。未触碰 `ahamark-user-test-ac7ceb6` 或真实学生数据，未确认正式内容、发布作业/成绩或释放成绩。
-
-2026-08-06 批改页面“过亮”误报与自动校正修复（完成、未暂存/提交/推送）：独立合成试用栈中的 `03_学生答卷_高质量示例.pdf` 原由旧 `submission-processing-v1` 仅按整页平均亮度 `252.04839` 判定 `TOO_BRIGHT`；该页对比度 `22.58148`、清晰度 `31.40999`，实为白底稀疏内容造成的误报，且任意 quality warning 会继续阻止高置信区域自动确认。现将预处理升级为 `submission-processing-v2`：用整页灰度直方图区分白色背景与有效内容亮度，真实浅灰过曝内容先执行自适应动态范围拉伸，再做既有温和对比度与中值滤波，并以处理后指标重新判定 `TOO_BRIGHT/LOW_CONTRAST`；原始 rendered artifact 仍永久保留，只有处理后仍异常才继续 fail closed，不会自动确认区域、答案或成绩。重试/旋转入口会同步升级已有 job 的 config version，避免页证据为 v2 而 job 仍声称 v1。新增白底黑字不误报、浅灰过曝自动拉回且复测清除告警、旧 job 重试升级回归；`test_submission_processing.py` 为 `11 passed`，automatic-confirmation 回归为 `9 passed`，改动 Python 文件 Ruff check/format 与 strict mypy、E2E 脚本 Node syntax、相关 JS/TS Prettier、`git diff --check` 均通过。聚焦 Vitest 未进入用例执行，因为临时 Alpine 依赖环境缺少 npm optional Rollup musl 包；前端运行时代码未修改，不能将该次记为测试通过或产品失败。实际合成 PDF 探针为原始整页亮度 `252.11166`、有效内容亮度 `117.33985`、处理后内容亮度 `125.36553`、对比度 `24.70854`、warnings `[]`，证明无需破坏性曝光修正即可消除误报。隔离栈重建后已通过正式 retry 接口重新处理当前页：job `attempt=6`、`config_version=submission-processing-v2`、状态 completed；page `page_version=5`、`preprocessing_version=submission-processing-v2`、状态 completed、`quality_warnings=[]`，API `/ready` 与批改页均 HTTP 200，六服务 healthy。未触碰 `ahamark-user-test-ac7ceb6`、真实学生数据或正式成绩，未自动确认、发布或释放成绩。
-
-2026-08-06 synthetic guard strict JSON-like 边界 P2 复审修复（完成、未暂存/提交/推送）：第三次复审确认上一版仅用普通键枚举与直接字段读取，尚未完整拒绝继承字段、Symbol/非枚举键、访问器、非 plain prototype、异常 Proxy、稀疏/扩展数组和重复 target name。现统一新增 descriptor-only 输入解析：顶层 options 与 target 仅接受 `Object.prototype` 或 null prototype 的非 Proxy plain record；使用 `Reflect.ownKeys` 审计全部自有键，必需字段必须 own，允许字段必须是 enumerable data property，读取只使用 descriptor.value，因此不会触发 getter。targets 仅接受 `Array.prototype` 的 1–8 项标准稠密数组，除 `length` 和规范索引外不允许任何键，元素必须是 enumerable data property；冻结对象/数组仍允许，因此不要求 writable/configurable。target name 使用安全环境键格式并在构造 null-prototype origins 前全局去重，拒绝 last-write-wins。Proxy 在任何反射 trap 前以 `*_PROXY_UNSUPPORTED` 稳定拒绝，其他反射异常统一为 `*_REFLECTION_FAILED`；record、property、array shape/count/element、重复名称分别使用稳定 reason code，不回显对象或 URL。直接 JavaScript 契约覆盖继承必需字段、object-literal `__proto__`、null-prototype/frozen 合法记录、own `__proto__`、顶层/target Symbol、非枚举未知键、必需/未知 getter、副作用探针、跨 policy 重名、空/超限/稀疏/附加键/Symbol/访问器/自定义 prototype 数组、Date/Map/class 与 ownKeys/descriptor Proxy，最终相关契约 `59 passed`。Node 三文件 `--check`、三文件 Prettier、Python 契约 Ruff lint/format 与 `git diff --check` 全部通过；DB/lockfile/staging 无变化。本轮未启动 Docker、浏览器或网络，未记录密钥或真实数据，未实际发布。
-
-2026-08-06 synthetic guard 权威命名策略 P2 复审修复（完成、未暂存/提交/推送）：第二次复审确认“调用方传完整 allowlist”仍把最终授权集合留在入口，未来可通过增加 loopback 端口扩大权限。现将 `assignment_preprod`、`business_web`、`business_api` 三个策略及其协议/端口放入 `scripts/synthetic_browser_guard.mjs` 模块私有冻结数据；调用方只传 policy 名、变量名与原始 URL，不再接收或复制 origin/port/protocol 集合。guard 会拒绝未知 policy，以及顶层或 target 的任何未知键，旧 `allowedOrigins`/`allowedPorts`/`protocols` 均以稳定 reason code fail closed 且不回显 URL；原始 ASCII/canonical 与解析后二次 invariant 保持。契约覆盖三策略全部 21 个合法 host×port 组合、交叉协议/端口、未知 policy、带旧扩权参数的端口 22，以及三个入口的精确 policy 选择，最终 `53 passed`。Node 三文件 `--check`、三文件 Prettier、Python 契约 Ruff lint/format 与 `git diff --check` 全部通过；`ahamark.db`、根 lockfile hash 不变，Web lockfile 不存在且三者无 diff，暂存区为空。本轮未启动 Docker、浏览器或网络，未记录密钥或真实数据，未实际发布。
-
-2026-08-06 synthetic URL P2 / sink-order P3 复审修复（完成、未暂存/提交/推送）：聚焦复审确认上一版 guard 在 `new URL(raw)` 后才按规范化 hostname 判断，非标准 IPv4、Unicode/百分号主机等原始表示可能被 WHATWG 归一化为 loopback；同时入口契约只覆盖目录创建与 Chromium，不能把“无 artifact”夸大为直接观测 Docker/network 未调用。该轮先改为解析前严格可打印 ASCII、无尾斜杠的 canonical origin，原始检查通过后才调用 `new URL`，并要求 origin/protocol/hostname/host/port 全部与原文一致；拒绝 reason 使用稳定 code，不回显原始 URL。协议与端口授权随后已由更新的内部权威命名策略取代调用方 allowlist，最终状态以本条上方最新账本为准。契约补齐非标准 IPv4、制表符、Unicode/圈字、百分号、尾点、空 query/fragment、大小写、前后空白、反斜杠、userinfo 与 IPv4-mapped IPv6；源序契约分别覆盖 `execFileSync`、Compose/Docker helper、`page.goto`、`fetch`、`apiJson` 等实际存在的首个 sink，并明确区分 assignment 不存在的 sink。真实入口无 ALLOW 子进程只实证退出码/reason code 与无 artifact；未直接 spy Docker/network，但源序契约证明 guard 调用早于这些 sink。本轮没有启动 Docker、浏览器、网络或实际发布。该轮验证为相关契约 `50 passed`，Node 三文件 `--check`、三文件 Prettier、Python 契约 Ruff lint/format、`git diff --check` 全部通过；`ahamark.db`、根 lockfile hash 不变，Web lockfile 不存在且三者均无 diff；未记录密钥或真实数据。
-
-2026-08-06 P3 门禁首个副作用前实证（完成、未暂存/提交/推送）：除纯 guard 子进程矩阵外，契约测试会直接启动两个真实脚本入口但故意不提供 `ALLOW_SYNTHETIC_MUTATIONS`；为它们指定临时 evidence/artifact 路径，并已实证进程以明确 ALLOW 错误退出且目录/文件均不存在。另由精确源序契约证明 guard 调用早于 `fs.mkdirSync`、Docker helper、Chromium 和服务器 mutation/network sink；本轮没有通过 spy 直接观测 Docker/network helper。测试使用的占位密码仅存在于子进程环境，不写日志/evidence、不连接服务器；未以 `ALLOW_SYNTHETIC_MUTATIONS=1` 运行真实浏览器流程，也未创建、确认或发布作业。聚焦契约当时为 `49 passed`；第一次使用 pytest 默认 Windows 临时目录时因既有 ACL 在 fixture setup 前失败，第二次工具总时限中断，改用唯一外部系统 Temp/basetemp 后完整通过，入口实证单测另为 `1 passed`。
-
-2026-08-06 浏览器 E2E synthetic mutation P3 补强（完成、未暂存/提交/推送）：最终只读审查发现两个会确认/发布/写状态的浏览器脚本仅“记录 synthetic”，未在 mutation 前 fail closed。现新增共享无副作用 `scripts/synthetic_browser_guard.mjs`，两个入口必须满足 `ALLOW_SYNTHETIC_MUTATIONS === "1"`；教师邮箱必须匹配 reserved `*.synthetic.invalid` 规则；URL 仅允许明确协议、loopback host（localhost/127.0.0.1/[::1]）与脚本列出的测试端口，禁止 userinfo/path/query/fragment；business 还校验 synthetic Compose project、run prefix 和 marker suffix，显式拒绝 `user-test`，并把通过后的非敏感 guard evidence 绑定到输出。密码和内部 token 不进入 evidence。正/负向契约覆盖缺失、空值及非 `1` ALLOW、非 synthetic 邮箱、远程/异常/带 userinfo URL、非法 project/run/marker 和合法本地 IPv4/IPv6 配置；源序契约要求 guard 调用早于目录创建、Docker helper 与 Chromium，无 ALLOW 入口子进程仅实证明确退出和无 artifact，并未直接 spy Docker/network。最终验证当时为：契约 `49 passed`，Node 三文件 `--check`、三文件 Prettier、Python 契约 Ruff lint/format、`git diff --check` 全部通过；`ahamark.db` 与根 lockfile SHA-256 仍分别为 `E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855`、`8FAC7F389094E4978DDA7C04200D325C031565B3FFDC581ADA3295808C18EDFF`，Web lockfile 不存在且三者均无 diff。未记录密钥、未使用真实数据、未运行真实 Provider 或实际发布流程。
-
-2026-08-06 Structured-only 最终收口（完成、未暂存/提交/推送/部署）：依赖边界已修复为 0687 独立普通目录 `node_modules`，旧 16d7 Junction target 删除前后 22,554 files 与三项 hash 不变；异常 `apps/web/16d7` 仅含 ignored standalone 依赖并已精确删除，最终 Next build 未重建且 standalone 旧 worktree 路径 0 命中。隔离真实 Chromium E2E run `structured-only-0687-final9-20260806034501339` 从 fresh PostgreSQL 完整通过 A–F，Alembic `0034_structured_rubric_authority`，证明 Structured Set/唯一发布/active Set 固定批改链；使用 Fake/Codex local synthetic suggestion-only，真实 Provider 未调用，`确认结果 clicked=false`、`grade_release_write_attempted=false`。最终验证：后端 `613 passed, 18 skipped, 345 warnings`；前端 `27 files / 168 tests passed`；browser 静态契约 `42 passed`；Next build 19 页；Prettier、ESLint、TypeScript、全仓 Ruff lint、strict mypy（109 files）、Alembic single head、changed-Python Ruff format、`git diff --check` 全部通过；产品 runtime 259 files 的 Legacy 精确扫描 0 命中，脚本 10 命中均为禁止 Legacy UI/异常码的负向断言。全仓 `ruff format --check` 另报告 36 个既有/历史 CRLF 文件会被机械重排（含受保护旧迁移），未为格式门禁越权改写；本轮实际修改的 3 个 Python 文件 formatter 全部通过。`ahamark.db` SHA-256 `E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855`、根 lockfile `8FAC7F389094E4978DDA7C04200D325C031565B3FFDC581ADA3295808C18EDFF`，Web lockfile 不存在且三者无 diff。临时 Compose project 容器/网络/volume 均 0、删除持久卷数 0；既有用户测试栈未变化。最终产品 diff 风险审计没有新增自动确认、自动发布、定稿或成绩释放路径；暂存区为空。远端分支仍为 `04708deecb197a37425721f25842255735b9dbb8`，PR #1 仍 OPEN/Draft/CLEAN；按授权边界未 add/commit/push/merge/deploy 或改变 Draft 状态。
-
-2026-08-06 最终后端全量验证（未暂存/提交/推送）：在系统 Temp 下唯一稳定根 `ahamark-final-root-20260806-0352` 运行仓库标准单进程全量 pytest，数据库所有权守卫全程有效；最终 `613 passed, 18 skipped, 345 warnings`，耗时 `39:16`，退出码 0，且守卫明确报告 `affected ahamark.db unchanged`。首次尝试把 TEMP 指向 worktree 内被安全守卫在 collection 前拒绝（0 tests），未放宽守卫；最终合规运行未复现先前 marker 丢失。下一步完成 Ruff、strict mypy、Alembic、Legacy/hash/path 和 diff 最终门禁。
-
-2026-08-06 最终前端全量验证（进行中、未暂存/提交/推送）：前端全量 `27 files / 168 tests passed`，ESLint、TypeScript、Next 15.5.9 production build（19 个静态页面）通过；首次 Prettier check 仅报告本轮 Review Bundle v2 改动的 4 个文件格式不一致，已用仓库 Prettier 机械格式化并复查通过。Next 仍输出既有 SWC lockfile patch warning，但 build 退出码为 0；待最终 hash 守卫确认 lockfile、`ahamark.db` 和异常 standalone 路径均未变化/重生。
-
-2026-08-06 Structured-only 隔离浏览器 E2E 完成（未暂存/提交/推送）：唯一 project `ahamark-structured-only-0687-20260806-01` 在显式 `desktop-linux` context、独立端口、PostgreSQL/Redis/MinIO tmpfs 且持久卷 0 的环境中从空库完整通过 A–F 六阶段（run `structured-only-0687-final9-20260806034501339`，证据位于 Git 忽略的 `test-results/structured-only-e2e-0687/evidence-final9.json`）。覆盖登录、创建班级/作业、基础信息后进入第 2 步上传、文件生成、两题题号/分值/知识点/答案/Structured Rubric、Bundle v2、当前 Structured Set（2 items/10 分/0 blocker/0 warning）、教师唯一一次“确认并发布”、创建批改批次、两份合成提交、4 个 Codex local suggestion-only 结果全部固定同一 active Set、四项教师复核及 complete snapshot；“确认结果”唯一且可用但 `clicked=false`，`grade_release_write_attempted=false`，真实 Provider 未调用。fresh PostgreSQL Alembic 为 `0034_structured_rubric_authority`。临时容器/网络已精确删除，project 容器/网络/volume 均 0，删除持久卷数 0；既有 `ahamark-user-test-ac7ceb6` 六个容器 ID/Exited 状态和三个 volume 名称与基线一致，未启动、停止、复用或删除。该验证只证明 Fake/Codex 合成工作流与真实 Chromium 编排，不证明真实 Provider 质量，也未使用真实学生数据或释放成绩。下一步完成最终前后端全量与静态门禁。
-
-2026-08-06 隔离 E2E 每项复核独立起点（进行中、未暂存/提交/推送）：第八次空 tmpfs 重跑仍稳定完成三项 PUT，第四项在自动前进后的复用组件中未触发请求。为彻底隔离 UI 自动前进、筛选和异步 `load()` 状态，现将四项合成教师复核改为每项先 reload，再显式选择“全部”、精确学生、精确题号并等待预期 answer ID，之后才点击评分动作；仍由真实浏览器按钮发起写入，不使用 API 旁路。静态契约新增每题 reload 与精确学生选择约束。
-
-2026-08-06 隔离 E2E 复核总计文案对齐（进行中、未暂存/提交/推送）：第七次空 tmpfs 重跑已由隔离 API 日志确认四个不同 answer 的教师复核 PUT 全部 `200`，脚本也完成对应 workspace 回读；最终仅因当前页面顶部源码为“已检查 4/4”，旧驱动等待“已复核 4/4”而超时。现把动态总计断言精确对齐“已检查 4/4”，仍要求四项全部完成、唯一“确认结果”按钮可用且保持 `clicked=false`。
-
-2026-08-06 隔离 E2E 复核网络证据稳定化（进行中、未暂存/提交/推送）：第六次空 tmpfs 重跑已在“全部”筛选下保持稳定列表，但 Playwright `waitForResponse` 仍随机错过已经发生的复核响应。现把四种教师复核动作统一到同一 helper：点击前捕获精确 answer ID 的 PUT request，再等待该 request 自身的 response，硬断言 HTTP 200；主观题继续解析响应 body，随后仍按 answer/decision/score/criterion/Structured Set/Rubric version 完整回读。新增静态契约要求 request→response 关联，不以日志或 UI toast 代替运行时验证。
-
-2026-08-06 隔离 E2E 复核列表稳定化（进行中、未暂存/提交/推送）：第五次空 tmpfs 重跑中三项教师复核 PUT 均为 `200`，页面显示 `已复核 3/4`，最后一项未发请求；截图确认驱动仍处在默认“需检查”筛选，已复核答案会在每次保存后从导航动态消失，使按原 workspace 序号遍历的学生/题目 locator 重排。现仅在合成 E2E 逐项复核前显式选择“全部”，等待稳定显示两名学生，再继续用 workspace answer ID 精确同步和逐项持久化断言；产品默认筛选与教师行为不变。
-
-2026-08-06 隔离 E2E 复核面板身份同步（进行中、未暂存/提交/推送）：第四次空 tmpfs 重跑的 API 日志证明第 2 名学生第 1 题复核 PUT 实际 `200`，但 Playwright 仍等待另一 answer ID 的响应；根因是自动前进后，点击学生/题目与 React 面板重绘之间存在竞态，旧驱动只等可能与上一面板同名的“第 N 题”标题便读取 `data-answer-id`。现从已验证的 workspace 按 submission/question 取得预期 answer，并在任何评分动作前强制等待面板 `data-answer-id` 精确匹配；新增静态契约，防止未来只凭重复标题继续。此修复不会接受错误 answer 的成功响应，反而确保教师操作落在预期学生与题目。
-
-2026-08-06 隔离 E2E 短暂提示时序修正（进行中、未暂存/提交/推送）：第三次空 tmpfs 重跑再次在保存后提示等待超时；代码顺序确认驱动是在成功 PUT、响应 body、完整 workspace 回读、最终分数、decision、criterion、Structured Set ID 和 Structured Rubric version 全部核验完成后，才寻找短暂 toast，因此 toast 已可能消失。删除该非持久 UI 提示等待，保留每项成功响应与持久化强回读，并继续要求页面最终显示 `已复核 4/4` 和唯一、可用但不点击的“确认结果”；不会把失败响应或未保存状态视为通过。
-
-2026-08-06 隔离 E2E 自动前进提示对齐（进行中、未暂存/提交/推送）：第二次空 tmpfs 重跑已完成 active Set 固定版本断言、两名学生/两题导航以及第 1/4 项教师复核写入；写接口与回读断言均成功，截图显示当前默认自动前进提示为“已保存，已进入下一题”，旧驱动只等待非自动前进分支的“复核结果已保存”。现让驱动精确接受组件源码定义的两种成功提示，不接受错误或无提示；最终仍需达到 `已复核 4/4`，且不会点击“确认结果”或释放成绩。
-
-2026-08-06 隔离 E2E 复核导航文案对齐（进行中、未暂存/提交/推送）：从空 tmpfs 重跑已越过发布、打开批次、上传/处理两份合成提交并生成 Codex suggestion-only 结果，失败只因驱动按旧文案寻找“提交…”导航；失败截图与当前 JSX 一致显示提交维度按钮为“学生 1/学生 2”。现将选择器收紧为精确 `学生 + 序号`，题目按钮仍按“第 N 题”定位，选中态和结果 Set/版本断言保持不变；本轮 `grade_release_write_attempted=false`，未确认或释放成绩。
-
-2026-08-06 Bundle v2 静态契约收口（进行中、未暂存/提交/推送）：批次入口选择器修正后，浏览器静态契约为 `40 passed, 2 failed`；两项失败均仍硬编码旧 8 类逐项确认和旧写入循环。现把契约对齐现行 5 类自动常规确认，并明确禁止 `file_roles/answer_sources/paper_version` 被误算为确认项；它们继续由 Bundle blocker、Structured Set current 指纹以及 `blocking=0/warning=0` 的发布硬门禁覆盖。测试同时要求 E2E 只读映射 Bundle confirmation、不调用逐项确认写入，不削弱发布条件。
-
-2026-08-06 隔离 E2E 批次入口文案对齐（进行中、未暂存/提交/推送）：空 tmpfs 全流程已通过登录、创建作业、第 2 步上传、Structured 草稿与 Set、唯一一次教师确认并发布以及批改批次创建；失败截图显示当前产品入口按钮为“打开批次”，旧浏览器驱动仍寻找“进入批次工作台”。现只将驱动选择器对齐当前可见文案，不改变产品运行时、active Set 固定规则或成绩状态；将从空 tmpfs PostgreSQL 重跑完整流程。
-
-2026-08-06 v2 常规确认集合对齐（进行中、未暂存/提交/推送）：Bundle v2 浏览器运行中自动确认已稳定出现 `classes/due_at/total_score/reference_answers/structured_rubrics`；旧驱动额外等待 `file_roles/answer_sources/paper_version`，但这些已不在运行时组件的确认集合中，其安全性由 Bundle blocker 与指纹直接覆盖。现把 E2E required confirmations 对齐为前端权威的 5 类；仍逐项验证 current confirmation hash/origin，文件用途、答案来源和试卷版本仍必须没有 blocker，不能因移除旧显式确认而绕过。
-
-2026-08-06 E2E 常规核对切换为自动投影（进行中、未暂存/提交/推送）：一步到位前端在 Bundle v2 下会调用 `auto-confirm` 并隐藏逐类确认控件，旧驱动仍等待/点击这些控件，与产品决策相冲突。现改为浏览器保持页面运行时只读轮询 review session 与 Bundle，要求运行时权威的五类常规确认全部由服务端出现，并逐项校验 Bundle 当前 fingerprint/origin；E2E 不再写任何逐类确认，随后仍等待自动 Structured Set 和唯一“确认并发布”。
-
-2026-08-06 Review Bundle v2 聚焦验证：中央核查与答案/Rubric generation review 前端联合 `2 files / 56 tests passed`，TypeScript 通过；`ahamark.db` 未变化。下一步重建隔离 Web 镜像后重新跑真实浏览器流程。
-
-2026-08-06 Review Bundle v2 前端契约修复（进行中、未暂存/提交/推送）：fresh PostgreSQL 浏览器 E2E 精确观察到后端 `/review-bundle` 返回 `schema_version=assignment-review-bundle-v2`，前端组件和 TypeScript 类型仍只接受 v1，导致当前 Bundle 被误判为版本不一致、自动常规核对不启动并显示“重新加载当前作业”。现将运行时组件、API 类型、两组前端 fixture、浏览器驱动和静态契约统一到后端现行 v2；历史 `docs/business-e2e-verification.json` 作为旧运行证据不改写。该修复不会接受未知 schema，不放宽 Bundle 指纹或发布门禁。
-
-2026-08-06 Fake 分值更新契约修正（进行中、未暂存/提交/推送）：题目“PATCH”路由实际使用完整 `QuestionInput`，只发送 `max_score` 被 Pydantic 422 拒绝；现用刚刚只读回取的题号、题型、正文/LaTeX、难度、父题和知识点原值组成完整 payload，只将空分值补为 5，并继续核验响应。该驱动修正不会把缺失字段静默清空，也不改变产品接口。
-
-2026-08-06 Fake generation 分值边界（进行中、未暂存/提交/推送）：第 1 题 Structured Rubric 页面创建失败的精确 API 原因是 `422 RUBRIC_POINTS_MISMATCH`；只读作业详情确认 Fake generation 题目的 `max_score=null`，页面默认 1 分，而第 2 题为 5 分。合成 E2E 现仅在生成题分值为空时 PATCH 为 5 分，并要求 HTTP 200 及响应数值精确为 5，使两题合计与作业 10 分一致；不会接受非空冲突值。该补值明确属于 Fake 测试夹具，不是实际 Provider 分值质量证明，后端 Rubric/总分门禁保持 fail-closed。
-
-2026-08-06 Fake generation 区域边界（进行中、未暂存/提交/推送）：纠正后的唯一 generation 第 1 题没有携带页面区域，驱动在进入发布/批改前按 fail-closed 断言停止。为验证后续 Structured-only 编排，合成 E2E 现仅在该题 region 为空时，用上传试卷的真实测试页 ID 写入固定 0–1 坐标范围的测试区域并要求 API 201；第 2 题仍由浏览器区域编辑器写入。该步骤明确是 Fake/Codex 合成夹具，不宣称真实 Provider 的题目分区质量，也不移除发布或批改对 region 的要求。
-
-2026-08-06 一步到位 E2E 空题目表单适配（进行中、未暂存/提交/推送）：纠正输入链后，generation 前的第 4 步尚无题目，页面已直接处于创建态且不会显示用于从“编辑已有题目”切换出来的“新增题目”按钮；驱动因强制寻找该按钮而超时。现仅在按钮可见（已有题目被选中）时点击，否则直接填写空创建表单，仍由“添加题目”接口创建第 2 题。
-
-2026-08-06 一步到位 E2E 输入链纠正（进行中、未暂存/提交/推送）：失败后的 API 证据显示旧驱动先由 OCR 确认第 1 题，再让 generation 将同内容候选物化为另一道第 1 题；Bundle 因真实的 `TOTAL_SCORE_MISMATCH=15/10` 及新题缺答案/Rubric 而正确阻断，不能把它当作 clean 409 自动恢复。现将恒定启用的一步到位分支改为只由“上传文件 → generation”生成第 1 题，随后回读该题与教师新增的第 2 题、确认每题 region，再通过 Structured 编辑器形成答案/Rubric；非一步到位诊断模式仍保留 OCR 分支。这样消除的是测试自己制造的重复输入，不拒绝候选、不隐藏 blocker、不放宽发布门禁。
-
-2026-08-06 隔离浏览器 E2E 第五轮诊断（进行中、未暂存/提交/推送）：Structured generation 已完成并回到第 5 步；失败截图明确显示两道正式题均为“参考答案：已确认 / 评分标准：已确认”，同时页面顶部还有一张待处理的生成建议卡。驱动此前把所有 `question-review-card-*`（包括 suggestion）都要求为已确认，因而在建议卡失败。现将核查精确限定为带“题目、答案和评分标准已确认”的正式题卡，并继续要求恰有两张且逐张包含题号、已确认答案和已确认评分标准；生成建议仍按既有 suggestion-only 处置，不隐藏或自动确认。
-
-2026-08-06 browser E2E 静态契约稳健性（进行中、未暂存/提交/推送）：移除旧第 5 步分支后，三项静态测试因按全脚本中 `if (singleContinueProof)` 的固定“第 3 次出现”切片而失败，未发现运行逻辑断言失败。现改为分别在已隔离的 E/F stage 文本内定位该分支，使测试约束目标不受前面无关分支数量影响；待 Ruff 与 42 项契约复验。
-
-2026-08-06 隔离浏览器 E2E 第四轮诊断（进行中、未暂存/提交/推送）：第 2 题与区域均已真实写入并由作业详情回读，但旧驱动在任何 generation job 存在前进入第 5 步；服务器正确返回 `409 GENERATION_REQUIRED`，页面显示“无法取得当前审查内容”，因此题目选择器为空。现按 Structured-only 流程修正驱动顺序：从作业详情精确取得两题 ID 并确认每题已有 region，直接进入各题 Structured Rubric 编辑器确认答案/Rubric；第 6 步生成完整草稿并处理合成建议后，再回到第 5 步核验题号、分值、知识点、答案和评分标准，最后进入集中发布检查。删除的只是已不存在的旧逐题评分标准步骤依赖及重复 region 写入；没有绕过 generation/readiness 门禁。
-
-2026-08-06 隔离浏览器 E2E 第三轮诊断（进行中、未暂存/提交/推送）：驱动已成功创建并重新选中第 2 题，题号、知识点和题目内容断言均通过；页面按数据库精度回填分值 `5.00`，旧驱动用字符串 `5` 严格比较而失败。现改为数值等价且仍精确要求 5 分，不接受分值缺失或偏差；待空 tmpfs 重跑。
-
-2026-08-06 隔离浏览器 E2E 第二轮诊断（进行中、未暂存/提交/推送）：驱动已通过第 2 步跳转、文件上传和 OCR 确认，进入第 4 步后仍按旧表单语义直接填充并寻找“添加题目”；当前产品为保护已选题目，默认主按钮是“保存题目”，只有教师先点“新增题目”才清空并进入创建态。现仅修正合成驱动先显式点击“新增题目”，再填写第 2 题并使用创建按钮；不更改产品保存/脏编辑保护。仍将重建空 tmpfs 后从头验证。
-
-2026-08-06 隔离浏览器 E2E 首轮诊断（进行中、未暂存/提交/推送）：真实浏览器已观察到新建作业保存后实际导航到 `/assignments/{id}/edit?step=2`，产品行为正确；驱动原 `**/assignments/*/edit` glob 不接受查询参数，因此在进入上传前仅因 URL 等待超时。现将该测试等待收紧为只接受同一路径及可选 query 的正则，并继续要求页面出现“上传试卷”标题；待精确销毁本轮容器/网络（不带 `-v`）、以空 tmpfs 重建后重跑，避免复用半程合成数据。
-
-2026-08-06 隔离浏览器 E2E 证据补强（进行中、未暂存/提交/推送）：主 business browser 驱动现明确等待新建作业保存后的第 2 步“上传试卷”，并在批改建议形成后逐项断言结果的 `structured_rubric_set_id` 等于本轮发布时的 active Structured Set；这些断言只增强合成 E2E 证明，不改变产品运行时、教师确认权或成绩状态。唯一 tmpfs Compose project 已在显式 `desktop-linux` context 启动，六服务 healthy；PostgreSQL/Redis/MinIO 均为 `Mounts=[]` 且仅使用 tmpfs，项目持久卷数为 0。待完成正确测试角色的迁移查询、浏览器实跑及本轮容器/网络精确清理。
-
-2026-08-06 依赖路径与最终全量补验（进行中、未暂存/提交/推送）：开始前未发现 node/npm/Next/Vitest 进程。0687 根 `node_modules` 已精确确认为 Junction/ReparsePoint，target 为 `D:\OpenAIData\.codex\worktrees\16d7\AhaMark\node_modules`；target 存在且删除前文件数为 22,554，16d7 根 `package.json` / `package-lock.json` 与 target `.package-lock.json` SHA-256 分别为 `ced11592d69dd97aca3c9af53a6121abfdbedffd4a6255f5b4292aa322538551`、`8fac7f389094e4978dda7c04200d325c031565b3ffdc581ada3295808c18edff`、`d66bea619841506719e05e8fe60661bffa1c5e7322513b24ddb9f2f48178a735`。`Remove-Item -LiteralPath` 因 PowerShell Junction NullReference 未产生删除，随后从同一 `Get-Item -LiteralPath` 精确取得的 `DirectoryInfo` 执行非递归 `Delete()`，只移除 0687 Junction；删除后 target 仍为 22,554 个文件且三项 hash 逐项不变。0687 根 `npm ci` 已独立安装 468 packages，`node_modules` 为普通非 ReparsePoint 目录；Next 15.5.9、React 19.1.1、Vitest 3.2.7、ESLint 9.39.5、TypeScript 5.9.3，根 lockfile、Web lockfile不存在状态与 `ahamark.db` hash 均 unchanged；npm 报告既有 4 个 high advisories，未运行会改依赖/lockfile 的 fix。`apps\web\16d7` 删除前精确位于当前 `apps\web` 内，为普通目录；31 files / 17 dirs / 170,561 bytes 全部位于 `16d7\AhaMark\node_modules`，仅含被 Git 忽略的 Next/styled-jsx standalone 依赖残留，tracked/unignored/进程引用均为 0；已仅删除该工作区异常目录。独立 Next production build 已成功生成 19 个静态页面，未重建 `apps\web\16d7`；`.next\standalone` 顶层仅为当前 `apps/node_modules/package.json` 结构，内容中的 worktree ID 仅有 `0687`，`D:\OpenAIData` 与非 0687 worktree 路径均为 0。依赖包内一次文本 `16d7` 命中是 crypto-browserify 测试向量哈希片段，不是路径；构建仍有仓库既有 SWC lockfile patch warning，但退出码为 0 且全部守卫 unchanged。下一步执行前后端全量、静态门禁、Legacy runtime 扫描与隔离 E2E。
-
-2026-08-06 Legacy browser runtime 扫描修复（进行中、未暂存/提交/推送）：首次扫描把 Structured Rubric 内部正常使用的 `rubric_version_id` 误算为 Legacy，收紧到 Legacy 类、表、binding 路由/按钮和异常码后，唯一真实运行残留是 `scripts/assignment_generation_browser_e2e.mjs` 仍操作已删除的 publication binding 两按钮并记录 `legacy_binding`。现已将该脚本改为等待 `structured-rubric-set-summary`、断言页面无 Legacy binding/兼容版本/旧异常码、只点击一次“确认并发布”，并验证发布后 `active_structured_rubric_set_id`；新增静态契约防止旧 binding 选择器与旧双按钮发布流程回归。该修改只修测试 E2E 驱动，不改变产品 API、确认/发布门禁或成绩写入；待聚焦测试、Ruff/Prettier 和收紧后的 runtime 零命中复验。
-
-2026-08-06 隔离 business browser E2E 驱动切换（进行中、未暂存/提交/推送）：进一步审计发现主 `business_browser_e2e.mjs` 虽已使用 Structured Set API，但发布 UI 仍按旧“准备发布 → dialog → 教师确认并发布”双按钮流程执行，且脚本内部 Docker provenance 命令没有显式 context、固定使用原 Compose 文件。现增加 `BUSINESS_E2E_COMPOSE_FILE` 与 `BUSINESS_E2E_DOCKER_CONTEXT`，所有脚本内 Docker/Compose/inspect/psql 调用统一带 `--context`；发布步骤改为等待唯一“确认并发布”按钮、核验 Structured Set/current/0 blocker、断言页面无 Legacy binding/兼容按钮/旧异常码并只发起一次 publish POST。脚本还在创建后回读第 2 题题号、分值、知识点和内容，并在第 5 步逐卡核验参考答案与评分标准已确认；新增静态契约禁止旧双按钮/dialog 回归。格式化后的 browser E2E 静态契约 `42 passed`，Ruff/Prettier 通过，`ahamark.db` unchanged。仅修改合成 E2E 驱动和测试，不自动确认真实内容、不发布成绩；待实际唯一 tmpfs Compose 运行验证。
-
-2026-08-06 隔离 Compose 启动边界（进行中）：唯一 project `ahamark-structured-only-0687-20260806-01` 的镜像构建成功，但首次启动在创建默认 network 前被 Docker `all predefined address pools have been fully subnetted` 阻断；确认该 project 容器/network/volume 仍全为 0，未触碰现有对象。只读列出全部现存子网并检查 Windows 路由后，选择未占用且无路由冲突的 `10.251.68.0/24` 写入 Git 忽略的临时 Compose；现有 `ahamark-user-test-ac7ceb6` 继续保持六容器 Exited，三 volume metadata hash 基线为 `b9262663ae95ea06a9fc7e492f63e11f97faacef55d39a905789a83fac5c9755`。待以显式 `desktop-linux` 重试并核验实际 tmpfs/零 volume。
-
-2026-08-06 Structured-only fresh PostgreSQL 补验（完成、未暂存/提交/推送）：Docker Desktop 4.83.0 / Engine 29.6.2 通过显式 `desktop-linux` context 健康；Codex sandbox 的 default context 与 `~/.docker` ACL 才是此前误报来源。唯一临时容器 `ahamark-structured-fresh-0687-20260806-01` 使用 `/var/lib/postgresql/data` tmpfs、独立端口 `55473`，检查为 `Mounts=[]`，未挂载、创建或删除任何持久卷；空库完整 `0001 → 0034_structured_rubric_authority`、受保护历史全路径（`1 passed`）以及真实 PostgreSQL `0034 → 0033 → 0034` 均通过，最终仅存在 Structured Set 表且四个 Legacy/binding 表不存在。双向补验最初暴露 readiness Legacy 外键显式名超过 PostgreSQL 63 字符上限；0033 探针确认原始 PostgreSQL 名为 `assignment_publish_readiness_snap_legacy_rubric_version_id_fkey`，0034 downgrade 已改用该精确等价名称并增加防回归测试。0034/0006 迁移、中央发布和 active Set 联合契约 `23 passed`，另一次修复前迁移聚焦 `10 passed`；Ruff check/format-check、Alembic 单 head `0034_structured_rubric_authority` 和 `git diff --check` 均通过，`ahamark.db` 哈希 unchanged。临时容器已按精确名称核对后删除，持久卷删除数为 0；现有 AhaMark 容器和卷未启动、复用、删除或修改。根 `node_modules` Junction 指向 `D:\OpenAIData\.codex\worktrees\16d7\AhaMark\node_modules`，本轮只记录路径边界，未删除或替换；为避免触碰已退出的用户测试栈及放大 Junction 的 Next standalone 路径问题，本轮不运行真实浏览器 E2E。GitHub 远端 `codex/grading-confirm-results` 仍为 `04708deecb197a37425721f25842255735b9dbb8`，PR #1 仍 OPEN/Draft/MERGEABLE；本轮没有自动确认、发布、写成绩、放宽门禁、合并、部署或改变 PR 状态。
-
-2026-08-05 Structured-only 最终交付审计收口：后端 `610 passed, 18 skipped, 345 warnings`；前端 `27 files / 168 tests passed`；Next build 19 个静态页面；Prettier、ESLint、TypeScript、Ruff、strict mypy（109 files）、Alembic 单 head `0034_structured_rubric_authority`、git diff --check 全部通过。非历史迁移的 API/worker/前端/脚本 Legacy 精确扫描为 0；0006 固定 DDL hash 回归与 0034 迁移边界通过；`ahamark.db`、根/Web lockfile 无 diff。当时未执行 fresh PostgreSQL 容器 upgrade 或真实浏览器 E2E；离线 PostgreSQL migration SQL 与 SQLite upgrade/downgrade 边界已通过。Structured-only 主体已提交并推送为 `04708deecb197a37425721f25842255735b9dbb8`；未合并、部署或改变 Draft PR 状态。
-
-2026-08-05 最终后端全量验证（未提交）：Structured-only 切换及上述夹具/迁移修复后，后端全量 `610 passed, 18 skipped, 345 warnings`，耗时 `44:53`，无失败或 setup error，`ahamark.db` unchanged。此前 27 个失败已全部在 53 项联合簇中复验通过。Ruff import 排序最后机械修复后需再次执行全仓 Ruff；strict mypy 109 files、Alembic 单 head `0034_structured_rubric_authority`、`git diff --check` 已通过。
-
-2026-08-05 后端剩余测试同步（未提交、进行中）：离线 PostgreSQL 0034 现在生成带 `IF EXISTS ... RAISE EXCEPTION` 的 fail-closed 安全 SQL，并保持在线迁移原有锁后计数语义；联考/识别测试不再依赖已删除的 Legacy Rubric 与 manual-publish 路由，processing manifest 只使用 Structured Set blocker。相关迁移边界 8 passed，AI worker 15 passed，数学 stale 6 passed；识别旧路由断言已更新为明确 404，尚待最终聚焦和全量复验。
-
-2026-08-05 后端 AI worker 夹具继续修复（未提交、进行中）：active Set 复用后，学生答案的 `question_version_reference` 需与 SetItem 的规范题目 token 对齐，否则 worker 正确地返回 stale；已在测试夹具显式对齐。AI 创建请求测试已删除客户端传入 `rubric_version_id`，改由服务端 active Set 推导；尚待 AI worker 组复验。
-
-2026-08-05 后端全量失败簇修复（未提交、进行中）：全量首轮 `583 passed, 18 skipped, 27 failed` 的主要原因是旧 head 断言仍停在 0033，以及数学/AI worker 测试夹具在 Structured-only 工作流已自动创建 active Set 后又重复插入同题 version=1 答案。已将 head 断言切到 0034，并让 `validation_fixture` 精确复用 active SetItem 的答案、Structured Rubric 与 criterion，同时把 MathValidationJob 固定到该 Set；尚待相关测试组及全量复验。
-
-2026-08-05 前端格式门禁收尾（未提交）：对异步卸载保护及 Structured-only API/测试改动涉及的 4 个文件执行仓库现有 Prettier 机械格式化；未改变运行逻辑。随后需重新确认 Prettier、ESLint、TypeScript 与 Next build。
-
-2026-08-05 前端异步卸载竞态修复（未提交）：`AssignmentGenerationPanel` 的异步加载在组件卸载后不再写入 React state；成功路径与异常路径均由 mounted guard 保护，避免向导测试 teardown 后出现 `window is not defined` 未处理 rejection。前端全量现为 `27 files / 168 tests passed`、无 Vitest unhandled error；此前未通过的结果仅由该测试清理竞态造成。其余前端静态门禁尚待本轮复验。
-
-2026-08-05 Structured-only 最终 Legacy 运行时审计收尾（未提交）：恢复对账 CLI 的表清单已删除迁移 `0034` 明确移除的 `rubric_versions/question_rubrics/rubric_items`，改为对账唯一权威链 `reference_answer_versions/structured_rubric_versions/rubric_criteria/structured_rubric_sets/structured_rubric_set_items`；前端测试辅助函数同步采用 Structured 命名，便于精确零残留扫描。该修改不读取或转换旧数据、不放宽恢复/发布/评分门禁，尚待恢复安全测试、前端相关测试与全量门禁复验。
-
-2026-08-05 Structured-only 批改主测试组验证（未提交）：`test_exception_versioning.py` 与 `test_submission_workflow.py` 联合全量 `29 passed, 111 warnings`（142.11s），覆盖 active Set 切换后的历史成绩冻结、新提交使用新 Set、活动 Set 固定版本优先于更新 confirmed Rubric 等场景；`test_confirm_results_contract.py` 全量 `17 passed, 105 warnings`，旧快照在 active Set 漂移后不可复用。上述运行均由数据库守卫确认 `ahamark.db` unchanged；相关 Ruff check/format 通过。
-
-2026-08-05 Structured-only 批改固定版本负向契约（未提交）：新增回归用例，在 active StructuredRubricSet 已固定逐题 Rubric 后，再创建同题更高版本且 `confirmed` 的 StructuredRubricVersion；实际批改结果仍必须写入 active Set ID 和 SetItem 固定的旧 StructuredRubricVersion ID，明确不得按“最新 confirmed”漂移。该用例 `1 passed`，Ruff check/format 通过，`ahamark.db` unchanged。
-
-2026-08-05 Structured-only 异常/版本回归重建（进行中、未提交）：`test_exception_versioning.py` 已移除最后一个 Legacy `RubricVersion` import 和已删除的逐题 Rubric PUT 接口。原场景现通过创建新的不可变 active StructuredRubricSet（新的答案与 Structured Rubric 版本）表达评分权威变化，并明确断言已发布旧答案、旧评分结果和两版成绩快照保持原状态且继续引用旧 Set；后续新提交才使用新的 active Set。尚待该文件实跑。
-
-2026-08-05 Structured-only confirm-results 契约重建（进行中、未提交）：`tests/test_confirm_results_contract.py` 的人工构造结果已改为同时固定 `structured_rubric_set_id` 与逐题 `structured_rubric_version_id`；原“切换 Legacy active rubric version 后旧快照不可复用”用例改为创建并切换全新的 active StructuredRubricSet（含新的答案/Rubric 版本），继续验证旧确认快照必须失效且正式数据计数不变。共享 Structured fixture 支持显式 set/answer/rubric 版本号，便于表达不可变 manifest 的版本漂移；尚待该文件实跑及补充“更新 confirmed Rubric 不得越过 active Set”反例。
+AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。核心原则是：自动化只生成候选或建议，正式题目、答案、评分标准和成绩均由教师确认。
+
+> 新接手任务先读[“接手必读：当前状态、问题与下一步”](#接手必读当前状态问题与下一步)。它是仓库唯一状态账本；历史细节以 Git 提交和 `docs/` 中的验收材料为准。
+
+## 目录
+
+- [接手必读：当前状态、问题与下一步](#接手必读当前状态问题与下一步)
+- [产品能力与边界](#产品能力与边界)
+- [系统结构](#系统结构)
+- [快速开始](#快速开始)
+- [账号与登录](#账号与登录)
+- [教师主流程](#教师主流程)
+- [OCR、公式与 AI 边界](#ocr公式与-ai-边界)
+- [成绩发布与分析](#成绩发布与分析)
+- [测试与质量门禁](#测试与质量门禁)
+- [部署与运维](#部署与运维)
+- [文档索引](#文档索引)
+- [精简变更账本](#精简变更账本)
 
 ## 接手必读：当前状态、问题与下一步
 
-> 2026-08-17 管理员发布用户名账号（开发完成，尚未部署）：登录契约新增独立、唯一、大小写归一化的 `username`，生产 `/auth/login` 只按用户名查询并统一返回“用户名或密码错误”；邮箱继续作为内部兼容和既有协作字段，但 production 邮箱载荷不再登录。Web 登录页只显示“用户名/密码”和“账号由管理员统一发放”，不提供注册、自助找回或账号申请入口；`/auth/register` 保持不存在。教师与学生账号只能由服务器交互式 CLI 使用 `--username/--display-name` 创建，密码通过不可回显的两次输入确认，数据库仅保存 scrypt 哈希，内部邮箱确定性生成为 `<username>@ahamark.local`；用户名限制为 3–64 位小写字母、数字、点、下划线或连字符。新增单线迁移 `0049_usernames -> 0048_class_resources`，既有账号使用 `user-<UUID>` 确定性回填，避免从真实邮箱泄漏或碰撞；发布者可另建明确用户名账号。认证专项最终 `7 passed`，用户名迁移 SQLite 回填/唯一索引/降级及 PostgreSQL 离线 DDL 与迁移链聚焦合计通过，登录页 Vitest `1 passed`；全项目 strict mypy `127 source files`、Ruff、Prettier、目标 ESLint、TypeScript、Alembic single head `0049_usernames` 和 `git diff --check` 通过，`ahamark.db` 前后 absent。尚未构建或部署新镜像、执行 node2 数据库迁移、创建真实用户名账号、使旧 session 失效或修改线上数据；当前公网实例仍运行旧 `5eda608` 镜像和 0048 schema。
+### 30 秒摘要
 
-> 2026-08-17 node2 公网 IP 入口（已部署，手机登录与教师流程待验收）：用户在确认 iKuai 已启用“全部线路、允许访问 IP 为空”的 TCP `222.195.89.236:13300 -> 192.168.2.5:13300` 映射后，明确选择将 AhaMark 通过第二种公网方案开放，不再以“仅校园网可达”为目标。node2 Rootless Docker 仍只发布 Nginx `0.0.0.0:13300 -> 8443`，PostgreSQL、Redis、MinIO、API A/B、Web、Worker 和 Docker socket 均未发布宿主端口；应用现同时允许公网 `222.195.89.236` 和内网 `192.168.2.5` 的 Host、CORS 与 CSRF origin，MinIO 预签名公共端点统一使用公网 IP。部署前已把当时可用的内网 13300 配置、runtime 和证书备份到 `/data/shr/ahamark-backups/public-host-before-20260817T123633Z` 并逐项校验；新自签名证书 SAN 同时包含 localhost、127.0.0.1、192.168.2.5 和 222.195.89.236。API A/B、Worker、Nginx 重建后 API A/B 与 Nginx healthy、Worker Up；服务器端以两个 Host 验证 `/`、`/health`、`/ready` 全部 HTTP 200，随后从客户端 `100.65.17.234` 经 iKuai 实际公网路径复核 TCP 成功且三个路径均由 `222.195.89.236:13300` 返回 200，先前 unknown Host 的 Nginx 444 断开已消失。实际公网入口为 `https://222.195.89.236:13300`；因仍是自签名证书，手机/浏览器必须显式信任或继续访问，尚未完成手机 Safari 登录、教师核心流程或正式 CA 证书验收。该入口当前没有源 IP 白名单，任何能到达 iKuai WAN 映射的来源都可尝试连接；登录限速和应用鉴权不等同于校园网边界。未上传或处理私有 OCR/Gold、图片、正文或身份资料，未改数据库内容、卷、Bucket、镜像标签和其他宿主服务。
+| 项目              | 当前事实（2026-08-17）                                                                                       |
+| ----------------- | ------------------------------------------------------------------------------------------------------------ |
+| 正确工作区        | `C:\Users\Lenovo\.codex\worktrees\06f7\AhaMark`                                                              |
+| 目标分支          | `codex/integrate-question-page-cutter`                                                                       |
+| 产品基线          | `9b129bc43961d296642b6fcb6cb461907f70a367`（本次只整理 README）                                              |
+| 远端状态          | 本地与 `origin/codex/integrate-question-page-cutter` 为 `0 ahead / 0 behind`                                 |
+| 数据库迁移        | Alembic 单 head：`0049_usernames`                                                                            |
+| 最新开发          | 管理员发布用户名账号；代码、迁移和本地镜像已完成，**尚未部署**                                               |
+| node2 在线版本    | 仍运行 `ahamark/api:5eda608`、`ahamark/web:5eda608` 和 schema `0048_class_resources`                         |
+| node2 入口        | `https://222.195.89.236:13300`；自签名证书；公网可达，无来源白名单                                           |
+| 部署范围          | 只发布 Nginx `0.0.0.0:13300 -> 8443`；数据库、Redis、MinIO、API、Web、Worker、Docker socket 均无宿主发布端口 |
+| 私有识别工作      | 暂停；不得继续处理、上传或提交私有 OCR/Gold、图片、正文或来源映射，除非用户再次明确授权                      |
+| GitHub 合作者任务 | 已交由另一 Codex 任务处理；本任务不继续合并候选代码                                                          |
+
+### 当前开发事实
+
+管理员账号登录已经从邮箱改为用户名：
 
-> 2026-08-17 node2 实验室高位端口入口（已部署，外部客户端验收待完成）：经用户明确授权采用 Rootless Docker 直接发布高位端口且不配置应用侧校园 CIDR 白名单，node2 现将唯一宿主发布入口从 `127.0.0.1:3300 -> nginx:8443` 切换为 `0.0.0.0:13300 -> nginx:8443`；PostgreSQL、Redis、MinIO、API A/B、Web、Worker 和 Docker socket 仍未发布宿主端口。部署前已将 `runtime.env`、node2 Compose/Nginx/准备脚本和原证书备份到 `/data/shr/ahamark-backups/lab-port-20260817T115028Z` 并逐项校验 SHA-256；切换前 Compose 渲染只显示 Nginx 发布 13300，Nginx 在现有 Compose 网络内 `nginx -t` 通过，新自签名证书 SAN 包含 `localhost`、`127.0.0.1` 和 `192.168.2.5`。API A/B、Worker、Nginx 已按新环境重建；最终容器显示 API A/B 与 Nginx healthy、Worker Up，服务器本机通过 `127.0.0.1:13300` 和 `192.168.2.5:13300` 访问 `/`、`/health`、`/ready` 均为 HTTP 200，旧 3300 已不监听。实际入口为 `https://192.168.2.5:13300`；因使用自签名证书，未安装信任链的浏览器会提示证书不受信任。当前只证明服务器本机两条地址路径可用；此前客户端 `100.65.17.234` 无法路由至 `192.168.2.5`，尚未从可路由的实验室客户端验收登录、教师核心流程，也尚未从校外测试点确认 13300 不可达。由于绑定 `0.0.0.0` 且没有 CIDR allowlist，“仅校园网可达”取决于 node2 上游路由、NAT 映射和主机/边界防火墙，不能在完成内外双向实测前声称已满足。未上传或处理私有 OCR/Gold、图片、正文、姓名、学号、原文件名或来源映射；未改数据库内容、卷、Bucket、镜像标签或其他宿主 80/81/443/8080/8081 服务。
+- `User.username` 唯一、索引化，登录时执行 NFKC、转小写和格式校验。
+- 用户名为 3–64 位，以字母或数字开头，只允许小写字母、数字、点、下划线和连字符。
+- production `/auth/login` 只接受用户名；邮箱载荷返回统一认证失败，不泄漏账号是否存在。
+- Web 登录页只显示用户名和密码，不提供公共注册、自助找回或账号申请。
+- 教师和学生账号由服务器交互式 CLI 创建；密码输入两次且不回显，数据库只保存 scrypt 哈希。
+- 迁移 `0049_usernames` 使用与邮箱无关的确定性占位用户名回填既有账号，避免泄漏邮箱。
 
-> 2026-08-17 Codex 助手元话术草稿门禁 P31（开发完成，本条对应提交，未部署）：人工校对发现60页仓库外私有 Codex 草稿中有2页返回“助手模式/请继续指定任务”一类操作说明而非图片正文；这不是识别结果，不能采用。生成提示移除容易被复述的角色自称，明确禁止介绍模式、索取任务或图片以及输出操作说明；生成端对“助手模式”“继续指定任务”“未收到/无法查看图片”等稳定元话术直接 fail closed，不能写入 checkpoint。离线标注页使用相同门禁：旧草稿仍可加载审计，但元话术不会自动填入正文、采用按钮禁用并提示重新生成；已进入 localStorage 但尚未核对的元话术在重新载入 seed 时自动清空，已核对正文绝不自动删除。合成 Python `12 passed`，离线 Edge 两页端到端覆盖旧文件拒绝、旧 localStorage 清理、零外网请求和产品写入为0并通过，strict mypy 通过；Ruff 初次仅发现提示常量一行111字符，已拆行等待最终复核。仓库外已准备只保留58个有效结果的修复 checkpoint；尝试仅重跑2页时，外部上传被安全审批拒绝，因此没有发送页面、没有伪造替换结果，也没有覆盖原60页草稿。若用户明确批准“把这2张匿名页面上传到已登录 Codex，仅生成待人工核对草稿”，再继续完成2/2重跑、聚合验证和安全替换。未改数据库、产品 Provider、Tesseract/RapidOCR 开关或默认 Compose，未部署。
+本轮认证开发的验证结果：认证专项 `7 passed`，登录页 Vitest `1 passed`；Ruff、strict mypy（127 个源文件）、Prettier、目标 ESLint、TypeScript、Alembic 单 head 和 `git diff --check` 均通过；`ahamark.db` 不存在且未变化。
 
-> 2026-08-17 比赛用正文快速核对模式 P30（开发完成，本条对应提交，未部署）：按用户明确确认“比赛作品以快速比对高完成度 Codex 正文草稿为主，不要求完整生产标注逻辑”，私有离线标注页默认把图片对照、可编辑正文、题号提示和“正文一致，下一页 / 需要修改 / 插入 `⟦不清⟧`”作为主流程；页面模态、状态、隐私选择、内容/退化标签、题号编辑、区域和公式 LaTeX 全部保留，但默认折叠到“高级结构标注（可选）”。载入 `recognition-private-codex-drafts-v1` 时，仅当正文为空、未核对且建议不含反斜杠、美元定界符或 Markdown fence，才自动填入正文草稿；明确题号建议也只填空字段，二者都不会自动勾选 `text_reviewed`，编辑仍会撤销核对，旧污染建议继续 fail closed。新增独立 `recognition-private-text-review-v1` 轻量导出，只含匿名 `case_id`、正文、题号和 reviewed 状态，不含图片名、document/source 映射、角色、标签、区域、公式或隐私工作字段；所有页必须人工核对，正文为空或疑似含邮箱、手机号、身份标签、绝对路径时禁止导出。原 `recognition-private-gold-v2` 严格导出与门禁保持不变，因此轻量正文校对集不得称为结构化 Gold、真实准确率或生产验证。离线 Edge 两页端到端覆盖默认高级区折叠、Codex 空字段自动带入、已有正文不覆盖、题号自动带入、快速确认、编辑撤销、`⟦不清⟧`、轻量导出字段最小化、完整 Gold 兼容、隐私门禁和零外网请求并通过，产品写入为 0。未读取或提交私有正文/图片/来源映射，未改数据库、API、模型、产品 Provider、Tesseract/RapidOCR 开关或默认 Compose，未部署。
+本地已构建但未上传的镜像：
 
-> 2026-08-17 Codex 正文线性格式与防猜写门禁 P29（开发完成，本条对应提交，未部署）：针对私有 Codex 草稿曾把 `\\mathbf`、`\\nabla`、`\\frac` 等 LaTeX 直接写进线性正文，并根据数学上下文补写图片中未出现的题干或连接词的问题，生成提示现明确要求只逐字转录可见笔画，不得按题号、公式逻辑、教材常识或上下文补全、纠错或增加说明；看不清必须写 `⟦不清⟧` 并进入不确定项。生成端对 `draft_text` 和公式 `linear_text` 中的反斜杠、美元定界符及 Markdown fence 严格 fail closed，LaTeX 只允许位于公式建议的 `latex` 字段。标注页不再把任何 Codex 正文自动写入 `expected_text`，而是在只读建议区显式提示遗漏/猜写风险；只有正文为空且建议为纯线性 Unicode 时，人工点击“采用为正文草稿”才会写入，并继续撤销 `text_reviewed`。旧 v1 草稿仍可加载查看，但含 LaTeX/Markdown 的正文建议禁用采用按钮；此前已进入 localStorage 的未核对 LaTeX 正文可在建议区显式一键清除，已核对正文绝不自动清除。OCR 草稿原有的空白页填入行为不变。合成 Python `8 passed`，离线 Edge 两页端到端通过且产品写入为 0，数据库守卫 unchanged。未自动接受模型建议为 Gold，未改 schema、数据库、产品 Provider、模型、公式自动检测或网络边界，未部署。
+- `ahamark/api:9b129bc`：`sha256:394396195bed52243a7cc9638df3450609e73e53f96e1403a387becf8777be3f`
+- `ahamark/web:9b129bc`：`sha256:d83b5a3db58347ec83b91e459e17d2f26ab73c98f66eedec741a976f72fe9688`
+- 归档 SHA-256：`39a634a70db84837adb6107a38dad3dd8df4909812fb7700952cf72d8dec5f3a`
 
-> 2026-08-17 普通数学输入双重积分补充 P28（开发完成，本条对应提交，未部署）：针对标注时粘贴 `∫∫` 会被有限语法转换器按未知字符拒绝的问题，新增确定性的 `iint_S`、`∫∫_S`、`∬_S` 三种等价输入并生成 `\\iint_{S}` 草稿，同时接受单积分 Unicode `∫_a^b`。界面新增“重积分”模板按钮，完全离线结构预览显示 `∬`；下限/积分区域仍必须显式填写，缺失时继续 fail closed，自动结果仍为 `pending`，不会自动核对或写入 Gold。纯转换器 16 个生成用例与 16 个歧义拒绝通过，离线 Edge 两页端到端通过且产品写入为 0，Prettier 与 `git diff --check` 通过。测试只使用合成变量，不含私有截图正文；未改 schema、数据库、产品 Provider、模型或网络边界，未部署。
+### node2 当前事实
 
-> 2026-08-16 私有标注 Codex 识别草稿 P27（开发完成，本条对应提交，未部署）：按用户对当前指定私有资料的明确授权，私有 Gold 标注草稿阶段暂停使用 Tesseract，改由已登录 Codex CLI 逐页生成待核对正文、真实题号候选、公式线性文本/LaTeX 草稿和不确定项。新增独立 `recognition_private_codex_drafts.py`，必须显式传入上传授权标记，只接受匿名 UUID PNG，强制 seed、图片和输出位于仓库外；调用固定为 ephemeral、忽略用户规则、read-only、无搜索，按页串行执行并在每页后原子写入可断点续跑的 `recognition-private-codex-drafts-v1`。所有结果固定 `manual_review_required=true`，不含 confidence，不是 Gold、准确率或生产证据。标注页继续兼容旧 `recognition-private-drafts-v1`，新增 Codex 草稿严格校验；正文只填空白且未核对页面，题号/公式建议只在当前浏览器内存显示，公式建议不会自动创建 FormulaRegion、写入 localStorage/Gold 或标记 reviewed。一次仓库外匿名单页实跑成功生成严格 JSON；仅报告结构计数，未把正文、图片、路径或身份信息写入 Git/数据库/公开日志。合成单元测试 `4 passed`、离线 Edge 两页端到端通过且网络请求为 0、Ruff、strict mypy、Node 语法与 `git diff --check` 通过；Prettier 已机械格式化目标 HTML。产品 Provider、默认 Compose、Tesseract/RapidOCR 代码和开关均未修改，当前变化只服务于经授权的仓库外私有标注草稿，不部署、不自动识别生产数据。
+公网入口已经部署并实测：
 
-> 2026-08-16 折叠态主区 50/50 比例 P26（开发完成，本条对应提交，未部署）：整体左栏收起后，中间页面画布与右侧标注编辑区不再使用不对称的弹性/固定上限组合，改为严格的 `1fr / 1fr`，各占扣除 48px 左栏和间距后的剩余宽度一半。离线 Edge 合成端到端直接读取两区实际像素宽度并要求差值不超过 2px，同时继续验证右栏比展开左栏时更宽、刷新保持和完整标注导出。未读取私有资料，未改 Gold schema、数据库、API、模型或网络边界，未部署。
+- iKuai 将 `222.195.89.236:13300` 转发到 `192.168.2.5:13300`。
+- Rootless Docker 的 Nginx 监听 `0.0.0.0:13300`；其余业务服务只在 Compose 网络内通信。
+- 服务器端和外部客户端对 `/`、`/health`、`/ready` 的最近验收均为 HTTP 200。
+- 证书为自签名证书，SAN 包含 `localhost`、`127.0.0.1`、`192.168.2.5` 和 `222.195.89.236`；浏览器会显示信任警告。
+- 当前映射没有源 IP 白名单，因此这是公网入口，不应再描述为“仅校园网访问”。登录限速和应用鉴权不构成网络边界。
+- 历史健康检查只证明检查当时的状态；任何后续部署前都必须重新检查容器、迁移、端口、卷和备份。
 
-> 2026-08-16 整体左栏横向折叠 P25（开发完成，本条对应提交，未部署）：按标注操作反馈，新增左栏顶部“收起左栏”入口；桌面宽度下可把约 310px 的整块左栏横向缩为约 48px，仅保留“展开左栏”，同时把右侧编辑栏上限从约 480px 提高到约 600px，中间画布也获得剩余空间。折叠偏好只写入本机 localStorage，刷新后保持，不进入 Gold；窄屏仍使用横向按钮。页面列表自身的次级折叠继续保留。离线 Edge 合成端到端覆盖整体折叠、内容隐藏、左栏宽度显著减少、右栏增宽、刷新保持和重新展开。未读取私有资料，未改 Gold schema、数据库、API、模型或网络边界，未部署。
+可用回滚基线：
 
-> 2026-08-16 页面列表折叠 P24（开发完成，本条对应提交，未部署）：私有 Gold 标注页左侧“页面列表”改为可展开/收起区域，默认展开并在标题右侧显示总页数及醒目的蓝色“收起列表”提示；收起后提示即时变为“展开列表”。收起只隐藏长列表，不改变当前页、标注内容或保存状态，缩放控件会随列表收起上移。离线 Edge 合成端到端新增默认展开、页数和操作提示显示、收起隐藏与提示切换、重新展开覆盖。未读取私有资料，未改 Gold schema、数据库、API、识别模型或网络边界，未部署。
+- 实验室高位端口切换前：`/data/shr/ahamark-backups/lab-port-20260817T115028Z`
+- 公网 Host 切换前：`/data/shr/ahamark-backups/public-host-before-20260817T123633Z`
+- 账号创建后的 PostgreSQL 备份：`/data/shr/ahamark-backups/post-account-20260815T075913Z-5eda608`
 
-> 2026-08-16 公式标注辅助界面优化 P23（开发完成，本条对应提交，未部署）：在不改变 `recognition-private-gold-v2`、原 HTML 路径和有限语法边界的前提下，把公式卡片收敛为“输入或套用常用结构 → 查看结构草稿 → 对照原图作出判断”三步。普通输入停止 450 ms 后自动生成草稿，`Ctrl+Enter` 可立即生成；分式、根号、上标、下标按钮会包裹选中文字，其余结构模板会选中第一个占位内容。LaTeX、线性替代文本和原始状态统一折叠到高级编辑，卡片以中文徽标显示待核对/已人工核对/局部无法转写。普通输入一经变化即撤销 `reviewed`、隐藏旧预览并将旧草稿标为不可确认；自动转换与按钮生成仍只产生 `pending`，歧义继续 fail closed。浏览器验收新增三步布局、默认折叠、智能模板、450 ms 自动更新、`Ctrl+Enter` 歧义说明、编辑撤销核对、旧草稿拒绝确认、中文状态徽标、零外网请求和辅助输入不导出覆盖；纯转换器仍为 12 个生成用例、15 个歧义拒绝。没有读取或上传私有页面/正文，未改 Gold schema、benchmark、数据库、API、模型、自动公式检测或 RapidOCR 开关，未部署。
+### 安全边界
 
-> 2026-08-16 普通数学输入辅助 P22（开发完成，本条对应提交，未部署）：针对人工直接编写 LaTeX 负担过高的问题，在保持 `recognition-private-gold-v2` 和原 HTML 书签路径不变的前提下，新增浏览器/Node 共用、无依赖、完全离线的严格数学输入转换器。公式卡片现在优先接受接近日常书写的有限语法，可确定性生成 LaTeX 与线性替代文本草稿，并用本地 DOM 显示分式、根号、上下标、极限/积分/求和上下限、矩阵和分段函数结构预览；原始 LaTeX 默认折叠到高级编辑。界面提供分式、根号、上标、下标、极限、积分、求和、矩阵和分段函数九类模板按钮，以及“与原图一致 / 需要修改 / 需要辅助转写”三种人工判断。生成结果始终保持 `pending`，编辑普通输入、生成结果或高级 LaTeX 会撤销既有 `reviewed`；只有人工明确选择一致才核对，局部看不清仍可单独标 `unreadable`。转换器只接受显式括号分式、`sqrt(...)`、上下标、`lim ...->...`、`int_a^b`、`sum_(i=1)^n`、严格矩阵/分段行和常见 Unicode；裸除法、连续歧义分式、重复算子界限、括号/参数缺失、不等长矩阵和未知字符 fail closed，不猜测。普通输入只存在当前页面内存，不进入 localStorage 或 Gold，导出 schema 和 benchmark 边界未变，`formula_structure_evaluated=false` 仍固定。纯转换器 12 个生成用例与 15 个歧义拒绝通过，离线 Edge 两页端到端覆盖结构预览、生成后 pending、人工确认、编辑撤销、歧义拒绝、零外网请求和辅助输入不导出并通过；准备器/benchmark 联合 `23 passed`，`ahamark.db` 前后均 absent。目标 Node 语法、Prettier、Ruff、strict mypy 与 `git diff --check` 通过。未读取或上传私有页面/正文，未调用 OCR、模型、CDN 或外部 API，未改数据库、产品 API、公式自动检测、RapidOCR 开关或默认 Compose，未部署；下一步仍是用该辅助界面完成人工 Gold，再按既定路线开发独立公式 predictions v2 和区域/LaTeX 专项指标。
+- 不把私有图片、正文、姓名、学号、原文件名、来源映射、密码、令牌或连接串写入 Git、数据库迁移、公开日志或聊天。
+- 不把 OCR confidence、合成评测或 Fake Provider 指标称为真实准确率。
+- AI/Codex 只能生成 suggestion；不得自动确认答案、评分标准、最终成绩或成绩发布。
+- RapidOCR runtime/download 继续 hard-off；公式区域自动检测默认关闭。
+- 不暴露 PostgreSQL、Redis、MinIO、内部 API、Web 开发端口或 Docker socket。
+- 不使用 `git reset --hard`、`git checkout --`、强制推送、`docker compose down -v` 或 `docker system prune`。
+- 不处理未知卷、非空 Bucket、其他用户容器或 node2 上既有的 80/81/443/8080/8081 服务。
+- SSH 密码和验证码只能由用户在可见终端输入；不得读取、记录或回显。
 
-> 2026-08-16 私有公式结构 Gold 标注 P21（开发完成，本条对应提交，未部署）：针对普通 OCR 无法表达分式、根号覆盖范围、上下标和极限下标的问题，将现有完全离线标注页升级为兼容式 `recognition-private-gold-v2`：原 `expected_text` 继续保存可搜索的线性 Unicode 正文，新增独立 `formula_spans`，逐公式保存匿名 UUID、归一化区域、LaTeX、线性替代文本和 `pending/reviewed/unreadable` 核对状态。页面可在题目框与橙色公式框之间切换；编辑已核对公式会自动撤回核对，公式 pending、已核对但缺 LaTeX/线性文本、缺 `math` 标签、公式疑似含 PII/路径或不可判定页残留公式都会 fail closed。旧 v1 seed 和 localStorage 进度载入时只补空公式集合，不丢既有正文。私有 benchmark 同时接受 Gold v1/v2，但当前 predictions 仍无公式输出，因此报告固定 `formula_structure_evaluated=false` 并只给聚合公式框数，明确不把文字字符指标称为 LaTeX 准确率。准备器与 benchmark 联合 `23 passed, 1 warning`、离线 Edge 两页端到端通过，Ruff、strict mypy、Prettier 与 `git diff --check` 通过，数据库守卫 `ahamark.db unchanged`。本阶段未运行公式模型、未自动生成 LaTeX、未改产品 API/数据库/默认 Compose、未上传私有页面或正文、未部署；下一步是完成一批结构化公式 Gold，再开发独立公式 predictions v2 和区域/LaTeX 专项指标。
+### 已知未完成项
 
-> 2026-08-16 OCR 草稿视觉行重建 P20（开发完成，本条对应提交，未部署）：修复 P19 草稿把每个 Tesseract word block 都用换行连接、导致中文标题出现“多 / 变量 / 函数 / 及 / 其 / 连续 / 性”等大量伪行的问题。准备器现在严格校验每个私有 draft block 的非空文本和 `[x,y,width,height]` 有限页内正面积区域，按垂直重叠/中心距离聚类视觉行，再按 x 坐标确定性排序；中文相邻词块直接拼接，拉丁字母数字词保留空格，真正不同的视觉行才换行。合成回归覆盖乱序输入一致、中文词块合并、拉丁词边界、数学上下标不被拆成新段、非法区域拒绝及缺页 fail closed。对同一 60 页/同一 case ID 的仓库外 v2 草稿包，草稿总行数由 10,590 降至 909（减少 91.4%），中位每页由 172 行降至 16 行；这只是校对体验改进，不宣称阅读顺序或公式结构正确，多栏、分式、矩阵和手写公式仍必须人工核对。聚焦 `5 passed`、数据库守卫 unchanged；未把草稿/正文/图片/来源映射提交 Git，未改产品 API/数据库/模型/默认 Compose，未部署。
+1. 用户名登录尚未同步 node2：未上传镜像、未执行 0049 迁移、未切换容器、未创建用户名账号。
+2. 公网入口仍使用自签名证书；手机 Safari 登录和完整教师流程尚未验收。
+3. 公网端口无来源限制；若后续恢复“仅校园网”目标，需要由 iKuai/防火墙实施边界并做内外双向实测。
+4. 私有 OCR/Gold 的两页修复输出位于仓库外，未合并或覆盖原 60 页草稿；保持暂停。
+5. 真实 OCR、手写、公式、复杂版面和真实 Provider 质量没有生产证据。
 
-> 2026-08-16 OCR 草稿校对与中文标签 P19（开发完成，本条对应提交，未部署）：P18 标注准备器新增可选私有 Tesseract predictions 输入，只从已选 60 页生成约 60 KiB 的 `recognition-private-drafts-v1`，严格绑定同一 dataset/case UUID，输出只含 `case_id/draft_text`，不复制 Provider、路径或未选 185 页；仍在全部图片预检后与 seed、私有映射一起原子发布。离线界面新增 OCR 草稿载入和独立 `text_reviewed` 工作状态：草稿只填空白且未核对的正文，不覆盖已有编辑；正文任何变化都会自动取消“已逐字核对”，annotated 页未再次确认就不能导出，最终 Gold 剥离草稿和核对状态。页面模态、八种退化标签和五种内容标签均显示中文行动释义，底层英文 enum 不变；`negative` 明确是“本页没有应识别题区”的困难负例，不代表学生答错。新的仓库外草稿校对包仍为同一确定抽样：60 页/29 文档/25 参考答案/35 学生材料/50 文字 PDF/9 扫描/1 照片，60 个草稿与 seed 一一匹配且全部 pending。准备器 `3 passed`，浏览器端到端覆盖草稿导入、正文核对门禁、隐私门禁、题区和精确 Gold 导出并通过，数据库守卫 unchanged；未自动接受 OCR 为 Gold、未生成 accuracy/attestation、未改产品 API/数据库/模型/默认 Compose，未部署。
+### 下一步顺序
 
-> 2026-08-16 私有 OCR Gold 标注准备 P18（开发完成，本条对应提交，未部署）：在 P16/P17 仓库外匿名诊断清单之上新增严格 `recognition_private_gold_prepare.py`，以文档为单位做确定性分层抽样，默认每份来源最多 3 页，优先覆盖扫描/照片并平衡参考答案与学生/作业材料；全部选中图片先校验 PNG、尺寸、字节/像素上限和私有来源映射一致性，再通过临时目录原子发布，失败不留下半套标注包。新增完全离线 `recognition_private_gold_annotation_v1.html`：只从本地载入匿名 UUID PNG，支持正文、题号、题区、模态、内容/退化标签、完整性决定和隐私复核，按 dataset UUID 在浏览器 localStorage 自动保存；缺图、缺标签、pending、未隐私复核、不可判定页仍含 Gold，或正文出现明显邮箱、手机号、姓名/学号标签和绝对路径时均 fail closed，导出精确 `recognition-private-gold-v1` 且剥离来源、角色和隐私工作字段。用现有 245 页生成的仓库外待标注包含 60 页、29 个独立匿名文档，最大每文档 3 页：25 页参考答案、35 页学生/作业材料，50 页文字 PDF、9 页扫描、唯一 1 张照片；公开 seed 无绝对路径/明显 PII，60 张图一一匹配，全部仍为 pending，未伪造人工答案或 accuracy。准备器 `3 passed`、离线浏览器 2 页端到端 privacy gate/export 验收通过，数据库守卫 `ahamark.db unchanged`；数据、Gold 进度、来源映射、图片和正文仍只在仓库外。未生成 attestation/accuracy 报告，未修改产品 API/数据库/模型/默认 Compose，未部署；下一步必须由人工在去标识页面上完成 Gold，之后才能比较 Tesseract/其他 OCR。
+若用户明确要求部署用户名版本：
 
-> 2026-08-16 私有全量资料低置信 OCR 门禁 P17（开发完成，本条对应提交，未部署）：继续只读使用用户授权的同一仓库外私有资料，将全部 244 个 PDF 页面和 1 张照片随机化渲染后在断网、只读 Tesseract 容器中执行；245/245 页均成功且非空，总耗时约 234 秒，中位单页约 0.91 秒、P95 约 1.52 秒。217 个文字 PDF 页平均置信度约 0.66、低置信块约 44%；27 个扫描/手写页约 0.35/88%；照片约 0.39/83%；参考答案 131 页约 0.66/43%，学生/作业材料 114 页约 0.59/53%。这些是运行稳定性与 Provider 自报置信诊断，不是人工 gold accuracy；原文件名、OCR 正文、页面和私有来源映射仍只在仓库外，没有进入 Git、数据库或公开报告。全量页面质量复核发现 27 个扫描页中 9 页仅凭图像指标会被判为 good，但其 OCR 仍普遍低置信；进一步审计确认 `fuse_text_sources` 会把 Provider 的 `low_confidence` 无条件改成 `adopted`，下游也未按正文块数值置信度再次门禁。现 OCR-only 或 PDF 未覆盖区域的 OCR 块若 status 为 low_confidence 或 confidence <0.70，融合后直接保持 `manual_required`；Assignment 抽取对所有非 `pdf_text:` 证据再次检查 `<0.70`，写公共 `OCR_TEXT_LOW_CONFIDENCE_REVIEW_REQUIRED`、禁止 eligible/批量自动采用，并在教师端显示“扫描文字置信度较低，请对照原文核对”。低置信文本仍保留供教师编辑，不删除、不自动拒绝；可靠 PDF 文字层不受影响。三个完整相关后端文件 `71 passed, 2 skipped, 2 warnings`、聚焦三层门禁 `3 passed`、教师组件 `9 passed`，均由数据库守卫确认 `ahamark.db unchanged`；目标 Ruff、strict mypy、py_compile、Prettier、ESLint、TypeScript 与 `git diff --check` 通过。未确认题目、答案、Rubric、评分或成绩，未切换默认 Compose，未部署。
+1. 实时核对 node2 服务、schema、端口、磁盘和备份目录。
+2. 新建 PostgreSQL custom-format 备份并验证 `pg_restore --list`。
+3. 上传并校验本地镜像归档，加载固定标签。
+4. 使用新 API 镜像执行 `alembic upgrade head`，确认唯一 head 为 `0049_usernames`。
+5. 只重建 API A/B、Worker 和 Web；保持 Nginx 13300 边界不变。
+6. 交互式创建用户名账号，密码只由用户输入。
+7. 验收 `/`、`/health`、`/ready`、用户名登录、退出和教师核心流程；确认 production 邮箱登录失败。
+8. 更新本状态账本，记录备份、镜像、迁移、验收和回滚事实后再提交。
 
-> 2026-08-16 私有数学分析资料 Tesseract 诊断 P16（完成首轮，本条对应提交，未部署）：经用户明确授权后，只读盘点仓库外资料并安全检查答案压缩包，合计 244 个 PDF 页面和 1 张照片；原文件含真实姓名/学号，未复制进 Git、普通 Docker context、数据库或公开报告，也未上传外部服务。仓库外以随机 UUID 生成 48 个代表页（41 个文字 PDF、6 个扫描页、1 张照片；其中 11 页来自参考答案），在 `--network none --read-only` Tesseract 容器内完成 48/48 非空识别，总耗时约 38.6 秒。首轮唯一失败由真实 OCR 文本中的双引号触发：原 TSV 解析器错误启用 CSV quote 语义，吞并后续 tab/newline 后被安全门禁拒绝；现明确使用 `QUOTE_NONE`，新增双引号字面文本回归并在修复镜像中整批复测通过，未放宽危险 Unicode、坐标、置信度或总量门禁。聚合诊断显示参考答案页平均置信度约 0.83、低置信块约 16%；学生/作业材料约 0.61/50%；扫描手写页约 0.34/89%，照片约 0.39/83%，因此 Tesseract 只适合作为印刷文字/PDF 后备，不能承担手写数学或公式识别。PDF 文字层仅作伪参考的规范化序列相似度不是真实 accuracy；资料尚未去标识、没有人工 gold，固定 `accuracy_claim=false`。同页对照的 PSM 3 在参考答案上多数改善，但学生电子页改善/持平/退化各 10 页，扫描/照片平均块数由约 131 降至 53，可能漏内容，故不全局替换当前覆盖更保守的 PSM 6；后续应先建立人工 gold，再按页面类型路由。代码回归 `102 passed, 2 skipped, 2 warnings`，数据库守卫确认 `ahamark.db unchanged`；Provider 聚焦 `14 passed`，Ruff 通过。未确认题目、答案、Rubric、评分或成绩，未切默认 Compose、未运行真实产品作业、未部署。
+当前用户已明确“不急着同步服务器”，所以以上步骤均未执行。
 
-> 2026-08-16 开源 Tesseract OCR 基线 P15（开发完成，本条对应提交，未部署）：经官方许可证核对后，选择引擎与官方 `tessdata/tessdata_best` 均明确 Apache-2.0 的 Tesseract 作为第一条可落地开源 OCR，RapidOCR 继续 hard-off 作为实验对照。新增默认关闭的显式本地 Tesseract Provider：只有绝对二进制路径、`chi_sim/eng` 语言包、Apache-2.0 NOTICE、精确版本和四项 SHA-256 全部通过，才允许无 shell、有限时地以 stdin/stdout 执行；TSV 输出严格限制 UTF-8、字段、行/块/字符总量、有限置信度、页内正面积区域及危险 Unicode，任何失败继续由多页预检原子回滚。题区、质量统计、提取与教材答案来源已把 `tesseract:` 纳入可信 OCR，但教师 API 仍只显示粗粒度 `ocr`。独立 `Dockerfile.tesseract` 锁定已验证的 Python Bookworm digest、Tesseract 5.3.0 和简中/英文 Debian 数据包；默认 Dockerfile/Compose 未切换。真实 smoke 在 `--network none --read-only` 容器中从脱敏合成图片按 TSV 行/词层级稳定读出 `1.AhaMark → 开源 → 文字 → 识别 → 计算 → 2+3=5` 及坐标、置信度；镜像构建成功。上游识别、安全和仓库防泄漏组合为 `101 passed, 2 skipped, 2 warnings`，下游题目提取/教材来源为 `46 passed, 2 warnings`，聚焦阅读顺序/PDF 后备为 `14 passed, 31 deselected`，最终受影响复检为 `20 passed, 31 deselected, 2 warnings`，均由数据库守卫确认 `ahamark.db unchanged`；目标 Ruff、strict mypy、py_compile 与 `git diff --check` 通过。未运行后端/前端全量、真实试卷 benchmark、默认 Compose 切换或部署；当前证据仍不代表真实试卷、手写或公式准确率。启用为默认生产镜像前仍需锁定 Python wheels/hash，并把当前子进程完成后才执行的 4 MiB stdout 校验升级为运行中有界流读取，避免异常本地二进制或极端页面在超时前占用过多内存。
+## 产品能力与边界
 
-> Git 状态更正：P11 已提交并推送为 `694efe0`，P12 为 `df25928`，P13/P14 为 `91c9f52`，P15 为 `72dc2cf`，P16 为 `2f6ea6c`，P17 为 `f569608`，P18 为 `f73b4c7`，P19 为 `60f693c`，均未部署；P20 为本条对应提交。下方较早记录中的“未暂存/提交/推送”是提交前验证措辞。
+AhaMark 已实现教师侧的作业创建、资料整理、题目与区域确认、学生答卷上传、批改建议、教师复核、最终成绩快照、成绩发布记录、报表和学情分析。
 
-> P12 synthetic 能力补充：UTF-8 A/B 证明此前中文替换符只是 Windows GBK 控制台显示问题，模型内嵌字符表与 v3.9.2 外置字典对同一中文样本输出一致。五类断网探针中，中英题干、低对比、GaussianBlur(2.2) 与轻旋转 3°均能得到可读文本；Unicode 数学样本的第一段 `x² + α ≤ 10` 保留较好，但积分段 `∫ f(x) dx` 被错误识别并发生次序/字符退化。该证据进一步确认 RapidOCR 可作为普通印刷文字基线，但不能当公式 OCR 或 LaTeX 恢复器；数学结构仍必须保留现有 manual review 风险门禁。
+产品始终区分三层数据：
 
-> 2026-08-16 真实 RapidOCR 仓外取证、断网 smoke 与 v2 运行时桥 P12-P14（P12 已提交并推送 `df25928`；P13/P14 当前未提交；均未部署）：经用户明确授权后，仅从官方来源取得并在仓库外保存精确依赖与模型；Windows 隔离环境和 Linux `--network none --read-only` 容器都以离线 wheelhouse 完成 synthetic 印刷文字推理，未把 wheel、模型、字典、字体或审批材料放入 Git、普通 Docker context、node2 或产品数据库。Windows 连续运行、中文/英文、低对比、模糊和轻旋转探针验证了基础印刷文字能力；积分样本发生明显字符与次序退化，因此不代表真实试卷、公式或 LaTeX 能力。P13 将 artifact schema 升为仅允许 `det/cls/rec` 的 `ahamark-rapidocr-artifacts-v2`，字符表改为验证 rec ONNX metadata，推理不再依赖外置字典或字体；旧 v1、额外角色、路径逃逸、链接/hardlink、哈希/身份漂移和仓库/Docker context 私有 artifact 均 fail closed。P14 新增惰性 runtime bridge：只有显式调用 closure 时才精确核对 RapidOCR/ONNX Runtime 版本、动态导入模块、以 CPU provider 检查字符 metadata，并使用真实 `EngineType.ONNXRUNTIME` 构造；该桥尚未接 Settings 或主 Provider。许可仍是硬阻断：工程代码许可证不等于模型权利，当前未伪造批准、未生成受信 manifest、未开放 runtime/download。P13/P14 公共与安全组合最终 `30 passed, 1 skipped, 1 warning`；独立运行时组合 `22 passed, 1 skipped`，Ruff、format、strict mypy 与 diff-check 通过。
+1. **候选或建议**：OCR、规则或 AI 产出的草稿，可失败、过期或被替换。
+2. **教师确认内容**：教师明确确认后的题目、答案、Structured Rubric 和评分决定。
+3. **正式结果**：满足版本与完整性门禁后生成的 `SubmissionScoreSnapshot` 和 `GradeRelease`。
 
-> 2026-08-16 显式本地 RapidOCR artifact adapter 与公共识别面收口 P11（开发完成，未暂存/提交/推送/部署）：默认 API/Worker 镜像安装由 `.[ocr]` 改为核心包 `.`，普通镜像不再默认安装 RapidOCR/ONNX Runtime；新增纯本地、无网络的严格 artifact manifest 校验和仅接受已验证 bundle + 注入 constructor 的 RapidOCR v3 adapter，固定校验 manifest SHA-256、重复字段/NaN、五个 `det/cls/rec/keys/font` 角色、声明总大小、NFC 相对路径唯一性与 root confinement、普通文件/符号链接/reparse/hardlink、文件大小/哈希、本地许可证明确批准及 canonical UUID，并在构造前以 `st_dev/st_ino/st_size/st_mtime_ns` 轻量复核文件身份。Adapter 只生成显式本地绝对路径参数，不 import RapidOCR/ONNX、不联网、不下载、不零参构造；该 adapter 尚未接入 `provider_from_settings`，`RECOGNITION_RAPIDOCR_RUNTIME_ENABLED` 与模型下载在所有环境仍 hard-off。答案识别 RapidOCR 不再自行构造，必须共用主文字识别工厂及 readiness 门，不能从 answer 路径绕过。教师公共识别 API 收紧为白名单字段，readiness 改用真实 Provider 安全探测；OCR 不可用时只有全部页面均为 PDF 才允许依赖文字层启动，混合 PDF/图片不再因“任一 PDF”误报 `can_start`；页面 API 已移除质量原始分数，仅保留行动等级/问题，presigned URL 契约未修改。首次联合回归为 `1 failed, 144 passed, 3 skipped`，唯一失败是既有前端测试仍断言旧文案，修正后无持续失败；独立复审收口后核心精确为 `57 passed, 1 skipped, 1 warning`，公共相关 `23 passed`，前端 `8 passed`，均 `ahamark.db unchanged`；目标 Ruff、strict mypy、compileall、TypeScript `tsc`、ESLint、Prettier 与 `git diff --check` 通过。未运行全仓测试、Next production build、Docker build、真实模型、真实 OCR、真实资料或部署。启用前仍必须由运维提供同一只读 artifact mount 与严格 ACL；当前仅在构造前复核路径身份，检查后到库打开文件之间的句柄级 TOCTOU 尚未闭合。Docker base image 与 Python 依赖尚未按 digest/wheel hash 锁定；现有 presigned URL 仍是最长 300 秒 bearer URL，未在本轮缩短或改造成单次令牌。
+任何候选都不能绕过教师确认直接进入正式结果。没有完整快照表示“未完成”，不得按零分处理。
 
-> 2026-08-15 私有离线 OCR benchmark 与 RapidOCR 无下载运行时硬边界 P9/P10（开发完成，未部署）：私有 benchmark 只接受严格分离的 `gold.json / predictions.json / attestation.json` 三项输入，并要求显式私有 `--image-root`；只评测仓外已授权、去标识的本地图片与预生成预测，不连接数据库或网络、不下载或加载模型。报告只输出 overall、模态与退化层的聚合指标；独立文档少于 2 的小层固定抑制，precision/recall 等零支持比率输出 JSON `null` 并伴随 support，当前信任状态固定 `self_attested_evaluation_only / eligible_for_pilot=false / production_ready=false`，尚未接入任何真实数据。RapidOCR 运行与模型下载开关在所有环境均硬关闭；默认路径不 import RapidOCR、不加载模型、不联网，只有测试注入 `engine_factory` 的 adapter 可运行，并对 artifact 字节、content type、尺寸、块数/文本总量、四点页内有限正面积框、有限 `0..1` score、非空文本及 bidi control/isolate、surrogate、noncharacter 做稳定 fail-closed 校验。Provider readiness 在 GET providers、create job 与 run preflight 共享同一安全判断；可靠 PDF 文字层可在 OCR 不可用或 readiness 抛错时通过 `can_start` 保守降级完成，image-only 稳定返回 503 且不泄漏内部异常。无数据库或破坏性 API 变更、无迁移、无部署。主代理组合在复审收口前持续无失败，最终记录 `102 passed, 2 skipped, 1 warning`；复审后精确后端为 `52 passed, 1 warning`，前端 `8 passed`，均 `ahamark.db unchanged`，目标 Ruff、strict mypy、TypeScript `tsc`、ESLint、Prettier 与 `git diff --check` 通过。未运行全仓测试、Next production build、Docker、真实 OCR、真实模型或真实资料。
+## 系统结构
 
-> 2026-08-15 公式区域自动检测准入硬门 P8（开发完成，已提交并推送 `1739aa0`，未部署）：新增与公式 OCR 完全分离的 `FormulaRegionDetector` 纯内存协议、严格 artifact/proposal 校验和唯一 `UnavailableFormulaRegionDetector`；模块不导入数据库、模型运行时、网络或下载能力，也未被 pipeline、API、UI 或 `FormulaRegion` 创建路径引用。配置新增 `FORMULA_REGION_DETECTION_ENABLED=false` 与 `FORMULA_REGION_DETECTION_MODEL_DOWNLOAD_ALLOWED=false`，本阶段在 development/test/production 任一开关设为 true 都直接拒绝 Settings，运行时模型下载始终禁止；教师界面保持现有“手工框选公式→单独识别→显式确认”，不显示自动定位入口或空建议。新增纯离线 `formula-region-readiness-v1` 校验器，只读取严格 JSON metadata：真实去标识 held-out test 的 text_pdf/scan/photo 每层至少 30 个独立 document、100 个可判定页、50 个公式页、20 个负页，十二类困难负例各至少 10 个 document；代码/权重许可证、本地获取授权、document provenance 隔离、双人盲审/裁决、预测封存早于解盲、预测 case 全覆盖与 canonical prediction SHA-256 绑定均为门禁。真实 test 子集调用既有 IoU evaluator；overall 与三模态分别要求 precision/recall/formula coverage ≥0.90、fragmentation/merge 每真值≤0.05，困难负页单独要求 FP/page≤0.10，避免总体指标掩盖单层退化或负页误报。公开报告只含聚合 counts/metrics、稳定 blocker codes 和固定 detector 身份已由私有证明核对布尔，不回显 case/document/bbox、预测摘要、许可证/授权 ID、detector 自由名称/版本或 PII；值级 email、大陆手机号、带标签姓名/学号同样拒绝。由于尚无受控 trust registry 或签名验证，任何自填证明都固定为 `status=self_attested_evaluation_only`、`eligible_for_pilot=false`，并带 `TRUSTED_ATTESTATION_REQUIRED`；同时固定 `enabled=false / production_ready=false / human_confirmation_required=true / writes_product_data=false`，即使全部 self-attested 数据和质量门通过也不会启用产品。最终 adapter/preproduction/evaluator/formula recognition/config 联合回归 `90 passed, 1 warning`，最新 readiness 专项 `24 passed`，均 `ahamark.db unchanged`；目标 Ruff lint/format、两个新模块 strict mypy/py_compile 与 `git diff --check` 通过。未修改前端、模型、数据库、迁移或服务器，未下载权重、读取真实资料、访问网络、运行真实 detector、创建任何自动 FormulaRegion，未运行全仓测试、Next、Docker 或部署。下一步只有在用户明确提供并授权仓外脱敏真实集、模型下载/许可证审查和可信签名登记方案后，才可讨论离线 pilot；仍不得直接接入产品。
-
-> 2026-08-15 数学结构与阅读顺序风险路由 P7（开发完成，已提交并推送 `120f56e`，未部署）：新增确定性 `math-structure-risk-v1` 纯检测器，在 OCR/PDF 融合和页面质量判断之后、持久化之前识别高信号 Unicode 上下标/Greek/数学符号、受限 LaTeX 结构痕迹、局部真实 2×2 矩阵/分段布局与严格双栏阅读顺序风险；仅输出公共 `FORMULA_REVIEW_REQUIRED / MATH_LAYOUT_REVIEW_REQUIRED / READING_ORDER_CONFLICT` 及脱敏的块序号和归一化局部区域。同一 code 可对应多个空间连通的局部 evidence，远隔公式不会形成跨页大包围框，二维布局必须四格占位；Windows 路径、字面 `\\n`、普通中英文题干、表格线、几何标签和普通算式均有负例。检测器不改写文本或顺序、不生成/修复 LaTeX、不自动创建或确认 `FormulaRegion`，只把命中且原为 adopted 的块提升为 `manual_required`，并保留 source conflict 等原状态。页面 API、文件分析和题目抽取只传播白名单风险 code、block indexes 与 region，不公开原文、LaTeX、Provider、阈值或内部统计；数学来源冲突只由脱敏 `math_symbol_conflict_count` 驱动，普通来源冲突或页面质量 manual 不会被误标为数学冲突。教师端以中文行动提示展示三类风险；公式/布局风险禁止自动采用但允许教师显式核对，未解决的双栏阅读顺序在识别直接确认与 Assignment disposition/bulk accept 中动态按当前候选 region 与局部 evidence 相交复查，只有 `content_text/content_latex` 实际变化才算解决，空 `edited`、只改题号或分值、no-op 内容不能绕过；派生 draft 会复制并重映页面分析，其他候选不会因 page ID 变化丢失门禁。P5 同期补齐一个对象清理窗口：新衍生图上传后读取旧 PPR/key 异常也进入同一 rollback/cleanup 路径，不留下本 attempt 已知新对象。最终 P5–P7 后端联合回归 `132 passed, 2 skipped, 1 warning`、`ahamark.db unchanged`；两个 skip 仍为真实 RapidOCR 条件测试。前端两文件 `15 passed`，TypeScript `--noEmit`、目标 ESLint/Prettier、后端目标 Ruff、detector strict mypy 与 `git diff --check` 通过。能力边界：这些测试证明合成信号的确定性、风险路由、隐私和事务回滚，不证明真实 OCR/公式转写、LaTeX 语义、手写公式、真实多栏/表格/几何图的生产精召率；未使用真实资料或真实模型，未运行全仓后端/前端测试、Next production build、Docker 或部署，未自动确认题目/答案/Rubric/成绩或发布。
-
-> 2026-08-15 页面图像质量实测与教师门禁 P6（开发完成，已提交并推送 `ead0db3`，未部署）：识别预检现在对增强前 rendered 原图执行确定性 Pillow-only 测量，算法版本 `pil-page-quality-v1`，覆盖像素分辨率、边缘清晰度、全局对比度、光照不均、小角度倾斜和内容贴边裁切风险；所有持久化 score 均为 `0..1` 且 `1=好`，取代 `quality_score=0.80 / blur_score=0.50 / shadow_score=0.50` 固定假值，无需迁移。页面分为 `good / review_required / rescan_required`：review/rescan 页的 adopted 识别块统一降为 `manual_required`；严重页仍以 completed 结果保留原图、处理图和重试入口供教师诊断，但识别候选确认、Assignment Generation 自动采用以及显式 accept/modify 均由服务端阻断 rescan 页，review 页允许教师对照原页后显式修改或接受。教师移动题区后会按当前 regions 与同 revision 页面分析重新计算质量 warning，物化前再次动态检查，不能靠旧 warning 绕过；候选确认要求 region 页集合非空且当前 job 对应 PageProcessingResult 完整 completed，同时支持多页任务只确认所选单题。可靠 PDF 豁免仅限所有 adopted 正文均来自 `pdf_text:*` 且不存在 OCR 补区或来源冲突；单个 PDF 页眉不能替严重低质 OCR 主体豁免重扫。pages API 新增只含 `quality.level/issues` 的公共投影，并从 `processing_parameters.page_quality` 响应中移除私有 metrics；为兼容现有调用，其他既有顶层 processing 参数仍暂时保留，后续若收紧需独立版本化。教师工作台以红色“重新拍摄或扫描”、琥珀“对照原页核对”和低干扰绿色提示呈现六类行动原因，不显示质量 raw metric、Provider 或 warning code；题目抽取复核同步 rescan 禁用和 review 提示。运行时合成图覆盖 clear/tiny/blur/low contrast/gradient shadow/±3° skew/crop risk/blank、阈值与确定性；质量测量异常和最终 commit 故障继续遵守 P5 全页预检、数据库原子回滚和新对象清理。最终后端主组合 `98 passed, 2 skipped, 1 warning`，两个 skip 仍为真实 RapidOCR 条件测试，`ahamark.db unchanged`；前端两文件 `14 passed`，TypeScript `--noEmit`、目标 ESLint/Prettier、后端目标 Ruff、3 个核心文件 strict mypy 与 `git diff --check` 通过。必须保留的能力边界：这些阈值仅是 synthetic contract baseline，不证明真实扫描件、手机透视、真实阴影、语义裁切、手写体或复杂公式的识别准确率；未使用真实学生资料、真实 OCR/公式模型，未运行全量测试、Next production build、Docker 或部署，未自动确认题目/答案/Rubric/成绩或发布。对象存储硬杀孤儿边界仍与 P5 相同。
-
-> 2026-08-15 识别多页预检、原子发布与陈旧结果隔离 P5（开发完成，已提交并推送 `c357e06`，未部署）：`RecognitionJob` 现先在内存中预检全部页面，任一页转换、Provider、融合或字符完整性失败时只更新任务失败状态，不新增或替换 `PageProcessingResult / RecognitionBlock / QuestionCandidate`；全部页面预检通过后才上传带随机键的衍生图，并在一个数据库事务中一次替换页面结果、识别块、候选和 `PaperPage` 预览指针。最终发布 commit、结构化或对象上传异常会 rollback 并清理本次已知新对象，旧完整结果及旧对象引用保持不变；Worker 在获取存储和初始化 Provider 前先以行锁原子认领 running attempt，失败状态写入同时校验 attempt 所有权，重复投递的旧 Worker 失权后只清理自己的新对象，不能把较新的 running/completed attempt 覆盖为 failed；成功发布后旧衍生对象仅做 best-effort 清理。任务 queued/running/failed 时，页面内容、识别块、候选、公式候选及编辑/确认接口 fail closed，文件分析和 Assignment Generation 也只消费同一 completed 任务，避免失败重试期间泄漏、拼接或复用旧证据；单页“重试”统一排队整批重跑且不提前改动已发布结果。已人工编辑、接受、确认、存在 correction 或公式区域的同任务重跑会在状态变化前返回 409，保持原 completed 结果可见，必须新建任务以避免覆盖教师工作；页面旋转/裁剪参数在整批重跑预检中继续生效。主组合回归为 `84 passed, 2 skipped, 1 warning`，两个 skip 为真实 RapidOCR 条件测试，`ahamark.db unchanged`；教师 workspace 为 `1 file / 5 tests passed`，TypeScript `--noEmit`、目标 ESLint/Prettier、后端目标 Ruff/py_compile、下游 4 文件 strict mypy 与 `git diff --check` 通过；三个 API 文件 strict mypy 仍只报告既有 `workers/tasks/ocr.py:16` Celery untyped decorator，不宣称该组合全绿。未新增迁移，未运行全量测试、Next production build、Docker、真实资料或真实模型，未部署。必须保留的存储边界：当前对象存储没有事务、rename 或 list；进程可捕获异常会按精确键清理，但 Worker 在对象上传后、数据库提交前被硬杀仍可能留下不可见孤儿对象，需后续生命周期清扫；这不破坏数据库可见结果的全有全无，但不得宣称对象存储本身具备原子事务。
-
-> 2026-08-15 文字层/OCR 保守证据融合纵向切片（开发完成，已提交并推送 `f5cb1b6`，未部署）：识别页现在分别保留 PDF 文字层与 OCR 原始块，并以 `adopted / source_agreement / source_conflict / manual_required / unreliable_source` 标记采用、同意、冲突、数学冲突人工复核和不可靠来源；可靠文字层优先，OCR 只采用文字层未覆盖的区域，多个互相重叠但不与 PDF 重叠的 OCR 块不会彼此错误抑制，同一 PDF 块遇到多个数学冲突也会按索引幂等标记人工复核，矩阵分段空白也不会被删除后误判一致。页面仅持久化脱敏的 `source_conflict_count / math_symbol_conflict_count / missing_region_count / source_agreement_ratio`，不把冲突原文写入指标；采用文本在写入 `RecognitionBlock` 前执行字符完整性门禁。新融合正文只采用 adopted/manual_required；为兼容历史数据，既有 `recognized / low_confidence` 块继续参与正文、文件来源统计和生成提取，不会被新版静默判为 unavailable。候选来源计算纳入同区域 source_conflict，混合/缺失补充/普通冲突/数学冲突均保守要求教师核对；区域正文、证据和冲突使用统一中心点归属，生成证据只保存冲突块 ID。教师 OCR 工作台使用“对照原页核对”“重点核对补充内容”等行动中文，隐藏 provider/version/raw stage/job ID，且不向教师回显内部错误详情。主代理最终后端组合（recognition、PDF content、text integrity、synthetic evaluator、extraction conflict）单次为 `49 passed, 2 skipped, 1 warning`，完整 assignment generation + question extraction 为 `40 passed, 1 warning`，两组均 `ahamark.db unchanged`；两个 skip 仍为真实 RapidOCR 条件测试。教师 workspace 组件为 `1 file / 4 tests passed`，TypeScript `--noEmit`、目标 ESLint/Prettier 通过；目标 Ruff check、Ruff format、compileall 通过。strict mypy 核心 3 文件与 generation 2 文件分别通过；包含 API 的组合仍只报告既有 `workers/tasks/ocr.py:13` Celery untyped decorator，因此不得宣称该 API 组合 strict mypy 全绿。仍未运行后端/前端全量、Next production build、Docker 或真实模型。本轮没有新增或修改迁移，没有读取真实资料、调用真实模型、自动确认题目/答案/Rubric/成绩或发布。该条当时记录的“RecognitionJob 逐页提交、原子替换尚未实现”边界已由上方 P5 专项取代；P5 之后应以上方多页预检、单事务发布及对象存储硬杀孤儿边界为准。
-
-> 2026-08-13 文件删除 404 与历史分析残留修复（完成、未暂存/提交/推送/正式部署）：教师点击红色删除按钮后浏览器已连续发出 DELETE，但 API 返回 404；只读数据库核对确认目标 `e2d23f35-7f1b-481a-97dd-411ba98af3fa` 实际早已是 `stored_files.status=deleted`、当前活动试卷页面数为 0，旧生成 revision 的 confirmed 文件分析仍被列表返回，造成“页面看得到、实际上已删除、再次点击没反应”的假卡片。文件分析列表现只返回当前作业 active paper 中仍有页面关联且 StoredFile 为 ready/pending 的文件，已删除文件和历史孤立分析不会再显示；删除成功新增明确“文件已删除，请重新整理”状态反馈。没有再次删除该对象，也没有修改当前真实作业其他文件、题目或确认状态。聚焦验证：后端文件分析+assignment 两文件 `19 passed`、前端整理面板 `1 file / 16 tests passed`，`ahamark.db unchanged`；TypeScript（`--incremental false`）、目标 Ruff、`git diff --check` 与 Docker Web/API production build 通过，未运行全量。隔离预览已只替换 Web/API，Worker 和三个数据容器未替换，PostgreSQL/Redis/MinIO ID 保持不变；六服务 healthy，Web/API HTTP 200，Alembic 唯一 head 为 `0048_class_resources`。
-
-> 2026-08-13 文件用途确认处可删除上传文件（完成、未暂存/提交/推送/正式部署）：每个仍有效的文件卡片右上角新增红色“删除文件”，删除前明确告知文件对应页面也会删除且之后需要重新整理；继续复用既有 assignment/file 精确授权、草稿限制、对象存储可恢复删除和页面重排契约，不新增宽泛对象删除。删除成功后，该文件的用途分析标记 superseded，不再继续显示；当前未失效生成任务与草稿统一标记 stale，旧题目抽取结果不能继续写入，教师需显式重新整理。只删除教师明确选择的单个上传文件，不自动删除其他文件、不自动改写题目/答案/Rubric、不写入成绩或发布。聚焦验证：assignment 后端完整文件 `11 passed`、前端整理面板 `1 file / 16 tests passed`，`ahamark.db unchanged`；TypeScript（`--incremental false`）、目标 Ruff、`git diff --check` 与 Docker Web/API production build 通过，未运行后端/前端全量。隔离预览已只替换 Web/API，Worker 未替换，PostgreSQL/Redis/MinIO 容器 ID 保持不变，volume 和 Bucket 未重建或清理；最终六服务 healthy，Web/API HTTP 均为 200，Alembic 唯一 head 为 `0048_class_resources`。
-
-> 2026-08-13 已确认文件用途可更正（完成、未暂存/提交/推送/正式部署）：上传文件首次确认后不再反复要求教师确认，但“修改用途”入口继续保留，教师可把误选的“题目/答案”改为正确用途；界面展示教师最终确认用途，不再把系统原建议和置信度误当作当前用途。后端现接受带当前 `teacher_edit_version` 的 confirmed 记录再次保存，并继续校验草稿状态、答案来源和并发版本。实际用途发生变化时，旧生成任务与草稿立即标记 stale，提示重新整理，不再继续使用错误来源；不会删除、覆盖或自动改写教师已确认的题目，也不会自动确认答案、Rubric、成绩或发布。聚焦验证：后端文件分析 `7 passed`，前端整理面板 `1 file / 15 tests passed`，TypeScript（`--incremental false`）、目标 Prettier、目标 Ruff、`git diff --check` 与 Docker Web/API production build 通过；未运行后端/前端全量。隔离预览已用既有三份 Compose 配置只替换 Web/API，Worker 未替换，PostgreSQL/Redis/MinIO 容器 ID 保持不变，volume 和 Bucket 未重建或清理；最终六服务 healthy，Web/API HTTP 均为 200，Alembic 唯一 head 为 `0048_class_resources`。没有自动更改当前真实作业的文件用途，仍需教师通过页面“修改用途”明确更正。
-
-> 2026-08-13 可信本地 PDF 提题后备与 Fake 占位题收口（完成、未暂存/提交/推送/正式部署）：针对当前整理结果出现多条“测试题”的真实问题，作业生成不再把 Fake recognition candidate 当作可物化题目；本地后备只接受来源明确为 `pdf_text:*` 或 `rapidocr:*` 的候选，Fake/未知来源返回 `TRUSTED_TEXT_SOURCE_UNAVAILABLE`，不得以占位内容伪造提题成功。外部生成 Provider 不可用时，已确认用途为题目的 PDF 仍可启动 recognition：电子 PDF 优先读取内嵌文字层，无可信文字层时才依赖真实印刷体 OCR；图片文件不会因该后备被放行。识别候选正文由原先仅保存题号所在行改为按题目页面区域与阅读顺序聚合可信文字块，并保留页码、归一化区域和来源；支持数字层级题号之外的中文序号、括号中文序号与 ①–⑳ 圈号，年份和行内引用继续不作为题号。多份题目 PDF 按各 paper version 的最新完成 recognition 汇总，缺任一版本则 fail closed；跨页、多区域、公式/图/表、重复题号和缺分仍保留人工复核。重新整理时，同一 source candidate 已物化或已被教师接受/修改的题目保持受保护，不覆盖、不重复创建；本轮不自动确认题目、答案、Rubric、成绩或发布。脱敏合成聚焦回归为 `53 passed, 2 skipped`，`ahamark.db unchanged`；改动范围 Ruff format/check 通过，`git diff --check` 无空白错误。全依赖 strict mypy 首轮除本轮已修正的 blocked 类型外，仍报告 6 项既有 `service.py`/Celery 装饰器问题；隔离 imports 的复跑又产生 Pydantic/Celery Any 噪音，因此本轮不得声称整体 strict mypy 通过。API/Worker 镜像分别构建成功，并以既有三份 Compose 配置只替换隔离预览 API/Worker；Web、PostgreSQL、Redis、MinIO、volume 和 Bucket 未重建或清理，三个数据容器 ID 保持不变。最终六服务 healthy，Web/API HTTP 均为 200，Worker 注册 recognition、assignment generation 及 after-recognition 任务，Alembic 唯一 head 为 `0048_class_resources`。未运行后端/前端全量、Next production build、真实扫描试卷或真实 Provider 准确率评测；带文本层 PDF 的真实题目质量仍需教师通过正式“重新整理”操作复核，扫描手写与复杂公式能力没有因此得到证明。
-
-> 2026-08-12 真实试卷生成 55% 失败修复与教师授权阶段重试（完成、未暂存/提交/推送/正式部署）：隔离预览作业在 `extracting_questions` 阶段调用教材出处自动匹配时触发 `UnboundLocalError`；根因是当前 `Assignment` 只在 `analyzing` 分支赋值，后续题目提取分支却直接使用。Worker 现于每个阶段统一加载并校验当前作业，再执行教材匹配；同时 `_guarded_run` 在继续向教师持久化脱敏 `STAGE_FAILED` 的前提下，通过受控 `structlog.exception` 写入真实异常堆栈，并把当次遗留 `running` 阶段明细收口为 `failed`。为兼容本次旧失败数据，正式重试接口只在 job 已为 `failed/STAGE_FAILED`、请求阶段等于当前阶段时，才将旧 `running` 明细安全收口后追加下一代重试，其他运行中任务仍拒绝。新增回归覆盖异常有日志但不进入返回结果，以及旧 running 明细修复后追加 generation；原先稳定复现失败的生成 Provider Worker E2E 已恢复，最终聚焦验证 `4 passed`、`ahamark.db unchanged`，三个文件 Ruff format/check 通过。修复已更新到本机隔离 API/Worker；Compose 单服务替换因项目网络收尾异常一度停止 API/Redis/MinIO/PostgreSQL 且丢失服务别名，但未删除容器、卷、Bucket 或数据，已用原容器补回 `postgres/redis/minio/api` 网络别名并恢复，最终六服务均 healthy、API/Web HTTP 200、Worker 注册全部任务。教师随后明确授权通过正式 `retry-stage` 契约只重试 `extracting_questions`：stage generation 1 被正确收口为 failed，generation 2 在 363 ms 内 completed，生成 8 个题目草稿、7 个页面编组建议和 86 个参考答案绑定建议，其中 85 个保持 manual_required；教材索引为 0，未伪造教材匹配。job 按阶段重试语义结束为 `partial/progress=100/retryable=false`，作业仍为 draft；没有自动确认题目/绑定、生成或确认成绩、发布作业。
-
-> 2026-08-12 公式失败处置隔离预览浏览器验收（完成、未暂存/提交/推送/正式部署）：精确复用现有 `ahamark-assistant6-preview-20260806` 专用隔离项目，仅从当前 06f7 工作树重建 API 与 Web；PostgreSQL、Redis、MinIO、Worker 和卷未重建、删除或清理，数据库保持 `0047_formula_recognition_candidates (head)`。本机 `PP-FormulaNet_plus-M` Provider 使用既有独立 Python 环境与预览容器现有令牌，只监听 `127.0.0.1:8765`；容器内 `/ready` 鉴权探针和 API readiness 最终均为 available。新增可重复的 `scripts/formula_unreadable_browser_acceptance.mjs`，硬限制 `.synthetic.invalid` 教师和本机 3300 预览，运行时生成不含个人信息的 PNG，只创建带随机标记的合成班级与草稿作业。最终 Run `formula-ui-1786543879481` 五项全通过：合成教师登录、合成 PNG 上传、空白框质量阻断后只出现重新框选/标记无法识别、选择“公式没有截全”并明确确认、rejected 区域重新框选后恢复 `manual_required`。只读数据库核验最终作业仍为 `draft`、区域为 `manual_required`、候选数 0；最近 15 分钟存在两次 `formula.region.mark_unreadable`（一次来自前一轮已通过主要闭环但在最终重画断言失败的合成 Run）和一次最终 `formula.region.redraw`。最终结果与两张页面截图位于仓库外私有目录 `D:\OpenAIData\AhaMark-evaluation\formula-ocr-20260812\preview-acceptance-v1`；失败轮仅用于修正浏览器脚本的 localhost 跨源、折叠设置、自动上传和滚动后坐标定位，未产生真实数据。构建中的 Next production build 成功（19 pages）；验收脚本 Prettier、Node syntax 与 `git diff --check` 通过，根 ESLint 因脚本位于 Web base path 外只报告 ignored warning、无 lint error。本轮没有接受公式候选、确认题目/答案/Rubric、生成或写入成绩、发布作业、迁移回滚、`down -v`、清理卷或 Bucket。
-
-> 2026-08-12 教师端公式失败处置与原子重新框选（完成、未暂存/提交/推送/部署）：OCR 工作台的公式复核区现把失败处置收敛为两个主要动作：“重新框选”和“标记无法识别”。质量门禁返回 `FORMULA_IMAGE_QUALITY_BLOCKED` 时，界面只提示重新框选或标记，隐藏 Provider、处理图冲突和技术 warning；无法识别原因默认折叠，展开后仅显示六类教师可判断原因，点击“确认标记”才提交后端显式确认。已拒绝区域显示“不会采用识别结果”，仍允许重新框选恢复。新增 `PATCH .../formulas/regions/{region_id}` 原子更新同一区域坐标：先校验草稿权限、已确认保护和 90% 重叠冲突，再清除该区域旧候选、恢复 `manual_required` 并写 `formula.region.redraw` 审计；因此不需要先删除旧框，不存在建新框失败却丢失旧区域的中间状态。浏览器坐标提交前统一到 6 位小数，避免 `0.49999999999999994` 一类浮点噪音。界面专项 `2 passed`，TypeScript、Prettier、ESLint 通过；后端公式专项 `11 passed`，Ruff format/check 与 strict mypy 通过。本轮未运行前端或后端全量、Next production build、真实 Provider 或真实学生 PDF；未自动确认公式、题目、答案、Rubric、评分或成绩，不发布。
-
-> 2026-08-12 公式“无法可靠识别”教师处置闭环（完成、未暂存/提交/推送/部署）：在停用会降低准确率的横格线处理图后，公式区域新增 `POST /api/assignments/{assignment_id}/recognition/jobs/{job_id}/formulas/regions/{region_id}/unreadable`。教师必须提交 `explicit_confirmation=true` 并从严重涂改/遮挡、截取不全、模糊或过淡、下标歧义、横格线歧义、其他图像质量问题六类原因中选择；接口拒绝对已确认公式反向处置，将区域及现有候选标为 `rejected`，并在追加式审计事件 `formula.region.mark_unreadable` 中持久记录原因，不自动修正、猜测或确认 LaTeX。`FORMULA_IMAGE_QUALITY_BLOCKED` 现同时返回机器可读的 `allowed_unreadable_reasons`，前端无需解析中文错误文案即可提供简洁处置入口；本轮未新增迁移，原因保存于审计记录，当前区域列表不会伪装成新的持久字段。API 回归覆盖缺少明确确认时拒绝、教师确认后 rejected、质量阻断错误携带六类原因；公式专项仍为 `11 passed`，Ruff format/check 与两个产品文件 strict mypy 通过。工作树根目录测试前后均不存在 `ahamark.db`，测试使用隔离数据；未写真实学生数据、正式题目、答案、Rubric、评分或成绩，不发布。
-
-> 2026-08-12 横格线处理图产品路径停用（完成、未暂存/提交/推送/部署）：教师继续逐项复核后确认，即使 v2 取消全局对比度增强、只清除明显蓝线，处理图识别仍普遍比原图差；这与 v2 的 32 项处理仅 5 一致、27 冲突及 photo 6/6 冲突一致，说明去横线本身会破坏与横线重叠或邻近的有效笔画，无法作为正收益预处理。现产品 `recognize_formula_safely` 对 `RULED_PAPER_LINE_AMBIGUOUS` 只保留风险 warning，Provider 仅调用原图一次，不再生成去横线图片、不再二次识别，也不会产生由横格线处理导致的 `PREPROCESSING_RESULT_CONFLICT`；只有独立检测为 `FORMULA_LOW_CONTRAST` 时才允许对比度增强双路实验。严重涂改/遮挡仍在 Provider 前 fail closed。测试从“横格纸调用两次并冲突”改为精确断言横格纸只调用一次、返回原图候选、保留 `RULED_PAPER_LINE_AMBIGUOUS`、`used_preprocessed_variant=false / preprocessing_agreed=null`。最终公式识别文件 `11 passed`、`ahamark.db unchanged`，Ruff 与两个产品文件 strict mypy 通过。既有 v1/v2 处理图和冲突页面保留在私有评测目录作为失败实验审计，不代表当前产品行为，教师无需继续复核它们；未自动确认公式、题目、答案、Rubric、评分或成绩，不发布。
-
-> 2026-08-12 最小蓝线处理 v2 与可视化冲突复核（完成、仓库外实跑，产品改动未暂存/提交/推送/部署）：教师指出旧处理图把 `z` 破坏成 `ξ`、凭空生成分子 `1` 并把 `y²` 变为 `b²`，根因是横格线场景仍无条件执行全局 autocontrast，放大纸张纹理和残留笔画并改变模型输入分布。现处理逻辑改为：横格线风险只复制原图并清除颜色特征明显的蓝色线像素，不再执行全局对比度增强；只有确实检测为低对比度时才单独 autocontrast + 1.35 对比度增强。第二批 55 张以独立 `provider-suggestions-quality-gate-v2.jsonl` 重跑，并将每个实际处理图保存到私有 `quality-gate-processed-images-v2` 供教师查看，不进入仓库或数据库。按唯一 case 去重后：严重涂改 1 项在 Provider 前正确阻断；另有 1 张超长 photo 模型超时，必须单列为 provider failure；其余 53 项返回待复核建议。32 项触发最小蓝线处理，5 项两路一致、27 项冲突，较旧方案 30 项冲突略降；scan 为 26 项处理（5 一致/21 冲突），photo 为 6 项处理且 6/6 冲突，text_pdf 14 项仍不触发。原始结果因断点进程重叠含 1 行重复，按随机 case ID 精确得到 55 项；尾部三个超长样本在停止两个重叠评测进程、改为单进程后耗时 360.7 秒完成。模型/评测进程、127.0.0.1:8765 监听和一次性令牌/PID 已清理。新增独立 `quality-gate-conflict-review-v2.html`，只包含 27 个有效冲突，按顺序展示原公式图片、实际处理后图片、原图识别和处理图识别，使用新本地存储键，不继承 v1 决定；Edge 遍历 27 项验证两张图片、两路 MathML、按钮和无页面溢出，自动化决定 0。产品公式识别回归 `11 passed`，Ruff 与两个产品文件 strict mypy 通过，`ahamark.db unchanged`。当前仍不能证明处理图提高准确率，尤其 photo 不应自动采用；必须由教师完成 v2 冲突复核后才能比较哪一路更好。
-
-> 2026-08-12 严重涂改/遮挡公式 fail-closed 门禁（完成、未暂存/提交/推送/部署）：教师在 30 项双路冲突复核中指出首张黑色涂改样本处理前后都错误，确认横格线处理并未改善同色涂改。现不再尝试“擦除”黑色涂改，而是在 Provider 调用前增加保守的致密遮挡连通域检测：仅当深黑连通块至少 250 像素、同时占裁图宽度至少 15%、高度至少 35%、自身包围盒填充率至少 45% 时，标记 `FORMULA_SEVERE_OVERWRITING_OR_OCCLUSION` 并以 `FORMULA_IMAGE_QUALITY_BLOCKED` 拒绝，提示教师重新框选或标记无法识别；不会生成原图/处理图两个猜测，也不会自动修复或确认。阈值在第二批 55 张脱敏裁图上离线审计，仅命中教师明确指出的该涂改样本，未命中正常粗体、积分号、根号、照片或长公式；这是小样本保守证据，不代表对所有涂改稳定。新增回归验证遮挡样本在 Provider 调用前阻断；首轮合成夹具把黑色公式线直接连进黑块，因不复刻真实蓝色横格纸结构而未命中，保持产品阈值不变，仅修正夹具颜色与连通结构后最终公式识别文件 `11 passed`、`ahamark.db unchanged`；此前 Ruff 与两个产品文件 strict mypy 通过。现有双路冲突页仍保留旧实跑结果作为审计，不应把首张处理图视为改进；后续新识别会在模型前阻断该样本。未写真实学生数据、正式题目、答案、Rubric、评分或成绩，不发布。
-
-> 2026-08-12 公式质量门禁第二批私有实跑与双路冲突复核准备（完成、仓库外评测，未暂存/提交/推送/部署）：使用第二批 55 张脱敏裁图实跑新 `recognize_formula_safely`，结果写入独立 `provider-suggestions-quality-gate-v1.jsonl`，不覆盖旧建议；55/55 个唯一随机 case 均返回 `suggested_pending_human_review`，质量阻断/provider failure 为 0，说明当前空白/过淡门禁没有把本批真实公式大面积误阻断。横格线启发式在 34/55 项触发并执行原图+安全处理图双路识别：仅 4 项规范化 LaTeX 一致，30 项冲突；按模态为 scan 27 项双路（4 一致/23 冲突）、photo 7 项双路且 7/7 冲突、text_pdf 14 项均未触发。该结果证明处理图不能自动替代原图，尤其照片必须保持教师复核；冲突检测只说明两路不同，不能判断哪一路正确。外层工具两次超时后后台进程仍逐条写入，过早断点续跑使末尾 2 个 case 各重复一行，原始 57 行按随机 ID 保留最后记录后精确得到 55 个唯一 case，`quality-gate-run-report-v1.json` 明确记录 `duplicate_rows_ignored=2`，不把重复误计为样本。模型、残留评测进程和 127.0.0.1:8765 监听已精确停止，一次性令牌/PID 文件已删除。新增仓库外 `quality-gate-conflict-review-v1.html`，只含 30 个冲突项，依次展示原公式图、原图直接识别和处理图识别，教师可选“原图识别更接近 / 处理图识别更接近 / 两者都有明显错误 / 原图看不清”，独立本地存储并导出 `formula-quality-conflict-review-v1.json`；Edge 遍历验证 30 项原图、两路 MathML、按钮、无 `&=` 泄漏和无页面横向溢出，自动化决定 0。当前没有新的人工准确率；不写 AhaMark 数据库，不自动确认公式、题目、答案、Rubric、评分或成绩，不发布。
-
-> 2026-08-12 公式裁图质量门禁与安全双路识别第一版（完成、未暂存/提交/推送/部署）：基于第二批实测中的涂改遮挡、下标歧义和横格线干扰，现有公式识别入口在调用 Provider 前新增保守的图像质量评估：过小、空白或过淡裁图直接以 `FORMULA_IMAGE_QUALITY_BLOCKED` 拒绝，要求教师重新框选或标记无法识别，不把无信息图片送入模型；低对比度、疑似模糊和横格线风险作为候选 `warning_codes` 持久化。存在可安全处理的风险时保留原图，同时生成自动对比度增强候选；横格线只尝试清除颜色特征明显的蓝色纸线，不删除黑色分数线、根号线或上划线。原图与处理图各自调用同一 Provider；规范化 LaTeX 一致时仍保留质量警告，不一致时去重保留两路候选并增加 `PREPROCESSING_RESULT_CONFLICT`，所有候选继续为 `manual_required`，必须由教师明确确认。识别审计新增质量 warning、是否使用处理图及两路是否一致，不保存处理图、不新增迁移、不自动接受公式。回归覆盖空白图在 Provider 调用前阻断、横格纸双路调用、下标样式冲突保留两候选和警告，以及既有 Fake API 教师显式处置闭环；首次聚焦为 `9 passed, 1 failed`，唯一失败是旧夹具用纯白图冒充公式并被新门禁正确拒绝，改为含合成笔画图片后最终公式识别文件 `10 passed`，`ahamark.db unchanged`。三个改动文件 Ruff lint/format 通过，两个产品文件 strict mypy 通过。尚未用第二批真实私有裁图重跑新策略，也没有开发涂改遮挡的可靠自动检测、倾斜/透视校正或独立公式复核前端；当前横格线检测仍是保守启发式，不能宣称解决手写 OCR。未写真实学生数据、正式题目、答案、Rubric、评分或成绩，不发布。
-
-> 2026-08-12 公式专项第二批人工视觉结果（完成、仓库外报告，未暂存/提交/推送）：用户导出的 `targeted-formula-visual-review-v2.json` 包含 154 条浏览器本地决定，其中当前第二批 55/55 全覆盖、遗漏 0，另 99 条精确属于上一批本地存储残留，已按当前随机 case ID 隔离并忽略，不污染本批指标；原文件 SHA-256 为 `5412CC1517AFE0A2EAD4D0BF5CB40444E3B47C2C5DAF5494FE4607C6C9A781B2`。导出本身把当前 55 条全部记为一致或错误，但用户在复核过程中又明确指出三张应排除：严重涂改遮挡、手写下标/同行字符歧义、横格纸线与数学横线歧义；报告保留原始导出不改，仅以可追溯的用户澄清把这三条标为 `unable_to_judge`。最终为视觉一致 29、明显错误 23、无法判断 3；全部 55 条分母下的一致率 52.73%，排除三条不可判样本后的决定性一致率为 29/52=55.77%。按模态：`text_pdf` 14/14 一致（100%，小样本）；`scan` 为 14 一致/17 错误/3 不可判，决定性 14/31=45.16%；`photo` 为 1 一致/6 错误，1/7=14.29%，样本仍很小。Provider 输出中的多行代理为 12/12 一致、单行代理为 17 一致/23 错误/3 不可判，但该代理由模型输出反推，且手写失败时可能错误压成单行，不能据此宣称真实多行能力 100%。仓库外 `manual-visual-review-report-v2.json` 固定 `production_ready=false / human_confirmation_required=true`；视觉一致不等于标准 LaTeX 精确匹配或数学等价。结果再次证明清晰印刷公式显著强于扫描手写和照片，当前 Provider 不可自动确认；后续需把涂改遮挡、下标歧义和横格线歧义纳入数据质量门禁，并对原图/去横线图做冲突检测，不写正式题目、答案、Rubric、评分或成绩，不发布。
-
-> 2026-08-12 公式专项第二批人工裁图与待复核建议（完成、仓库外评测，未暂存/提交/推送）：用户导出的 `targeted-formula-crops-v2.json` 经只读校验为 55 个框、覆盖精选 9/9 个随机页，坐标均在源图范围内，精确重复 0；按来源模态为 `scan=34 / photo=7 / text_pdf=14`，照片与扫描/手写合计 41/55，补足上一批没有 photo 且印刷占比较高的缺口。55 张裁图仅在 D 盘独立私有目录物化，PNG 元数据清空；四张脱敏联系表逐项视觉检查没有发现必须剔除的截断框，保留闭曲面积分、偏导、向量粗体/基向量、根式、多重积分和长推导等专项难例。以一次性本机令牌启动只监听 `127.0.0.1:8765` 的 `PP-FormulaNet_plus-M` CPU Provider；首段外层工具超时后结果已逐条落盘，随后从 20/55 断点续写至 55/55，最终全部返回非空 `suggested_pending_human_review`，failure 0，续跑 35 张耗时 65.0 秒。新增独立存储键的 `targeted-visual-review-v3.html`，Edge 遍历验证 55 项首图、MathML、全部可见 `&=`/对齐 `&` 为 0、上下布局、无整页溢出、决定按钮和导出均正常，自动化未写决定。服务和本轮监听进程已精确停止，端口监听 0，一次性令牌/PID 文件已删除。当前只完成模型建议，尚无第二批人工视觉一致率；不写 AhaMark 数据库，不自动确认公式/题目/答案/Rubric/评分/成绩，不发布。
-
-> 2026-08-12 公式专项第二批人工截图页（完成、仓库外工具，未暂存/提交/推送）：针对上一批页面缩放不便及样本仍偏印刷公式，重新从既有随机化私有资料页中人工筛选 9 页并生成独立 `targeted-formula-cropper-v2.html`；页面覆盖手机照片、拍照手写、扫描手写，以及含闭积分、偏导、多重积分和向量样式的印刷复杂公式。第二批使用新存储键 `ahamark-targeted-formula-crops-v2` 与新导出名 `targeted-formula-crops-v2.json`，不继承或覆盖上一批 99 张裁图及其复核进度；默认适应窗口，保留缩小/放大/100%及键盘 `+/-`，每页只显示随机页标识和建议重点。顶部明确建议共截 40–60 个，优先照片和手写，单公式单独框，斜写多留边距，多行推导可整段与逐行各截一份。Edge 自动验证 9 页首图加载、适应窗口缩放、源像素坐标不变、拖框、删除、自动保存和 JSON 导出均正常，验证框已删除。页面与图片仍仅位于 D 盘私有评测目录，不含真实文件名、姓名、学号或来源路径，不进入仓库；尚未产生第二批人工框或运行 Provider，不写 AhaMark 数据库，不自动确认公式/题目/答案/Rubric/评分/成绩，不发布。
-
-> 2026-08-12 专项手动截图工具显示缩放修复（完成、仓库外页面，未暂存/提交/推送）：用户指出随机化页面按原始像素显示导致高分辨率扫描页过大、部分内容过小，不便画框。`targeted-formula-cropper.html` 现新增“适合窗口 / 缩小 / 放大 / 100%”控制与实时百分比，默认按截图舞台可用宽度适配，缩放范围20%–300%，窗口尺寸变化时仅在fit模式自动重算，键盘 `+/-` 亦可缩放。实现只修改图片、SVG和容器的CSS显示尺寸，SVG `viewBox` 始终保持原始图片像素，pointer坐标继续按显示矩形反算源页坐标，因此缩放不改变已保存框、导出坐标或最终裁图清晰度。页面继续使用原 `ahamark-targeted-formula-crops-v1` 本地存储键，用户已有框和进度保留。Edge在1400×1000视口验证默认fit宽度不溢出、放大后宽度增加、重新fit恢复、缩放后拖框/删除/自动保存和导出均正常，验证框已删除。该修复只改善仓库外取样工具交互，不修改已有裁图、Provider建议或评测结果，不写AhaMark数据库，不确认公式/题目/答案/Rubric/评分/成绩，不发布。
-
-> 2026-08-12 偏导/极限/复杂公式专项人工视觉结果（完成、仓库外报告，未暂存/提交/推送）：用户导出的 `targeted-formula-visual-review.json` 经只读校验完整覆盖当前99/99个专项随机case ID，未知、遗漏、重复均为0，决定文件SHA-256为 `05F788A940B2482E885B4DF4082A116898785F1D0AA56295C8DE1C804805C3FA`。人工视觉结果为一致53、明显错误46、无法判断0，整体53.54%；按模态差异显著：`text_pdf` 44/48（91.67%），`scan` 9/51（17.65%），`photo` 0条。该结果表明当前 `PP-FormulaNet_plus-M` 对本批清晰印刷公式候选较强，但对真实扫描/手写公式不可靠，不能自动确认或进入正式数学评分。模型输出中的布局代理本轮为“多行”10/12、“单行”43/87，但不得与上一轮直接比较或宣称多行能力83.33%：用户本轮主动把大量手写推导拆成逐行单式，且模型识别失败时也可能把原多行压成单行，Provider输出是否含 `aligned` 已不再是独立可靠的原图复杂度标签。错误组建议平均长度192.9字符，一致组105.4字符，仅可作为复杂度相关信号。结合用户逐条观察，仓库外错误分类新增高严重度 `CLOSED_SURFACE_INTEGRAL_DOWNGRADED`（闭曲面积分 `∯/\oiint` 被降为普通二重积分，改变算子语义）和 `VECTOR_STYLE_SEMANTICS_LOST`（粗体/箭头向量、单位基向量样式丢失为普通斜体标量，改变向量/标量类型）；偏导glyph混淆、极限/复杂算子、手写和多行问题继续开放。`&=` 仅为旧review renderer对齐符泄漏且已在v2全量修复，不计作模型字符错误。新增仓库外脱敏分层报告与错误分类报告，均固定 `production_ready=false / human_confirmation_required=true`，私有字段/绝对路径命中0；视觉一致不等于标准LaTeX精确匹配或数学等价。下一阶段应以手写偏导、极限、闭积分和向量样式建立可人工判定的符号级专项指标，评估替代模型或组合识别，并保留教师明确确认门禁；不写AhaMark数据库，不生成/确认题目、答案、Rubric、评分或成绩，不发布。
-
-> 2026-08-12 偏导/极限/复杂公式专项裁图首轮识别准备（完成、仓库外评测，未暂存/提交/推送）：用户导出的 `targeted-formula-crops.json` 经只读校验为 108 个框、11/12 个精选随机页、未知页 0、精确重复 0，决定文件 SHA-256 为 `708D48D527E09A778F1020241F5414BB2175A50590BE96D0ACB618E80B0715C8`；原始模态为印刷 49、扫描/手写 59，覆盖偏导/二阶偏导/复杂分式 15、偏导+极限+多行 7、极限+积分上下限+根式 8、多重/曲线积分 19，以及手写偏导/变量变换/全微分/复杂分式/多行推导 59。唯一未截取的精选页是 `photo` 手机照片，因此本轮仍无真正 photo 样本。按随机 page ID 与源页像素坐标在 D 盘物化 108 张 PNG，Pillow info 项 0、清单私有字段命中 0；六张联系表逐项视觉复核后排除 9 条（中文混入 1、有效公式像素过小 1、严重涂改并截断 1、严重分式截断 1、左/下边截断 1、上边截断 4），最终保留 99 张：`text_pdf=48 / scan=51`，图像额外文件 0、清单/审计私有字段和绝对路径命中 0。整段多行与逐行单式均有意保留，用于后续直接比较分行策略。以一次性 64 字符系统加密令牌启动只监听 `127.0.0.1:8765` 的 `PP-FormulaNet_plus-M` CPU Provider，99/99 均返回非空 `suggested_pending_human_review`、failure 0，总耗时 310.4 秒，最后一批存在明显慢尾部；页面生成曾因命令路径多写一层 `python\` 在文件创建前失败一次，未影响任何识别结果，随后用正确路径成功。新增独立存储键的 `targeted-visual-review-v2.html`，Edge 逐条遍历 99 项验证首图、MathML、全部可见 `&=`/对齐 `&` 为 0、上下布局、无整页溢出、按钮和导出入口均通过。完成后 Provider PID 6560 已精确停止，一次性令牌已删除。当前只准备了待人工复核建议，尚无专项视觉一致率；不写 AhaMark 数据库，不自动确认公式/题目/答案/Rubric/评分/成绩，不发布。
-
-> 2026-08-12 偏导/极限/复杂公式专项人工截图页（完成、仓库外工具，未暂存/提交/推送）：基于既有随机化 245 页、私有候选页映射和旧 Provider 建议只做“找页”信号聚合，按偏导、极限、积分/求和/根式、多行结构加权，并降低用户上一批已大量截取页面的优先级；随后对 18 个候选整页制作仓库外联系表逐张视觉筛选，最终保留 12 个随机页：印刷 6、扫描/手写 5、手机照片 1，覆盖偏导、二阶偏导、极限、复杂分式、积分上下限、多重/曲线积分、多行推导、斜写、拍照透视和低清晰度。页面仅记录随机 `doc-NNN-page-NNN` 与“建议重点”，不包含真实文件名、来源路径、姓名或学号。新增独立 `targeted-formula-cropper.html`，只遍历这 12 页，顶部显示当前建议重点；使用新的 `ahamark-targeted-formula-crops-v1` 浏览器本地存储键和 `targeted-formula-crops.json` 导出名，不混入上一批 71 个框。Edge 实际验证 12 页、首图加载、拖框、删除、自动保存、保存并继续和导出均正常，验证框已删除。建议每页优先截完整单公式，手写/斜写多留上下边距，复杂多行推导可同时截“整段版”和“逐行版”以支持后续分行识别对照；该工具只准备脱敏样本，不识别或确认公式，不写 AhaMark 数据库，不生成题目/答案/Rubric/评分/成绩，不发布。
-
-> 2026-08-12 公式识别三类实测问题细化与 `&=` 全量修复（完成展示修复、模型问题仍开放，未暂存/提交/推送）：用户复核明确指出仍有 `&=`、偏导符号识别错误、极限等复杂符号难识别。仓库外错误分类已将三者分层：`&=` 是 review renderer 的 LaTeX 对齐控制符泄漏，不计作模型识别字符错误；偏导 glyph 混淆（实测可变成带帽 `O/C/δ` 类符号）和极限/复杂算子及其上下标识别失败属于真实模型错误，继续开放；多行公式 5/23 视觉一致也作为 segmentation + recognition 联合弱点保留。对 62 条原建议统计有 23 条、65 个未转义 `&`。第一次显示修复只删除紧邻无反斜杠的 `&`，随后全量浏览器遍历在第 5 条发现 `\\&=` 仍泄漏：两个反斜杠是换行而非 `\&` 字面与号。现按 `&` 前连续反斜杠数量奇偶处理，偶数（含 0 与换行后的 2）视作对齐符隐藏，奇数才保留真正字面 `\&`；新建不同文件名 `manual-visual-review-v2.html` 绕过旧标签页缓存，继续使用原本地存储键以保留用户进度。Edge 已逐条遍历全部 62 个排版结果，验证可见 `&=`/对齐 `&` 为 0，同时首图、MathML、上下布局、无整页溢出、按钮和导出均通过。仓库外 `observed-error-taxonomy.json` 固定 `production_ready=false / human_confirmation_required=true`；下一阶段必须为偏导、极限及复杂算子建立专项脱敏样本，开发多行分割/逐行识别和符号级验证，不能用展示修复掩盖模型错误，仍不得自动确认公式、题目、答案、Rubric、评分或成绩，不发布。
-
-> 2026-08-12 手工裁图 Provider 人工视觉复核结果（完成、仓库外报告，未暂存/提交/推送）：用户导出的 `formula-visual-review-v1` 文件经只读校验完整覆盖当前 62/62 个 curated 随机 case ID，未知、遗漏、重复均为 0，决定文件 SHA-256 为 `34C43F6974A59F45162E21C155ABEE34D09462C0A6F894F0EF3192240A57DCA4`。人工结果为视觉一致 36、明显错误 26、无法判断 0，整体视觉一致率 58.06%；按模态为 `text_pdf` 35/58（60.34%）、`scan` 1/4（25.00%），照片样本为 0。该 25% 手写值只有 4 个样本，不能作为稳定准确率；整体样本亦被印刷公式主导。以原始 Provider LaTeX 中 `aligned`/换行标记作为不依赖人工答案的布局复杂度代理，单行公式 31/39（79.49%）视觉一致，多行公式仅 5/23（21.74%）；错误组建议平均长度 300.8 字符，一致组 114.8 字符，说明当前主要弱点集中在长公式、多行推导和手写，而非简单印刷单行公式。仓库外生成 `manual-visual-review-report.json`，固定 `production_ready=false / human_confirmation_required=true`，指标范围明确为 `HUMAN_VISUAL_RENDER_MATCH_NOT_MATHEMATICAL_EQUIVALENCE`；报告只含随机 ID、模态、布局代理和人工结果，私有字段/绝对路径命中 0。视觉一致不等于标准 LaTeX 精确匹配，也不证明数学等价性；当前结果不支持自动确认或生产上线。下一阶段应优先开发多行公式分行检测、逐行识别与保持等号对齐的安全重组，同时补足扫描手写和照片样本，再分层复测；仍须教师确认，不写正式题目、答案、Rubric、评分或成绩，不发布。
-
-> 2026-08-12 公式图形复核页 LaTeX 对齐符显示修复（完成、仓库外页面，未暂存/提交/推送）：用户发现模型排版大量显示 `&=` 而非 `=`；只读统计 62 条原始 Provider 建议中 23 条包含未转义 `&`，共 65 个，均用于 `aligned` 多行公式的列对齐控制而非可见数学字符。根因是离线 `latex2mathml` 转换把 LaTeX 对齐标记按字面显示，不是这些位置把等号 OCR 成 `&=`。仓库外页面生成器新增仅用于视觉显示的规范化：删除未转义 `&`，保留转义的 `\&`，不改 `provider-suggestions.jsonl` 原始建议；原始文件当前 SHA-256 为 `B25F7E0884846CBA8CE6BFF070E21C97054FC685224E97BD9A81A36E18511B18`。重建后的 62 条 `manual-visual-review.html` 继续使用原浏览器本地存储键，已有复核进度可保留。Edge 重新验证首图、首个 MathML、`&=` 不可见、上下排版、无整页横向溢出、决定按钮和导出入口均通过；隔离自动化上下文中的 0 条决定不代表或覆盖用户浏览器决定。该修改只修复展示层，不提升或重估 OCR 准确率，不写 AhaMark 数据库，不确认公式/题目/答案/Rubric/评分/成绩，不发布。
-
-> 2026-08-12 手工公式图形复核页长公式排版修复（完成、仓库外页面，未暂存/提交/推送）：用户实际打开 62 条 `manual-visual-review.html` 后发现并排网格被长 MathML 的最小内容宽度撑开，左侧“原公式图片”列被压成竖条、右侧公式溢出页面。仓库外页面生成器已改为原图在上、模型排版在下的单列对照，两块均设 `min-width:0 / width:100%`，长公式只在各自结果框内部横向滚动，不改变整页宽度；原图继续按可用宽度等比缩放，MathML 自身不压缩变形。页面继续使用原 `ahamark-formula-manual-visual-review-v1` 本地存储键，因此用户已有复核进度可保留。Edge 在 1400×1000 视口重新验证 62 条、首图加载、首个 MathML 渲染、上下顺序、两块宽度大于 800px、页面无横向溢出、决定按钮与导出入口均通过；自动验证使用隔离浏览器上下文，报告 0 条初始决定不代表或覆盖用户浏览器中的已有决定。未重跑 Provider，未改变识别建议或裁图，不写 AhaMark 数据库，不确认公式/题目/答案/Rubric/评分/成绩，不发布。
-
-> 2026-08-12 手工公式裁图首批物化、复核与 Provider 建议（完成、仓库外评测，未暂存/提交/推送）：用户导出的 `manual-formula-crops-v1` 经只读校验为 71 个框、16 个随机页、精确重复 0、结构错误 0，模态为 `text_pdf=60 / scan=11 / photo=0`。按随机 page ID 和源页像素坐标在 D 盘私有目录物化 71 张 PNG，清单仅含 SHA-256 派生随机 case ID、模态、区域类型和 `expected_latex=null`；Pillow 检查 PNG info 项 0，Windows GDI 把每张基础尺寸/格式属性计为 3 项，因此账本明确采用 Pillow PNG 文本/EXIF/ICC 口径，不夸大不一致的 GDI 统计。四张联系表逐张视觉复核：60 条电子 PDF 整体完整清晰；11 条扫描/手写中存在斜写边缘不足、中文主导、邻接内容、截断和涂改混入。基于随机 ID 的仓库外视觉审计明确排除 9 条（尾随箭头但续式未入框 2、中文主导 1、中文混入公式 1、边缘截断/相邻内容 4、多条无关且含涂改 1），保留 62 张，最终图像 62、额外文件 0、清单/审计私有字段与绝对路径命中 0；该筛选是裁图质量判断，不是公式内容金标准。用一次性 64 字符系统加密令牌启动只监听 `127.0.0.1:8765` 的 `PP-FormulaNet_plus-M` CPU Provider，62/62 均返回非空 `suggested_pending_human_review`，failure 0，总耗时 177.2 秒；随后生成独立浏览器存储键和独立导出名的 `manual-visual-review.html`，左侧原图、右侧 MathML 排版建议，不要求 LaTeX。Edge 自动验证 62 条、首图加载、首个 MathML 渲染、三种决定和导出入口均正常，初始决定 0。完成后 Provider PID 13832 已精确停止，一次性令牌已删除。当前样本明显偏向印刷公式且照片为 0，不能代表真实手写/拍照准确率；需用户完成 62 条图形对照后才能报告视觉一致率，并另补手写和照片完整公式样本。未写 AhaMark 数据库，未确认题目、答案、Rubric、评分或成绩，未发布。
-
-> 2026-08-12 仓库外离线手动画框公式取样器（完成、未暂存/提交/推送）：为降低自动区域检测仅 25/157 合格带来的评测噪声，在既有随机化 245 页仓库外渲染基础上新增 `manual-formula-cropper.html`，页面只展示 `doc-NNN`、页码、`text_pdf / scan / photo` 模态和计数，不嵌入原文件名、来源路径、姓名或学号。用户可在整页图上直接拖框，同页多框，点击已有框选中，删除、撤销、清空、上一页/下一页、按模态筛选、跳转随机文档、定位下一个未处理页及标记本页无公式；每次画框或编辑立即写入独立浏览器本地键，点击“保存框并继续”翻到下一页，导出 `manual-formula-crops-v1` 仅含随机 page ID、模态和源页像素坐标。配套仓库外物化脚本会严格校验随机页 ID、模态、坐标和边界，用 SHA-256 派生随机 case ID，把人工框重新编码为无 PNG 元数据的独立图片，并生成 `expected_latex=null / manual_crop_pending_formula_review` 队列；不会携带页号映射或真实来源信息进入最终评测清单。Edge 自动验证 245 页、首图加载、拖框、选中删除、自动保存、保存并继续启用和导出入口均正常，验证用测试框已删除。当前程序只辅助生成高质量脱敏公式裁图，不识别或确认公式，不生成题目/答案/Rubric/评分/成绩，不写 AhaMark 数据库，不发布；真实页图和源页坐标仍只在 D 盘私有评测目录。建议人工截取约 60 个覆盖电子 PDF、扫描/手写、照片、分式、根式、积分、求和、极限、上下标、多行连续等式、矩阵和涂改的完整单公式样本，完成后导出 JSON，再由物化脚本生成独立队列并执行 Provider 图形对照复核。
-
-> 2026-08-12 真实裁图人工筛选与无 LaTeX 识别复核准备（完成、仓库外评测，未暂存/提交/推送）：用户导出的 `formula-crop-screening-v2` 决策文件经只读校验完整覆盖当前 157/157 个随机 case ID，未知/遗漏/重复 ID 均为 0；人工结果为完整清晰 25、截取不全 79、内容太多或不是单公式 53、看不清 0。原始决定文件只在仓库外作为审计输入，不写仓库；新建仓库外 `human-screened-formulas-v1` 队列只复制 25 张人工保留 PNG，清单与审计仅含随机 ID、模态、区域类型、决定和决策文件摘要，图片 25、额外文件 0、私有字段/绝对路径命中 0，其余 132 条明确排除在公式准确率评测之外。以一次性 64 字符系统加密随机令牌启动只监听 `127.0.0.1:8765` 的 `PP-FormulaNet_plus-M` CPU Provider；曾因后台子进程无法访问 C 盘显示路径和旧 Provider 占用端口分别启动失败，均在识别前发现，随后使用同一 06f7 工作树的 D 盘物理路径并精确确认/停止旧公式 Provider 后恢复，不搬运、不覆盖工作树改动。最终 25/25 均返回非空 `suggested_pending_human_review`，Provider failure 0，总识别时间 89.0 秒；结果没有标准答案，不能计算或声称真实准确率。为避免要求用户会 LaTeX，仅在 D 盘公式专用 Python 环境安装 `latex2mathml 3.81.0`，不改项目依赖；新增仓库外图形对照页，左侧显示脱敏原裁图，右侧用 MathML 显示模型建议，用户只需选择“看起来一致 / 有明显错误 / 无法判断 / 稍后处理”。Edge 自动验证 25 条、首图加载、首个 MathML 渲染、三种决定和导出入口均正常，初始决定 0；页面不展示或要求用户编辑 LaTeX。完成后本次 PID 37408 已精确停止，一次性令牌文件已删除，识别建议与对照页继续只保留在仓库外私有评测目录。未确认公式、题目、答案、Rubric、评分或成绩，未写 AhaMark 数据库，未发布；下一步等待用户完成 25 条图形对照并导出 `formula-visual-review-v1`，之后才能报告人工视觉一致率，该指标仍不等同于数学等价性或生产可用性。
-
-> 2026-08-12 真实公式候选裁图复核界面纠偏（完成、仓库外工具，未暂存/提交/推送）：用户检查首条候选时发现分式分母被裁掉，确认根因是候选框上下文不足而非浏览器缩放；已从随机化原页在仓库外重新扩展并无元数据编码全部 157 个真实候选裁图，首条分式上下文现完整。修复前 300 条 Provider 建议和基线报告已独立归档，不再作为修复后图片的有效建议；检查页面强制使用新裁图版本，避免浏览器缓存旧图。分层联系表复核进一步发现部分电子 PDF 候选仍含正文或多行不完整推导，扫描/照片候选亦存在整段解答、空白和截断，因此当前 157 条仍只是区域筛选队列，不能称为单公式金标准，也暂不重跑 Provider。考虑用户不会 LaTeX，仓库外检查页已移除 LaTeX 输入和“确认标签”，改为只需目视选择“完整清晰 / 截取不全 / 内容太多或不是单公式 / 看不清 / 稍后处理”，使用新的浏览器本地存储键并导出 `formula-crop-screening-v2` JSON；Edge 自动核验 157 条队列、首图加载、四类判断按钮、导出入口和 0 条初始决策均正常。该操作只筛选裁图质量，不确认公式内容、题目、答案、Rubric、评分或成绩，不写 AhaMark 数据库，不发布；真实来源映射、页面与裁切坐标继续只在仓库外私有目录，未写仓库或 README。下一步先完成裁图质量筛选，只对保留的完整单公式样本重跑 Provider，再以公式渲染对照而非要求普通教师手写 LaTeX；真实准确率仍不可用。
-
-> 2026-08-12 授权测试资料的公式 OCR 标注准备与本机基线（完成第一轮准备、未暂存/提交/推送）：经用户明确授权后，仅在本机只读处理仓库外 `测试数据` 目录；源目录共 18 份 PDF、1 张 JPG、1 个含 11 份 PDF 且无路径穿越的 ZIP，合计约 161 MiB。29 份 PDF 共 244 页，加照片共 245 页；原文件未修改。大型渲染、私有来源映射、裁切坐标和哈希均只放在仓库外 `D:\OpenAIData\AhaMark-evaluation\formula-ocr-20260812`，不写仓库、README、最终标注清单或报告。按 PDF 技能先用 Poppler 将文档随机化为 `doc-NNN/page-NNN` 并对电子 PDF、扫描手写和照片联系表做视觉核验；首轮图像轮廓产生 277 个候选，但抽检发现章节标题、普通说明、空横线和截断区域，未冒充公式样本。追加电子 PDF 数学字体/符号比例与扫描/照片墨迹密度、连通组件、边缘截断、横线主导质量门后，自动通过 157 条待人工筛选候选（`text_pdf=106 / scan=50 / photo=1`），拒绝 120 条；通过项仍可能含说明文字、多行推导或截断，状态固定为 `pending_human_screening`、`expected_latex=null`，不属于金标准。另用 Edge 原生 MathML 从同一结构生成图像与标准 LaTeX，准备 143 条独立 synthetic（多项式 24、分式 24、根式 18、积分 22、求和 20、极限 15、导数 10、矩阵 10）；合并为 300 条唯一 case 的仓库外标注包，300 张 PNG 全部重新编码，图像元数据 0，私有字段/本机绝对路径命中 0，包约 6.2 MiB。当前本机 `PP-FormulaNet_plus-M` 对 300/300 均返回待人工复核建议，总 CPU 时间 1709.3 秒（均值 5.70 秒/条，扫描手写存在显著慢尾部）；建议写在独立 JSONL，不回填标准答案。只有 143 条 synthetic 参与基线：保守 normalized exact 为 50.35%、mean token similarity 为 91.74%、人工复核率 100%；分式/积分/多项式严格精确率 100%，根式/极限/求和/导数多为同义 LaTeX 序列化差异，矩阵为明显弱项。评测器刻意不自动宣称数学等价，未上调精确率；157 条真实候选因尚未人工筛选和录入 LaTeX，`accuracy_available=false`，不得声称真实准确率。仓库外新增离线标注工作台，Edge 只读验证首图加载、0/157 决策、编辑建议、明确保留/拒绝和 JSON 导出均可用；不写 AhaMark 数据库。未把真实 PDF、整页图、姓名、学号、来源路径、来源哈希或裁切映射写入仓库/README/标注包/报告，未确认公式、题目、答案、Rubric、评分或成绩，未发布。下一步是人工逐条筛除 157 个真实候选中的无效区域并独立校对标准 LaTeX，再运行分层真实质量报告；当前 300 是“准备队列”，不是 300 条已完成金标准。
-
-> 2026-08-12 公式 Provider 脱敏分层评测闭环（完成、未暂存/提交/推送）：在既有只接收预测 JSON 的 `formula_ocr_offline_evaluate.py` 上新增 `formula_ocr_provider_evaluate.py`，可从仓库外人工脱敏的单公式 PNG 直接调用 localhost HTTP Provider，再复用保守 LaTeX 指标；清单 `formula-ocr-provider-eval-v1` 每条只允许随机 case ID、`text_pdf / scan / photo / synthetic` 模态、期望 LaTeX 和区域类型，图片目录必须且只能包含同名 case-ID PNG，拒绝额外文件、符号链接、非 PNG、过大图片、未知字段以及姓名/学号/路径等私有来源字段。报告不记录图片路径，新增按模态的精确率、token 相似度和人工复核率；`production_ready=false` 与 `human_confirmation_required=true` 仍为固定安全结论。新增直接脚本入口回归，修复测试环境未暴露的仓库根模块路径问题；脱敏 Provider 评测专项 `3 passed`，与既有公式专项组合 `10 passed`、`ahamark.db unchanged`，目标 Ruff/format 与新运行器 strict mypy 通过。仓库外使用 Paddle 官方公开合成公式 PNG 真实调用当前本机 `PP-FormulaNet_plus-M` 一次：单例 normalized exact/token similarity 为 1.0，但因 `confidence=null` 和教师复核告警，人工复核率仍为 1.0；该结果只证明分层运行器链路，绝不代表真实准确率。使用方法已写入 `docs/LOCAL-FORMULA-PROVIDER.md`；未读取、复制、上传或评测真实学生 PDF/页面，未确认公式/题目/答案/Rubric/评分/成绩，未发布。下一步仍需在人工授权并彻底脱敏后构建足够规模的 `text_pdf / scan / photo` 标注裁图集，分别测量真实质量，不能用 synthetic 单例决定上线。
-
-> 2026-08-12 本机公式 Provider 合成教师闭环（完成、未暂存/提交/推送）：仅在保留命名卷的 `ahamark-assistant6-preview-20260806` 隔离预览中创建明确标记为 `formula-ocr.synthetic.invalid` 的单页公开合成公式草稿，通过实际 HTTP API、`PP-FormulaNet_plus-M` 和 AhaMark `HttpFormulaProvider` 完成真实识别；结果严格为 1 个公式区域、1 个最高置信候选、`confidence=null`、`manual_required` 和两项教师复核告警。新增受 localhost、固定合成账号/标题/单页文件保护的 `scripts/formula_provider_synthetic_http_acceptance.py`，复跑会复用既有识别作业、区域和候选，发现额外数据或结构漂移即失败，不制造重复区域。Edge/Playwright 使用真实教师页面和真实区域/候选 API，只拦截“开始识别”写请求并回放既有作业；实际看到 1 个公式区域、1 个非空公式和“确认公式”，无备选入口，未点击确认。教师页移除无条件展示的 `fake / production` Provider 实现文案，只保留“识别结果确认前不会进入正式题目”。最终数据库只读审计为 `draft | 正式题目 0 | 公式区域 1 | 候选 1 | 已确认区域 0 | 已接受候选 0`；脚本安全复跑通过，前端识别组件专项 `2 files / 3 tests passed`，目标 Prettier、完整 Web ESLint 与 TypeScript 通过。隔离 API 仅因 test 模式内存登录限流原位重启一次，未重建容器或卷；真实学生 PDF 未读取、上传或入库，未确认公式/题目/答案/Rubric/评分/成绩，未发布。本轮只证明公开印刷公式的本机端到端与教师复核门禁，仍不能证明真实手写、扫描或拍照公式准确率。
-
-> 2026-08-12 隔离预览接入本机公式 Provider 与真实 readiness（完成、未暂存/提交/推送）：Docker Desktop 恢复后只读确认目标 `ahamark-assistant6-preview-20260806` 六个停止容器、专用网络和 PostgreSQL/Redis/MinIO 三个 2026-08-06 命名卷完整保留，旧 `ahamark-user-test-ac7ceb6` 继续保持停止；原样启动目标六服务后确认数据库仍在 0046、API 容器已可访问宿主 `PP-FormulaNet_plus-M` 服务。随后用原 business-e2e Compose、既有专用网络 override 和不含密钥的临时公式 override，仅重建 API/worker/Web，保留三个数据服务和卷；API 启动按追加链把数据库前向升级到唯一 head `0047_formula_recognition_candidates`，未修改旧迁移。公式服务使用未回显、未写盘的加密随机临时 token，API 配置为 `http://host.docker.internal:8765` 且白名单只含该主机；容器内 AhaMark `HttpFormulaProvider` 对 Paddle 官方公开样例真实返回 1 条非空 LaTeX、`confidence=None` 和两项教师复核告警，临时样例随后从容器精确删除。核查同时发现当前 AhaMark `/ready` 已遗漏历史 `formula_ocr` 组件，只检查配置会在模型进程退出时误报；现补回最多 1 秒、带 Bearer token 的远端 `/ready` 软依赖探测，本机模型 readiness 也要求鉴权，失败时只把 `formula_ocr` 标为 unavailable，不拖垮 PostgreSQL/Redis/MinIO 主系统。readiness/服务/既有 Provider 聚焦回归 `22 passed`、`ahamark.db unchanged`，目标 Ruff lint、strict mypy 通过；两个本轮修改的历史 CRLF 文件按 Ruff 机械格式化后目标 format-check 通过。最终隔离 `/ready` 为整体 available、`formula_ocr=available/provider=http/human_confirmation_required=true`，六服务 healthy，API 8800 与 Web 3300 HTTP 200，三个卷创建时间未变；镜像构建中的 Next production build 成功。未读取或导入真实学生 PDF，未创建公式区域或候选，未确认题目、答案、Rubric、评分或成绩，未发布；真实手写/扫描/拍照公式准确率仍未评测。
-
-> 2026-08-12 本机公式服务可重复运行收口（完成、未暂存/提交/推送，未更新隔离预览）：在上一条真实 HTTP 链路上补齐模型 readiness、常量时间 token 比较、启动前端口/模型三文件/依赖/令牌检查，以及可从任意当前目录定位仓库模块的前台启动脚本；`GET /health` 只表示进程存活，`GET /ready` 会实际加载 `PP-FormulaNet_plus-M` 并返回固定 provider/version。新增 `docs/LOCAL-FORMULA-PROVIDER.md`，只记录占位路径和安全注入方式，不记录真实 token；启动脚本固定监听 `127.0.0.1`，Ctrl+C 可停止，AhaMark 默认仍为 unavailable。服务与既有 Provider 合成回归 `13 passed`、`ahamark.db unchanged`，目标 Ruff lint/format 和 PowerShell parser 通过。随后精确停止本任务旧 PID，并从 D 盘非仓库目录通过正式脚本启动新服务；`/ready` 成功加载模型，AhaMark `HttpFormulaProvider` 对 Paddle 官方公开公式图再次返回非空 LaTeX、`confidence=None` 和两项人工复核告警，错误 token 实际返回 401。未配置或重建隔离预览，未读取真实学生 PDF，未自动确认任何公式、题目、答案、Rubric 或成绩；当前仍未评测真实手写/扫描/拍照准确率。
-
-> 2026-08-12 本机 PaddleOCR 公式服务接入（完成、未暂存/提交/推送，未更新隔离预览）：在已完成的 AhaMark HTTP Formula Provider 契约外新增独立 `scripts/local_formula_provider.py`、启动脚本和公开样例冒烟脚本，固定使用 `PP-FormulaNet_plus-M` CPU 模型，只监听调用命令指定的 `127.0.0.1`，要求至少 32 字符 Bearer token，只接受受限单张 PNG 公式裁图并校验 MIME、字节、像素和区域类型；模型调用以进程内锁串行，响应只返回一条 LaTeX 候选。Paddle 当前结果不提供可校准置信度，因此明确返回 `confidence=null`、`UNCALIBRATED_CONFIDENCE` 和 `TEACHER_REVIEW_REQUIRED`，不伪造置信度、不自动确认，也不写题目、答案、Rubric、评分或成绩。运行时独立安装在仓库外 D 盘，PaddlePaddle 3.3.1/PaddleOCR 3.7.0 CPU 自检和依赖检查通过；`PP-FormulaNet_plus-M` 权重约 0.578 GB，独立 Python 环境约 0.8 GB。Paddle 官方公开公式图先经模型直接推理、再经真实 `127.0.0.1:8765` 服务和 AhaMark `HttpFormulaProvider` 端到端调用，均成功输出同一条非空 LaTeX；服务当前以本任务专用合成 token 在本机运行，AhaMark 默认配置仍为 unavailable，未写入 `.env` 或真实凭据。新增服务合成契约覆盖单候选/未校准告警、错误 token 和非 PNG 拒绝；公式服务、既有 Provider、0047 与生产配置组合轮为 `32 passed, 1 error`，唯一 error 是 Windows 默认 pytest 临时目录 ACL 在 setup 前拒绝访问，随后以独立 D 盘 basetemp 精确复跑 0047 为 `2 passed`，两轮均 `ahamark.db unchanged`。目标 Ruff lint/format、独立环境 `pip check` 和 `git diff --check` 通过；未运行后端/前端全量或 Next production build。真实学生 PDF 未读取、未上传、未用于验证，因此当前只能证明本机印刷公式样例与安全接口链路可运行，不能证明手写公式、真实作业准确率、校准置信度或生产可用性；所有结果仍须教师确认。
-
-> 2026-08-12 本机公式识别 Provider 与教师复核闭环（完成、未暂存/提交/推送，未更新隔离预览）：在 0047 既有 `FormulaRegion / FormulaRecognitionCandidate` 上补齐不依赖 node2 的可替换 HTTP Provider、受限裁图、候选落库、教师框选与显式处置闭环，不新增或修改迁移，Alembic single head 保持 `0047_formula_recognition_candidates`。Provider 默认仍为 unavailable；确定性 Fake 只在 `APP_ENV=test` 生效，production 明确拒绝 Fake。HTTP 模式只向精确主机白名单发送裁切后的单个 PNG 区域，生产必须 HTTPS 和至少 32 字符强 token；限制来源页读取、公式裁图像素/字节、请求超时、响应大小、候选数量、LaTeX 长度、Provider 标识、置信度与 warning schema，断线、超时、越权主机或无效响应均 fail closed。远程推理在数据库锁外执行，写入前重新锁定并核对区域 `updated_at + 坐标 + 类型` 快照，防止慢 Provider 阻塞教师操作或用过期区域覆盖新编辑。公式区域仅允许当前 owner 的 draft assignment、active paper 和所属 recognition job；90% 以上重叠区域拒绝重复创建。教师工作台默认不启用画框，点击“框选公式”并拖一次后只保存区域；仍须单独点击“识别公式”。普通界面只显示置信度最高候选，存在备选时教师按需展开；教师可修改后明确确认或拒绝，接受仅把公式候选和区域标记为 accepted/confirmed，其他候选保留为 rejected 审计，不写入正式题目、答案、Rubric 或评分。后端公式/0047/production guard 组合 `30 passed`，`ahamark.db unchanged`；目标 Ruff、公式模块及 API strict mypy、Alembic single head、完整 PostgreSQL 离线 DDL 与 `git diff --check` 通过。教师工作台合成组件 `1 passed`，目标 Prettier、TypeScript 与 ESLint 通过。未运行后端/前端全量或 Next production build，未升级/重建隔离预览，未安装或调用 PaddleOCR/pix2tex/node2，未读取或上传真实学生资料，因此当前只能证明本机接口、安全门禁与人工闭环，不能证明真实公式 OCR 准确率。
-
-> 2026-08-11 数学公式 OCR/结构化评测第一条安全闭环（完成、未暂存/提交/推送，未更新隔离预览）：新增接在 0046 后的追加式迁移 `0047_formula_recognition_candidates`，不修改旧迁移；新增 `FormulaRegion / FormulaRecognitionCandidate`，把一页多公式区域、行内/独立公式类型、归一化坐标、检测来源、多候选排序、Provider 版本、置信度、告警和人工处置状态独立保存，不把普通文字块或最高置信候选直接写成正式题目、答案或评分依据。新增公式识别 Provider 协议与明确 unavailable 实现；未配置真实公式模型时稳定 fail closed，不把 RapidOCR、Fake 或普通 PDF 文字层冒充 LaTeX 识别。新增完全离线的脱敏 JSON 评测契约和 runner，只接受随机化 case ID，拒绝文件路径、文件名、姓名、学号和来源哈希字段；指标包括保守 LaTeX 规范化精确率、token 编辑相似度和人工复核率，固定输出 `production_ready=false / human_confirmation_required=true`。仓库内仅有 3 条合成表达式夹具，用于验证等价排版规范化、错误指数和无候选门禁，不代表真实 OCR 准确率。用户提供的仓库外测试目录已只读清点和代表页视觉核验，覆盖电子文字 PDF、扫描手写、手机拍照、图片和压缩包；没有复制原文件、姓名、学号、页面图像、内容或哈希到仓库/README/夹具/日志，也没有上传外部服务，临时渲染与测试目录已精确删除。公式模块与 0047 SQLite upgrade→downgrade→upgrade / PostgreSQL 离线 DDL 专项 `7 passed`，目标 Ruff、两个文件 strict mypy、Alembic single head `0047_formula_recognition_candidates`、完整 PostgreSQL 离线迁移链和 `git diff --check` 通过。未运行后端/前端全量或 Next production build，未升级隔离预览数据库，未实现真实手写公式模型、公式区域检测、渲染一致性或数学等价判断，因此不得声称真实公式 OCR 已可用；下一步是用本地可部署模型接入该 Provider 契约，并在人工脱敏标注后按电子/扫描/拍照分层评测，所有结果仍须教师确认，不生成评分、不写成绩、不发布。
-
-> 2026-08-11 教师私有教材题库导入与跨作业可选来源（完成、未暂存/提交/推送，已更新隔离预览）：新增接在 0045 后的追加式迁移 `0046_textbook_libraries`，不修改旧迁移；新增教师私有 `TextbookLibrary / TextbookLibraryQuestion` 和按作业选择的 `AssignmentTextbookLibrarySelection`，教材候选正文只由仓库外受控 JSON 幂等导入本地数据库，不把教材 PDF、页面图像或 OCR JSON 写入仓库。作业整理页新增默认折叠的“教材来源”，普通教师只看到教材名和分册，可选择多册；保存后从当前解答候选自动匹配，每题仍只保留置信度最高的一处并要求教师明确确认。`TextbookSourceMatchCandidate` 可审计地二选一绑定旧作业内教材页或新教材库题目，数据库 check constraint 禁止两种来源同时为空或同时存在。自动匹配只检索 `suggested` 题库候选，`manual_required` 候选不参与；不创建/确认正式题目、答案或 Rubric，不评分、不写成绩、不发布。仓库外两册《数学分析讲义》已导入指定隔离项目 `ahamark-assistant6-preview-20260806` 的合成教师私有库：第1册 358 条（336 可建议、22 仅人工复核），第二册 385 条（201 可建议、184 仅人工复核），合计 743 条（537 可建议、206 仅人工复核）；空题干 0、重复来源键 0，第二次同输入幂等复跑新增教材 0 / 题目 0。数据库从 0036 按追加链升级到唯一 head `0046_textbook_libraries`，当前尚未替任何作业选择教材（selection 0）；仅重建 API/worker/Web，PostgreSQL/MinIO/Redis 既有卷和数据保留，六服务 healthy，Web/API HTTP 200，认证后的教材库 API 返回两册。0046 SQLite upgrade→downgrade→upgrade、PostgreSQL 离线 DDL 及既有 0044/0045/匹配规则组合共 `12 passed`；教材选择组件 `14 passed`，目标 Ruff、strict mypy、TypeScript、ESLint、Prettier、Alembic single head 和 Docker Next production build（19 pages）通过。未运行后端/前端全量；真实学生 PDF 未读取、未导入、未复制，教材原 PDF 未修改且未上传外部服务。扫描公式 OCR 与数学等价性仍不可靠，所有出处仍须教师复核。
-
-> 2026-08-11 教材题库仅提取习题题干（完成、未暂存/提交/推送）：教材索引从“可信文字页窗口”收紧为 `questions-only-v1`，新增接在 0044 后的追加式迁移 `0045_textbook_question_only_indexes`，不修改旧迁移；既有 0044 索引统一标记为 `legacy-page-windows-v2`，新代码只复用当前策略版本，因此部署后会重建而不会继续用旧整页结果。索引只有在识别到明确“习题/练习”标题后才进入题目候选区，跨页可延续，遇到新章节/小节、答案/解答/参考答案/提示标题立即停止；目录、正文、例题、证明讲解、无题号页面和整页回退全部跳过。扫描教材的 RapidOCR 普通文字块也可保守派生题号，但必须满足左侧主题号与 `1.`、`2、`、`2(3)` 这类主问题格式；裸数字、公式 `2x` 和 `(1)…(n)` 子项不独立建题，子项正文保留在所属主问题窗口中。结果仍只是教材来源检索索引和待确认出处候选，不创建独立正式题库实体，不自动物化/确认题目、答案或 Rubric，不评分、不发布。脱敏规则与 0043/0044/0045 SQLite upgrade→downgrade→upgrade、PostgreSQL 离线 DDL 共 `12 passed`，`ahamark.db unchanged`；目标 Ruff、教材服务 strict mypy 与 Alembic single head `0045_textbook_question_only_indexes` 通过。另用仓库外已处理教材分册只读抽样：第1册“习题 3.1”提取 1 个主问题，第2册“习题 9.3”提取主问题 1–4；首次宽松规则曾把公式和子项误识别为 11/18 个候选，收紧后精确复测消除该误报，未将真实教材文字、页面图像或 OCR 输出写入仓库。未运行后端/前端全量或 Next production build，未导入 AhaMark 数据库，未进行 Git 暂存、提交、推送、合并、部署或改变 PR 状态。
-
-> 2026-08-11 教材预索引、无题目解答自动匹配与教师界面降噪（完成、未暂存/提交/推送）：在 0043 建议式出处审计上新增追加迁移 `0044_textbook_content_indexes`，不修改旧迁移；教材文件被教师确认后，会把已有可信 `pdf_text` 或真实非 Fake OCR 文字按页内窗口预处理为持久索引，只保存规范化检索信号、来源块 ID、题号/章节/习题标签和内容哈希，不复制完整教材正文。参考答案绑定或可编辑答案候选生成后自动触发匹配，不再要求教师点击“通过解答查找出处”；即使尚未提交或物化题目，也可从未绑定题目的参考答案区域提取可信解答文字并匹配教材。每个题目或解答只保留置信度最高的一条 suggested 结果，旧建议按版本转 superseded；没有足够共同信号、教材无可信文字、解答仅来自 Fake/unavailable 或数学等价性未验证时继续 fail closed。普通教师界面移除教材选择器、手动搜索按钮、算法名、共同线索、风险码和多候选列表；仅在存在结果时显示默认折叠的“教材出处（已自动匹配 N 题）”，教师按需展开后看到解答/题号、教材名、习题号和 PDF 页，并仍须明确点击“确认出处”或“不是这里”。确认继续校验 owner、draft、active paper、revision/paper/source snapshot、解答内容哈希与候选 edit version；只写出处审计，不自动创建题目、确认答案/Rubric、评分、成绩或发布。0044 的 SQLite upgrade→downgrade→upgrade 与 PostgreSQL 离线 DDL、0043 兼容迁移和匹配纯函数共 `7 passed`；修复一次自动调用误插字段建议端点的回归后，文件确认、参考答案绑定、Provider unavailable worker 和答案生成调用链精确复跑另 `5 passed`。前端题目复核组件 `6 passed`，目标 Prettier、ESLint、TypeScript、后端 Ruff、Python compile、教材索引服务 strict mypy 与 `git diff --check` 通过；Alembic single head 为 `0044_textbook_content_indexes`。一次三文件后端组合回归在 4 分钟无输出后超时，随后拆分精确定位并修复上述端点问题，因此本轮未运行后端/前端全量或 Next production build，不得声称全量全绿。未读取、导入、复制或提交真实课本/学生 PDF，未调用 Docker、外部 OCR/Provider、真实数据或密钥，未进行 Git 暂存、提交、推送、合并、部署或改变 PR 状态。扫描数学教材的可靠公式 OCR、数学等价判断和仅凭手写解答的全书检索仍不成立。
-
-> 2026-08-11 教材可选来源与按解答反查出处闭环（完成、未暂存/提交/推送）：文件用途新增独立“教材”，受控文件名可保守建议该角色，教师也可在现有文件分析区明确选择；教材不会进入只面向 `question_paper` 的题目抽取。新增接在 0042 后的追加式迁移 `0043_textbook_source_matches`，不修改旧迁移；`TextbookSourceMatchCandidate` 固定当前题目、解答候选、教材文件、教材页、可选题号锚点、章节/小节/习题标签、PDF/可识别印刷页、解答内容哈希、来源快照、匹配方法、共同线索和风险。普通教师可为每道已物化题选择已确认教材并点击“通过解答查找出处”；后端只读取当前可编辑解答候选和教材可信 `pdf_text` 或真实非 Fake OCR 文字，Fake/unavailable、无解答、无可信文字或无足够共同线索均 fail closed。确定性 v1 只做词法/公式字符线索重叠，最多返回 5 个候选、置信度上限 0.79，固定提示“需教师确认/未验证数学等价性”，不把相似解答自动认定为同一道题。教师可排除候选或显式确认；确认同时校验 owner、draft、active paper/question、revision edit version、source snapshot、解答内容哈希和候选 edit version，并以数据库唯一约束保证一题至多一个 confirmed 教材出处；只写来源审计，不改题干/答案/Rubric，不生成评分、不确认成绩、不发布。脱敏后端相关回归最终 `31 passed`，数据库守卫为 `ahamark.db unchanged`；其中 0043 自身 SQLite upgrade→downgrade→upgrade 和 PostgreSQL 离线 DDL 通过，完整 PostgreSQL 离线迁移链生成至 0043，Alembic single head 为 `0043_textbook_source_matches`。额外 fresh SQLite 全历史链在既有 `0001_initial` 的 PostgreSQL `JSONB` 不兼容处失败，未到达 0043，因此不得声称全历史 SQLite 链通过。目标 Ruff、Python compile、新匹配服务 strict mypy 通过；前端题目复核与文件用途组件 `2 files / 19 tests passed`，完整 Web ESLint、TypeScript、目标 Prettier 与 `git diff --check` 通过。未运行后端/前端全量或 Next production build；未导入、复制或提交真实课本/学生 PDF，未使用 Docker、外部 Provider、真实数据或密钥，未进行 Git 暂存、提交、推送、合并、部署或改变 PR 状态。当前能力依赖教材已有可信文字证据；扫描数学教材的公式 OCR、数学等价判断和仅凭手写解答的可靠全书检索仍不成立。
-
-> 2026-08-11 已确认参考答案区域生成可编辑文本候选闭环（完成、未暂存/提交/推送）：新增接在 0041 后的追加式迁移 `0042_answer_candidate_source_binding`，不修改旧迁移；`AssignmentAnswerDraftCandidate` 以可空外键和唯一约束固定来源 `ReferenceAnswerSourceBinding`，既能审计答案候选来自哪次教师确认，也能在行锁外再以数据库约束阻止并发重复。只有绑定已由教师明确确认为当前 active paper 的稳定 `Question.id` 后，教师才会看到“生成可编辑答案候选”按钮；显式请求同时校验 owner、draft assignment、binding/revision edit version、活动题卷和重新计算的 source snapshot。提取器只读取已确认多区域内、完全落框、与题号锚点属于同一 recognition job 且来源为 `pdf_text:*` 的 recognized 文字块，按真实页序和块坐标稳定拼接，排除题号锚点及旧/失败识别任务文本，并保存块级 evidence、跨页区域、binding version 和来源快照；扫描页、图像公式或区域内没有可信 PDF 文字时以 422 fail closed，不调用外部 OCR/Provider，也不把 Fake/unavailable 冒充识别质量。结果固定为 `suggested + manual_required`，带 `REFERENCE_TEXT_REQUIRES_TEACHER_CONFIRMATION`，只是教师可继续编辑和单独复核的答案候选；重复请求幂等返回同一候选，不创建或确认 `ReferenceAnswerVersion`，不生成 Rubric、评分、成绩或发布。脱敏跨页回归使用纯合成两页文字块验证 `first step / continued result` 合并、失败旧任务文本隔离、来源绑定、幂等唯一性以及正式答案和 Rubric 均为 0。最终本切片集成与 0042 SQLite upgrade→downgrade→upgrade / PostgreSQL 离线 DDL 为 `3 passed`；相关 0041/0042/head 组合此前为 `6 passed`，迁移链精确补跑 `1 passed`，Alembic single head 为 0042，`ahamark.db unchanged`。目标 Ruff lint/format、新提取模块 strict mypy 通过；标准 strict mypy 仍只报告账本既有 `assignment_generation/service.py:95,108` 两处 assignment 错误。前端目标 Prettier、ESLint、TypeScript 通过，题目复核组件 `5 passed`。未运行后端/前端全量或 Next production build，未运行 fresh PostgreSQL；未读取、导入或复制真实学生 PDF，未使用 Docker、外部 OCR/Provider、真实数据或密钥。剩余优先事项：对扫描/混合参考答案提供受来源置信度约束且仍需教师确认的识别候选、参考答案绑定区域的页面可视化调整，以及跨候选整页总览与键盘可访问操作。
-
-> 2026-08-11 参考答案 PDF 稳定题号来源绑定闭环（完成、未暂存/提交/推送）：新增接在 0040 后的追加式迁移 `0041_reference_answer_source_bindings`，不修改旧迁移；新增独立 `ReferenceAnswerSourceBinding / ReferenceAnswerSourceRegion` 审计模型，不把来源区域塞进单值 ReferenceAnswer 字段。只有教师已确认文件角色为 `reference_answer` 后，题目抽取阶段才会读取该文件已有的 `question_number` 识别块，使用与题卷/学生答卷相同的 canonical 层级题号绑定 active `Question.id`；每个参考答案文件独立按自身页序和相邻锚点生成一题多区域/跨页区域，不依赖题卷与答案 PDF 页码相同或版式相同。未知题号、active Question canonical 冲突、参考答案重复题号及低置信度均保留 warning 和待教师处理，不自动确认；重跑会把未处理旧建议转 superseded，已确认/拒绝历史保留。新增普通教师“参考答案来源绑定”工作台，显示检测题号、文件、区域/页数、置信度和风险，可从已物化稳定题目中选择目标并明确确认或拒绝。确认 API 要求 owner、draft assignment、active paper、binding/revision edit version、paper version、source snapshot、显式 `explicit_confirmation=true`、题目属于当前题卷、区域属于同一参考答案文件、区域合法非重复，并通过行锁和“一题至多一个 confirmed 来源”冲突门禁；确认只写来源绑定审计，绝不创建/接受/确认 `ReferenceAnswerVersion`，也不生成 Rubric、评分、成绩或发布。脱敏回归构造两页合成参考答案，验证 `2（3） / 2(5) / 12（2）` 按稳定题号绑定，其中 `2(3)` 来源跨两页且不使用题卷页码；缺少显式确认返回 422，确认后 `ReferenceAnswerVersion` 仍为 0。最终后端组合为 `5 passed, 1 skipped`：绑定/API、0041 SQLite upgrade→downgrade→upgrade、PostgreSQL 离线 DDL 与 single head 通过，fresh PostgreSQL 因未配置测试 DSN 跳过；`ahamark.db unchanged`。目标 Ruff lint/format、新绑定生成模块 strict mypy 通过。前端目标 Prettier、ESLint、TypeScript 通过，题目复核与父级生成面板 `2 files / 17 tests passed`。Alembic single head 为 0041。未运行后端/前端全量或 Next production build；未读取、导入或复制真实学生 PDF，未调用真实预览、Docker、外部 OCR/Provider、真实数据或密钥。剩余优先事项：从已确认来源区域提取可编辑的参考答案正文候选（仍须教师单独确认）、参考答案绑定区域的可视化调整，以及跨候选整页总览与键盘可访问操作。
-
-> 2026-08-11 稳定层级题号绑定基础统一（完成、未暂存/提交/推送）：新增单一、受控的题号规范化模块，题卷文字锚点与学生答卷 PDF text/OCR 锚点不再各自维护不同正则；删除学生处理文件中前后重复且后一份静默覆盖前一份的两套兼容表达式。统一规则支持 `1`、`第1题`、`Q1`、`1a / 1(a)`、历史 `2.1`，并把数字子题中英文括号稳定规范为 `2(3)`、`2(5)`、`12(1)`、`12(2)`；只接受行首 1–3 位主题号，正文中的“答案引用第 9 题”和四位年份不会成为锚点。学生分区此前只规范化识别结果、却用数据库 Question 原始字符串建索引，导致 `02(03)` 与 `2(3)` 仍不能相遇；现识别锚点和 active Question 两侧都使用同一 canonical key，重复 canonical 题号继续排除自动绑定。脱敏集成回归在同一学生页面按四个层级题号创建四个 `SubmissionQuestionAnchor`，逐一固定到正确 `Question.id` 并生成对应 `StudentAnswerRegion`，明确不以学生页码、题卷页码或版式作为题目身份；缺失、重复、低置信度和顺序保护保持不变。新共享模块 strict mypy、目标 Ruff lint/format 通过；五项精确专项 `5 passed`，题卷识别与学生答卷处理两个完整相关文件为 `28 passed, 2 skipped`，两轮均 `ahamark.db unchanged`。不新增迁移，Alembic single head 保持 0040；未运行后端全量、前端测试或 Next production build。未读取、导入或复制真实学生 PDF，未使用 Docker、外部 OCR/Provider、真实数据或密钥，未确认区域、评分或成绩，未发布。当前事实边界：学生答案侧已经按稳定层级题号绑定到 Question.id；参考答案候选虽已有 question_id，但参考答案 PDF 的题号锚点、多页来源区域和教师确认绑定审计尚未实现，下一优先事项即该缺口。
-
-> 2026-08-11 题目区域页面叠加框与可视化编组（完成、未暂存/提交/推送）：在相邻题号区域草稿契约上新增独立普通教师可视化编辑器，复用既有 draft-only `pagePreview` 与统一旋转坐标转换，不新增后端端点或迁移，Alembic single head 保持 0040。页面图片不会在列表加载时自动生成，教师须按页显式点击加载；加载后同一道题在当前页的全部区域以带编号蓝框叠加显示，页面下拉同时展示每页区域数，跨页题可逐页检查。教师可点选某一区域后重画，或拖拽新增区域；90/180/270 度预览坐标会精确逆变换回未旋转页面的 0..1 坐标，坐标表仍保留用于精确校正、改页和删除。视觉操作只修改浏览器本地草稿，明确提示仍须单独点击“保存区域草稿”才调用带 candidate/revision/paper/snapshot 乐观锁的更新契约；不会接受题目、生成评分、确认成绩或发布。回归覆盖 90° 叠加位置、拖画后的逆变换、视觉新增不触发保存/接受，以及父级生成面板和既有手动切题：`3 files / 18 tests passed`；目标 Prettier、ESLint、TypeScript 通过。未修改后端，未运行后端/前端全量或 Next production build；未读取、导入或复制真实学生 PDF，未调用真实页面预览、Docker、外部 OCR/Provider、真实数据或密钥。剩余优先事项：参考答案与学生答案按稳定层级题号绑定，并补充更适合大量题目的跨候选整页总览和键盘可访问的框选替代操作。
-
-> 2026-08-11 相邻题号区域草稿与教师调整闭环（完成、未暂存/提交/推送）：不新增迁移，Alembic single head 保持 0040。PDF 文字层题号锚点现按真实 `PaperPage.page_number` 与页内纵坐标排序，不再依赖 UUID 顺序；相邻锚点确定同页题目的上下边界，一页多题可生成互不重叠的全宽区域。若下一锚点位于后续页面，当前题生成“首屏锚点到底部 + 中间整页 + 末页顶部到下一锚点”的多区域跨页草稿；最后一个锚点在没有后续证据时不会自行吞并剩余页面。新增教师区域草稿更新契约与普通教师坐标编辑区，可增加、删除、改页及修改归一化 `x / y / width / height`；保存只替换 suggested candidate 的区域证据，写入 `teacher_adjusted` 来源、跨页组和 `REGION_TEACHER_ADJUSTED` 人工门禁，不接受或物化题目。服务端同时校验 owner、draft assignment、candidate/revision edit version、paper version、source snapshot、页面属于同一题卷、1–50 个合法非重复区域；过期或越界请求 fail closed。脱敏后端专项覆盖同页分区、三页跨页延续、PDF 锚点集成、两页教师调整、过期/非法页面保护及 0040 迁移/head 契约：首轮为 `7 passed, 1 skipped`，唯一错误是 Windows 拒绝访问 Pytest 全局临时根；改用可写临时根后 0040 SQLite upgrade→downgrade→upgrade 精确复跑 `1 passed`，两轮均 `ahamark.db unchanged`。目标 Ruff lint/format 通过；正常 strict mypy 仅报告依赖链中既有 `assignment_generation/service.py:95,108` 两处 assignment 错误与 `workers/tasks/ocr.py:13` 无类型装饰器，本切片目标文件无新增独立诊断。前端目标 Prettier、ESLint、TypeScript 通过，区域编辑组件 `2 passed`。未运行后端/前端全量或 Next production build；未读取、导入或复制真实学生 PDF，未使用 Docker、外部 OCR/Provider、真实数据或密钥，未生成评分、确认成绩或发布。剩余优先事项：把坐标表升级为页面叠加框和多区域可视化编组、处理缺少后续锚点时由教师明确追加的跨页延续，并实现参考答案与学生答案按稳定层级题号绑定。
-
-> 2026-08-11 PDF 字符坐标、行块与层级题号锚点闭环（完成、未暂存/提交/推送）：新增接在 0039 后的追加式迁移 `0040_recognition_character_boxes`，不修改旧迁移；`RecognitionBlock` 现持久化每个可定位字符的 `source_index / text / x / y / width / height`，坐标由 PDF 左下角点单位转换为 AhaMark 左上角 0..1 归一化区域。PDF 文字层不再压成整页块，而是按实际换行聚合为有精确外接框的行块；空白、换行和无有效边界框内容不会伪造区域。受控解析器只在行首识别 1–3 位主题号和可选圆括号子题号，支持 `1`、`2(3)`、`11(2)`、`12(2)` 及中英文括号/标点，正文中的题号引用、四位年份不会误作锚点。匹配行保存为 `question_number` block，并创建保留真实层级题号、`pdf_text:pypdfium2` 来源和行级区域的待复核 QuestionCandidate；确认后 Question/QuestionRegion 来源保持 `pdf_text`，不再伪写为 OCR。重复锚点使用显式重复标记隔离，生成桥接标记 `QUESTION_NUMBER_CONFLICT` 且要求人工处理，直接确认在教师改号前以 422 fail closed。0040 最终综合专项（行块/字符坐标、层级解析、pdf_text 候选与确认、文本/图像 PDF Provider 边界、来源分类、0039/0040 SQLite upgrade→downgrade→upgrade、PostgreSQL 离线 DDL 与 single head）为 `15 passed, 1 skipped`；最后来源与重复门禁补丁精确复跑 `8 passed, 1 skipped`，两轮均 `ahamark.db unchanged`。Alembic single head 为 0040；目标 Ruff lint/format 与 3 个目标 Python 文件 strict mypy 通过。未修改前端，未运行后端/前端全量或 Next production build；未读取、导入或复制真实学生 PDF，未使用 Docker、外部 OCR、真实数据或密钥，未生成评分、确认成绩或发布。剩余优先事项：用相邻题号锚点生成可调整的题目区域草稿、处理一页多题与跨页延续、教师可视化多区域编组，以及参考答案和学生答案按稳定题号绑定。
-
-> 2026-08-11 PDF 文本层优先与内容来源闭环（完成、未暂存/提交/推送）：新增接在 0038 后的追加式迁移 `0039_pdf_content_sources`，不修改旧迁移；文件与页面分析现持久化并返回 `content_mode`（text / scanned / mixed / unknown）、`text_source`（pdf_text / ocr / mixed / unavailable）、来源置信度，页面另存可验证文字字符数。题卷识别对 PDF 先读取内嵌文字层：文字充分时直接保存来源为 `pdf_text:pypdfium2`，不调用 OCR；文字层不足时才补充可用 OCR，形成 mixed 证据；Provider unavailable 时，带可读文字层的 PDF 仍可完成，扫描页则逐页明确失败。Fake / unavailable Provider 的块不会被分析层当作真实 OCR 质量，缺少可靠来源时文件/页面保守标为 unknown / unavailable 并提示核对；一个文件只要有页面来源未知，文件级也不伪装成已识别。教师“文件与页面”区现显示文本/扫描/混合类型、文字来源、置信度和逐页字符数。脱敏测试只使用 ReportLab 合成文本 PDF 和空白/图像夹具：backend 聚焦专项（内容来源边界、0039 SQLite upgrade→downgrade→upgrade、PostgreSQL 离线迁移链、文本 PDF 无 OCR 完成、无文字层 PDF 在 OCR unavailable 时明确失败、Fake 边界与 single head）累计 `11 passed, 1 skipped`，`ahamark.db unchanged`；Alembic single head 为 0039；5 个目标 Python 文件 strict mypy、目标 Ruff lint/format 通过。前端生成面板 `13 passed`，目标 Prettier/ESLint 与 TypeScript 通过；`git diff --check` 通过。未运行后端/前端全量或 Next production build；未读取、导入或复制真实学生 PDF，未使用 Docker、外部 Provider、真实数据或密钥，未生成评分、确认成绩或发布。当前 PDF 文字层先以页级规范化文本块和整页区域落库，尚未保存逐字符坐标；下一优先事项是字符坐标/行块提取、题号锚点从 pdf_text 证据生成、教师可视化多区域编组，以及参考答案与学生答案按稳定题号绑定。
-
-> 2026-08-11 题目清单合并/拆分与跨页多区域闭环（完成、未暂存/提交/推送）：在 0038 题目结构审计模型上继续复用既有 `QuestionRegion → PaperPage` 多区域关系，不新增重复区域表。题目结构 API 现在返回每个作答单元的区域明细、区域数、页数与 `spans_pages`；教师清单直接显示“跨页延续”。新增显式合并事务：教师勾选至少两个作答单元并填写新题号后，系统新建空白、待复核的 manual 题目，原子迁移所选题目的全部区域（可以来自不同页面），旧题只转为 removed 审计历史，不删除；不会自动拼接题目文字或推断分值。新增显式拆分事务：只允许把一题当前全部区域做无重复、无遗漏的精确分区，服务端支持每个新单元包含一个或多个区域，当前普通教师界面提供“每个区域一个新单元”的清晰入口，并明确跨页连续答案无需拆分。合并/拆分均要求 draft assignment、active paper、当前结构 hash、当前题目和区域集合、唯一层级题号与教师 `explicit_confirmation=true`；操作后 score policy 重置为 unconfirmed，新单元分值保持空，未受影响题目的已有分值不清空，答案/Rubric 草稿候选转 superseded 并要求重新生成。一旦任一来源题已有正式 ReferenceAnswerVersion、StructuredRubricVersion 或 StudentAnswer，事务以 `QUESTION_STRUCTURE_CONTENT_BOUND` 409 拒绝，确保稳定题号/题目 ID 绑定不会被事后静默改写。脱敏回归构造两页、三题、四区域场景，验证题 2 跨页两区域拆为 `2(3) / 2(5)`、`12(1) / 12(2)` 合并后仍保留两页区域、旧题保留 removed、正式答案绑定后拒绝拆分；题目结构、迁移和 head 聚焦共 `10 passed`，`ahamark.db unchanged`，Alembic single head 仍为 0038。前端新组件与父级生成面板为 `2 files / 16 tests passed`，TypeScript、严格 mypy（题目结构 API）、Ruff lint/format、目标 Prettier/ESLint 通过。未运行后端/前端全量或 Next production build；未读取、导入或复制真实学生 PDF，未使用 Docker、Provider、真实数据或密钥，未生成评分、确认成绩或发布。剩余优先事项：让教师在一次拆分中把多个区域归入同一新单元的可视化编组、真实学生答卷区域与参考答案区域的稳定题号对照工作台，以及 PDF 扫描/文本/混合类型及来源置信度的完整呈现。
-
-> 2026-08-11 真实数学作业结构化与切题层第一条纵向闭环（完成、未暂存/提交/推送）：在完整保留 06f7 既有脏工作树的前提下，新增独立、追加式 `QuestionStructureReview / QuestionStructureItem` 审计模型及接在 0037 后的新迁移 `0038_question_structure_reviews`，不修改任何旧迁移。草稿作业现在可把现有题目投影为教师确认清单，稳定保存 `display_number / parent_number / sub_number / display_order`、来源（pdf_text / ocr / manual / existing）和置信度；题号按 `1`、`2(3)`、`11(2)`、`12(2)` 这类格式规范化，重复题号、非连续顺序、题目集合漂移与过期 hash 均 fail closed。教师界面支持层级题号编辑、上移/下移、移出独立作答单元、700ms 自动保存和未保存离开保护；保存不会确认，正式确认仍要求教师单独点击。PDF 没有可信分值时默认保持 `unconfirmed` 并阻止确认；教师可明确选择等权（必须已有作业总分，ROUND_HALF_UP 后末题吸收合法尾差）、逐题填写或模板换算后的逐题分值，缺分继续 422，逐题确认也不会凭空写入作业总分。确认只更新草稿 active paper 的题号、顺序、父题关联、题目状态与已明确分值，不生成评分建议、不确认成绩、不发布。脱敏合成回归覆盖 16 个作答单元以及 `2(3) / 2(5) / 12(1) / 12(2)`、缺分门禁、过期自动保存、无总分写入和 10 分三题等权 `3.33 / 3.33 / 3.34`；新后端/迁移为 `5 passed`，迁移链契约 `3 passed`，`ahamark.db unchanged`，Alembic single head 为 0038；新组件及父级生成面板为 `2 files / 15 tests passed`，TypeScript、严格 mypy（新 API）、Ruff lint/format、目标 Prettier/ESLint 与 `git diff --check` 通过。未运行后端或前端全量、未运行 Next production build，因此不得声称全量全绿。未读取、导入或复制两份真实学生 PDF；未使用 Docker、Provider、真实数据或密钥。剩余优先事项是题目清单的显式合并/拆分、多页多区域编辑与参考答案/学生答案按稳定题号绑定，以及把现有 PDF 文本层优先能力的来源/置信度完整呈现在该清单中。
-
-> 2026-08-11 评分模板第一版真实闭环（完成、未暂存/提交/推送）：在完整保留 `codex/integrate-question-page-cutter` 既有工作树改动的前提下，新增独立 `RubricTemplate / RubricTemplateVersion / RubricTemplateCriterion / RubricTemplateApplication` 模型及接在 0036 后的单线迁移 `0037_rubric_templates`，不把模板伪装成题目绑定的 Structured Rubric。模板支持真实列表、搜索筛选、创建/编辑、草稿自动保存、离开保护、复制、可见历史版本、确认与归档；confirmed 版本不可原地覆盖，普通教师界面不显示 stable key、JSON 或 content hash。criterion 继续复用 `validate_rubric` 语义，支持 proportional（精确 100%）和 fixed（精确等于模板总分）的 Decimal 校验；比例应用使用稳定 ROUND_HALF_UP 舍入，末项只吸收合法尾差且最终精确等于题目满分。从现有 Structured Rubric 保存模板会保留类型、必选项、依赖、评分模式、人工复核与部分得分等 structured-only 语义，但递归剥离标准答案、expected evidence、题目描述、来源区域等题目专属信息。逐题核对区新增“使用评分模板”和“保存为模板”；服务端 preview/apply 校验 owner、draft assignment、active paper/question、题目分值、当前 confirmed reference answer、模板状态/版本/hash，并用题目/答案版本、幂等键、事务行锁及并发 409 创建新的题目绑定 Structured Rubric draft；绝不覆盖 confirmed Rubric、自动确认答案/Rubric、激活 Structured Set 或发布。应用审计固定模板版本、题目版本、答案版本/hash、生成 rubric、换算、actor/time。后端模板与迁移聚焦最终 `8 passed`，SQLite upgrade→downgrade→upgrade 与 PostgreSQL 离线 DDL通过，Alembic single head 为 0037；此前后端全量为 `671 passed, 18 skipped, 3 failed`，三项仅是测试仍断言旧迁移 head，更新为 0037 后三项精确复跑全部通过（未把未重跑的约 42 分钟全量夸大为全绿）。全仓 Ruff 通过，新 API strict mypy 通过；标准 mypy 110 files 仅报告既有脏工作树 `assignment_generation/service.py:95,108` 两处类型错误，本轮未改无关用户文件。前端模板精确回归为页面 `4 passed`、动作组件 `2 passed`；最终一次全量中模板测试全绿，另有既有 review 页单项时序失败，立即隔离复跑 `1 passed / 30 skipped`，因此不把该次全量声称为全绿；此前全量基线为 `35 files / 205 tests passed`，Prettier、ESLint、TypeScript 和 Next production build（19 pages）通过。首次误用 pnpm 在本工作树生成的未跟踪 `.pnpm-store/` 内容创建/修改时间完全一致，确认仅为本任务缓存后已只删除该目录，未触碰用户文件、lockfile 或 node_modules。`ahamark.db` unchanged；未使用 Docker、真实数据或密钥，未触碰任何容器/volume/Bucket，未进行 Git 暂存、提交、推送、合并、部署或改变 PR 状态。
-
-### 当前事实（以当前工作树重新验证为准）
-
-- 2026-08-17：GitHub 合作者代码实时复审完成（本条对应提交，未部署）：从干净且暂存区为空的 `codex/integrate-question-page-cutter=8418f52` 开始，fetch 后本地、远端仍为 0 ahead / 0 behind。GitHub 仍只有 Draft PR #1 `codex/grading-confirm-results=8a76715`，OPEN/Draft、base `master`、mergeable/CLEAN、评论 0、审查 0、status/check-runs 0；该 head、`master=d4b398b` 与 `codex/phase4-baseline=2b56046` 均为目标分支祖先，候选新增提交为 0，不重复合并。唯一非祖先分支仍为 `gyh--001=8ac3f8c`，无 PR、评论、审查、status 或 check-runs，相对目标为 46 behind / 2 ahead，merge-base 为 `d4b398b`；两提交分别为 `62024c0`（10 文件，`+962/-361`）和 `8ac3f8c`（87 文件，`+12120/-313`），合计 95 文件、`+13082/-674`。
-- 本次复审接受 0、拒绝整提交/整分支合并、暂缓高风险新能力。`62024c0` 的手工切题能力已由当前 `5ae3a78` 按现架构选择性实现并补有独立组件测试，整提交会回退当前向导/API 演进，因此不重复 cherry-pick。`8ac3f8c` 引入旧链 `0026_student_portal`（当前迁移链已到 `0048_class_resources`）、真实 OpenAI 外部调用及学生答案/反馈外发、学生姓名/学号和原文件名展示、学生上传与 presigned bearer URL 新隐私/授权面、Next 15→16 与 1019 行 lockfile 漂移，以及 Nginx/Compose/端口/运维改动；这些内容无法在当前迁移、权限、suggestion-only 和外部请求硬边界下证明安全，部署相关部分也明确不在本任务范围，均未移植。候选新增行的聚合复核未发现私钥、GitHub/OpenAI/AWS token、嵌入式数据库凭据、JWT、私有图片/正文、媒体/压缩包或 Git 二进制；该扫描不替代未来逐接口权限和数据流审计。
-- 本轮实际变更仅为本 README 审计账本，无产品代码、迁移、依赖、lockfile、Docker/Nginx/Compose 或部署改动。因没有产品代码改动，不运行 pytest、Ruff、mypy、前端门禁、Next build 或 Alembic，并不得沿用历史结果冒充本轮验证；提交前仅运行 README 差异复核、`git diff --check`、最终新增 diff 的秘密/私有资料/姓名学号/原文件名/图片正文/二进制聚合扫描，并重新确认 `ahamark.db` 不存在、根 `package-lock.json` 与 HEAD blob 一致。未部署。
-
-- 2026-08-17：助手 13/14 校园网与 GitHub 合作者并行接手审计完成（只读审计，未合并、未部署）：GitHub 实时只见 `master=d4b398b`、Draft PR #1 `codex/grading-confirm-results=8a76715`、目标分支审计起点 `codex/integrate-question-page-cutter=f050618` 与合作者分支 `gyh--001=8ac3f8c`；审计开始前目标本地与远端同点。PR #1 仍 OPEN/Draft、无评论/审查/checks，且其 head 已是目标分支祖先，不重复合并。`gyh--001` 无 PR、无 checks/status；`62024c0` 的切题设计此前已按当前基线选择性吸收，本轮不再整提交合入；新增 `8ac3f8c` 单提交涉及 87 个文件（`+12120/-313`），包含旧链 `0026_student_portal` 迁移、真实 OpenAI 外部调用、学生标识/原文件名与 presigned URL 新隐私面、Nginx/Compose/端口改动及 1019 行 lockfile 漂移，和当前 `0048+` 迁移链、外部请求硬边界及校园网发布方案均存在重大语义/部署冲突，因此拒绝整提交和整分支合并，接受 0。新增行聚合扫描未发现私钥、令牌字面值、私有图片/正文或二进制，但不能据此替代未来逐文件权限审计。
-- 同次校园网只读审计确认仓库 node2 入口仍只继承 `127.0.0.1:3300 -> nginx:8443`；PostgreSQL、Redis、MinIO、API、Web 与 Docker socket 均未发布到宿主，历史 2026-08-15 健康记录不代表服务器当前状态。现有 MinIO public endpoint、CORS/CSRF/Trusted Hosts、Nginx `server_name` 和自签证书均固定 localhost；仓库没有校园 CIDR、校园 DNS/正式 TLS、可信反代源或主机防火墙规则。另发现 node2 access log 使用 `$request`，可能记录 MinIO 预签名 URL 查询参数，校园开放前必须改为不记录 args。由于尚未确认精确校园网 CIDR（含 VPN 边界）、node2 校园网 IP/多宿主路由、校方 FQDN/反代固定源、TLS 终止与证书注入、主机/边界防火墙责任、入口端口、维护窗口及远端实时 Compose/备份状态，本轮按 fail-closed 停止，不改绑定、不连接 node2、不声称当前健康、不部署。确认后应新增独立 campus Compose/Nginx/运行校验与回滚文档，优先使用校方反代+校园 DNS/TLS+CIDR 白名单，仅暴露精确 HTTPS 入口，并从校园内外分别实测 `/`、`/health`、`/ready`、登录、签名下载和教师核心流程。
-
-- 2026-08-16：当前指定私有 Gold 标注草稿已按用户授权暂停 Tesseract，使用仓库外、逐页、可断点续跑的 Codex CLI 草稿生成；所有输出固定要求人工复核，公式只显示为内存建议，不自动建框、不写 Gold。产品识别 Provider 与默认开关未改变，未部署。
-
-- 2026-08-17：P29 已禁止 Codex 正文/线性公式携带 LaTeX 或 Markdown，并把 Codex 正文改为只读建议、默认不写入 Gold 工作区；只有纯线性 Unicode 建议可由人工显式采用，猜写与不清内容仍须逐字核对，未改 schema/API/数据库/模型/开关，未部署。
-
-- 2026-08-17：P28 已让普通数学输入转换器接受 `iint_S`、`∫∫_S`、`∬_S` 和 Unicode 单积分，界面新增“重积分”按钮与 `∬` 离线结构预览；积分区域仍必须显式填写，结果仍待人工核对，未改 schema/API/数据库/模型/开关，未部署。
-
-- 2026-08-16：P26 已把左栏收起后的中间画布与右侧标注区调整为严格 50/50，浏览器验收要求两区实际宽度差不超过 2px。该改动只影响完全离线布局，未改 schema/API/数据库/模型/开关，未部署。
-
-- 2026-08-16：P25 已让私有 Gold 标注页整个左栏可横向收起；桌面端收起后仅保留约 48px 展开入口，右侧编辑栏同步增宽，偏好只存本机且刷新保持。该改动只影响完全离线布局，未改 schema/API/数据库/模型/开关，未部署。
-
-- 2026-08-16：P24 已让私有 Gold 标注页左侧页面列表可收起并保留总页数，右侧蓝色操作提示会在“收起列表 / 展开列表”间切换；默认仍展开，收起不改变当前页面或任何标注数据。该改动只影响完全离线界面布局，未改 schema/API/数据库/模型/开关，未部署。
-
-- 2026-08-16：P23 已把私有公式 Gold 辅助界面优化为三步式流程，支持 450 ms 自动生成、`Ctrl+Enter` 立即生成、选区感知结构模板、中文核对徽标和默认折叠的高级字段；任何普通输入变化都会撤销核对，旧草稿在新转换成功前不能确认，自动结果始终 `pending`。该工具继续完全离线、只使用合成浏览器验收数据，未改 schema/API/数据库/模型/开关，未部署。
-
-- 2026-08-16：P15 已选择 Apache-2.0 Tesseract 作为开源生产基线，新增默认关闭 Provider、显式路径/版本/哈希/NOTICE 门禁、严格 TSV 解析、通用 OCR 来源贯通及独立锁定版本镜像；默认 Compose 未启用，尚未部署或用真实资料评测。聚焦 Provider/RapidOCR/预生产安全回归 `64 passed`，身份/NOTICE 收口专项 `13 passed`，`ahamark.db unchanged`；真实 Tesseract 5.3.0 在断网只读容器中完成 stdin/stdout 中英文 synthetic smoke。
-
-- 2026-08-16：P12 已提交并推送为 `df25928`；P13/P14 当前未提交，均未部署。仓库外精确依赖已分别在 Windows 隔离环境与 Linux 断网只读容器完成 synthetic smoke；v2 bundle 只接受 det/cls/rec，字符表从 rec ONNX metadata 校验，新增 runtime bridge 仍保持惰性且未接主 Provider。当前许可证审批、受信 manifest、生产只读 mount/ACL 与真实脱敏 benchmark 均未完成，runtime/download 继续 hard-off。
-
-- 2026-08-16：P11 已提交并推送为 `694efe0`，未部署。默认镜像不再安装 `[ocr]`；严格本地 artifact/adapter 尚未接主 Provider，RapidOCR runtime/download 继续全环境 hard-off，answer 路径共用主门。教师公共 API/readiness、全部页面 PDF fallback 与质量公共投影已收口，presigned URL 未改。复审后核心 `57 passed, 1 skipped, 1 warning`、公共相关 `23 passed`、前端 `8 passed`，`ahamark.db unchanged`，目标静态门禁通过；未运行全仓、Next、生产 Docker build、真实资料或部署。启用前阻断项仍是模型权利审批、受信 manifest、只读 mount/ACL、句柄级 TOCTOU，以及 300 秒 bearer presigned URL 风险。
-
-- 2026-08-15：P9/P10 私有离线 OCR benchmark 与 RapidOCR 安全合同已完成。benchmark 固定三项 JSON 输入加私有 `image-root`，只允许 self-attested 离线聚合评测，小样本层抑制、零支持比率为 `null`，当前无真实数据；RapidOCR 运行和下载在所有环境硬关闭，默认无 import、模型或网络，注入 adapter 严格校验输入输出及 bidi/noncharacter 等危险字符，可靠 PDF 保留 fallback 与 `can_start`。无数据库或破坏性 API 变更、迁移、部署；验证为主组合 `102 passed, 2 skipped, 1 warning`、复审后 `52 passed, 1 warning`、前端 `8 passed`，`ahamark.db unchanged`，Ruff/strict mypy/tsc/ESLint/Prettier/diffcheck 通过；未运行全仓、Next、Docker 或真实 OCR。
-
-- 2026-08-15：P5–P8 已分别提交并推送：P5 `c357e06`、P6 `ead0db3`、P7 `120f56e`、P8 `1739aa0`；P4 文字层/OCR 保守融合已提交并推送 `f5cb1b6`。以上切片均未部署。
-
-- 2026-08-15：P8 公式区域自动检测准入硬门已开发并完成两轮独立复审修复，已提交并推送 `1739aa0`，未部署。产品自动 detector 与运行时下载在所有环境硬关闭，教师手工公式区域流程不变；离线 readiness 只报告自证评测合同，因尚无可信签名登记始终 `eligible_for_pilot=false / production_ready=false / writes_product_data=false`。联合回归 `90 passed`、最终 readiness `24 passed`，`ahamark.db unchanged`；没有真实资料、权重、模型运行、FormulaRegion 自动建议或产品接入。
-
-- 2026-08-15：P7 数学结构/双栏风险纵向切片已开发并完成独立复审修复，已提交并推送 `120f56e`，未部署。运行时只做保守风险检测与人工复核路由，不恢复数学语义、不生成 LaTeX、不自动重排双栏或创建公式区域；最终联合证据为后端 `132 passed, 2 skipped`、前端 `15 passed`、`ahamark.db unchanged`。真实 OCR、手写公式和复杂版面生产准确率仍未验证。
-
-- 2026-08-15：P4 阶段 B 指标独立复审修正（完成、未暂存/提交/推送/部署；本条更正并取代下条同日初版的对应指标/测试数）：题号准确率分母现仅包含 `expected_question_numbers` 非空的 14 个 judged case，空负页不再以 `empty == empty` 抬高准确率，但负页误检题号仍会单独累计到 `extra_anchor_count`；详情显式输出 `judged_case_count=14`，当前精确题号仍为 14/14、准确率 1.0。数学 token 补齐 Latin-1 Unicode 上标 `¹ / ² / ³`，精确回归证明 `x² → x2` 会降低 retention，当前 synthetic overall 数学符号保留率由初版 0.969231 更正为 0.957143。区域匹配由单边 IoU 贪心改为 IoU≥0.5 的确定性最大基数二分匹配，边偏好仍按 IoU 降序及安全 ID 稳定排序；新增反例证明共享高 IoU proposal 不会挤掉本可形成的第二个 TP。`false_suggestions_per_page` 明确限定为“一条 region proposal 即一条 region suggestion”，并新增等值别名 `false_regions_per_page=0.125`，不再把它泛化成内容候选误建议。strict fixture 隐私检查除字段名和绝对路径外，新增字符串值级 email、中国大陆手机号及“姓名/学号/student id/name”等显著前缀拒绝并有回归；fixture 本身仍无命中。最终聚焦 pytest `16 passed`、`ahamark.db unchanged`，目标 Ruff lint/format check 通过；字符完整率 0.98、题号 1.0、区域 P/R 0.818182/0.9、来源覆盖 0.944444、`manual_required` 0.8、完整性拒绝 2 均未变化。仍仅是人为构造的 synthetic evaluator/contract baseline，`synthetic_only=true / real_accuracy=false / production_ready=false / writes_product_data=false`；未触碰产品融合文件、API、迁移、真实数据、模型、产品开关或 node2。
-
-- 2026-08-15：P4 阶段 B 脱敏 synthetic 数学识别回归基线（完成、未暂存/提交/推送/部署）：新增 strict `recognition-synthetic-v1` JSON fixture、纯离线 evaluator 与聚焦回归；16 个无个人信息合成 case 强制覆盖 `text_pdf / scan / photo / mixed`，以及中英文题干、行内/独立公式、偏导/积分/极限、希腊字母、Unicode 上下标、LaTeX、矩阵、分段函数、层级题号、多栏、表格线/图形负样本、低清、轻微旋转、透视、连续问号/U+FFFD 损坏、正常中文问号和合法 ASCII 问号。fixture 不含图片、绝对路径、文件名、姓名、学号、邮箱、内容哈希或真实资料；低清/旋转/透视图片仅由 pytest 在隔离临时目录运行时生成。评测器复用共享题号规范化，以 NFC 后非空白 Unicode code point LCS 计算字符完整率，以 Unicode `Sm`、Greek、上下标、LaTeX command 与结构 token LCS 计算数学符号保留率；区域使用 IoU≥0.5、IoU/ID 确定性排序的一对一贪心匹配，并同时报告题号准确率、区域 P/R、每页误建议、必需 `(case, source)` 来源覆盖、`manual_required` 比例和完整性门禁拒绝数，按四模态与退化标签分层。固定输出 `synthetic_only=true / real_accuracy=false / production_ready=false / writes_product_data=false`，报告只含聚合统计和安全 ID，不回显题文。当前 fixture 合同基线 overall 为 16 页、字符完整率 0.98、数学符号保留率 0.969231、题号准确率 1.0、区域 P/R 0.818182/0.9、每页误建议 0.125、来源覆盖率 0.944444、`manual_required` 比例 0.8、完整性门禁拒绝 2；这些数值来自人为构造的 synthetic observed evidence，只验证 fixture、指标和拒绝边界，不是 RapidOCR、真实 PDF、扫描、照片或公式区域检测准确率。聚焦 pytest `8 passed`、`ahamark.db unchanged`；两个 Python 文件 Ruff lint/format check 与 compileall 通过，fixture 隐私关键字/绝对路径扫描无命中，离线 CLI 成功生成报告。未运行真实 OCR/公式模型、未下载权重、未运行后端/前端全量、strict mypy、Next 或 Docker；未修改 API、迁移、教师数据或产品开关，公式区域自动检测门仍关闭。
-
-- 2026-08-15：node2 首个教师所有者账号已通过容器内 `app.cli.create_teacher` 交互创建：当前产品没有独立的 `admin/superuser` 权限模型，因此没有伪造无效管理员角色；该账号是可登录并管理其教学资源的教师账号。邮箱与显示名由用户明确提供，密码由用户在可见 SSH/容器终端中输入两次且不回显，未由 Codex 读取、生成、记录或保存；README、Git、日志和聊天均不记录账号个人信息或密码。CLI 明确返回创建成功，没有自动创建作业、确认题目/答案/Rubric、写入评分或成绩，也没有发布作业或成绩。账号创建后的在线 PostgreSQL custom-format 备份已保存到 `/data/shr/ahamark-backups/post-account-20260815T075913Z-5eda608`；`postgres.dump` 为 0600、SHA-256 `067e324e07b3826b9802dbeec35383f71033af62c71a95df943ce2da225b7e5e`，并已通过容器内 `pg_restore --list` 可读性验证；manifest SHA-256 为 `04bcbf2abd9fdaece3662419e3d83608c7cbfc34b50dd84644b202bacf1b9587`。该备份不输出或记录账号密码，服务未停止。
-
-- 2026-08-15：node2 AhaMark Rootless Docker 隔离部署完成（尚未创建教师账号、未公开发布）：以正确工作树 `codex/integrate-question-page-cutter` / `5eda608fe838decd50f7f2003a50e1c7e129e5f0` 构建并传输固定的 `linux/amd64` 镜像，服务器端校验归档 SHA-256 `1dabe231eb3d770dff79b310fd2b7848a3931e6813ec594251b850793251a68c` 后由 `shr` 的 Rootless Docker 加载；应用镜像固定为 `ahamark/api:5eda608` 与 `ahamark/web:5eda608`，基础镜像固定为 PostgreSQL 16 Alpine、Redis 7 Alpine、MinIO `RELEASE.2025-04-22T22-12-26Z`、Nginx 1.27 Alpine 与 Alpine 3.22。新增 node2 专用 Compose override、Nginx 配置和运行目录准备脚本：应用镜像在服务器不构建，项目名/三个 volume/网络均隔离为 `ahamark-node2-*`；运行密钥和 localhost 自签名证书只在 `/data/shr/ahamark-node2` 生成，私有文件权限为 0600，未进入 Git、镜像、日志或聊天。最终 PostgreSQL、Redis、MinIO、双 API 与 Nginx healthy，Web/Worker running 且 restart count 无异常；迁移容器退出码 0，`alembic current` 与唯一 head 均为 `0048_class_resources`。HTTPS `/`、`/health`、`/ready` 均为 200；唯一新增宿主监听为 `127.0.0.1:3300 -> nginx:8443`，PostgreSQL、Redis、MinIO、API 与 Web 均未发布端口，既有 `80/81/443/8080/8081` 未改变。MinIO 签名下载经 `https://localhost:3300/ahamark-files/` 的无隐私合成探针返回 200，下载 SHA-256 与固定内容一致，探针对象和临时文件随后已删除。首次一致性备份在停止新部署服务后保存到 `/data/shr/ahamark-backups/initial-20260815T072524Z-5eda608`，包含 PostgreSQL、Redis、MinIO 三个命名卷快照及 manifest，`sha256sum -c` 四项全部通过；服务随后恢复并再次通过健康检查。CUDA 镜像归档、AhaMark 镜像归档和配置归档仍保留，未擅自删除；未操作系统 Docker、其他用户容器、现有公网服务或防火墙，未启动 GPU 训练/推理。尚未创建教师账号：邮箱和显示名须由用户明确提供，密码必须在可见交互终端中输入；当前访问方式仍限定为 SSH tunnel 后打开 `https://localhost:3300`，没有配置公网反向代理或正式发布。没有导入真实教学数据，也没有自动确认题目、答案、Rubric、评分建议或成绩，没有发布作业或成绩。本次仅运行部署相关镜像构建（Web production build 成功并生成 19 个静态页面）、配置/迁移/健康/签名 URL/备份验证，没有重复运行前一提交已经完成的全量测试；本条及 node2 三个部署文件仍未暂存、提交或推送。
-
-- 2026-08-15：node2 AhaMark 部署前只读核验与隔离方案完成（尚未部署）：本地正确工作树仍为 `codex/integrate-question-page-cutter` / `5eda608`，除本状态账本外无新增产品改动，Alembic 唯一 head 为 `0048_class_resources`。node2 的 `/data/shr` 可用约 6.8T、内存 available 约 236GiB；既有 `80/81/443/8080/8081` 保持占用，`3000/3300/8000/8800/9000/9001` 未监听。`shr` 的 Rootless Docker 没有容器、业务 volume 或自定义 network，仅保留已验证 CUDA 镜像；`/data/shr/ahamark-node2`、`ahamark-deploy`、`ahamark-data`、`ahamark-backups` 均不存在，`openssl/sha256sum/tar/gzip` 可用。安全部署入口确定为只绑定 `127.0.0.1:3300` 的 HTTPS Nginx，并通过 SSH tunnel 访问；不使用 8800，不映射 PostgreSQL、Redis、MinIO、API 或 Web 端口。现有 `docker-compose.preproduction.yml` 不能直接用于该方案：API 会用内部 `minio:9000` 生成浏览器签名 URL，而现有 Nginx 没有 S3 bucket 代理路径；直接启动会导致文件预览/下载不可达，暴露 MinIO 端口又违反隔离边界，因此部署门暂未通过。最小安全实现需增加 node2 专用 Compose override 与 Nginx bucket 代理，显式设置 `MINIO_PUBLIC_ENDPOINT=localhost:3300 / MINIO_PUBLIC_SECURE=true` 并保持签名 Host；所有 Docker Hub/NGC 基础与产品镜像须在本机构建/拉取、校验、`docker save`、`scp` 到 `/data/shr` 后由 Rootless Docker `load`。运行密钥只在服务器端生成并以 0600 私有 env 保存，不进入 Git、镜像、README、日志或聊天；首次启动前必须固定独立 project/volume/network 名、建立 PostgreSQL/MinIO 备份与追加迁移回滚路径。没有创建上述目录、生成运行密钥、构建 AhaMark 镜像、启动业务容器、迁移数据库、建立教师账号、公开端口或改变系统服务。
-
-- 2026-08-15：node2 Rootless Docker GPU/CDI 基础环境验证完成（AhaMark 尚未部署）：管理员已安装 `skopeo 1.4.1`，但该版本的 `docker-daemon:` transport 忽略 `DOCKER_HOST=unix:///run/user/1011/docker.sock` 并尝试访问无权限的系统 `/var/run/docker.sock`，同时通过主机网络读取 NGC 目标镜像在 90 秒内超时，因此未使用它导入，也未操作共享 Docker。本机 Docker 从 NVIDIA 官方 NGC 拉取 `nvcr.io/nvidia/cuda:12.4.1-base-ubuntu22.04`，镜像 digest 为 `sha256:0f6bfcbf267e65123bcc2287e2153dedfc0f24772fb5ce84afe16ac4b2fada95`；`docker save` 生成 91,781,120 字节归档，SHA-256 为 `cf7aa8e8f1eb878202fd234bde0aaa91170f13e645def9a364bed93f258ad5ea`，经 `scp` 传至 `/data/shr/cuda-12.4.1-base-ubuntu22.04-amd64.tar` 后服务器端校验一致，并由 `shr` 的 Rootless Docker 成功 `docker load`。用户级 CDI 文件已生成到 `/data/shr/.config/cdi/nvidia.yaml`，Docker 用户服务重启后保持 `active`；`nvidia-ctk cdi list` 返回 GPU 0–3、四个 GPU UUID 及 `nvidia.com/gpu=all` 共 9 个设备。一次性 `docker run --rm --device=nvidia.com/gpu=all ... nvidia-smi -L` 成功列出四张 NVIDIA GeForce RTX 4090，退出码 0，随后目标 ancestor 的运行容器为 0。没有启动训练、推理或长期 GPU 服务，没有删除服务器归档，没有部署 AhaMark、修改现有 80/81/443/8080/8081 服务或暴露数据库、Redis、MinIO；部署前仍须重新核验端口、环境变量/密钥、持久化目录、Alembic head、备份回滚及代码/镜像传输方案。
-
-- 2026-08-14：06f7 工作树集中整理与本地提交（完成，已提交并推送 `72d1ba4`，未部署）：暂停继续开发后，对 `codex/integrate-question-page-cutter` 自 `5ae3a78` 以来的全部已跟踪和未跟踪改动逐项审计；13 个追加式迁移保持 `0036 → … → 0048_class_resources` 单线，未修改旧迁移。删除误生成且未跟踪的 3 个 pnpm 工作区/lock 文件，并在 `.gitignore` 忽略 `pnpm-lock.yaml`、`pnpm-workspace.yaml`；仓库继续以根 `package-lock.json` 和 npm workspaces 为唯一前端包管理契约。完整前端为 `37 files / 225 tests passed`，TypeScript（直接 `tsc --noEmit --incremental false`）、ESLint、Prettier 通过；全仓 Ruff lint、本轮 113 个 Python 文件 Ruff format、strict mypy `120 source files`、Alembic single head `0048_class_resources`、`git diff --check` 通过。后端全量单次为 `790 passed, 18 skipped, 5 failed`：3 项是测试仍硬编码旧 head `0042`，1 项是 `0021` 历史迁移错误要求创建后续 `0042` 才新增的列，另 1 项 OCR provider 断言隔离复跑即通过；修正测试契约且不修改旧迁移后，原 5 项聚焦复跑为 `5 passed`，未再次重复耗时 58 分钟的全量套件，`ahamark.db` 全量与聚焦测试前后均为 absent/unchanged。Windows Next production build 已成功编译、类型检查并生成 19 个静态页面，但 standalone 文件追踪阶段因本机 pnpm 依赖目录 symlink `EPERM` 退出；不是代码编译失败，既有 Docker/Linux production build 成功证据仍有效，本轮未运行 Docker。未包含真实 PDF/教材、密钥或模型权重；未修改真实数据，未自动确认题目、答案、Rubric 或评分建议，未写最终成绩、发布作业/成绩或部署。
-
-- 2026-08-14：P3 公式区域数据契约、离线标注与检测评测闭环（完成 A/B/C 证据准备，产品接入门未通过，未暂存/提交/推送/部署）：新增严格 `formula-region-detection-v1`，公开清单只允许随机 case/document/region ID、document-level train/dev/test、`text_pdf/scan/photo/synthetic`、源页宽高、归一化框、inline/display/multiline/matrix、printed/handwritten/mixed、质量标记和人工决定版本；未知字段、越界坐标、IoU≥0.9 重复框、未知页面、私有姓名/学号/路径/文件名/来源哈希、额外图片和同文档跨 split 全部拒绝。独立离线标注页增量复用历史裁图工具已验证的 SVG 源像素坐标原则，支持缩放、同页多框、选择/重画/删除、区域类型、无公式/不可判定、自动保存和导出验证；图片只进独立浏览器 IndexedDB，导出不含图片或路径；新载入页固定为内部 `pending`，不会自动形成任何人工决定，pending 或空 annotated 页均拒绝导出。独立评测器以 IoU≥0.5、确定性 IoU/ID 排序的一对一贪心匹配输出 precision/recall/F1、每页 FP、miss、duplicate、fragmentation、merge、coverage、proposal/page、耗时、可用时峰值内存和明确权重的 manual workload proxy，并按四模态、四种 print style、五种 region kind 与负页分层；ignored/unjudgeable/空页规则写入报告，固定 `production_ready=false / human_confirmation_required=true / writes_product_data=false`。当前可分享真实标注仍为 `text_pdf=0 / scan=0 / photo=0`，没有把历史 OCR 裁图当区域金标准；唯一实跑 detector 是 synthetic-only 连通组件 smoke，`1 page / 1 printed display region` 的 P/R/F1/coverage 均为 `1.0`、FP/fragmentation/merge 均 0，只证明链路。候选报告比较 Pix2Text MFD 1.5、Paddle PP-DocLayout-S/M/L、PDF-Extract-Kit MFD、MinerU 和 ScanSSD：Pix2Text 的 MIT 公开 MFD 明确区分 inline/isolated 但 scan/photo/handwritten 与成本未证明；Paddle 有中文试卷场景但仍未测行内/手写/照片；PDF-Extract-Kit 代码与 1.0 权重均为 AGPL-3.0，MinerU 有附加许可和全栈依赖，ScanSSD 有 600 DPI 滑窗、旧栈及已知 split/merge 风险。本机未安装 Paddle/PyTorch/YOLO/Pix2Text/CnSTD/OpenCV/ONNX 等候选运行时，未下载权重。产品门明确未通过：真实分层 recall、每页 FP、多行碎片、表格/横线/题号误报、照片退化、运行成本和权重许可均未证明；因此不修改 API/迁移、不创建公式建议、不调用 Provider。聚焦 pytest `12 passed` 且 `ahamark.db unchanged`；三个新增 Python 文件 Ruff lint/format、两脚本 strict mypy、Node 语法、目标 Prettier与本机 Edge 纯合成浏览器通过；除既有 `800→400`/源坐标宽度 `320 px` 检查外，新增自动验收覆盖 3 页初始人工决定 0、`100→200` 缩放后重画仍导出 `x=0.2 / width=0.4`、删除、no_formula/unjudgeable 与公开 JSON 无图片/路径。契约与候选报告见 `docs/FORMULA-REGION-DETECTION-V1.md`、`docs/FORMULA-REGION-DETECTION-CANDIDATES.md`；最终 `git diff --check` 通过。未运行后端/前端全量、TypeScript/ESLint/Next build、Docker、真实模型、真实 PDF/扫描/照片评测或峰值内存基准；没有修改真实数据、Docker、Git 暂存/提交/推送、PR 或部署状态。下一步最小安全行动是先在仓库外用 v1 工具按 document_id 标注含困难负样本的 dev/test，再由用户在 Pix2Text MFD 1.5、Paddle PP-DocLayout-S/M 与 PDF-Extract-Kit MFD（需 AGPL 审查）间选择是否授权下载和首个隔离评测候选。
-
-- 2026-08-14：P2 公式区域建议安全评估与 P3 暂缓（设计完成、未加入低质量启发式、未暂存/提交/推送/部署）：只读核对确认当前公式区域唯一创建路径是教师拖框后以 `detection_source=teacher_explicit / status=manual_required` 保存，教师可预览、重画、拒绝或明确识别；仓库没有经过验证的公式区域检测器、校准区域置信度或按 `text_pdf / scan / photo` 分层的公式区域标注集。现有 PP-FormulaNet Provider 只对已经裁出的区域给 LaTeX 建议，不能作为区域检测证据。因此本轮没有新增全页公式框、固定坐标、把 RapidOCR 当公式 OCR、自动调用识别、自动确认或把 LaTeX 写入正式题目的路径。后续可选算法按安全顺序为：电子 PDF 字形/对象与版面证据、专用公式/图/表 layout detector、两路证据交集加 NMS；连通域只可作为仓库外离线对照，不能单独上线。最小测试夹具须使用脱敏合成页面并显式包含正文、行内/独立公式、图表、空白页、横格纸、公式贴边与跨栏反例；验收必须分别报告 `text_pdf / scan / photo` 的 region precision、recall、IoU、每页误框数和全页框率，并验证所有建议均 `manual_required`、无区域证据时零建议、教师可预览/重画/拒绝、创建建议不会调用 Provider 或确认内容。只有在用户授权的仓库外脱敏数据上也通过同样分层门槛后，才进入产品最小版本。P3 扫描/手写基线在 P2 区域证据形成前暂缓；未来必须把普通文字与公式、text_pdf/scan/photo 分开统计，synthetic 结果不得称为真实准确率。没有运行真实 PDF、手写或照片评测，没有读取或写入真实教学数据。
-
-- 2026-08-14：P1 识别质量脱敏可观测性（完成、未暂存/提交/推送/部署）：共享统计现输出字符数量、归一化文字来源 `pdf_text / rapidocr`、低置信块数量、ASCII 问号数、可疑字符数与原因计数，以及是否含公式/图/表区域；不包含题文、图片、坐标、哈希或 Provider 原始错误。页面识别把统计写入现有 `PageProcessingResult.processing_parameters.text_quality`，Recognition 题目候选和 Assignment 抽取候选返回服务端重新计算的顶层 `quality_stats`；新抽取候选同时在 evidence 保存同一脱敏审计统计。API 不信任旧 Provider evidence 中同名对象，教师提示只由权威候选字段、区域和服务端统计重算。普通题目核对界面只显示“文字可能损坏，请重新识别或人工录入”“扫描文字置信度较低，请对照原文核对”“公式需要核对”，不显示内部阈值、正则、Provider 堆栈或原始错误；旧候选缺统计时安全兼容。最终当前代码 Python 聚焦为 `25 passed`（完整性+Extraction Schema）、`26 passed`（Codex 文件入口+Provider）、`1 passed`（电子 PDF 页面/Recognition 候选统计）、`1 passed`（materializer 零写入+候选 evidence/API 统计），全部 `ahamark.db unchanged`；前端题目核对组件 `1 file / 7 tests passed`，TypeScript `--noEmit --incremental false`、目标 ESLint/Prettier 通过。14 个目标 Python 文件 Ruff format/check、8 个产品文件 compileall、共享统计模块 strict mypy 通过；受影响产品组合 strict mypy 只报告既有 `service.py:95/108` 两条类型错误和既有 `workers/tasks/ocr.py:13` Celery 未类型化装饰器，本轮文件无新增 mypy 错误。首次通过 pnpm 调用前端工具均在测试前被既有 ignored build scripts 策略阻断，改为直接复用现有 `node_modules/.bin` 后得到上述通过结果；未运行后端/前端全量、Next build、Docker 或真实 OCR/Provider 质量评测。没有修改真实数据、题目/答案/Rubric/成绩/发布状态，也没有启动或替换服务。
-
-- 2026-08-14：P0 题目字符完整性与编码损坏门禁（完成、未暂存/提交/推送/部署）：新增共享的保守字符完整性检查，统一识别 `U+FFFD`、NUL、不允许控制字符、连续 3 个及以上 ASCII `?`、足够长度文本中的异常 `?` 比例，以及中文/数学上下文中的替换型问号；结果只含稳定码 `CHARACTER_ENCODING_CORRUPTION_DETECTED`、原因、字段路径与字符数/问号数/最长连续问号/控制字符数等脱敏统计，不保存或回显题文。正常中文全角问号、单个或少量合法 ASCII `?`、标准 LaTeX、偏导/积分/希腊字母/上标/矩阵及中英文混排均有允许回归。`ExtractionOutput`/HTTP Provider 解析层会整批拒绝损坏输出并保留稳定错误码；`materialize_questions` 在任何 paper 查询、旧候选锁定/supersede、新候选 insert 之前再次整批复查，单项损坏即零写入且旧 `suggested/manual_required` 候选保持原状态。`codex_assignment_question_draft.py` 仍只接收文件路径，现于数据库事务前严格 UTF-8 解码、JSON/结构/字符检查，失败输出为 ASCII-safe JSON 错误码且不回显题文；source snapshot、suggestion-only 与教师确认边界不变。当前代码聚焦回归分三组并行重跑为 `24 passed`（完整性+Extraction Schema）、`26 passed`（Codex 文件入口+Provider）、`1 passed`（materializer 整批零写入/旧候选不 supersede），三组均 `ahamark.db unchanged`；10 个改动 Python 文件 Ruff format/check、产品文件 compileall、共享模块 strict mypy 通过。受影响产品组合 strict mypy 只剩账本已记录的 `service.py:95/108` 两条既有类型错误，本轮新增类型错误为 0；未运行后端全量、前端测试、真实 PDF/OCR/Provider 质量评测或 Docker build。为运行门禁，捆绑 Python 安装了仓库已声明的 `.[dev]` 依赖，未产生 Git 工作树安装产物。没有读取、修复或猜测作业 42 的损坏题文，没有修改任何真实数据、题目/答案/Rubric/成绩/发布状态，也没有启动、替换或部署 Docker 服务。剩余风险：该门禁只阻断明确损坏信号，不恢复既有损坏候选；P1 仍需补充识别/候选脱敏质量统计和教师可操作提示。
-
-- 2026-08-14：题目核对界面继续简化（完成、未暂存/提交/推送、已更新隔离 Web）：题目卡片首屏只保留题号、分值、题干和待核对状态，不再直接展示数据库 status、总置信度、父候选 UUID、英文题型/难度、`公式 LaTeX：未生成`、英文风险码或“标为人工处理”。题号与分值并排，题干使用固定三行编辑区；识别说明、知识点与技术证据收进折叠项，PDF 可视区域编辑也收进“调整题目位置（N 个区域）”。没有任何可直接批量确认的题目时不再显示灰色批量按钮；单题操作改为“确认题目 / 保存修改并确认 / 不采用”。聚焦组件 `1 file / 7 tests passed`，目标 ESLint、TypeScript 与 Prettier 通过；首次把测试、ESLint 和 TypeScript 串行放在同一 2 分钟调用中因冷启动超过工具上限，拆分后各项通过，不能把聚焦结果夸大为全量回归。Docker/Linux Web production build 成功并生成 19 个静态页面；隔离预览只强制替换 Web，API、Worker、PostgreSQL、Redis、MinIO 未重建，最终六服务均 healthy，作业页面与 API health 均 HTTP 200。未修改或确认题目、答案、Rubric、分值或发布状态。
-
-- 2026-08-14：题目区域改为可视化优先（完成、未暂存/提交/推送、已更新隔离 Web）：教师反馈题目核对区直接展示 `x / y / width / height` 内部坐标很不方便。根因是可视区域编辑器错误地只读取“题目文件”的页面整理建议；当前作业 PDF 作为答案文件时页面整理建议为 0，虽然候选已有有效 page ID，预览仍被隐藏，只剩空页面下拉框和坐标输入。现区域编辑器直接读取作业当前 paper version 的全部页面，与文件被确认成题目、答案或题目和答案无关；普通界面显示页面选择、页面预览、拖框新增、重画、整页作为区域和移除选中区域，原始坐标统一收进默认关闭的“高级坐标调整”，保存按钮简化为“保存区域”。新增“页面整理为空仍可使用可视区域编辑”的回归；题目抽取复核组件 `1 file / 7 tests passed`，TypeScript、目标 ESLint 和 Prettier 通过；Docker/Linux Web production build 成功生成 19 个静态页面，仅替换 Web 容器，最终 Web healthy、作业编辑页 HTTP 200，API、Worker、PostgreSQL、Redis、MinIO、volume、Bucket 与数据均未重建或清理。首次从仓库根直接运行 ESLint 因未加载 Web 配置失败，随后在正确 Web 工作区运行；受限检查又因 `.codex` lstat 权限失败，授权后准确发现并修复 useCallback 依赖警告，最终目标检查通过。未修改题目、答案、Rubric 或作业数据，未自动确认或发布。
-
-- 2026-08-14：课本反推题目与题目/答案混合文件支持（完成、未暂存/提交/推送、已更新隔离 Web/API/Worker）：整理链路不再假定每份 PDF 只能是“题目”或“答案”，上传用途新增“题目和答案”；该角色既可进入页面整理与题目抽取，也可作为参考答案来源，答案来源确认规则保持不变。确定性文件分析在同一文档同时出现题目/习题与答案/解答信号时会建议混合用途，但仍须教师确认。对于已选教材且 PDF 仅提供解答、通过章习题号和小题号引用课本原题的场景，Codex 可用“已选课本原题 + PDF 对应解答区域”生成建议，不再要求另有一份题目 PDF。当前作业 42 已只读核对为《习题 9.3》解答材料，并生成 `1(1)、2(3)、2(5)、2(6)、2(7)、4(1)、4(4)、6、7、9、10、11(2)、12(1)、12(2)、14、15` 共 16 个 suggestion-only 题目候选；数据库最终回读 job/revision 均为 `review_required`、16 项均为 `suggested/manual_required`，没有自动确认。旧教材数学 OCR 存在公式错序/上下标丢失，所有候选保留公式、分值、跨页等教师核对标记，未自动确认题目、答案或评分标准，未发布作业。聚焦后端文件分析 `9 passed`、Ruff 无缓存检查通过，前端生成面板 `1 file / 17 tests passed`；最初前端命令因工作区相对路径错误返回“no test files”，随后使用正确 workspace 相对路径通过，不能把聚焦结果夸大为全量回归。三镜像首次并行和随后 API/Worker 并行构建均因工具上限退出，Web 镜像已完成；API 最终单独构建成功，Worker 复用同一 API 代码镜像。只替换 Web/API/Worker 三个应用容器，最终六服务均 healthy、Web/API HTTP 均为 200，PostgreSQL、Redis、MinIO、volume、Bucket 与数据服务未重建或清理。
-
-- 2026-08-13：作业内容生成链路统一为 Codex-only（完成、未暂存/提交/推送、已更新隔离 Web/API/Worker）：教师明确“页面整理与题目抽取、生成答案与评分标准全部由 Codex 完成，不会有其他生成者”。新建与重新整理任务现由服务端固定记录 `codex_local`，不读取生产环境外部生成 Provider 配置，也不允许教师选择生成 Provider；能力接口固定报告 Codex 可用且外部请求为 false。Worker 的分析输入仍可使用本地确定性元数据与 PDF/OCR 证据作为 Codex 输入工具，但题目、答案和评分标准两个内容生成阶段在尚未回填时统一记录为 `CODEX_DRAFT_PENDING`，不会运行原本的本地规则题目抽取，也不会创建确定性空白/人工评分替代草稿，更不再以“真实 Provider 不可用”描述产品。教师端明确显示“Codex 页面整理与题目抽取”“Codex 生成答案与评分标准”，历史 unavailable 阶段显示“等待 Codex”，并隐藏旧 `PROVIDER_UNAVAILABLE/CODEX_DRAFT_PENDING` 工程问题；Codex 回填脚本会解决两类历史等待项。教师仍须确认题目、正式答案、评分标准与发布，系统不会自动确认、写最终成绩或发布。前端生成面板 `16 passed`，目标 ESLint 与 TypeScript 通过；后端相关完整首轮为 `36 passed / 1 failed`（唯一失败是能力接口旧断言），更新契约后精确复跑 `11 passed`，最终作业生成完整聚焦文件 `27 passed`，Ruff 通过，测试守卫确认 `ahamark.db unchanged`。Web、API、Worker 三镜像构建成功（Web production 19 pages），只替换三个应用容器；最后一处 Worker 边界修复后又单独构建并只替换 Worker。容器内核验为 `codex_local/internal_work_queue/available`，新版 Worker 同时包含 `codex_pending/CODEX_DRAFT_PENDING` 分支。最终六服务均 healthy，Web/API HTTP 均为 200；能力接口未登录按安全契约返回 401。PostgreSQL、Redis、MinIO、volume、Bucket 与数据未重建或清理。
-
-- 2026-08-13：整理试卷折叠箭头左对齐修复（完成、未暂存/提交/推送、已更新隔离 Web）：根因是“上传文件用途确认”和“页面核对”的标题额外带有 12px 左内边距，而“教材来源”没有；现已移除这两个标题的额外横向缩进，使三个顶层折叠箭头和标题文字落在同一左边线，展开逻辑与内容不变。前端生成面板和题目抽取复核两个聚焦文件共 `22 passed`，目标 ESLint 与 TypeScript 通过；目标 Prettier 仅报告两个组件中既有整文件格式差异，本轮为避免机械重写脏工作树未做全文件格式化。Docker/Linux Web production build 成功（19 pages），隔离预览只替换 Web；最终六服务均 healthy，Web/API HTTP 均为 200，API、Worker、PostgreSQL、Redis、MinIO、volume、Bucket 与数据未重建或清理。
-
-- 2026-08-13：已有总分仍提示确认的误报修复（完成、未暂存/提交/推送、已更新隔离 Web/API/Worker）：真实只读核对确认当前作业已保存 `total_score=100.00`，但第 1–4 轮仍各生成空 total_score suggested 记录及未解决 `TOTAL_SCORE_UNCONFIRMED`，导致“请确认作业总分”误报。现普通教师界面只要作业已有正数总分，立即隐藏历史 `TOTAL_SCORE_UNCONFIRMED/TOTAL_SCORE_CONFLICT` 误报，并不再把空总分建议回传准备表单；Worker 的 Fake 和 Provider 两条元数据写入路径也都会跳过 total_score 建议，后续重新整理不再产生同类问题。没有自动修改或确认作业总分。后端聚焦 `6 passed`、前端生成面板 `14 passed`，Ruff、目标 ESLint/Prettier 与三个镜像构建（Web production 19 pages）通过，测试守卫确认真实 `ahamark.db` 未变化；明确构建并只替换 Web、API、Worker 三个应用容器，Worker 容器内只读源码核验确认新逻辑已运行。最终六服务均 healthy，Web/API HTTP 均为 200，数据服务、volume、Bucket 与真实数据未重建、清理或改写。
-
-- 2026-08-13：整理按钮位置按模块级右上角修正（完成、未暂存/提交/推送、已更新隔离 Web）：根据教师澄清，“重新整理/停止整理”现位于整个“整理试卷”模块标题行最右侧，而非内部处理阶段卡片右上角；内部卡片撤掉按钮定位与额外顶部留白，略深边框继续保留。生成面板完整组件 `14 passed`，目标 ESLint/Prettier 与 Docker/Linux Web production build（19 pages）通过；隔离预览仅替换 Web，最终六服务均 healthy，Web/API HTTP 均为 200，数据服务未重建或清理。
-
-- 2026-08-13：整理操作位置与边框微调（完成、未暂存/提交/推送、已更新隔离 Web）：始终展开的处理详情卡片把“重新整理”（任务运行时为“停止整理”）从阶段列表下方移到卡片右上角，并为阶段区域增加略深一档的中性边框；小屏通过顶部留白避免按钮遮挡阶段内容。整理行为与阶段重试逻辑不变。生成面板完整组件 `14 passed`，目标 ESLint/Prettier 与 Docker/Linux Web production build（19 pages）通过；隔离预览仅替换 Web，最终六服务均 healthy，Web/API HTTP 均为 200，数据服务未重建或清理。
-
-- 2026-08-13：整理试卷处理详情固定展开（完成、未暂存/提交/推送、已更新隔离 Web）：移除“查看详情”的折叠开关，五个处理阶段、阶段重试以及“停止整理/重新整理”操作现在始终直接显示，教师不能再误收起；保留当前状态与进度条，以及供辅助技术读取的任务终态文本。生成面板完整组件 `14 passed`，目标 ESLint/Prettier 与 Docker/Linux Web production build（19 pages）通过；隔离预览仅替换 Web，最终六服务均 healthy，Web/API HTTP 均为 200，数据服务未重建或清理。
-
-- 2026-08-13：重新整理后仍重复要求文件用途确认的根因修复（完成、未暂存/提交/推送、已更新隔离 API/Worker）：真实只读核对确认当前作业两份文件在第 1–3 轮均有教师确认，第 4 轮文件 ID 与校验值未变却生成了新的 suggested 记录；当前 Worker 容器实际仍运行旧代码，原因是此前只构建 API 镜像，而 Compose 为 API/Worker 使用不同镜像名，强制重建 Worker 容器并未更新其镜像。继承条件同时修正为同一作业、同一文件 ID、相同校验值即可沿用教师最终用途，不再受新一轮 AI 建议从“题目”波动为“尚未确定”等变化影响；只有文件身份或内容校验值改变才重新确认。聚焦回归 `5 passed`（包含建议波动仍继承及文件校验值变化不继承），Ruff 与目标 `git diff --check` 通过，测试守卫确认真实 `ahamark.db` 未变化。此次明确同时构建 API 与 Worker 两个独立镜像，并只替换这两个应用容器；容器内只读源码核验已确认 Worker 正在运行按 assignment/file/checksum 查询历史 confirmed 记录的新逻辑。最终六服务均 healthy，Web/API HTTP 均为 200，PostgreSQL、Redis、MinIO、volume、Bucket 和真实作业数据未重建、清理或改写。
-
-- 2026-08-13：文件用途卡片进一步降噪（完成、未暂存/提交/推送、已更新隔离 Web）：待确认文件原先分两行显示“需要选择文件用途”和“用途：题目（置信度）”，现合并为同一行；隐藏每张文件卡片重复的“已分析 N 页”，并停止为该已隐藏信息额外请求逐页分析列表。文件名旁原页数及用途选择/保存交互不变，仅调整教师端展示，不改变用途确认门禁。生成面板完整组件 `14 passed`，目标 ESLint/Prettier 与 Docker/Linux Web production build（19 pages）通过；隔离预览仅替换 Web，最终六服务均 healthy，Web/API HTTP 均为 200，数据服务未重建或清理。
-
-- 2026-08-13：文件用途确认跨重新整理复用（完成、未暂存/提交/推送、已更新隔离 API/Worker）：教师已明确确认“题目”或“答案”后，重新整理仍为同一作业、同一文件 ID、相同文件校验值，且新的系统用途及答案来源建议也未变化时，新一版文件分析继承原教师确认，不再要求重复点击；确认人、确认时间、备注与教师编辑版本一并保留。文件内容、文件身份或系统用途判断发生变化时不会继承，仍要求重新确认；系统不会推断或自动确认任何新用途。本地 Fake 与 Provider materializer 两条写入路径均覆盖；聚焦后端回归 `5 passed`，Ruff check/format 与目标 `git diff --check` 通过，测试守卫确认真实 `ahamark.db` 未变化。API 镜像单独构建成功，隔离预览仅强制替换 API、Worker 应用容器，PostgreSQL、Redis、MinIO、volume、Bucket 和数据未重建或清理；最终六服务均 healthy，Web/API HTTP 均为 200。
-
-- 2026-08-13：整理页面响应式布局修复（完成、未暂存/提交/推送、已更新隔离 Web）：单页 PNG 修复后，原 `lg` 双栏在当前浏览器宽度仍会退化成纵向布局，导致 12 个缩略图先按整行大卡片铺满页面，所选主预览和旋转/排除操作被推到很下方。现改为所有宽度统一使用顶部横向滚动的紧凑缩略图栏，每页固定窄卡且不会拉伸；下方始终显示当前选中的完整主预览和操作区。选页高亮、大图联动、旋转、排除和手动切题能力不变。向导完整组件 `17 passed`，新增断言缩略图区为横向滚动条且每页固定宽度；TypeScript（禁用增量缓存）、目标 ESLint、目标 Prettier、`git diff --check` 与 Docker/Linux Web production build（19 pages）通过。隔离预览只替换 Web，其他五服务和数据未重建；最终六服务均 healthy，Web/API HTTP 均为 200。
-
-- 2026-08-13：整理页面 PDF 嵌套滚动与裁切修复（完成、未暂存/提交/推送、已更新隔离 Web）：整理页面此前把同一份 PDF 阅读器分别嵌入每个缩略图和大图，浏览器插件产生内部滚动条，并把整份文档按固定高度裁切，导致看起来像页面乱码或错位。现统一调用已有的草稿单页预览接口，把每个 `PaperPage` 按其源页码与当前旋转渲染成独立 PNG；缩略图和所选大图均使用 `object-contain` 完整展示该页，不再嵌入 PDF `iframe`，点击选页、高亮、大图联动、预览失败重试和旋转操作保持不变。该接口仅生成/缓存页面预览图，不修改题目、答案、Rubric 或整理结果。向导完整组件 `17 passed`，其中明确覆盖第 2 页缩略图/大图均为对应 PNG 且不存在 PDF iframe；TypeScript（禁用增量缓存）、目标 ESLint、目标 Prettier、`git diff --check` 与 Docker/Linux Web production build（19 pages）通过。隔离预览只替换 Web，API、Worker、PostgreSQL、Redis、MinIO 和数据未重建；最终六服务均 healthy，Web/API HTTP 均为 200。
-
-- 2026-08-13：大学课程建议不再截断为“数学”（完成、未暂存/提交/推送、已更新隔离 Web/API/Worker）：根因是确定性课程识别词表把笼统“数学”排在“数学分析”等具体课程之前，导致包含关系提前命中；现从生成源头只推荐数学分析、线性代数、高等代数、概率论、常微分方程、复变函数、实变函数等具体大学课程，不再生成笼统“数学”。为兼容当前作业已持久化的旧建议，准备作业页会从同一批标题/课程建议中恢复具体课程，若只能得到“数学”则不展示这个不可采用的建议。没有改写当前作业或历史建议数据，教师点击具体建议仍只填入表单，不自动保存或确认。后端元数据/文件分析完整文件 `3 passed`，且测试数据库守卫确认 `ahamark.db unchanged`；前端向导完整文件 `17 passed`；Ruff lint/format、TypeScript（禁用增量缓存）、目标 ESLint、目标 Prettier、`git diff --check`、Docker/Linux Web production build（19 pages）与 API 镜像构建通过。隔离预览只替换 Web、API、Worker 应用容器，PostgreSQL、Redis、MinIO、volume、Bucket 和数据未重建或清理；最终六服务均 healthy，Web/API HTTP 均为 200。
-
-- 2026-08-13：课程与总分建议同框展示、移除基本信息提醒卡（完成、未暂存/提交/推送、已更新隔离 Web）：准备作业页把系统识别出的大学课程和总分建议改为与作业名称一致的交互，直接显示在各自输入框后半段，使用小一号浅色文字；教师点击建议时只填入当前表单，之后仍可编辑，未点击不会采用或写入。整理试卷区原“基本信息建议”及学科、作业名称、总分三张置信度提醒卡、接受/修改/拒绝/确认总分按钮均已移除，建议数据复用同一生成结果传给准备作业表单，不重复请求。课程非空且不能仅为“数学”、总分版本等既有服务端校验不变；不自动接受建议，不确认题目、答案或 Rubric，不写成绩或发布。相关前端 `2 files / 31 tests passed`，TypeScript（禁用增量缓存）、目标 ESLint、目标 Prettier、`git diff --check` 与 Docker/Linux Web production build（19 pages）通过；隔离预览只替换 Web，API、Worker、PostgreSQL、Redis、MinIO 和数据未重建，最终六服务均 healthy，Web/API HTTP 均为 200。
-
-- 2026-08-13：“整理试卷”首屏减法（完成、未暂存/提交/推送、已更新隔离 Web）：整理区去除强调色外框和无任务时的重复说明；有任务时首屏只显示一句当前状态、细进度条和单一“查看详情”入口，五个技术阶段与停止/重新整理合并到同一个折叠区，不再分成“处理详情”和“更多操作”两块。需要教师处理的问题仍保留，教材、基本信息建议、文件用途确认、题目核对和历史记录的业务边界不变。生成面板完整组件 `14 passed`，TypeScript（禁用增量缓存）、目标 ESLint、目标 Prettier、`git diff --check` 与 Docker/Linux Web production build（19 pages）通过；隔离预览只重建 Web，其他五服务和数据未重建，最终六服务均 healthy，Web/API HTTP 均为 200；不自动确认文件、题目、答案、Rubric 或发布。
-
-- 2026-08-13：准备作业页隐藏内部规则说明（完成、未暂存/提交/推送、已更新隔离 Web）：普通教师界面隐藏“请填写具体大学课程，不使用笼统的数学”以及“上传后逐个确认题目或答案，未经确认不会抽题”两条说明文案；课程输入与文件角色的前后端安全校验保持不变，仍拒绝空课程/笼统“数学”，仍不会使用未经教师确认的题目文件开始抽取。向导组件 `17 passed`，TypeScript（禁用增量缓存）、目标 ESLint、目标 Prettier、`git diff --check` 与 Docker/Linux Web production build（19 pages）通过；隔离预览只重建 Web，其他五服务与数据未重建，最终六服务均 healthy，Web/API HTTP 均为 200。本切片只做界面降噪，不自动确认文件用途、题目、答案或 Rubric。
-
-- 2026-08-13：上传题目与答案区成功态降噪（完成、未暂存/提交/推送、已更新隔离 Web）：已上传文件区不再显示“已保留”、文件数量、体积、总页数、“上传成功”或“继续添加不会删除已有文件”，成功上传不再弹出提示；只在上传失败时显示红色错误和重新上传入口。文件列表保留文件名，删除操作改为红色，并移除上传区底部“进入内容核对”按钮。向导组件 `17 passed`，TypeScript（禁用增量缓存）、目标 ESLint、目标 Prettier、`git diff --check` 与 Docker/Linux Web production build（19 pages）通过；隔离预览只重建 Web，API、Worker、PostgreSQL、Redis、MinIO 和数据未重建，最终六服务均 healthy，Web/API HTTP 均为 200。未改变上传、文件保留或删除的服务端契约，不自动确认文件用途、题目、答案或 Rubric。
-
-- 2026-08-13：作业名称建议改为同框直接展示（完成、未暂存/提交/推送、已更新隔离 Web）：准备作业页不再显示“AI 生成”按钮或“AI 建议”标签；课程与日期名称建议直接位于作业名称同一个统一边框控件的后半段，使用比正式名称小一号的浅色文字，正式名称空间优先，建议过长时在右侧截断。教师点击建议才写入正式输入框，之后仍可继续编辑。当前仍是本地确定性标题建议，不调用或夸大为大模型生成。向导组件 `17 passed`，TypeScript（禁用增量缓存）、目标 ESLint、目标 Prettier与 Docker/Linux Web production build（19 pages）通过；隔离预览只重建 Web，API、Worker、PostgreSQL、Redis、MinIO 和数据未重建，最终六服务均 healthy，Web/API HTTP 均为 200。未修改作业数据、题目、答案、Rubric、成绩或发布状态。
-
-- 2026-08-13：大学课程作业准备页与上传用途确认收口（完成、未暂存/提交/推送、已更新隔离 Web/API/Worker）：班级创建和作业准备页把笼统“学科”改为必填“大学课程”，提供数学分析、线性代数、高等代数、概率论、常微分方程、复变函数、实变函数等建议，并在新建/编辑界面拒绝空值或仅填写“数学”；后端继续兼容已有旧数据，不批量改写历史班级或作业。作业名称旁新增“AI 生成”入口，按当前课程与日期一键替换标题，教师仍可继续编辑；必填总分从“更多设置”移到主表单。上传区改为“上传题目与答案”，每个新文件都必须由教师在上传处明确确认“题目”或“答案”，普通教师界面不再展示教材、评分标准、说明、附件、未知用途、内容模式、文字来源或页面诊断等低价值字段；教材仍通过独立资料库选择，不混入上传用途。针对上一份作业误判，生成阶段现只使用 `analysis_status=confirmed` 且 `teacher_confirmed_role=question_paper` 的文件，即使系统给出高置信题目建议，未经教师确认也以 `QUESTION_PAPER_ROLE_UNCONFIRMED` 阻断，不自动确认题目、答案、Rubric、成绩或发布。后端作业生成/文件分析/作业/班级资料聚焦回归 `42 passed`，前端向导/生成面板/班级详情 `3 files / 33 tests passed`；Ruff、TypeScript（禁用增量缓存）、ESLint、目标 Prettier、`git diff --check` 与未合并冲突检查通过。Docker/Linux Web production build 成功，API 镜像单独构建后供 Worker 复用；隔离 Web/API/Worker 已替换，PostgreSQL、Redis、MinIO 和数据未重建，六服务均 healthy，Web/API HTTP 均为 200。三服务并行构建曾在 20 分钟工具上限退出，但 Web 已成功产出；随后 API/Worker 单次构建成功。容器替换时旧 Web/Worker 名称占用导致两次 Compose 冲突，已只删除明确核实的旧应用容器并完成替换，未删除 volume、Bucket 或数据容器。当前工作树只读统计为 158 项（89 项已跟踪修改、69 项未跟踪）、暂存区 0；分支仍为 `codex/integrate-question-page-cutter`，HEAD 仍为 `5ae3a78`。
-
-- 2026-08-12：班级资料库与创建作业复用资料（完成、未暂存/提交/推送、已更新隔离 API/Web）：班级详情新增“班级资料”，教师可上传 PDF/PNG/JPG，标记为习题、讲义、参考资料或其他；服务端执行文件类型、内容、大小、页数、校验和与班级归属检查，保存资料名称、类型、页数和来源元数据，同班相同内容拒绝重复保存。创建草稿作业时，仅展示该作业所选班级的可用资料，可多选加入；加入时按校验和复核并复制为作业自己的文件与页面，班级原资料保持不变，跨班选择、非草稿作业、文件或页数超限均 fail closed。这里的“整理”仅指安全校验、分类和页面建档，第一版不自动提取题目、不确认题目/答案/Rubric、不生成评分、不发布作业或成绩。新增迁移 `0048_class_resources`，接在 `0047_formula_recognition_candidates` 之后，Alembic 当前唯一 head 为 0048；SQLite upgrade→downgrade→upgrade 与 PostgreSQL 离线 DDL 均由迁移专项覆盖。后端 API/迁移专项 `4 passed`，Ruff 通过；班级页与作业向导专项 `2 files / 18 tests passed`，TypeScript、目标 ESLint、目标 Prettier 与 `git diff --check` 通过。Windows production build 完成编译、类型检查与 19 页生成后因 standalone symlink `EPERM` 退出；随后在 Docker/Linux 中重新构建成功，19 页完整生成。仅重建隔离 API/Web，PostgreSQL、MinIO、Redis 与数据未重建；API/Web 均 healthy，HTTP 均为 200，数据库为 `0048_class_resources (head)`，Web 产物含班级资料页及“从班级资料选择”，未登录请求资料 API 返回 401 而非 404。旧 API/Web 镜像保留 `pre-class-resources` 标签用于回退。未使用真实学生 PDF，未写入真实成绩或发布数据。
-
-- 2026-08-10：修复批次“确认结果”点击后无反应（完成、未提交、已更新隔离 API/Web）：批次 `b6a64d10-4b4c-48c6-9995-ba906b06177d` 的浏览器请求实际已发出，但正式确认事务返回 409；只读日志与回滚式诊断确认根因是新建 `SubmissionScoreSnapshot`、`GradeRelease` 和 `GradeReleaseItem` 只通过预生成 UUID 关联，ORM 无法推断写入依赖，PostgreSQL 偶尔先写明细并触发即时外键约束。现于同一全有或全无事务内先显式 flush 成绩快照和发布主记录，再添加发布明细；没有放宽 owner、行锁、版本哈希、幂等或 readiness 门禁。确认按钮提交期间显示“正在确认…”，避免长请求看起来没有响应。新增回归要求写明细时被引用记录已不在待写集合；后端完整确认结果契约 `17 passed`、Ruff 通过，复核页 `31 passed`、TypeScript、ESLint、Prettier 通过，Docker Next production build 成功生成 19 pages。隔离预览仅重建 API/Web，六服务 healthy，复核页与 API HTTP 200。部署后在真实隔离 PostgreSQL 中以 `db.commit=db.flush` 执行完整确认路径并强制 rollback，成功得到 2 份作业/2 个快照的响应；回滚前后 `SubmissionScoreSnapshot/GradeRelease/GradeReleaseItem` 全局计数均为 `(0,0,0)`，未替教师确认、未留下最终成绩或发布记录、未释放成绩。
-
-- 2026-08-10：补充上传与已匹配上传合并（完成、未提交、已更新隔离 Web）：学生作业区不再为已匹配文件保留第二条独立横条；唯一的上传横条会直接显示“已匹配 N 个文件”，展开后上方选择并上传新答卷，下方在同一区域查看已匹配文件或撤销错误上传。保留多文件上传、确定性匹配和撤销逻辑，仅减少重复入口和纵向占用。新增已匹配文件必须嵌套在上传区内的回归；批次页组件测试 13/13、TypeScript、全 Web ESLint、目标文件 Prettier 通过，Docker Next production build 成功生成 19 pages，仅重建隔离 Web。未改变答卷、分数、教师确认、发布或成绩释放状态。
-
-- 2026-08-10：批次页“学生作业”信息类别视觉差异化（完成、未提交、已更新隔离 Web）：保持所有横条默认折叠和精简信息不变，通过低饱和背景、边框、左侧类别标识和状态色区分不同用途；补充上传使用靛蓝，学生答卷按待批改/已确认分别使用琥珀/绿色，已匹配文件使用青色，高级处理工具使用灰色虚线，避免上传入口、学生记录和低频工具看起来完全相同。新增稳定的 section-kind 语义标记及待批改样式回归；批次页组件测试 13/13、TypeScript、全 Web ESLint、目标文件 Prettier 通过，Docker Next production build 成功生成 19 pages，仅重建隔离 Web，六服务 healthy，批次页 HTTP 200。未改变折叠逻辑、答卷数据、分数、教师确认、发布或成绩释放状态。
-
-- 2026-08-10：核心教师页面统一自动刷新（完成、未提交、已更新隔离 Web）：新增共享的可见页刷新机制，工作台、作业列表、班级列表与详情、批改列表、批次工作台、逐题复核、消息中心和搜索均会在窗口重新聚焦、标签页重新可见或网络恢复后自动获取最新状态，并在页面可见时按场景每 30–60 秒静默更新；标签页隐藏时不轮询。并发触发会合并为一个在途请求和至多一次补刷，普通后台失败保留当前数据，不再切回骨架屏或用临时错误覆盖可用内容。批改复核在保存或修改分数期间暂停自动刷新，防止覆盖教师输入；保存类操作仍沿用各页面的即时刷新。共享 hook 精确测试 3/3，完整 Web 为 33 files / 201 tests，TypeScript、全 Web ESLint、全 Web Prettier、`git diff --check` 通过；Docker Next production build 成功生成 19 pages，仅重建隔离 Web，六服务 healthy，批次页 HTTP 200。未修改 API、数据库、worker、正式评分、发布或成绩释放状态。
-
-- 2026-08-10：修复逐题确认后下一题操作必须刷新才出现（完成、未提交、已更新隔离 Web）：复核页保存单题后，先以最新 workspace 作为主状态并统一进入下一道 pending 题；“整批确认资格”属于次要刷新，即使该请求临时失败也不再阻断 workspace 更新、自动选题和下一题“确认建议分”按钮。保留当前 readiness 供后续重试，不把已成功保存误报为失败。新增精确回归覆盖“首题确认成功、workspace 已刷新、readiness 刷新失败”场景，验证自动定位第二题且确认按钮立即可用。复核页组件测试 31/31、TypeScript、目标 ESLint、Prettier 通过；Docker Next production build 成功生成 19 pages，仅重建隔离 Web。
-
-- 2026-08-10：批次工作台“学生作业”改为默认折叠横条（完成、未提交、已更新隔离 Web）：每份学生作业首屏只显示学生名称，以及右侧“待批改”或全部题目均已有教师确认分后的合计分数；学号、页数、流程原因、页面与高级操作及切题工作台全部收进点击横条后才展开的内容，避免多份答卷纵向占满页面。补充上传、已匹配上传与高级处理工具仍保持独立折叠。组件测试 13/13、TypeScript、目标 ESLint、Prettier 通过；Docker Next production build 成功生成 19 pages，仅重建隔离 Web，API 与数据服务未动。
-
-- 2026-08-10：上述混合复核状态修复已完成隔离 API 重建并对 generation 4 重新 reconcile；run `81163ad4-5f6f-47d1-b934-729639f3f877` 现为 `awaiting_teacher_review`、5 completed、0 failed、0 pending Codex，复核页可直接进入。隔离数据与存储均保留，未重建 Web、worker、Postgres、MinIO 或 Redis。
-
-- 2026-08-10：同一批次追加的第二份答卷已生成差异化评分建议，并修复混合复核状态汇总（完成、未提交、待更新隔离 API）：教师在批次 `b6a64d10-4b4c-48c6-9995-ba906b06177d` 第一份已确认后明确要求继续处理另一份。只读核验第二份 submission `a6f2ee21-c4fb-41cd-a263-0398f7ddc370`、文件 `04_学生答卷_含典型错误示例.pdf`（SHA-256 `85a43827f490c09c6b031ceb563d3b5dbea4ef42bd1873c9f7d8e7cd9697e888`）为 1 页、5 个答案、5 个 confirmed region；逐题查看处理图确认第 1、3、5 题正确，第 2 题 `det(C)=1` 正确但 `rank(C)=1` 错误，第 4 题误判线性无关且理由错误。经教师本次继续批改授权确认第二份已核对的 Fake 识别证据后，正式 processing generation 4 / run `81163ad4-5f6f-47d1-b934-729639f3f877` 仅领取并应用第二份 5 个 Codex work item；第一份已有 5 个 TeacherReview、结果为 `accepted`，其重复 work item 因当前教师复核自动 stale，未重新生成或覆盖。第二份 5 个 `GradingResult` 均为 `suggested`、`requires_review=true`、置信度 0.99，逐题为 20/20、10/20、20/20、0/20、20/20，11 个评分项合计 70/100；第二份 TeacherReview 与最终成绩快照均为 0，未替教师确认评分、发布或释放成绩。识别与建议仍为纯合成/Fake 演示证据，不能冒充真实 Provider 质量。实验同时发现一个批次包含“已确认旧答卷 + 新建议答卷”时，旧答卷的 stale 重复步骤会令 run 误落 `waiting_input`；`_aggregate_run_state` 现将至少一个 succeeded 且其余仅 stale 的组合归为 `awaiting_teacher_review`，全 stale 仍不放行。定向 manifest 测试 5 passed，Ruff 通过；需在隔离 API 重建后再次 reconcile generation 4，使页面状态采用新汇总规则。
-
-- 2026-08-10：当前新作业批次生成完整评分建议（隔离预览数据操作、未提交）：教师明确要求为批次 `b6a64d10-4b4c-48c6-9995-ba906b06177d` 生成评分建议。生成前只读核验作业 `ebf9e030-ea73-4815-a531-55afb80e52af` 已发布并固定 active Structured Set `42595d59-e341-4cf7-9917-b56d997a29e3`，唯一 submission `272cc758-9f8b-48eb-b869-37cf355f9e63` 为 1 页、5 个答案、5 个 confirmed region；处理图逐题可见的线性代数作答均与当前正式答案一致。识别文字仍是 Fake provider 的 `Student answer` 占位，视觉核对与本地 Codex 建议不能冒充真实 OCR/评分 Provider 质量。通过正式 batch-scoped claim/submit/apply/reconcile 契约定向完成 run `f6c3ed7a-a1ab-4f07-a43c-e7c65f2e53e4` generation 1：10/10 steps completed、0 failed、0 pending Codex，状态 `awaiting_teacher_review`；5 个 work item 均 applied，5 个 `GradingResult` 均为 `suggested`、`requires_review=true`、置信度 0.99、每题建议 20/20，11 个 `scored` 评分项合计 100/100。正式安全确认资格函数回读为 5 题 eligible、0 excluded、建议总分 100、64 位 review hash；旧批次 `29240723-1089-4c98-bf09-b43a6d94deff` 的 5 个任务仍为 queued/attempt 0，未受影响。TeacherReview、最终成绩快照和 GradeReleaseItem 均为 0，submission 仍为 `recognized`；未替教师确认、写最终成绩或释放成绩。一次性容器脚本和处理图副本已精确清理。
-
-- 2026-08-10：当前作业根据双 PDF 生成完整题目、答案与 AI 建议评分标准草稿（隔离预览数据操作、未提交）：教师对作业 `ebf9e030-ea73-4815-a531-55afb80e52af` 明确要求根据 PDF 生成。只读核验上传文件为此前逐页审查过的同一组合成文件：`01_线性代数演示试卷.pdf` SHA-256 `01345f8d8330165f9463d0f09f0618afae07791fb8cb771fe4bf92513fcae61c`（1 页）和 `02_参考答案与评分标准.pdf` SHA-256 `abee31e969fc1fe068547f70f384bd4f0f467dc84ba3658ef657fd0da30cabf2`（2 页）；原 Fake 任务 `a3cf6d49-e2fd-451e-9412-5f38ab1c7358` 只有“1. 测试题”占位。经哈希、owner、draft 状态、active paper、source snapshot、teacher edit version 与目标文件真实 `StoredFile.id` 护栏校验后，通过单事务复用同一教师账号、同文件且已确认的正式来源内容，生成题号 1–5 的 active 待复核题目（每题 20 分，总分 100）、5 份 `suggested` 答案、5 份 `suggested/ai_suggestion` Structured Rubric 候选和 11 个评分项；旧占位答案候选保留为 superseded 历史，不硬删除。任务与 revision `e34d09e3-f7b9-4287-8cba-4d8825daf26d` 均为 `review_required` / 100%，结构校验为 5 个 `indeterminate`、0 unsupported/failed，风险 0 blocking、4 warning，含义是结构完整但仍须教师核对。独立只读回读确认作业仍为 draft，正式 `ReferenceAnswerVersion`、`StructuredRubricVersion`、active Structured Set 和 `published_at` 均为 0/空；未接受或确认候选、未发布、未写最终成绩或释放成绩。一次性容器脚本已精确清理。
-
-- 2026-08-10：修复评分建议无法直接确认及 `Failed to fetch` 工程提示（完成、未提交、已更新隔离预览）：当前批次 `436f2570-122c-4379-a6f6-13c62a68ab00` 的五题建议均为 20/20，但 Codex-local 按安全契约固定写入 `requires_review=true`，复核页却错误要求该值为 false 才显示“确认建议分”；同时页面要求自动识别置信度至少 0.9，而当前 Fake 识别只有占位文字、置信度为空；安全确认后端又只接受历史 `evaluated` 评分项，未接受当前稳定公开状态 `scored`，因此页面只发送 readiness/preview GET、没有发出确认 POST。现明确把“教师点击确认”本身作为复核动作：当前、未 stale、有有效建议分、无质量异常、有答题区域且评分项非 manual/incomplete 时显示逐题确认，不再把 `requires_review` 或缺失自动识别置信度误当成禁止教师确认；单份作业安全确认继续要求非空当前答案、固定 Structured Set/版本、精确评分项集合与分值、当前证据、无质量标记、未复核和版本哈希一致，并兼容 `evaluated/scored` 两种完整状态，缺分、manual、incomplete、stale、证据或版本变化仍排除。Codex-local 后续结果置信度取所有有分评分项置信度的保守最小值，不再无条件写空。Web 请求层捕获浏览器网络异常及非 JSON 错误响应，统一显示“暂时无法连接服务/请求失败（状态码）”，不再把 `Failed to fetch` 暴露给普通教师。后端受影响完整文件 `38 passed`、Ruff check 通过；复核页与请求层 `32 passed`，TypeScript、目标 ESLint/Prettier 通过；Docker API/Web 与 Next production build 成功，隔离六服务 healthy。部署后用正式只读资格函数核验当前 submission `7c4e4d2b-beb6-4c8a-b42b-37923550a781` 为 5 题全部 eligible、0 excluded、64 位 review hash；未替教师确认，未生成最终成绩快照或释放成绩。
-
-- 2026-08-10：当前批次生成评分建议并补强按批次领取隔离（完成、未提交、已更新隔离预览）：教师明确要求为批次 `436f2570-122c-4379-a6f6-13c62a68ab00` 生成评分建议。只读核验其唯一 submission `7c4e4d2b-beb6-4c8a-b42b-37923550a781` 的处理图后，五道线性代数题作答均与当前正式答案一致；识别文本仍是 Fake provider 的 `Student answer` 占位，图像人工核对与本地 Codex 建议不能冒充真实 OCR/评分 Provider 质量。处理时发现全局 FIFO 会先领取另一旧批次的 5 个任务，因此正式 claim 契约新增可选 `grading_batch_id` 过滤；不传时既有全局行为保持，传入时只领取 owner 下指定批次，新增回归确认目标批次被领取且另一批次保持 queued，聚焦 `2 passed / 7 deselected`，Ruff check 通过，隔离预览仅重建 API。随后通过正式 batch-scoped claim/submit/apply/reconcile 契约完成 run `ce33ea42-31bb-4070-912e-142311cd7a64` generation 1：10/10 steps completed、0 failed、0 pending Codex，状态 `awaiting_teacher_review`；5 个 work item 均 applied，5 个 `GradingResult` 均为 `suggested`、`requires_review=true`、每题建议 20/20，11 个评分项建议合计 100/100。旧批次 `29240723-1089-4c98-bf09-b43a6d94deff` 的 5 个任务仍为 queued、attempt 0，未受影响。独立只读回读确认 TeacherReview、最终成绩快照和 GradeReleaseItem 均为 0，submission 仍为 `recognized`；未替教师确认建议、写最终成绩、完成提交或释放成绩。
-
-- 2026-08-10：评分标准接受操作 `Failed to fetch` 修复（完成、未提交、已更新隔离预览）：教师在作业 `528bc462-d7b7-4f1a-8ee3-4e6bf85748f1` 接受第 1 题答案后继续接受评分标准，API 因候选评分项已使用正式类型 `intermediate_result`、物化映射只接受 Provider 草稿类型 `step` 而触发未处理的 `KeyError`，返回 500；Web 因异常响应缺少正常错误体而显示笼统的 `Failed to fetch`。现将正式评分项类型投影集中到 `_formal_criterion_type`：继续支持 `result/method/step/reasoning/proof/format/unit/precision/other`，并兼容已导入或历史候选中的 `final_answer/intermediate_result/justification/proof_step/presentation`；真正未知类型稳定抛出 `ValueError("RUBRIC_CRITERION_TYPE_INVALID")`，由既有 API 转成可读 422，不再泄漏 500。新增聚焦回归并运行答案/Rubric 完整文件 `40 passed`，数据库守卫为 `ahamark.db unchanged`；Ruff check 与目标文件 format-check 通过。隔离预览仅重建 API，其他服务和数据保留；修复后通过正式 CSRF、source snapshot、题目版本和草稿 edit version 护栏，精确重试教师此前已明确点击但失败的第 1 题 Rubric 接受操作，候选 `474f7dd7-ed6c-45f5-bc93-24035ae88875` 已为 accepted，物化 draft Structured Rubric `df5cd8e9-782e-4ede-8b38-354e5e182484`；未代替教师处理第 2–5 题，未确认正式答案/Rubric、发布作业、写最终成绩或释放成绩。
-
-- 2026-08-10：当前作业根据字节一致的双 PDF 生成完整待复核草稿（隔离预览数据操作、未提交）：教师对作业 `528bc462-d7b7-4f1a-8ee3-4e6bf85748f1` 明确要求根据 PDF 生成题目、答案和评分标准。正式生成任务 `6bacbe64-d3cc-4ca1-8897-1bd25cedc510` / revision `33e15954-4df2-4b1d-a321-34db09a4e7ea` 先完成为 `review_required` / 100%，但 Fake 测试 Provider 只产生“1. 测试题”占位，不能冒充真实 PDF 生成质量。只读比对确认当前 `01_线性代数演示试卷.pdf` SHA-256 `01345f8d8330165f9463d0f09f0618afae07791fb8cb771fe4bf92513fcae61c` 与 `02_参考答案与评分标准.pdf` SHA-256 `abee31e969fc1fe068547f70f384bd4f0f467dc84ba3658ef657fd0da30cabf2` 和此前逐题核验的 synthetic 文件字节完全一致；因此通过带文件哈希、来源作业和 `draft_only` 审计元数据的 Codex-local 单事务，把当前 active 题精确补为 1–5、每题 20 分，总分 100，并建立 5 份 `suggested` 答案、5 份 `suggested/ai_suggestion` Structured Rubric 候选和 11 个评分项。结构校验为 5 个 `indeterminate`、0 failed/unsupported，含义是结构完整但数学正确性仍须教师确认。独立只读回读确认作业仍为 draft，正式 `ReferenceAnswerVersion`、`StructuredRubricVersion` 与 active Structured Set 均为 0；未接受或确认候选、未发布、未写最终成绩或释放成绩。
-
-- 2026-08-10：空白教师账号新作业根据双 PDF 生成完整待复核草稿（隔离预览数据操作、未提交）：教师对作业 `1ea14e67-4b55-472f-a5dc-2d4adc376e7a` 明确要求根据 PDF 生成题目、答案与评分标准。只读核验上传文件仍为此前逐页审查过的同一组 synthetic 文件：`01_线性代数演示试卷.pdf` SHA-256 `01345f8d8330165f9463d0f09f0618afae07791fb8cb771fe4bf92513fcae61c`（1 页），`02_参考答案与评分标准.pdf` SHA-256 `abee31e969fc1fe068547f70f384bd4f0f467dc84ba3658ef657fd0da30cabf2`（2 页）；原 Fake 任务只有“1. 测试题”占位。经已审计的 Codex-local suggestion-only 单事务生成后，旧占位题保留为 removed 历史，当前 active 题精确为 1–5、每题 20 分，总分自动保持 100；建立 5 份答案候选、5 份 Structured Rubric 候选和 11 个评分项，5 套 Rubric 均为 `ai_suggestion`，11 个评分项均非 manual-only。任务 `9b9cd691-4af1-4ede-abc7-38dd762e52bf` / revision `13ba3f31-3a17-4a24-8f74-be477c530f3a` 仍为 `review_required` / 100%，风险为 0 blocking、5 warning；候选 `manual_required` 表示必须由教师复核，不代表仅教师评分。独立只读核验确认正式 ReferenceAnswerVersion、StructuredRubricVersion 与 active Structured Set 均为 0，作业仍为 draft；未接受、确认、发布、写最终成绩或释放成绩。
-
-- 2026-08-10：新增隔离预览空白教师账号（纯合成数据操作、未提交）：教师要求提供空账号后，确认既有两个 synthetic 教师账号均已有作业，因此通过正式 `create_teacher` CLI 逻辑在 `ahamark-assistant6-preview-20260806` 新建 `empty-teacher@business-e2e.synthetic.invalid`（显示名“空白测试教师”）。只读核验该账号为 active、作业数 0、班级数 0；正式 `/auth/login` 与 `/auth/me` 均 HTTP 200。该账号仅用于本机隔离测试，不含真实教师或学生数据；未触碰其他 Compose 项目，未创建作业、班级、提交、成绩或发布记录。
-
-- 2026-08-10：PDF 题目分值完整时自动补全作业总分（完成、未提交、已更新隔离预览）：教师未填写总分时，后台在最新一版 PDF 题目候选已全部物化、当前 active 题目集合与候选精确一致、每题分值均存在且合计大于 0 后，自动把题目分值合计写入作业总分；不再等待教师逐题确认，也不再要求教师点击“确认总分”。教师已经填写任何总分时绝不覆盖；缺题、缺分、部分物化、多试卷版本或候选与当前题目不一致时保持人工处理。自动写入与 job/revision、文件/页面/题目候选的 source snapshot 重基线在同一事务完成，避免系统自己的补全被下一阶段误判为来源变化；原总分建议转为 superseded，`TOTAL_SCORE_UNCONFIRMED` 自动解决，但真实 `TOTAL_SCORE_CONFLICT` 仍保留。中央复核既有自动确认会在总分与题目合计一致时直接完成该项，无需新增按钮。新增回归覆盖未复核题目也能推导、教师已有总分不被覆盖、Provider→Worker 自动补全后仍继续生成答案/Rubric且快照一致；Ruff 通过，完整相关后端 `41 passed`，数据库守卫为 `ahamark.db unchanged`。当前作业 `22a89ede-82eb-488b-a7fc-ee10a171d414` 已是 5×20=100 分，旧 `TOTAL_SCORE_MISMATCH` 复核项为 stale，不是有效阻断；未确认内容、发布或写成绩。
-
-- 2026-08-10：当前双 PDF 作业生成题目、答案与 AI 建议评分标准草稿（完成、未提交、已更新隔离预览）：教师在作业 `22a89ede-82eb-488b-a7fc-ee10a171d414` 明确要求根据 PDF 生成后，先核对其 `01_线性代数演示试卷.pdf`（SHA-256 `01345f8d8330165f9463d0f09f0618afae07791fb8cb771fe4bf92513fcae61c`，1 页）与 `02_参考答案与评分标准.pdf`（SHA-256 `abee31e969fc1fe068547f70f384bd4f0f467dc84ba3658ef657fd0da30cabf2`，2 页）和此前已人工审查的 synthetic 文件逐字节一致；因此在不冒充真实 Provider 的前提下，以 Codex-local suggestion-only 单事务生成 5 道 `ai_draft` 题（每题 20 分）、5 份答案候选、5 份 Structured Rubric 候选和 11 个评分项。旧 Fake“1. 测试题”保留为 removed 历史；最新题目候选 version 2 精确为 1–5。5 套 Rubric 的 `scoring_mode` 均为 `ai_suggestion`，11 个评分项均不再标记为仅人工；同时修复正式化投影此前把 `ai_suggestion` 错落为 `deterministic` 的问题，使教师以后接受草稿时逐项继续要求 AI 给出建议分，显式人工项和 `manual_only` 仍保持仅人工。精确评分路由回归 `7 passed`，Ruff 与临时事务脚本语法检查通过；隔离预览只重建 API，六服务数据保持。任务 `3b995e95-9a38-4deb-96a7-0f0968317422` / revision `c03818d5-e204-44d7-b4ba-411cc819e25e` 仍为 `review_required` / 100%，风险为 0 blocking、5 warning；答案与 Rubric 候选继续标记 `manual_required`，含义是必须由教师复核，不是仅教师评分。独立只读核验确认正式 `ReferenceAnswerVersion`、`StructuredRubricVersion` 和 active Structured Set 均为 0，作业仍为 draft；未接受、确认、发布、写最终成绩或释放成绩。
-
-- 2026-08-10：教师端搜索、消息中心与使用帮助完善（完成、未提交、已更新隔离预览）：搜索页不再默认铺满全部账号数据，首屏只保留六个常用入口；输入后按空格拆分多个关键词，同时匹配作业标题、班级、年级、学科、状态和教师行动语言，并支持功能/班级/作业分类、数量、清空和无结果引导，草稿结果直接进入编辑页。消息中心明确为根据当前账号班级与作业状态自动整理的待办，不冒充服务端通知；聚合提醒改为逐个班级/作业的直接行动，按处理优先级排序，支持未读/全部、单条已读/未读、全部已读，本机按账号保存状态，顶部铃铛显示本机已知未读数并实时同步。使用帮助移除 Rubric、OCR、finalize、request ID 等普通教师不需要的工程术语，改为四个常用入口、六步完整教师流程、九个与当前产品一致的常见问题和帮助搜索，覆盖多文件上传、切题修正、AI 建议分确认、自动草稿、5 分钟撤回与发布边界。新增三页及顶部入口组件回归，目标 `4 files / 8 tests passed`；完整 Web ESLint、TypeScript 和 Docker Next production build（19 pages）通过。隔离预览只重建并替换 Web，API/worker/PostgreSQL/MinIO/Redis 与数据保持原状，六服务 healthy，`/search`、`/notifications`、`/help` 均 HTTP 200。消息与草稿已读状态仍只保存在当前浏览器，不是跨设备服务端通知。本轮未确认内容、写入成绩、发布、释放成绩、暂存、提交或推送。
-
-- 2026-08-10：体验收敛助手 8 完成复核页七项收口（完成、未提交、已更新隔离预览）：正常题首屏收敛为原卷、题目/学生答案、醒目的 AI 建议分与理由、确认建议分/修改分数，识别、评分项、原图依据与调整默认折叠；识别不清、低置信度、stale、冲突、缺分和不完整/人工评分项会自动给出“修正识别文字/重新框选答案、重新批改、查看差异/修改分数、手动评分”等行动，不向普通教师显示 provider、generation、hash、英文状态、criterion key、坐标或验证术语。待处理异常优先，主筛选仅“待处理/已完成”，其余进入“更多筛选”；显示剩余题数，保留确认后自动进入下一题，A/E/左右方向键在输入框、选择框、按钮、可编辑区和组合键期间均不触发，切题保留缩放及原图/处理图选择，最后一题只提示下一步、不自动发布。后端新增最小追加式 `grading_review_commands` 幂等命令表与新迁移 `0036_grading_review_commands`：按单份作业预览题数/总分，教师二次明确确认后，正式事务接口以 owner/协作题目范围、行锁、当前答案/Structured Rubric/结果/评分项版本哈希、严格候选集合和幂等键全有或全无写入 `TeacherReview/accepted`；异常题明确排除，状态/并发变化返回 409，绝不创建最终快照、确认批次或释放成绩。评分项只使用后端中文 title/description。最终分、分项分和反馈草稿按 batch+submission+answer+结果 ID+Rubric 版本保存在浏览器本机，旧版本不恢复；未保存编辑有离开保护，保存/取消/切题正确清理。刚确认题可在 5 分钟内通过正式重开契约撤回，追加 `ScoreRevision` 与 `AuditLog`，保留 actor、reason、时间和前后版本，不删除审计历史。后端完整受影响文件 `29 passed`、数据库守卫为 `ahamark.db unchanged`；复核页 `30 passed`、识别组件 `2 passed`；Ruff、TypeScript、全 Web ESLint、目标文件 Prettier、`git diff --check`、Alembic 单 head（0036）及 Next production build（19 pages）通过。隔离项目只重建 API/worker/Web，PostgreSQL/MinIO/Redis 与数据保留；六服务 healthy，迁移为 0036，复核页与 API HTTP 200。只读核验当前 batch `13d19129-d2dc-421d-b72e-36c0547c93f5` / run `eeacc133-8ebf-46f6-934d-eb1214be4813` 仍为 generation 3、`awaiting_teacher_review`、5/5 completed，五题当前 synthetic/Fake 建议均 20/20；TeacherReview、ReviewCommand、最终成绩快照和成绩释放仍全部为 0。剩余边界：草稿仅保存在当前浏览器设备，撤回窗口固定 5 分钟；合成/Fake 证据不代表真实 Provider 质量。本轮未替教师确认、发布或释放，未暂存、提交或推送。
-
-- 当前分支为 `codex/integrate-question-page-cutter`，产品改动仍在工作树中且未提交；禁止把下方历史运行结果当成当前代码已通过的验证。
-- 当前隔离预览为 `ahamark-assistant6-preview-20260806`，Web `http://localhost:3300`、API `http://localhost:8800`；只允许在该 desktop-linux 项目内重建明确服务，不触碰 `ahamark-user-test-ac7ceb6`、未知卷或非空 Bucket。
-- 当前产品边界仍是 suggestion-only：AI 只能生成候选，教师必须确认正式答案、评分标准和最终发布；Fake synthetic 证据不能代表真实 Provider 质量。
-
-- 2026-08-10：针对本轮批改实验恢复明确的建议分确认主路径（完成、未提交、已更新隔离预览）：实验发现后端虽支持教师 `accepted` 决策，复核页却只显示“修改/手动评分”，造成教师看到 AI 建议分但无法从网页直接确认；同时建议分视觉层级过低，修正答案、重新批改、手动评分和答题框坐标挤占正常路径。现把 AI 建议分提升为醒目的独立卡片；对当前、非 stale、有有效总分且无人工/未完成评分项的建议显示主按钮“确认建议分”，教师单击后仍通过正式复核 API 写入明确 `accepted` 决策，不自动确认；分数为空、评分项不完整或结果 stale 时不显示该按钮，继续要求人工评分或重批。主路径只保留“确认建议分/修改分数”，修正答案、重新批改和可用时的手动评分折叠到“更多操作”；识别调整中不再向普通教师直接展示归一化坐标，正常建议理由不重复“仅供参考”。复核页完整组件测试 `25 passed`，TypeScript、受影响文件 ESLint/Prettier 与 Docker Next production build（19 pages）通过。关机后只恢复既有隔离容器并仅重建 Web；六服务 healthy，复核页和 API HTTP 200，当前 generation 3 run 仍为 `awaiting_teacher_review`，TeacherReview、最终成绩快照和成绩释放仍均为 0，未替教师确认或发布成绩。
-
-- 2026-08-10：评分标准新增“AI 建议评分”模式（完成、未提交、已更新隔离预览与当前合成作业）：教师明确要求当前评分标准不再使用“仅教师评分”，而是要求 Codex/AI 按每个评分项给出建议得分。结构化评分标准现支持 `ai_suggestion`，编辑器以教师文案“AI 建议评分”展示，新评分项默认使用该模式；Codex-local 输出契约对该模式强制要求逐项建议分和总建议分，缺分时拒绝落库，同时修正 `manual_only` 识别遗漏，确保真正的仅人工项仍不能被自动评分。后端相关回归 `18 passed`、前端编辑器组件 `4 passed`，Ruff、TypeScript 与 Docker Next production build（19 pages）通过；隔离预览仅重建 API/worker/Web，六服务 healthy。当前纯合成作业 `51cfbaad-5678-40a5-8736-d404ce0317ff` 未覆盖旧历史，而是从 Structured Rubric Set v1 创建不可变的新 v2 `86f6fe56-363f-4031-b4fe-c5b09fd4b2b2`，五份新 rubric 共 11 个 criterion 均为 `ai_suggestion`，活动权威校验通过。新 processing run `eeacc133-8ebf-46f6-934d-eb1214be4813` generation 3 已按正式 claim/submit/apply/reconcile 契约完成，状态 `awaiting_teacher_review`、5/5 completed、0 failed、0 pending Codex；五题建议分均为 20/20，11 个分项均有明确建议得分且 `requires_review=true`。证据仍为 synthetic/Fake 测试来源，不代表真实 Provider 质量；TeacherReview、最终成绩快照和成绩释放均为 0，答卷未 finalized，未自动确认、写最终成绩、发布或释放成绩。复核页面与 API 均 HTTP 200。
-
-- 2026-08-09：批次主页恢复最新处理状态（完成、未提交、已更新隔离预览）：教师完成批改建议生成后刷新批次主页，后台 run 已为 `awaiting_teacher_review`，页面却只显示“继续处理”；根因是主页的 `processingRun` 只在本次页面会话点击“继续处理”后写入内存，初始 `load()` 从未读取数据库中的最新 run，刷新即丢失状态并按旧 workflow blocker 回退按钮。现新增受 owner 权限约束的最新 processing run 只读接口，批次主页每次加载都并行恢复最新 run；已完成时稳定显示“检查结果”并进入 `/grading/{batchId}/review`，处理中也会恢复既有轮询，不会诱导教师重复启动。后端精确回归 `1 passed` 且 `ahamark.db unchanged`，批次主页组件完整文件 `13 passed`；Ruff check、TypeScript、ESLint、三个 Web 文件 Prettier 与 Docker Next production build（19 pages）通过。新版 Ruff format-check 仍只报告账本已记录的历史大文件/CRLF 机械重排，本轮未接受该无关整文件 diff。隔离预览仅重建并替换 API/Web，数据库、MinIO、Redis、worker 及数据保留。旧页面曾继续暴露按钮，教师点击后建立的最新 run `2a1cc947-1655-42c8-b47f-d30b70edd953` generation 2 也已完成 5/5 work items 并对账为 `awaiting_teacher_review`；generation 1 保留为 `stale` 审计。未改变批改建议、教师确认、最终成绩、发布或释放成绩边界。
-
-- 2026-08-09：当前坐标修复后答卷生成批改建议（隔离预览数据操作，未提交）：教师确认切题识别正确并明确要求批改后，当前批次 `13d19129-d2dc-421d-b72e-36c0547c93f5` 首轮 processing run `eb24184e-b67a-4c41-94c2-baa86d265815` generation 1 完成；因主页刷新缺陷误导出的 generation 2 `2a1cc947-1655-42c8-b47f-d30b70edd953` 也已按相同正式契约完成，当前最新 run 为 `awaiting_teacher_review`、5/5 steps completed、0 failed、0 pending Codex，首轮保留为 `stale` 审计。最新 5 个 GradingResult 均为 `suggested`，没有 TeacherReview。根据当前处理图逐题核对，学生五题作答均与正式参考答案一致，建议每题满分 20 分；但 Structured Rubric 的所有 criterion 均为 `manual_only`，系统契约强制输出 `manual_required`、不携带建议分数，因此只保存逐项核对意见和满分建议，未代替教师写入分数。识别文本仍由 Fake provider 提供占位内容，图像核对和本地 Codex 建议不能代表真实 Provider 输出质量；未确认建议、未写最终成绩、未发布或释放成绩。
-
-- 2026-08-09：切题框与处理图坐标空间统一（完成、未提交、已更新隔离预览）：教师提供页面截图证明第二轮 v3 框在原图像素坐标中虽同时包含题号和答案，但在默认 processed 预览上仍整体下移。最终根因不是题号锚点或题间距，而是 `preprocess_page` 为增强识别裁掉白色扫描边缘后直接保存裁剪图：当前页 original 为 `1489×2105`，旧 processed 为 `1221×1888`，而 `StudentAnswerRegion`、前端覆盖层和答案证据裁图仍使用原图归一化坐标，因此显示框和后续 OCR 证据都会错位。现升级 `submission-processing-v3`：允许内部对内容区裁边并增强，但保存 processed artifact 前必须把结果粘回旋转后的原始白色画布，保持尺寸和内容像素位置不变；原图/处理图切换、区域覆盖与答案 OCR 由此共享同一坐标空间，不需要继续用经验偏移补偿。新增“白边确实触发内部 crop、最终 processed 尺寸仍等于原图、内容 bbox 漂移不超过 2 像素”回归；三条精确回归 `3 passed`，切题与自动确认两个完整文件最终 `31 passed`，数据库守卫确认 `ahamark.db unchanged`；Ruff、Python compile、产品文件 strict mypy 和 `git diff --check` 通过。隔离预览只重建 API/worker；正式重处理 job `a939997e-d713-4b92-bb03-141237ef6706` completed，page version 4 / `submission-processing-v3`，MinIO 实际 processed 图精确为 `1489×2105`，五个 `submission-seg-v3` 框继续为 confirmed/system_auto 且零重叠。逐像素复核：五题题号分别位于 `406–434 / 597–625 / 787–815 / 978–1006 / 1169–1197`，答案分别位于 `479–499 / 669–690 / 859–881 / 1049–1071 / 1239–1307`，均完整落在当前五框 `379–569 / 569–760 / 760–951 / 951–1141 / 1141–1332` 内。未修改题目、答案文字、评分标准、教师复核、最终成绩、发布或成绩释放状态。
-
-- 2026-08-09：PDF 题号锚点切题边界收紧（完成、未提交、已更新隔离预览）：教师在当前合成批次 `13d19129-d2dc-421d-b72e-36c0547c93f5` 发现五个自动框与题目内容不贴合。只读核对确认旧 `submission-seg-v2` 对每题从“题号顶部减 1%”一直延伸到下一题题号，并让下一题同样向上扩 1%，因此相邻四组固定重叠约 1% 页面高度；最后一题直接延伸到页底。现升级为 `submission-seg-v3`：仍以高置信 PDF/OCR 题号锚点确定题目身份，非末题精确结束于下一题顶部，末题优先按实际内容末行收口；若 PDF 文本层像当前文件一样只暴露“第 N 题”标题而不暴露答案行，则必须保留到下一题前的完整区域，末题按同页典型题间距估算，不能把“未检测到答案文字”误当成“没有答案”。首版 v3 实跑正是因该标题-only 情况把框收得只剩题号，经教师复核后已补齐此 fail-safe；`strict-auto-confirm-v3` 同时新增同页区域零重叠硬门禁，任何重叠都保持待教师处理。三条精确回归 `3 passed`，切题与自动确认两个完整文件最终 `30 passed`，数据库守卫确认 `ahamark.db unchanged`；相关 Ruff、Python compile、产品文件 strict mypy 和 `git diff --check` 通过。隔离预览只重建 API/worker，PostgreSQL/MinIO/Redis/Web 及数据保留；最终通过正式 API 对纯合成 submission `c9efbc1e-2533-4b8b-b399-46f3fb696dbe` 重跑 job `194bbe44-585e-4ac5-8053-10daac7ad020`，旧 v2 及首版过短 v3 系统框均保留为 `superseded`，当前五个 v3 框均为 `confirmed/system_auto`；页面像素上下边界分别约为 `379–569 / 569–760 / 760–951 / 951–1141 / 1141–1332`，相邻重叠数为 0，末题底部为 `0.632761`，审计策略仍为 `strict-auto-confirm-v3`。六服务 healthy、批改页 HTTP 200；未修改题目、答案文字、评分标准、教师复核、最终成绩、发布或成绩释放状态。
-
-- 2026-08-09：当前双 PDF 作业生成完整待审核草稿（隔离预览数据操作，未提交）：经教师明确授权，对作业 `51cfbaad-5678-40a5-8736-d404ce0317ff` 的 `01_线性代数演示试卷.pdf`（SHA-256 `01345f8d8330165f9463d0f09f0618afae07791fb8cb771fe4bf92513fcae61c`）和 `02_参考答案与评分标准.pdf`（SHA-256 `abee31e969fc1fe068547f70f384bd4f0f467dc84ba3658ef657fd0da30cabf2`）生成完整草稿。两份文件与已人工核对过的合成来源作业 `dd6757f5-8ff4-4ec5-85fe-b7d992526bb3` 的文件哈希完全一致，因此通过 Codex-local suggestion-only 边界转录其 5 道线性代数题、答案和分项评分标准；这只是 Fake synthetic/同文件草稿证据，不代表真实 Provider 输出质量。单一数据库事务把旧 Fake 占位题保留为 `removed` 历史，建立题号 1–5 的 active `ai_draft`（每题 20 分），并生成 5 份题目抽取候选、5 份答案候选和 5 份 Structured Rubric 候选；三类内容都要求教师复核，答案和 Rubric 均为 `manual_required`。任务 `aacbd802-6321-48ad-a96d-6591f7b8a991` 仍为 `review_required` / 100%，source snapshot 为 `0a8738c079fae0667803c73a7a5f9bf511f7376eb1a566d7ef937d514057a571`。提交后独立只读核验确认当前 active 题精确为 1–5、候选与题目和快照逐项对齐、正式 `ReferenceAnswerVersion` 和 `StructuredRubricVersion` 均为 0、作业仍为 draft、`published_at` 和 active Structured Set 均为空；未接受或确认候选、未生成正式内容、未发布、未写成绩或释放成绩。前两次尝试分别因来源候选已是 `accepted` 和证据错误使用文件哈希而由同一事务完整回滚，均未留下目标写入；最终改用当前作业参考答案 PDF 的真实 `StoredFile.id` 后成功。一次性执行与核验脚本在完成后精确清理，不进入 Git。
-
-- 2026-08-09：关机前当前工作树全量复核（完成、未提交、已更新隔离预览）：后端全量首轮为 `627 passed, 17 skipped, 27 errors`，27 项全部在测试 setup 前因 Windows 既有 `Temp\\pytest-of-Lenovo` 目录 ACL 拒绝访问而失败，产品断言失败为 0；随后为这些 error 所在的 14 个测试文件指定唯一系统 `--basetemp` 重跑，结果 `135 passed, 1 skipped`，两轮均明确 `ahamark.db unchanged`。全仓 Ruff 通过，标准 mypy 为 `109 source files` 无问题。前端全量首次准确发现页面减法后测试仍查找旧文案“需要选择用途”，而当前产品显示“需要选择文件用途”；只修正该测试契约并机械格式化后，前端全量为 `28 files / 181 tests passed`，该文件复跑 `13 passed`，TypeScript、ESLint、全 Web Prettier 和 Docker Next production build（19 pages）通过。最终 `git diff --check`、暂存区、隔离服务和数据在关机前再次核对；隔离 API/worker/Web/PostgreSQL/MinIO/Redis 六服务 healthy，Web 与 API 均 HTTP 200，processing run `bf3bb96a-fb65-4bfe-94cf-73b65dbd1a43` 仍为 generation 1 / `awaiting_teacher_review`。本轮没有确认内容、写成绩、发布、暂存、提交或推送；用户已明确要求检查完成后关闭本机。
-
-- 2026-08-09：当前教师流程第二轮改进（完成、未提交、已更新隔离预览）：基于现有 active 题目的“重新生成本题”入口已放入逐题“更多”，只请求该题新的答案与 Structured Rubric 候选；请求绑定当前 source snapshot 与草稿 edit version，API 锁定 revision/assignment 并核对 draft、active paper、active question 和无并行生成，Worker 写入前再次核对同一快照、版本与题目。旧 `suggested/manual_required` 候选只在新候选安全物化成功时转为 `superseded`；Provider 不可用、语义检查失败或意外异常均保留旧内容并稳定结束任务，正式 draft/confirmed 内容不覆盖，不自动接受、确认、激活 Set 或发布。三步向导与逐题核对增加“你现在在”；答案/Rubric 未提交编辑按 assignment、question 和候选 ID 即时保存在浏览器本机，候选变化时不误恢复旧草稿，存在本地编辑时启用离开保护。当前代码检查与历史生成依据已分区并明确历史不代表当前验证；根 README 也明确当前事实与历史证据的阅读边界。测试期间精确发现并修复 API 行锁调用 500 与前端题号字段类型错误；最终答案/Rubric 后端完整文件 `33 passed`（数据库守卫确认 `ahamark.db unchanged`），受影响前端两个组件 `26 passed`，Ruff、Python compile、TypeScript、ESLint、Prettier、Docker Next production build和 `git diff --check` 通过。隔离项目仅重建 API/worker/Web，六服务 healthy，Web `/` 与 API `/health` 均为 HTTP 200，Worker 已注册 `ahamark.assignment_generation.regenerate_question`；PostgreSQL/MinIO/Redis 及数据保留，未触碰 `ahamark-user-test-ac7ceb6`、未知卷或非空 Bucket，未执行任何重新生成、内容确认、成绩写入或发布。
-
-- 2026-08-08：试卷上传支持多文件自动处理（完成、未提交、已更新隔离预览）：教师可在一次文件选择或一次拖拽中加入多个 PDF/PNG/JPG，前端先逐个校验格式、空文件和 25 MB 单文件上限，再按选择顺序自动上传并汇总文件数与新增页数；不需要逐个选择或额外点击上传。任何文件校验失败时本批次不开始上传并明确指出文件名，服务端既有单文件接口、已有文件保留和删除边界不变。新增双文件顺序上传回归，作业向导完整组件测试 `15 passed`；Docker Next production build 通过编译、Lint、TypeScript 检查并生成 19 pages。隔离预览只替换 Web，数据库、MinIO、Redis、API 与 worker 数据均保留；未暂存、提交、推送或发布作业。
-
-- 2026-08-08：教师端主路径第一轮“页面减法”（代码完成、未提交、已随 2026-08-09 统一更新隔离预览）：按教师明确选择先处理四项体验原则——不向普通教师暴露工程术语、正常状态不重复解释、安全操作尽量自动完成、高级内容折叠到“更多设置”。作业准备页首屏现只保留作业名称、截止时间和发布班级，学科、教学层级、总分、联考方式与作业说明收进“更多设置”；选择合法试卷文件后立即自动上传，删除了额外“开始上传”点击。生成区改为“整理试卷”，正常路径只显示简短状态，五阶段、重做/停止、历史记录和批量工具收进“处理详情/更多操作”；答案与评分标准核对移除重复说明、缩短为“确认本题/确认全部”，题目列表合并重复的答案与评分标准状态；评分标准首屏隐藏英文模式、confidence、criterion key、JSON 和内部证据结构，改为中文评分方式并收进“更多设置/高级规则/详细信息”。发布页改为“发布检查”，隐藏服务器问题 code、正常状态重复说明、评分标准集版本与指纹话术，重新检查放入“更多操作”；系统原有自动确认和自动准备继续执行，最终发布仍必须由教师明确点击。原轮只完成 `git diff --check` 的限制已由 2026-08-09 当前工作树重新验证取代：当前代码已通过 TypeScript、ESLint、Docker Next production build，并随 API/worker/Web 更新到隔离预览；本条仍不把未重跑的旧组件测试冒充当前证据。未修改数据库中的答案、评分标准、成绩或发布状态，未暂存、提交或推送。
-
-### 历史证据（仅供追溯，不代表当前代码验证）
-
-以下记录保留当时的代码、数据与运行环境证据。除非在“当前事实”中明确重新验证，否则不能据此声称当前工作树已通过相同门禁。
-
-- 2026-08-07：当前 synthetic 批次生成批改建议（隔离预览数据操作，未提交）：教师明确要求为批次 `db7c28ec-9f30-433c-8a09-cc8018223f75` 生成批改建议。生成前只读核对为 active Structured Rubric Set 已固定、题号 1–5 各恰好一个 confirmed region；代次 1 已完成 5 个前置步骤并等待 Codex-local。首次领取的终端输出被截断，未提交任何结果；租约按系统规则自然到期并恢复为 queued（attempt 1/3），随后通过正式 internal claim/submit/apply 契约续领并完成 5/5 work items，再调用正式 `reconcile_processing` 服务对账。最终 run `bf3bb96a-fb65-4bfe-94cf-73b65dbd1a43` 为 `awaiting_teacher_review`，10/10 steps completed、0 failed、0 pending Codex；5 个 GradingResult 均为 `suggested`，0 TeacherReview。当前识别证据为 Fake synthetic，且 Rubric criteria 要求人工复核，因此所有 criterion 输出均为 `manual_required`、无建议分数，明确标记 synthetic evidence 风险；未确认任何建议、未写最终成绩、未发布或释放成绩。
-
-- 2026-08-07：手动误框增加图片内删除入口（完成，未提交，已更新隔离预览）：原删除能力只位于右侧区域卡片，图片上的框无法直接对应操作；首版图片按钮又错误地只依赖显式 `manualMode`，导致当前答卷仍有未切题时，两条 `confirmed/manual/teacher_explicit` 区域没有删除入口。现只要工作台处于切题处理态，每个已保存框右上角就直接显示“删除此框”；全部切题完成的简洁态仍需先点击“调整切题”。按钮携带题号可访问名称和精确 region ID，点击时阻止误触画布拖框、调用既有删除接口并刷新区域，已启动的重画不会被强制关闭。只读实证当前答卷有第 1、4 题两个教师手动画框，准确覆盖本次缺陷。组件完整文件 `4 passed`，Prettier、Docker Next production build（19 pages）和 `git diff --check` 通过；隔离预览仅替换 Web，服务端原有答卷可编辑权限与发布门禁不变，未修改数据库、成绩或发布状态。
-
-- 2026-08-07：答卷切题手动框选题号显示与绑定修复（完成，未提交，已更新隔离预览）：`segmentation-incomplete` 现在返回当前 active 答卷题目的 `id/question_number/display_order`，并按 `display_order → question_number → id` 稳定排序；前端不再依赖已有区域反推题号或按 UUID 排序。题目选择器显示真实“第 N 题”，开始框选前和框选中均提示当前归属题目，草稿框及已保存框直接显示题号；保存仍提交教师精确选择的 question ID。新增回归覆盖无既有区域的第 2 题仍按题序显示、选择后状态与框标签正确；前端组件完整文件 `4 passed`，后端精确契约 `1 passed`，Ruff、Prettier、Docker production build（19 pages）与 `git diff --check` 通过。隔离预览仅替换 API/Web，二者及依赖服务 healthy；未修改任何题目、答案、评分标准、成绩或发布状态。
-
-- 2026-08-07：当前空白账号 PDF 作业的核对体验与草稿完整性修复（完成，未提交，已更新隔离预览）：缺失作业总分会在最新一版题目全部处理、当前 active 题均有分值后按题目分值自动汇总，但仍保留教师明确确认总分的发布门禁；新一轮题目抽取会把已 supersede、从未被教师审查且来源为 `ai_draft` 的旧物化占位题安全转为 `removed`，不硬删除历史、也不影响已采纳题目。Worker 不再新建“教师必须检查并确认所有草稿内容；Worker 不能发布作业”的冗余通用问题，前端兼容隐藏同文案历史项，但保留真实题目人工核对告警。三步向导的“整理页面”现默认折叠；题目编辑区移除不便使用的 x/y/width/height 数值表单和“保存区域”，图片上的直接框选入口保留。答案/Rubric 空状态改为教师顺序文案；新增 `codex_assignment_answer_rubric_draft.py`，只允许对同一输入快照和当前全部 active 正式题精确生成 `codex_local/manual_required` 答案与 Structured Rubric 候选，绝不接受、确认、激活 Set、发布或写成绩。验证：新增总分与旧占位题清理 `2 passed`，受影响前端 `3 files / 37 tests passed`，Python compile/Ruff、Docker Next production build（19 pages）和 `git diff --check` 通过；一次较宽后端组合运行在 3 分钟内无输出而超时，未计为通过。隔离作业 `dd6757f5-8ff4-4ec5-85fe-b7d992526bb3` 现 active 题精确为 1–5，旧 Fake 占位题为 removed；重复生成的 version 3 未审查候选已精确标为 superseded；已根据教师上传的参考答案 PDF 创建 5 份答案和 5 份评分标准候选，仍全部等待教师核对。API/Web/Worker 仅在 `ahamark-assistant6-preview-20260806` 中替换，PostgreSQL/MinIO 数据保留，未触碰 `ahamark-user-test-ac7ceb6`。
-
-- 2026-08-07：发布评分标准集未生成修复（完成，未提交，已更新隔离预览）：教师完成整套一键确认后，审查会话正确到达 `ready_for_set` 且 5 份答案、5 份 Structured Rubric、班级、截止时间和总分均已确认，但自动创建 Structured Rubric Set 返回 500。API 日志确认根因为 PDF 题目物化时所有 `Question.display_order` 均写成 `0`，复制到 `structured_rubric_set_items` 后触发 `uq_structured_set_order` 唯一约束。新题物化现按当前试卷最大顺序递增；发布集构建对历史重复顺序按确定性选择结果重新编号为连续的 1..N，因此无需修改或删除历史题目数据。确认发布页在自动准备期间新增显式“生成发布评分标准集”入口，自动流程失败时教师可直接重试；该操作仍只生成待发布 Set，不自动发布。新增双题同序回归验证最终 Set 顺序为 `[1, 2]`；精确后端回归 `7 passed`，更宽相关运行 `18 passed / 1 unrelated tmp-path setup error`（Windows pytest 临时目录拒绝访问），`ahamark.db` 未变化，`git diff --check` 通过。前端本地依赖链接不完整，Vitest 未能启动；隔离 Docker API/Web production build 成功，Next TypeScript/build 通过并生成 19 pages，已仅重建 `ahamark-assistant6-preview-20260806` 的 API/Web。用户需刷新第三步后点击新增按钮或等待自动准备，最终发布仍必须由教师再次确认。
-
-- 2026-08-07：题目核对重复历史项修复（完成，未提交，已更新隔离预览）：只读核对确认当前 active 题目仍精确为 1–5，各一题；重复展示来自旧 Fake 占位题候选仍以 `superseded` 历史状态出现在题目核对主列表。前端主核对区现排除 `superseded/stale/rejected` 历史候选，批量采用也只针对当前候选；不删除历史记录、不修改题目数据、答案/Rubric 或发布状态。回归新增“旧重复题不渲染”断言，聚焦 `1 passed`、前端完整 `28 files / 178 tests`、ESLint 通过；Docker Next production build 通过类型检查及 19 pages。隔离预览仅重建 Web，Web/API healthy，目标页面 HTTP 200。
-
-- 2026-08-07：教师整套内容一键确认（完成，未提交，已更新隔离预览）：在答案与评分标准审核区增加“一键确认全部题目、答案和评分标准”。若当前是待人工核对的生成候选，单次请求会在同一服务端事务中完成整套“接受候选 → 物化正式草稿 → 教师确认”；若已经存在正式草稿，则直接整套确认。两条路径均绑定教师当前看到的 Bundle hash、全部题目集合、每题内容 hash 和精确候选编辑版本或正式答案/Rubric 内容 hash，要求恰好覆盖当前全部题目、拒绝重复/缺失题目，并按稳定题目 ID 顺序处理；任一题版本过期、绑定错误、来源未知、内容不完整或评分校验失败时整笔事务回滚，不留下只确认一部分的状态。操作只确认内容，不激活 Structured Set、不发布作业。验证：候选整套原子路径聚焦后端 `1 passed`；正式草稿成功确认及 stale 零写入 `2 passed`；两套相关后端完整回归 `43 passed`；前端聚焦 `10 passed`、完整 `28 files / 178 tests`；TypeScript、ESLint、Ruff、Ruff format、strict mypy（修改模块）、Prettier、`git diff --check` 通过；Docker Next production build 通过（19 pages）。隔离 `ahamark-assistant6-preview-20260806` 仅重建 API/Web，二者及依赖均 healthy，页面与 `/health` 返回 200；部署后只读核对当前 PDF 作业仍为 draft、5 道 active 题、5+5 份 `manual_required` 候选、0 正式答案、0 正式 Rubric、无 active Structured Set，未替教师点击确认或发布。
-
-- 2026-08-07：当前 PDF 草稿包快照冲突修复（完成，隔离预览数据修复，未提交）：教师首次尝试逐题接受答案时收到通用 409 自动刷新提示；只读核对确认第 1 题答案被标为 `stale`，原因是本轮先以旧输入快照生成候选、随后物化 5 道 `ai_draft` 并移除旧 Fake 占位题，题目集合变化后实际 `source_snapshot_hash` 已从 `91cc43...` 变为 `fbe6f0...`，而 revision/job/候选仍引用旧值；旧占位题还残留一份 `manual_required` 答案，造成数据库层第 2 题重复候选。现基于当前 draft + active paper + active 题号 1–5 重新计算并统一固定 revision/job、最新题目候选、当前答案/Rubric 与仍可处理的文件/页面建议快照；第 1 题答案从 `stale` 恢复为 `manual_required`，旧占位题答案转为 `superseded` 历史。最终只读契约核对为题号 1–5 各恰好 1 份当前 `manual_required` 答案和 1 份当前 `manual_required` Rubric，全部候选快照与 question version token 精确匹配，正式答案/Rubric 物化计数均为 0；作业仍为 draft 且 active Structured Set 为空。未执行任何 accept/modify、未创建正式答案或 Structured Rubric、未激活 Structured Set 或发布作业；一次性修复脚本已清理。
-
-- 2026-08-07：人工核对答案/Rubric 的提示语义修复（完成并更新隔离预览、未提交）：`manual_required` 候选按接口契约仍允许教师逐题使用“接受”或“修改后接受”，只是不能被批量自动接受；旧前端却把批量资格原因 `CANDIDATE_NOT_SUGGESTED` 显示成“建议已经处理或已失效”，并把 `MANUAL_REVIEW_REQUIRED`、`PROVIDER_OUTPUT_DEGRADED` 和非确定性模式重复列出，造成按钮与提示看似矛盾。现对人工核对候选收敛为一条教师可执行说明，保留逐题接受按钮和所有服务端门禁；非人工候选仍按原始资格原因显示，raw code 仅保留在默认折叠的技术审计详情。新增回归覆盖 `manual_required` 答案仍可逐题接受且主提示不再暴露错误失效文案/raw code；聚焦 `8 passed`，前端全量 `28 files / 176 tests passed`，Prettier、ESLint、TypeScript 与 Docker Next production build（19 个静态页面）通过。隔离 Web 以 `--no-deps` 单独替换，未重建 API 或触碰数据库。未自动接受或修改当前答案/Rubric，未激活 Structured Set 或发布作业。
-
-- 2026-08-07：当前试用作业已根据两份 PDF 生成完整草稿包（隔离预览数据操作，未提交）：对作业 `f9954dce-e540-4f01-bcdd-cd011ee94f23` 的 `01_线性代数演示试卷.pdf`（1 页）和 `02_参考答案与评分标准.pdf`（2 页）完成 SHA-256 对账、Poppler 逐页渲染和视觉核对；确认原 Fake 任务仅有“1. 测试题”占位内容后，通过仓库现有 suggestion-only/Codex-local 物化边界生成题号 1–5 的 `ai_draft`，每题 20 分，并逐题生成 PDF 对应的答案候选与分项评分标准候选。旧 Fake 占位候选保留为 `superseded`，其物化题保留历史但转为 `removed`；当前 active 题目恰为 1–5，总分 100。5 份答案和 5 份 Rubric 均为 `manual_required/hybrid`，每题 criteria 分值合计精确为 20（题 1–4 各 2 项、题 5 为 3 项），任务仍为 `review_required`。作业仍为 draft，`active_structured_rubric_set_id` 为空；未自动接受题目建议、确认答案或评分标准、激活 Structured Set、发布作业或成绩。临时下载、文本提取、渲染图片和一次性草稿脚本在验证后精确清理，不进入 Git。
-
-- 2026-08-07：基本信息建议重复/无效提示降噪（完成并更新隔离预览、未提交）：前端只展示仍为 open 且与当前可操作建议对应的问题；老师已经填写明确值时，不再展示相应空建议的低置信度提示，`academic_year`、`assessment_type` 等当前作业表单不可处置的内部建议不再直接暴露。总分继续保留独立的教师明确确认门禁，但隐藏重复的通用低置信度提示，并优先以草稿已有总分作为确认输入默认值。新增回归覆盖已解决问题、已有学科值、内部学年字段和总分重复提示；最终聚焦 `13 passed`，前端全量 `28 files / 175 tests passed`，Prettier、ESLint、TypeScript 与 Docker Next production build（19 个静态页面）通过。隔离预览六服务 healthy，目标作业仍存在且页面 HTTP 200；Compose 因依赖关系同时重建了未改代码的 API 容器，但 PostgreSQL/MinIO/Redis/worker 与数据均保留，旧 `ahamark-user-test-ac7ceb6` 六容器 ID/Exited 状态未变。本轮未自动接受建议、确认总分、发布作业或修改用户数据，尚未暂存、提交或推送。
-
-- 2026-08-07：“生成作业内容”未展开状态已压缩并更新隔离预览（本地体验中、未提交）：卡片外边距和纵向间隔缩小，五个阶段卡片收进单行“状态 · 百分比”折叠项，基本信息、文件与页面、页面核对、题目候选和历史版本的折叠标题改为紧凑内边距；展开后仍保留完整进度、阶段重试和核对操作。新增回归断言默认状态详情保持关闭。验证：相关聚焦 `3 files / 26 tests passed`，前端全量 `28 files / 174 tests passed`，Prettier、ESLint、TypeScript、Docker Next production build（19 个静态页面）通过；隔离预览数据卷保持不变。本轮尚未暂存、提交或推送。
-
-- 2026-08-07：教师端草稿生成区域已精简并更新隔离预览（本地体验中、未提交）：标题改为“生成作业内容”，删除生成机制、Codex/Provider、suggestion-only、Generation/Revision、输入快照/hash、阶段尝试次数、原始 MIME/bytes/checksum、raw 风险代码和旧六步编号等非教师信息；内部状态与字段名改为中文教师文案，问题区只显示可读消息，历史只显示版本与状态。保留生成/重新生成、进度、阶段重试、取消、必要异常、文件用途核对、题目/页面核对和历史入口；没有改变 suggestion-only、教师确认或发布门禁。验证：相关聚焦 `3 files / 26 tests passed`，前端全量 `28 files / 174 tests passed`，Prettier、ESLint、TypeScript、Docker Next production build（19 个静态页面）通过；隔离预览数据卷保持不变。本轮尚未暂存、提交或推送。
-
-- 2026-08-07：发布班级长列表已改为紧凑选择器并更新隔离预览（本地体验中、未提交）：默认只显示已选数量、最多三个班级标签及剩余数量，不再随班级总数拉长页面；教师显式展开后可按班级名、学科、年级或学年搜索，结果在固定高度区域内滚动，已选班级置顶，并支持“全选当前结果”和“清空”。保存仍提交精确班级 ID，普通作业至少一个班级与联考授权/发布门禁均未改变。验证：向导聚焦 `1 file / 13 tests passed`，前端全量 `28 files / 174 tests passed`，Prettier、ESLint、TypeScript、Docker Next production build（19 个静态页面）通过；隔离预览健康数据卷保持不变，旧 `ahamark-user-test-ac7ceb6` 未触碰。本轮尚未暂存、提交或推送。
-
-- 2026-08-07：按教师选择将作业编辑页从六个顶层阶段压缩为三步向导（本地体验中、未提交）：第 1 步“准备作业”合并基本信息与试卷上传，第 2 步“核对内容”连续保留页面整理/手动切题、题目编辑和 Structured 评分标准，第 3 步“确认发布”保留集中审查、服务端门禁与教师一次确认发布；Codex 完整草稿生成仍保留且 suggestion-only。后端原有 completeness 1–6 编号通过兼容映射定位到新三步，中央审查未完成项不会跳错；新建作业和显式 URL 只接受新 1–3 步。压缩过程中同步修正页面预览仍监听旧第 3 步的问题。验证：向导/新建页聚焦 `2 files / 16 tests passed`，前端全量 `28 files / 173 tests passed`，Prettier、ESLint、TypeScript、Next production build（19 个静态页面）通过；根/Web lockfile 无变化。隔离预览 `ahamark-assistant6-preview-20260806` 已用最终代码重建并保留原 PostgreSQL/MinIO 数据，等待教师选择性体验；未触碰旧 `ahamark-user-test-ac7ceb6`。本轮尚未暂存、提交或推送。
-
-- 2026-08-05：前端剩余 Structured-only 已切换：作业向导第 5 步删除手动 Legacy Rubric/标准答案快捷录入，生成审核删除 `savedRubrics` Legacy prop 与旧已保存 fallback；批改复核统一使用 `structured_rubric_set_id`、`structured_rubric_version_id`、`criterion_id`；数学验证与 AI 建议显示 Set/Structured 版本，AI 创建请求不再接收或发送任意 `rubric_version_id`，由服务器 active Set 推导。后端 Math/AI job JSON 同步输出 `structured_rubric_version_id`。验证：TypeScript 通过；相关 4 files / 53 tests 通过。前端全量、Prettier、ESLint、Next build 尚待运行。
-
-2026-08-05 结果导出测试契约同步（进行中、未提交）：`SnapshotPayload` 测试夹具已从 `rubric_version_id` 改为 `structured_rubric_set_id`，保持指标、XLSX/PDF 只读取不可变成绩快照的边界，不引入任何 Legacy 回退；结果文件现 `8 passed`。
-
-2026-08-05 全仓 collection 在上述 processing 测试切换后已越过这两个文件，收集到 620 tests；当前唯一 collection blocker 转为 `tests/test_exception_versioning.py` 仍导入已删除的 Legacy `RubricVersion`，因此不能声称全仓 collection 已通过。
-
-2026-08-05 processing 输入与 PostgreSQL 并发测试已移除 Legacy fixture（未提交）：`test_processing_input_snapshot.py` 的固定正式内容测试改为由 StructuredRubricSetItem 精确选择答案/Rubric，不会因后来草稿或 retired 版本改变；只读构建器契约明确要求 Structured Set validator，并固定缺失/漂移错误为 `STRUCTURED_SET_REQUIRED/STRUCTURED_SET_STALE`。PostgreSQL drift matrix 通过篡改 SetItem criteria hash 验证 stale，不再修改 projection profile。`test_processing_orchestrator_concurrency.py` 的 Codex apply fixture 改为 active Set/SetItem，请求携带 Set 与三个内容 hash；删除 generation/review/binding/Legacy rubric tree。两文件 collection 共 20 tests；当前环境实跑 `9 passed, 11 skipped`，11 个 skip 均为缺少显式隔离 PostgreSQL URL 的条件型测试，Ruff 通过，`ahamark.db` unchanged。
-
-2026-08-05 作业路由回归同步（进行中、未提交）：旧测试不再通过已删除的逐题 Rubric PUT 和 manual-publish 旁路构造发布，改为明确断言三条旧路由均为 404，唯一 `/publish` 必须携带服务器生成的 Structured Set readiness；完整一次发布事务由中央发布专项覆盖。作业路由文件现 `10 passed`。
-
-2026-08-05 题目版本 token 一致性补齐（进行中、未提交）：除教师手动 Structured Rubric 创建外，生成候选物化正式 Rubric 也已改用共享 UTC `question_version_token`，避免 SQLite/跨方言时区表示差异让刚创建的 Set 被误判 stale；对应物化→确认→Set 回归已通过 `1 passed`。
-
-2026-08-05 合成 seed 的 Structured Set 版本与内容指纹复用生产端 question-version token 及 semantic payload/hash；不会用任意测试 hash 冒充当前 Set，运行时能够按与发布链一致的规则复核。
-
-2026-08-05 三个合成 seed 已切换为 Structured-only（未提交）：`seed_analytics_demo.py` 与 `seed_capacity_results.py` 现在为每题创建明确的 confirmed ReferenceAnswerVersion、StructuredRubricVersion、manual-only RubricCriterion，以及 assignment-level active StructuredRubricSet/SetItem manifest；成绩快照写 `structured_rubric_set_id`，作业写 `active_structured_rubric_set_id`。`seed_recovery_fixture.py` 不再创建 QuestionRubric/RubricItem 或修改已发布评分标准，而是验证容量 fixture 的活动 Set、精确 SetItem、Structured Rubric 与 criterion 链，并让恢复边界快照引用同一 Set。新增 AST 防回归测试禁止这三个 seed 导入/构造 Legacy 三模型、写旧作业活动字段或向成绩快照写旧 rubric FK。Ruff、三个模块直接 import、恢复安全与 seed 契约 `18 passed`，`ahamark.db` unchanged；未使用真实数据。范围外扫描发现 `scripts/verify_score_correctness.py` 仍直接构造 Legacy RubricVersion/active_rubric_version_id/旧快照 FK，`scripts/business_browser_e2e.mjs` 仍读取旧结果/快照 `rubric_version_id` 并把 criterion key 当作 rubricItemId；按本子任务边界只记录，未扩散修改。
-
-2026-08-05 Structured-only grading 测试重建（进行中、未提交）：`tests/test_grading.py` 已删除 Legacy result/snapshot 字段、`rubric_item_id/rubric_items` Provider payload 和旧质量队列断言，改为断言 Set ID、逐题 StructuredRubricVersion ID、`criterion_id/rubric_criteria`；新增旧 `rubric_item_id` Provider Schema 必须 ValidationError 的负向契约，该文件 Ruff check/format 与全量 `19 passed`。新增共享 `structured_rubric_support.py`，直接创建 confirmed ReferenceAnswer/StructuredRubric/criteria 与 active Set/SetItem，并按正式发布相同 payload 计算三类 hash，不再经 Legacy API/projection。`test_submission_workflow.py` 的主 fixture、手工结果、criterion 和 snapshot 已切到 Set；首段 14 项通过后暴露并修复测试 Provider 仍读取 `rubric_items`，后段含该回归的 9 项通过，合计覆盖该文件 23 项，`ahamark.db` unchanged。confirm-results 大型 fixture 仍待切换。
-
-2026-08-05 Structured-only 中央发布回归重建（进行中、未提交）：删除原测试中所有 Legacy binding/projection 操作，改为验证 Set 是唯一发布权威、readiness 不含 binding、最终一次发布激活 Set，以及 criterion 内容漂移必然 409。为消除 SQLite 丢失时区而造成的伪漂移，题目版本 token 统一按 UTC 规范化，Structured Rubric 创建、Set 校验和处理输入共用同一函数；真实题目更新时间变化仍判 stale。中央发布文件现 `11 passed`，`ahamark.db` unchanged。
-
-- 2026-08-05：Codex local Structured-only 批改契约已完成模块切换（未提交）：`processing/codex_local.py` 的 work request、claim/apply 锁定与幂等回放现在只接受活动 `StructuredRubricSet → StructuredRubricSetItem → ReferenceAnswerVersion/StructuredRubricVersion → RubricCriterion` 固定链；请求携带 Set/Item ID 及答案、Rubric、criteria hash，apply 在写入前重新校验 owner/assignment/paper/活动指针、逐题关系和全部 hash，任何漂移以明确 409 fail closed。`GradingJob/GradingResult` 写 `structured_rubric_set_id` 与 `structured_rubric_version_id`，criterion 结果直接写 `criterion_id`；已删除 Legacy publication binding、QuestionRubric/RubricItem mapping 和旧字段读写。AI 仍只生成 `suggested` 且强制教师复核，不会自动确认、发布或写最终成绩。两组夹具已改为真实 Set manifest，work request 不再暴露 `legacy_binding`。验证：`test_codex_local_apply.py` 9 passed、`test_codex_local_work_items.py` 8 passed，相关 Ruff 全通过，`git diff --check` 通过，`ahamark.db` unchanged；尚未据此声称后端全量或 PostgreSQL E2E 通过。
-
-- 2026-08-05：AI/数学验证 active Set 固定性切换已完成：`MathValidationJob` 与 `AIScoringJob` 模型及新迁移 `0034_structured_rubric_authority.py` 新增不可空 `structured_rubric_set_id`（`RESTRICT` FK + index）；新增共享 authority resolver，以已发布且仍有效的 assignment active Set/SetItem 为唯一答案、Rubric、criteria 来源。两个创建 API 已删除客户端 `rubric_version_id`，旧字段作为 extra 会被 422 拒绝；幂等复用、criterion retry、数学 worker 执行前/落库前、AI worker 执行前/落库前均重验 Set 固定关系，Set 漂移时 fail closed 为 stale/409。Codex-local 严格子任务同步固定其已验证的 Set。0034 会拒绝含未固定 Math/AI job 的旧库，避免不可空 Set FK 伪回填；迁移边界 fixture 已补两个任务表，并断言 upgrade/downgrade 时 Set FK 精确出现/移除。新增直接契约测试覆盖拒绝任意 Rubric、Set/答案/Rubric 三元固定和两类旧异步任务 fail-closed。验证：相关 Ruff 通过；AI/数学现有聚焦组 `20 passed`；新增契约 + 0034 迁移边界 `9 passed`。另有旧 worker 测试在收集时因并行 Structured-only 删除 `QuestionRubric` 而失败，属于共享分支待同步的 Legacy 测试 fixture，不是本次执行逻辑失败。未修改任何其他迁移。
-
-2026-08-05 Structured-only 作业 API 切换（进行中、未提交）：`assignments.py` 已删除 `RubricVersion/QuestionRubric/RubricItem` imports、Legacy 详情子树、`PUT /assignments/{id}/rubrics/{question}` 旧写接口及 `manual-publish-readiness/manual-publish` 发布旁路；作业详情改为返回活动 `StructuredRubricSet` manifest 与逐题固定 criterion，`publish_issues` 直接校验 Set 所属 assignment/owner/paper、中央核查 session、完整指纹、题目全集、固定答案/Rubric 关系、分值及教师确认状态，缺失或漂移均 fail closed。作业复制不再复用已发布 Set：它为新题目创建新的 ReferenceAnswerVersion、StructuredRubricVersion、RubricCriterion 和独立 draft Set，原 Set 保持不可变。该模块 Ruff check/format、直接 import 及“旧三条路由不存在、统一 publish 路由仍存在”的运行时路由契约检查通过；现有 `test_assignment_central_review_publish.py` 仍引用中央核查刚删除的 `PROJECTION_WRITE_LOCK_ORDER`，`test_assignments.py` 的全应用收集仍被尚在并行切换的 `processing/codex_local.py` 导入已删除 binding 模型阻断，因此两组不能记为通过，待对应代理完成后重跑。没有自动确认、发布或写成绩。
-
-2026-08-05 Structured Set 发布后固定版本保护（进行中、未提交）：Set 校验已区分“发布前必须仍是当前选择”和“发布后必须复现已激活 manifest”。处理输入不会因后来创建的新草稿 Rubric 偷换版本或错误判定 active Set 过期，而是直接重验 SetItem 固定的题目版本、答案、Rubric、criteria 及三个 hash；真实题目内容版本变化仍明确返回 stale。
-
-2026-08-05 Structured-only 批改切换（已完成模块切换、未提交）：`grading.py` 已移除 Legacy `RubricVersion/QuestionRubric/RubricItem` import、字段、选择与输出路径，统一通过 active `StructuredRubricSet → SetItem → ReferenceAnswerVersion/StructuredRubricVersion → RubricCriterion` 解析器取得固定权威内容；解析器校验作业/所有者/paper、Set 激活状态、逐题绑定、答案与 Rubric confirmed 状态、question version、两级总分，并按发布 Set 相同 canonical payload 重算答案、Rubric 和 criteria 三类 hash，任一缺失、交叉引用或内容改写均以 `STRUCTURED_SET_REQUIRED/INCOMPLETE/STALE` fail closed。直接评分、教师复核、批量确认结果、最终提交、质量一致性和读取 API 均使用同一 Set/逐题 Structured version；`GradingJob/GradingResult` 写 Set ID 与 StructuredRubricVersion ID，criterion result 直接写 `criterion_id`，两条成绩快照路径写 Set ID。评分 Provider Schema 与上下文同步只接受 `criterion_id/rubric_criteria`，旧 `rubric_item_id` Schema 验证失败，不再存在 Legacy Provider 字段。两个模块直接 import、Ruff check/format、显式 mypy 通过；稳定 objective/provider 聚焦 `8 passed`，额外 Schema 探针确认旧字段 fail closed，静态扫描确认两个模块 Legacy runtime token 为 0，`ahamark.db` unchanged。现有包含 Legacy fixture/字段断言的整组 grading 测试尚待统一改造后才能作为新架构全量证据。
-
-2026-08-05 Structured-only 成绩读取切换（进行中、未提交）：`FinalScoreService` 的完整与已发布成绩快照 schema 已由 Legacy `rubric_version_id` 改为 `structured_rubric_set_id`，并校验 Set 所属 assignment/paper 及 manifest 题目全集；正常读取还要求 Set 仍为 active。没有从“最新 Rubric”推断或回退，也未写成绩。
-
-2026-08-05 Structured-only processing 门禁同步（进行中、未提交）：processing orchestrator 的 readiness blockers 已删除 `ACTIVE_CONFIRMED_FORMAL_REQUIRED` 与两个 `LEGACY_PROJECTION_*`，只接受 input snapshot 当前会产生的 `STRUCTURED_SET_REQUIRED/STALE`；这不放宽门禁，Set 缺失或任一固定内容 hash 漂移仍 fail closed。
-
-2026-08-05 Structured-only 前端发布主链切换（已完成、未提交）：前端 session、readiness 和 review bundle 已改为直接使用 `structured_rubric_set_id` / `structured_rubric_set`；删除 publication binding、Structured→Legacy projection/loss report 的类型与 create/get/confirm API。中央核查不再生成、确认或展示兼容版本，常规流程改为在确认项和真实 blocker 处理完成后自动建立不可变 Structured Rubric Set，再进入统一 publication prepare；发布按钮仍只在服务端 Bundle、Set 和 readiness 都为当前状态时开放，最终仍由教师一次“确认并发布”，原有 409 clean/dirty 保护和有界轮询保持。旧 Legacy blocker 文案已删除，新增 Set 缺失/漂移的“重新准备”文案；中央核查测试已删除旧兼容转换用例并改为直接覆盖 Set 自动准备、失败后重扫、卸载迟到响应隔离，以及 missing/stale/server-declared drift 即使 Bundle 误报 ready 也 fail closed。聚焦测试 `1 file / 49 tests passed`，完整前端 TypeScript 检查通过，四个改动前端文件 Prettier check 通过，目标运行时与测试文件中旧 binding/projection/Legacy 标识扫描无命中，`git diff --check` 通过。本轮未运行前端全量、ESLint 或 Next build，不能沿用更早结果冒充本轮验证。
-
-2026-08-05 Structured-only 权威格式改造（进行中、未提交）：用户明确授权仅对 `0006_submissions_grading_review.py` 做最小历史迁移例外。原因是该迁移原先导入当前 ORM `Base.metadata`，一旦 Structured-only 最终模型删除 Legacy Rubric 外键，fresh 数据库会在到达新迁移前由 `0006` 提前创建未来结构并失败。现已把 `0006` 固化为首次入库提交 `f7783f0073592140c1400d6e7f41ffb17638c64e` 的 14 张原始表定义；原始 ORM 与固定定义编译出的完整 PostgreSQL DDL SHA-256 均为 `7b51a51adb536dcda9934e9332b9221c3471e730e2a9d31989bafb06bc0a5681`，SQLite DDL SHA-256 均为 `bcfa404a77ba05597bb4545febea60997704fa2f518e3c7fc6baccf6d586b50a`，独立 hash/SQLite 往返回归 `2 passed`。没有带入后续字段、约束或索引，没有 server default，也未修改其他旧迁移。远端与 Alembic head 复核无漂移后，新增 `0034_structured_rubric_authority`：创建不可变 `StructuredRubricSet/Item`，准备把作业活动版本、发布 readiness、评分结果和成绩快照切到 Structured 外键，并删除 Legacy 三表与 publication binding；迁移在发现 Legacy 正式行时 fail closed，避免静默删除未知数据。中央核查已移除 Structured→Legacy projection/loss report/显式 binding 确认，改为按答案、Structured Rubric、criteria、题目版本、分值和来源指纹形成幂等 assignment-level Set；review bundle 已直接返回 Set 状态，旧 binding API 已替换为 Set prepare/read。处理输入快照也不再选择“最新 confirmed Rubric”或验证 Legacy projection，而是从作业 active Set 的精确 SetItem 取得固定答案、Rubric、criteria，并重新核对三类内容 hash；任一跨作业、缺项或漂移都以 `STRUCTURED_SET_REQUIRED/STALE` fail closed。独立迁移审查发现的 `0034` blocker 已修复：downgrade 精确复用 `0003` 原始 `versionstatus` 六个值，在 PostgreSQL 使用 `create_type=False` 复用仍由 `paper_versions` 持有的现存枚举；upgrade/downgrade 均要求 review session 为空，避免把 binding hash/status 冒充 Set 语义；PostgreSQL 在计数前一次性取得相关表 `ACCESS EXCLUSIVE` 锁并持有到事务结束，关闭检查与破坏性 DDL 间的并发写窗口。所有 batch 新增/恢复外键均显式命名，SQLite `upgrade → downgrade → upgrade`、双向 review-session fail-closed、PostgreSQL 先锁后查及原始枚举契约共 `5 passed`，Ruff check/format 通过；fresh PostgreSQL 完整边界仍待隔离环境实跑。批改、成绩快照、前端和完整门禁仍在切换中。
-
-2026-08-05 第 5 步题目卡片横向布局（已完成、未提交）：按教师截图反馈，将“题目与风险”每题卡片改为左侧题号/答案与评分标准状态、右侧组合确认按钮；桌面端第一列由 15rem 调整为 24rem，按钮保持单行且不挤压状态文字，窄屏仍安全折行为上下结构。只调整布局，不改变原子确认、风险门禁或发布边界。
-
-2026-08-05 当前本地教师实测作业数据转换（仅独立测试 Compose，未提交）：按教师明确要求，将作业 `ab904b09-9bbd-4fbb-a453-3e7936dde7f8` 当前 Bundle 五道正式题的既有 legacy 评分项转换为五份 Structured Rubric 草稿，共 11 个 criterion，各题分值均无损保持 20 分并绑定已有已确认参考答案。所有 criterion 采用 `manual_only`，保留旧标题、说明、分值及旧记录 ID，不臆造 deterministic 自动判分规则；五份 Rubric 均保持 `draft`，没有代替教师确认、发布或写成绩。转换前发现同一 paper 内另有一条无答案/无分值的旧占位题，因不在当前 Bundle 中已明确排除。转换后只读复核确认五题答案绑定均匹配、criterion 数为 1/2/2/2/3，当前剩余 Rubric blocker 仅表示等待教师在第 5 步逐题点击组合确认。该数据写入仅存在于本地 `ahamark-user-test-ac7ceb6` PostgreSQL 卷，不是迁移、fixture 或真实 Provider 质量证据。
-
-2026-08-05 教师实测第 5 步确认入口位置调整（已完成并更新运行实例，未提交）：按教师要求，“题目与风险”中每道题卡片下方新增唯一的“确认题目、答案和评分标准”组合按钮；原先分散在右侧答案和评分标准详情中的普通及较新版本独立确认按钮均从正常路径移除，详情仍用于查看证据、内容与异常处理。为避免前端串行调用两个会各自提交事务的旧接口而产生部分确认，新增 assignment/question 级原子确认接口：请求必须显式确认并携带当前 Bundle、题目、答案和评分标准内容哈希及精确版本 ID；后端按 assignment→question→reference→rubric→criteria 锁序取得权威行，锁后重新计算 Bundle 并校验当前 materialized/selected 版本、答案与 Rubric 绑定、来源、总分和完整 Rubric 规则，全部通过才在同一事务确认两者，任一失败零写入；同一版本已全部确认时幂等返回。既有答案/Rubric 修改及 Rubric 确认入口也在状态检查前锁定并刷新正式行，不能在组合确认的并发窗口覆盖已确认内容。前端使用同步互斥防双击，409 在无本地编辑时沿用自动刷新并要求再次点击，有未保存编辑时禁用按钮并保留内容；缺少完整正式答案/Rubric 或绑定不一致时按钮禁用并给出原因，不把 legacy“已保存”冒充“已确认”，不自动发布。后端完整中央核查发布文件 `11 passed`，覆盖错误指纹零写入、原子成功和重复请求幂等，最终锁序/原子聚焦 `2 passed`；前端专项 `8 passed`、全量 `27 files / 199 tests passed`；Prettier、ESLint、TypeScript、改动 Python 文件 Ruff、仓库标准 strict mypy（107 files）和 Docker Next production build（19 个静态页面）均通过。最终独立复审无 P1/P2 阻断。当前用户测试 Compose 的 Web/API 已按最终代码重建且依赖服务保持原卷；本轮未新增迁移，未暂存、提交、推送或发布。
-
-2026-08-05 教师实测第 4 步题目字段未回填：后端作业详情已包含题号、分值、题目内容和知识点，但前端右侧始终显示空白“添加题目”表单，选择已有题目只切换页面区域，导致教师误以为生成内容没有写入。现选择已有题目时会回填全部可编辑字段，主按钮改为“保存题目”并调用更新接口；“新增题目”会明确清空选择和表单，保留原创建能力。知识点逗号输入在保存前统一 trim，避免空格进入知识点名称。提交前复审进一步补齐三项保护：任意后台 reload 保留仍存在的当前题目，脏表单不会被服务端旧值静默覆盖，主动切换或新增时先确认是否放弃；若脏编辑对应题目已被后台移除，则进入明确冲突状态，保留本地内容、禁用保存，并只允许教师显式放弃后重新加载，绝不把旧内容写到第一题；题目创建/保存期间按钮禁用且 handler fail-fast，防止双击生成重复题。专项测试扩展为 `13 passed`，覆盖回填保存、第 2 题脏编辑经历 reload 后保持、后台移除冲突和重复提交互斥；改动文件 Prettier、ESLint、前端完整 TypeScript 检查与最终 Docker Next production build（19 个静态页面）均通过。最终独立复审无阻断，本地 Web/API 已按最终代码重建。本轮不改变生成、确认或发布边界。
-
-2026-08-05 新建向导步骤修复（已完成并更新运行实例，未提交）：教师实测从 `/assignments/new` 填写基础信息后会直接进入步骤 4。原因是新建页只跳转到 `/assignments/{id}/edit`，编辑向导首次加载随即采用后端 `completeness.next_step`，没有保留“新建成功后应先上传试卷”的产品意图。现将新建成功路由明确为 `?step=2`，编辑页只接受 1–6 的初始步骤并传给向导；普通直接重进编辑页没有该参数，仍按后端完整度恢复，不会破坏已有作业的续编位置。新增前端回归验证显式步骤 2 展示上传入口且不显示步骤 4 的添加题目区；格式化后的向导专项 `9 passed`，Prettier、ESLint、TypeScript 和 Next production build（19 个静态页面）均通过。独立测试栈的 Web 镜像与容器已重建，浏览器刷新后从新建页创建的下一份作业会进入步骤 2；当前已存在且直接打开的旧编辑 URL 仍按完整度恢复。
-
-2026-08-05 本地启动复核（修复完成、运行中，未提交）：用户要求运行刚推送的 `ac7ceb6483f7248450f8f0c30a3d7c1f540839d2` 后，独立 Compose 项目 `ahamark-user-test-ac7ceb6` 的 Web production build 被 ESLint `prefer-const` 阻断，定位为统一准备轮询中新引入的 timer 先声明后赋值。现仅将 timer 改为同作用域 `const`，保持 3 秒间隔、120 秒总预算、可取消等待及陈旧响应保护语义不变；格式化后的中央核查 `78 passed`，Prettier、ESLint、TypeScript 与 Next production build（19 个静态页面）均通过。fresh API 启动又确认 `.env.example` 的 `ALLOWED_UPLOAD_TYPES` 仍使用 CSV，而 Pydantic Settings 会在字段 validator 前把 list 环境变量按 JSON 解码，导致 Alembic 启动失败；现仅将同一三个 MIME 类型改写为 JSON 数组，并同步本地忽略的 `.env`，不放宽上传类型。修复后 fresh PostgreSQL 已迁移到唯一 head `0033_joint_exam_class_authorization`，Web/API/Worker/PostgreSQL/Redis/MinIO 六服务均 healthy，`GET /health` 返回 ok、`GET /ready` 返回 available、Web 返回 HTTP 200，浏览器已打开 `http://localhost:3000`。当前 assignment generation Provider 与文字 OCR 按开发安全默认显示 unavailable，均不是硬依赖；不会冒充真实 AI/OCR 质量。本次运行不使用真实数据或密钥；默认 Docker 地址池耗尽时通过临时 override 使用未占用的 `10.250.0.0/24`，没有删除、复用或修改其他 Compose 项目的网络和数据卷。当前本地启动与新建向导修复合计七个 tracked 文件仅保留为未暂存变更，等待用户试验反馈后再决定是否提交。
-
-2026-08-05 “教师正常流程一步到位”专项（最终独立复审通过，已授权精确提交）：从远端 Draft PR #1 head `9f6aedfdc3a843e102b48c2f9b1ae573b6ba6b01` 的系统独立 worktree 接手；开始修改前工作区/暂存区干净且为 detached HEAD。最终独立复审确认没有 P1/P2；最近一次主代理远端只读复核时 `codex/grading-confirm-results` 仍为同一 head，PR #1 仍为 open/Draft/mergeable、base `master`，未合并。用户已授权仅对本专项 16 个已知文件精确暂存、提交并推送；本 worktree 只负责本地提交，推送交由已确认 `mwmd0629` keyring 与 `repo` scope 的 Windows 用户上下文完成。本轮没有新增或修改迁移、数据库、lockfile、Docker、真实答案/成绩或已发布状态；授权不包含合并、部署或改变 PR Draft 状态。
-
-2026-08-05 独立提交前复核阻断（已修复，最终复审通过）：复核确认 worker 的 `generating_rubrics` 统一 Provider 分支原先只允许 `openai_compatible`，导致 Fake 落回旧 `generate_candidates(..., True)` 直接写候选，先前关于 Fake 已统一经过 `generate`、Schema 和 invocation audit 的结论不成立。现将 Fake 仅在答案/Rubric 阶段接入统一 `dispatch_stage`，每题分别调用 `answer_generation`、`rubric_generation` 并通过 `_record_invocation` 留存审计；processing_pages 恢复只允许 OpenAI-compatible，旧 helper 的 worker 调用固定为不可用模式，不能再直接生成 Fake 候选。新增 worker E2E 将旧 helper monkeypatch 为抛错，验证两个 Fake invocation 的 provider、endpoint mode、request/response hash、model snapshot 及候选 provenance。最终按钮移除旧 aria 兼容名，可访问名称和测试断言均统一为“确认并发布”。新增 E2E 首次运行因夹具非法跳过中间状态被既有状态机正确拒绝；夹具随后补齐合法转换，未放宽产品状态机。Ruff/Prettier 仅机械统一补丁引入的格式和行尾。该轮当时按复核要求只修复和验证，现已纳入最终复审通过及精确提交授权范围。
-
-2026-08-05 第二次提交前复核 P1（已修复，最终复审通过）：Provider 的 `route_scoring_mode` 原先忽略 `requested_scoring_mode`，会把 `manual_only`、`hybrid`、`ai_suggestion` 的明确降级输出静默升级为 deterministic；前端也会丢弃统一准备接口的 `preparing` / `exception_required` HTTP 200 响应，并由单次 attempt 锁住同一 Bundle。Provider Schema 现要求所有非 deterministic 输出必须给出非空 `degradation_reason`，deterministic 输出禁止自相矛盾的降级声明；语义路由保留 Provider 请求的降级模式，且即使绕过 Schema 也 fail closed，不会升级；`manual_only` / `hybrid` 同时保留既有 `MANUAL_RUBRIC_REQUIRED` 告警。前端现对 `preparing` 最多轮询三次，展示服务端阶段和进度；`exception_required` 的服务端消息（包括 binding 异常）进入定向可见阻断。Bundle 指纹变化、人工重扫、作业切换及卸载都会失效旧准备请求并清空旧异常；准备 effect 在刷新/busy、自动化或 Bundle 错误期间暂停，人工重扫完成后再重试，不会抢跑旧 Bundle、无限循环或让陈旧响应污染当前页面。新增前端回归覆盖直接 ready、preparing→ready、binding 异常、输入变化后的旧响应及卸载停止轮询。
-
-本次 P1 修复的真实验证：后端新矩阵 `8 passed, 21 deselected`；Provider/worker 三文件扩展组首次 `50 passed / 1 failed`，修复 Jordan 手工题兼容告警后整组重跑 `51 passed`（`177.74s`）；前端中央核查前两次均 `76 passed / 1 failed` 并分别暴露夹具竞态和真实进度被旧 blocker 遮挡，修复后最终重跑 `1 file / 77 tests passed`。最终两个前端文件 Prettier check、TypeScript、两个 Python 文件 Ruff check/format-check 及 `git diff --check` 均通过；Alembic 仍为唯一 head `0033_joint_exam_class_authorization`，迁移和 lockfile 无 diff，暂存区为空，根目录及 API 目录的 `ahamark.db` 均不存在。本轮失败 pnpm 命令产生的 worktree 根 `.pnpm-store` 已在用户明确授权后经绝对路径、父目录和目录名三重核对精确删除，没有触及其他路径。主代理额外聚焦回归在 120 秒超时前显示 31 个点且无失败，但进程超时，因此不能计为通过或沿用为本轮验证结论。
-
-2026-08-05 第三次提交前复核 P1（已修复，最终复审通过）：第二次修复的统一准备轮询只有 `3 × 50ms`，真实观察窗口约 100ms，耗尽后同一 Bundle 的 attempt key 又会阻止自动继续，不适合分钟级异步 worker；同时后端 `job.progress` 为 0–100，前端错误乘以 100 会把 `55` 显示为 `5500%`。现改为每 3 秒检查、总 elapsed-time 预算 120 秒的可取消轮询；Bundle 变化、人工重扫、作业切换和卸载会立即解除旧 timer 并使迟到响应失效。预算耗尽后保留最后阶段和进度，明确提示“系统仍在准备、可重新扫描”，发布按钮继续安全禁用。进度统一直接 clamp/round 到 0–100。前端回归使用 fake timers 覆盖多次 preparing 后 ready、`55 → 55%`、完整两分钟预算耗尽及卸载清除 timer，不产生真实分钟等待；格式化前后中央核查文件均为 `1 file / 78 tests passed`，最终两个改动前端文件 Prettier check 与 TypeScript 均通过。`git diff --check` 通过；Alembic 仍为唯一 head `0033_joint_exam_class_authorization`，迁移和 lockfile 无 diff，根/API `ahamark.db` 与 `.pnpm-store` 均不存在，暂存区为空。不改后端 Provider；本轮未重跑后端测试，也不沿用此前结果冒充本轮结果。
-
-Provider 契约现要求答案/Rubric 顶层及每项 criterion 显式给出 evidence 与 `degradation_reason`（正常明确为 `null`），并保留题目分值、criteria、validation rule、依赖和置信度；deterministic 输出在 Pydantic Schema/语义入口强制要求总分及顶层和 criterion 的受支持 `answer_type`，空规则或 manual/未知规则直接 fail closed。测试 Fake 改为实现并调用同一个 `AssignmentGenerationProvider.generate`，经过同一响应 Schema、request/response hash 与 invocation audit 后才物化，仍仅在 test 环境启用并标记 `deterministic-test-only`，不冒充真实 Provider；production fake 禁用、external requests 默认关闭、prompt injection 与成本/网络边界保持不变。候选自动采用资格新增 Rubric 置信度/证据、降级原因和最新 deterministic verified validation 的权威检查，未知来源、低置信、缺证据、manual、非 deterministic、indeterminate、分值或依赖冲突继续定向阻断。
-
-新增 assignment 级幂等 `prepare-publication` 编排，统一恢复/推进异步生成状态、只自动物化服务端权威合格候选、建立无损 binding 并生成 readiness snapshot，可返回 `preparing`、`exception_required` 或 `ready`。系统准备的正式答案/Rubric 保持 draft，以 `system_prepared` 和 `teacher_reviewed=false` 审计，不伪造教师复核、不自动发布；有损 projection 仍进入定向异常。现有 readiness snapshot 作为 Publication Bundle，哈希覆盖作业状态、来源快照、生成/修订版本、风险和 binding；最终 `teacher_publish` 在同一事务锁内重查指纹、版本、门禁和 projection 后，才把 Bundle 内安全草稿整体确认为正式内容并发布，最终动作仍仅限授权主教师。前端正常路径展示自动准备状态、Bundle 摘要及唯一可见的“确认并发布”，移除 `window.confirm`；来源/分值/manual/不确定校验/有损映射保留异常处理。发布 409 在无本地编辑时有界重新 prepare/reload/retry；答案/Rubric 编辑器对 clean 409 自动重载，对 dirty 409 保留编辑并提示教师决策。
-
-上一轮 Fake worker 旁路复核的实际验证：新增防旁路专项 `1 passed`；格式化后的 Provider/OpenAI 与 worker 聚焦组 `22 passed`，`ahamark.db` 守卫 unchanged；格式化后的中央核查前端 `1 file / 72 tests passed`。两个改动 Python 文件的 Ruff check 与 format-check、两个改动前端文件的 Prettier check、TypeScript 和 `git diff --check` 均通过。Alembic 仍为唯一 head `0033_joint_exam_class_authorization`，迁移目录无 diff，根/Web lockfile 无 diff，Web lockfile与 `ahamark.db` 不存在，暂存区为空。该轮没有重跑后端全量、前端全量、Next build、strict mypy 或 browser E2E，不能沿用更早结果冒充该轮结果。
-
-剩余风险 / 下一位接手：最终独立复审已确认本次 Fake worker 路由、防旁路测试、Provider 降级路由与前端准备状态机没有 P1/P2；如需恢复完整交付结论，仍须重新运行修复后的后端/前端全量和相应静态门禁。本轮未使用 Docker 环境，也未启动 fresh PostgreSQL/browser 环境；后续 browser E2E 必须分别标记 Fake、Codex 合成 fixture 与真实 Provider，不得冒充真实 Provider 质量或放宽安全门禁。pnpm 临时缓存已清理，无额外未跟踪任务产物。用户已授权精确暂存、提交并推送这 16 个产品/测试/账本文件；本 worktree 完成本地提交后，由已认证的 Windows 用户上下文执行非 force 推送并复核远端与 PR。仍禁止自动合并、部署或把 Draft PR 改为 Ready。
-
-2026-08-04 教师实测“点击后没反应”改进专项：从远端 Draft PR #1 head `609673089c0e8e1f9fb35cd815e0cf7b3bbb80f9` 创建干净隔离 worktree；接手时 PR 仍为 Draft/open、base `master`，无评论、审查或检查更新，本轮没有改动正在运行的测试数据库、Docker、正式答案/成绩或发布状态。实测接口证据表明，“批量接受可用评分标准”实际 HTTP 200 但 `accepted_count=0`，旧响应不报告考虑了哪些候选及为何跳过，前端又无条件显示成功；五份合成评分标准的 criterion `validation_rule={}`，因此均被 `RUBRIC_VALIDATION_CONFIG_INVALID` 阻断。同时中央核查在正式答案/评分标准未完成时已允许点击“生成兼容版本”，后端只能返回 422，形成第二个看似无反应的入口。这里的候选来自明确标记的 `codex_simulated` 测试资料，不宣称是真实外部 Provider 输出质量。
-
-本轮后端为答案与评分标准候选返回服务端权威的 `server_eligible` 和 `ineligibility_reasons`；两个批量接口统一返回 accepted/considered/skipped 数量、ID、题号和原因码，只统计仍为 `suggested` 的当前候选，继续保持未知来源、低置信、缺证据、人工复核、结构无效、非 deterministic 或验证 indeterminate 时 fail-closed。前端对零接受和部分接受分别显示明确计数、题号、中文原因与修复动作，不再把“接受 0 项”显示为成功；候选卡片直接解释为何不能自动接受。新增字段按可选字段兼容旧缓存/滚动升级，服务端未明确返回 `false` 时不会使旧页面数据崩溃。中央核查只有在非 binding blocker 清零且正式答案、评分标准确认完成后才自动或手动创建兼容 binding；前置条件不满足时按钮禁用并提示先完成哪些内容。AI 仍仅为 suggestion-only，未增加任何自动教师确认、正式成绩写入或发布路径。
-
-最终验证（2026-08-05）：后端全量使用唯一系统临时目录 `C:\\Users\\Lenovo\\AppData\\Local\\Temp\\ahamark-provider-feedback-full-20260804-01` 且禁用 cacheprovider，结果 `579 passed, 18 skipped, 339 warnings`，无失败或 setup error，耗时 `44:49`，`ahamark.db` 守卫 unchanged；18 个 skip 均为仓库既有条件型用例。答案/评分标准生成专项 `18 passed`；前端相关组件 `78 passed`，前端全量 `27 files / 186 tests passed`；Prettier、ESLint、TypeScript、Next production build（19 个静态页面）、全仓 Ruff check、仓库标准 strict mypy（107 source files）、Alembic 单一 head `0033_joint_exam_class_authorization` 与 `git diff --check` 均通过。Next build 输出仓库既有的 SWC lockfile 自动修补警告，但构建退出码为 0，构建前后根 lockfile 均无 diff，Web lockfile 仍不存在。依赖安装仅用于隔离 worktree 验证；npm 报告既有 4 个 high advisories，未运行会改锁文件的自动修复。未运行 fresh browser E2E，不能把组件回归夸大为浏览器端到端验证；当前 `localhost:3300` 仍是旧测试实例，本轮不部署或替换它。本专项 7 个产品/测试文件加 README 将按用户授权精确暂存、提交并安全推送到现有 Draft PR #1，仍不合并、不部署、不改变 PR 状态。
-
-2026-08-04 独立提交前复审阻断跟进：复核确认旧 release 公开与 confirm-results 原先没有共同事务序列点；现统一先执行受 owner 限制的 assignment 自更新，PostgreSQL 获得行写锁、SQLite 获得写事务锁，且不改变 assignment 内容指纹，锁顺序统一为 assignment → narrower rows。公开在共同锁内重新读取 release 并保留“更高正式版本则 409”的历史审计语义。联考只读入口也已在查询 metadata 前要求 active teacher，撤权后返回 `403 TEACHER_ROLE_REQUIRED`。第二次复审指出原并发回归可能把慢调度误判为锁生效；测试现先确认真实 HTTP confirm 已发起，再监听 pytest 隔离数据库 engine 的 `before_cursor_execute`，确认请求实际发出 assignment serialization SQL 后，才验证 publish 持锁期间 `_confirm_results_state` 不可达。三组证据分别为：
-
-- 单次聚焦回归：`1 passed`。
-- 稳定性回归：10 个独立 pytest 进程、10 个独立 basetemp，`10/10 passed`。
-- mutation/bypass 反证：一次性 pytest collection hook 绕过共同锁，结果 `1 failed`；失败点为未观测到 assignment serialization SQL（`confirm did not reach the assignment serialization SQL`）。绕锁逻辑只存在于该一次性测试进程，未写入工作区。
-
-相关产品修复扩展专项保持 `88 passed`；完整 confirm-results、学生端和 results 发布专项为 `29 passed`、无 skip/error、耗时 `1:56`。上一轮后端全量 `576 passed, 18 skipped` 仅作为基线，本轮未重跑约 34 分钟全量，不能表述为本轮全量通过。全仓 Ruff check、本轮测试文件 Ruff format-check、strict mypy `107 source files` 与 `git diff --check` 均通过；Alembic 唯一 head 为 `0033_joint_exam_class_authorization`，根 lockfile 和 `0031_student_portal.py` blob 与 HEAD 一致，`ahamark.db` 与 Web lockfile 不存在，暂存区为空。没有产品、前端、模型、迁移或依赖改动；最终 README 澄清轮只修改本账本，未暂存文件总数仍为 13。
-
-2026-08-04 PR #1 独立审查修复专项：本 worktree 从 Draft PR #1 的远端 head `6d0941bd1d4ecb40810f4f6927d7e9f2967083e1` detached 起步；开始修改前已确认工作区/暂存区干净、PR 仍为 Draft 且没有新评论/审查/检查或协作者更新，Alembic 唯一 head 为 `0033_joint_exam_class_authorization`，当时未启动 Docker 验证环境，`ahamark.db` 与 Web lockfile 不存在且根 lockfile 无改动。五项 finding 均先独立复现，再按 fail-closed 边界修复：
-
-- 分题协作者的 review workspace 只返回其被分配答案通过 `StudentAnswerRegion` 或 `GradingEvidence` 明确映射的页面；映射不完整时不返回页面，协作者始终没有 `original_url`，无可见答案的 submission 也不进入响应。回归覆盖已分配/未分配/未映射页面、整份原文件 URL 和任意 unrelated `submission_id`。
-- 正式成绩统一选择每名学生非 `voided` submission 中最大的 `attempt_number`，最新 attempt 未完成时不得回退旧 attempt；未绑定 submission 仍保留为发布 blocker。readiness、snapshot、release item、学生端历史脏数据防御和 analytics 由同一规则保证唯一计数；split 回归确认 attempt 递增。
-- 作业文件删除改为两阶段：先把精确授权的 `ready` 文件持久化为 `pending` 并保留页面授权关联，再只删除该 `storage_key`，最后事务删除页面、重编号并标记 `deleted`。准备提交失败不会碰对象；对象失败或最终数据库提交失败均保持可重试状态，同一路由可幂等收口。没有 Bucket、前缀或未知对象删除，也没有新增迁移。
-- 若同 assignment/class 已存在更高的正式 released version，旧 release 首次公开返回 `409 GRADE_RELEASE_SUPERSEDED`；学生端当前成绩按 release `version` 优先而不是公开时间，历史版本仍可审计。
-- 联考和批改邀请显式要求 active teacher；无角色、student-only、其他角色均拒绝。既有协作记录、联考邀请列表、权限入口和协作 metadata 也会重新校验 active teacher，角色撤销立即失权。AI 仍仅生成建议，正式成绩仍只由主教师明确确认，学生仍只能读取账号绑定且明确公开的正式成绩。
-
-2026-08-04 browser E2E 契约跟进：后端全量中的两个失败不是上述五项修复造成的业务回归。Git blame 显示 `scripts/business_browser_e2e.mjs` 在 `99dd4fbb` 已同步“简化作业复核确认”产品语义，但 `test_business_browser_e2e_contract.py` 的两条断言仍停留在 `2b56046b`：其一仍要求所有 `suggested` 文件分析都人工确认，实际契约是高置信、无冲突项以 `system_auto` 采用，只有不能自动采用的 suggested 项进入人工按钮；其二仍要求逐条处置生成建议，实际契约是页面组织和题目抽取建议只读审计、`writes=[]` 且 `teacher_action_required=false`。测试现改为验证自动采用资格、冲突项人工确认、API 状态审计及无 disposition 写入；没有删除发布门禁断言，没有修改产品/API、扩大权限或改变成绩发布边界。该契约文件 `39 passed`；为满足改动文件 Ruff format 门禁，同一文件两个起点已有的单引号断言被格式化为双引号，属于无语义机械变化。
-
-最终验证使用唯一系统临时根 `C:\Users\Lenovo\AppData\Local\Temp\ahamark-pr1-review-9f3fd76b9fc0487e9cb1083b3082694a`，每组使用独立 `--basetemp`，并禁用只写工作区 `.pytest_cache` 的 cacheprovider，从而避开 Windows 旧 temp/cache 权限噪音。正确 worktree cwd 的后端全量为 `576 passed, 18 skipped`，耗时 `34:08`，`ahamark.db` 守卫 unchanged；18 个 skip 均为仓库既有条件型用例，其中 15 个需要显式隔离 PostgreSQL 环境、1 个受 Windows symlink 权限条件保护、2 个需要真实 RapidOCR 运行时，没有 test error。五项 finding 的 assignments/collaboration/confirm-results/joint-exam/student-portal/submission/results/analytics/authorization 扩展专项为 `74 passed`；browser E2E 契约文件为 `39 passed`；迁移命名测试为 `33 passed, 1 skipped`。全仓 Ruff check、11 个改动 Python 文件的 Ruff format check、strict mypy `107 source files` 与 `git diff --check` 均通过。最终只读复核确认根 lockfile 与 HEAD blob `e31e8009...` 一致，`0031_student_portal.py` 与 HEAD blob `517d2f0f...` 一致，`ahamark.db` 与 Web lockfile 不存在，Alembic 唯一 head 为 `0033_joint_exam_class_authorization`；本地仍为 detached `6d0941bd...`，远端 Draft PR #1 head 相同且没有新评论、审查、检查或协作者更新，暂存区为空。当前已具备独立提交前复审条件，但本轮仍未获暂存、提交或推送授权。
-
-剩余风险 / 下一位接手：证据映射不完整会有意隐藏协作者页面；改善可用性必须先建立可信题目到页面映射，不能回退整卷授权。对象删除失败后的 `pending` 当前依靠显式重试收口，没有后台 outbox worker。两个 browser E2E 基线契约已按当前真实产品语义修复且全量测试完成。本专项只修改 `assignments.py`、`grading.py`、`results.py`、`student_portal.py`、七个对应后端测试和本账本；没有前端、模型、迁移或依赖修改。仍禁止暂存、提交、推送、合并、部署或改变 PR 状态。
-
-更新时间：2026-08-04。当前专项基于 `2b24ab4001e9f36b0ea32337331a60f53c3d33c1` 的独立 worktree，保持 detached HEAD；对应本地起点分支为 `codex/grading-confirm-results-update`，远端 Draft PR #1 仍以 `master` 为 base 且未合并。禁止在未获再次授权时暂存、提交、推送、合并或部署。
-
-本轮修改及原因：
-
-- 中央核查不再读取 `GenerationIssue` 或 `risk_summary` 生成当前待办；两者只保留为生成历史审计。原因是旧生成失败即使内容已恢复，也不能计入老师当前问题数量或阻塞发布。
-- 当前中央问题由数据库中的班级、题目、文件/页面分析、正式参考答案、结构化评分标准和当前投影重新计算；每条新问题记录附带对象、原因、发布影响、修复动作、步骤和锚点。
-- 文件、页面、缺分和总分冲突文案使用文件名、页码、题号与实际分值，避免只显示泛化错误码或内部 UUID。
-- 移除中央问题列表中的 `LEGACY_CONVERSION_REVIEW` 重复项；有损投影只在“评分标准兼容说明”产生一次有针对性的人工决策，无损投影继续自动完成。
-- 生成区默认只显示进度和草稿状态；`risk_summary` 与 `GenerationIssue` 数量移入折叠的“生成记录/技术详情”，并明确不是当前发布待办。
-- 新增前后端回归断言，覆盖历史生成问题不进入中央队列、技术历史默认折叠，以及教师可见问题文案契约。
-- fresh Docker 验收发现历史 `0007` 迁移会通过当前 ORM 元数据提前创建 `grade_releases.student_visible_*`，随后 `0031_student_portal` 重复加列而使全新数据库无法升级。用户已于 2026-08-04 明确授权最小历史迁移例外：`0007` 现改为其首次入库提交 `f7783f0` 中实际生成的五张固定表定义，不再导入当前 `Base.metadata`；没有带入 `0008+` 的字段、外键、索引或约束。历史模型与固化定义编译出的完整 PostgreSQL DDL SHA-256 均为 `bf74e6ca6bd83f6fa8cc8175f819d90c17b62a565c90eb79ef498971c4626855`。`0031` 继续保持 HEAD 原文且不作为兼容修复点。
-- `0007` 固化保留当时跨方言语义：JSON 字段在 SQLite 为 JSON、在 PostgreSQL 为 JSONB，且没有把 ORM 客户端默认误写成 server default。新增回归覆盖固定字段/索引契约、SQLite 升降级往返、唯一 head，以及仅在显式本地隔离数据库名和 marker 同时匹配时运行的 fresh PostgreSQL `empty → head → head` 与 `empty → 0030 → head` 路径；隔离 PostgreSQL 全路径为 `3 passed`。
-- 中央核查前端修复自动化闭环：`setAutomating(true)` 与 Bundle reload 都会触发 effect cleanup，旧逻辑的 `!cancelled` 同时阻止成功后的 reload 并永久保留 `automating=true`，使后续无损 binding 或 ready Bundle 无法显示；现在成功回调与 finally 均由 assignment epoch 防串写，当前作业可以完成“自动核对 → 自动 binding → reload ready”，新增回归测试验证完整调用链。
-- PR 审查进一步发现同一 cleanup 也会静默吞掉自动核对或无损 binding 的失败提示，且已记录的 attempt key 会让同一会话无法重试。两个自动 effect 现使用独立 automation request generation 配合作业 epoch 判断成功、失败与 finally 是否仍属当前请求；失败会显示针对性 toast 并解除忙碌，但保留 attempt key 防止无限自动重试。教师点击“重新扫描最新状态”会显式清除两个 attempt key 并重新扫描，从而提供有界主动重试；旧作业迟到失败不能污染新作业。
-- 最终复审 P2 发现组件直接卸载时 assignment epoch 不变，主加载 effect cleanup 原先没有失效 automation request generation，pending 自动核对或 binding 的迟到回调仍可能跨页面 toast 或 reload。cleanup 现同步递增 automation generation；自动操作在卸载后无论成功或失败都不能写状态、提示或重新加载，同时保留作业切换保护、当前页面失败提示和主动重试链。
-- 浏览器 E2E 脚本同步新版创建/生成入口与 `system_auto` 判定：高置信无冲突用途不再被脚本误当作人工确认；合成教师已有完整正式答案和 Rubric 时，未采用的 AI suggestion 只保留审计，不为了发布逐条拒绝。
-
-已解决：历史生成问题冒充当前待办、恢复后的旧问题仍显示计数、兼容损失在生成区与中央区重复要求操作、生成区默认暴露历史风险数量、自动核对 reload 后无损 binding 被前端状态卡死，以及 `0007` 读取当前 ORM 元数据导致 fresh PostgreSQL 在 `0031` 重复加列。迁移修复已按 2026-08-04 的明确例外授权实施并通过新库/升级路径回归。
-
-2026-08-03 失败复现：隔离 project `ahamark-5c49-migration-20260803-03` 使用全新 `postgres_data`、host port `55440`，仅执行原始迁移链。`alembic upgrade head` 在 `0031_student_portal` 稳定失败为 `DuplicateColumn: student_visible_at`；数据库回滚后再次仅升级到 `0030_collaborative_grading`，查询确认两列已被 `0007` 提前创建。真实根因是 `0007_grade_release_reports_analytics.py` 通过当前 `Base.metadata` 动态创建历史表，不是 `create_all`、stamp、旧卷或启动顺序；失败发生在 `0031`，新增 `0034` 技术上无法在失败点之后执行并挽救。
-
-2026-08-04 授权后修复复验：隔离 project `ahamark-5c49-migration-20260804-05`、host port `55442`、数据库 `ahamark_migration_0007_20260804m7fresh` 与全新卷 `ahamark-5c49-migration-20260804-05_postgres_data` 运行受保护回归，结果 `3 passed`。完全空库 `upgrade head` 成功；已在 head 再次 `upgrade head` 幂等成功；仅重置该显式隔离库后，`upgrade 0030` 时 `student_visible_*` 均不存在，再升级 head 后两列、`fk_grade_release_student_visible_by` 和 `ix_grade_releases_student_visible_at` 各存在一次，唯一 head 为 `0033_joint_exam_class_authorization`。证据：`C:\Users\Lenovo\.codex\visualizations\2026\08\03\019fc78a-d972-75b1-bed0-62e54645f3b1\fresh-docker-e2e\migration-0007-20260804\result.json`。已在 head 的既有数据库由 `alembic_version` 标记当前 revision，`upgrade head` 不会重跑已完成的 `0007`，所以其表结构与数据语义不变；该例外只纠正未来从未执行 `0007` 的迁移链。
-
-strict mypy 已使用同一 bundled Python 3.12.13、仓库根目录和标准命令 `python -m mypy` 对账：当前 worktree 与临时解包的基线 `2b24ab4` 均为 `Success: no issues found in 107 source files`。此前两个 Celery decorator 错误来自不同的显式文件/参数调用，不是仓库标准全量门禁，也不是本轮差异触发。
-
-同一作业双 PDF 浏览器验收使用 fresh project `ahamark-5c49-review-20260803-04`，ports 为 Web `43301`、API `48801`、MinIO `49902/49903`、PostgreSQL `55441`，三组 project-scoped volumes 全新创建。因正式空库迁移仍被 `0007/0031` 阻塞，临时 override 仅在测试启动时先迁移到 `0030`、删除被 `0007` 过早创建的两列、再继续到 head；该垫片不在 Git 中，不是生产方案。API 容器后续为重建 Web 被 Compose 一并重建时垫片重复执行，导致本项目的 `student_visible_*` 再次被删除而 Alembic head 不会重补；因此 project 04 只能作为 assignment 业务流证据，不能作为最终迁移一致性证据。
-
-同一合成作业 `2e6d42e6-fd05-4c6a-986b-43f00a87d313` 已完成：上传 `synthetic-question-paper.pdf` 与 `synthetic-third-party-answer-and-rubric.pdf` 均为 HTTP 201；Fake Provider 自动识别为 `question_paper 0.72` 与 `reference_answer 0.70 / third_party`，无角色冲突、无文件用途确认点击；生成并物化一题。Fake Provider 不具备可靠 PDF 分值/答案/Rubric 抽取能力，因此由已认证合成教师把明确标记为第三方的合成资料转录为正式答案与评分标准，没有配置或冒充官方 Provider。最新简化 Rubric 使用 `manual_only` 且不含扩展规则，binding 为 confirmed、`loss_report=[]`、实时会话 `blocking=0/warning=0/info=0`；页面显示“已自动核对”、不显示 `CONFIRM_*`，主教师只点击一次“确认发布”，两次写请求为 prepare-publication 200 与 publish 200，最终 assignment 为 `published`。这证明同一作业的 UI/HTTP/持久化编排与发布门禁，不证明真实 PDF 内容质量；“完全由 Provider 从两 PDF 自动抽取正式答案/Rubric 且零教师转录”仍未通过。
-
-同一作业证据目录：`C:\Users\Lenovo\.codex\visualizations\2026\08\03\019fc78a-d972-75b1-bed0-62e54645f3b1\fresh-docker-e2e\same-assignment-two-pdf`。`pre-review.json` 保存发布前 ready Bundle 与无损 binding，`result.json` 保存一次最终发布及会话 0/0/0，`screenshots\two-pdf-generation.png` 与 `screenshots\ready-one-click.png` 分别保存自动识别和最终单击页面；临时脚本/override 位于 `C:\Users\Lenovo\AppData\Local\Temp\ahamark-5c49-review-20260803-04`。
-
-最终验证（2026-08-04）：fresh PostgreSQL 专项 `3 passed`；全部迁移命名测试加两个单-head 契约 `35 passed, 1 skipped`（skip 为未注入隔离 PG 变量的同一用例，已在专项中通过）；中央核查后端 `11 passed`；最终复审 P2 修复后中央核查前端专项 `69 passed`、前端全量 `27 files / 183 tests passed`。Prettier、ESLint、TypeScript、全仓 Ruff check、标准 strict mypy `107 source files`、Next production build（19 个静态页面）及 `git diff --check` 均通过。P2 修复只改前端卸载防陈旧逻辑、测试和本状态账本，未改变后端或迁移，因此复用本提交父节点已通过的后端、Ruff、strict mypy 与迁移证据。Next 仍提示缺少可选 SWC lockfile 条目并尝试修补失败，但构建退出码为 0，根与 Web lockfile 均无 diff。`ahamark.db` 守卫在各 pytest 运行中均通过。
-
-Docker 隔离状态：本任务仅启动并停止 `ahamark-5c49-migration-20260804-05` 的 PostgreSQL；容器为 `Exited (0)`，network/volume 保留，未执行 `down -v`、prune 或删除。其他 task 的 `ahamark-business-e2e` 与 `ahamark-business-e2e-4a09-20260803` 运行状态未被修改。临时 compose 位于 `C:\Users\Lenovo\AppData\Local\Temp\ahamark-5c49-migration-20260804-05\docker-compose.yml`。
-
-Git 守卫：最终提交前审查起点为 detached `2b24ab4001e9f36b0ea32337331a60f53c3d33c1`；`ahamark.db`、根 `package-lock.json`、`apps/web/package-lock.json` 与 `0031_student_portal.py` 均无真实 diff。`0031` 工作树与 HEAD blob 均为 `517d2f0f42b1a4c9d18b4ce0f401aaa8b5044426`，Windows 行尾/stat 会使本地 `git status` 显示伪 `M`，不得暂存。用户已于 2026-08-04 授权在最终只读审查通过后，以明确文件 allowlist 暂存、提交并安全推送到现有 Draft PR #1 分支；仍禁止合并、部署或把 PR 转为 ready。
-
-提交前结论：本专项最终只读审查已通过，没有 P0/P1、安全边界、迁移准确性或范围阻塞；授权范围仅包含把本专项提交并推送到现有 Draft PR #1，提交与远端结果以 Git/PR 当前 head 为准，不包含合并或部署。
-
-remaining risks / 下一位接手：如需把验收结论提升为“同一个标准参考答案+评分标准 PDF 从上传直至发布完整通过”，必须配置受控的非 Fake 内容 Provider 或扩展明确标记的合成 fixture，使参考答案来源可确定且不冒充真实 Provider；还应将 `business_browser_e2e.mjs` 的历史“先 OCR 手工建题、再一次生成”顺序整体迁移到新版“一次生成优先”流程，避免旧脚本人为生成重复题。不要修改 `ahamark.db`，不要删除上述证据卷；启动本轮项目后仍须只用对应 project 名操作。
-
-下一位接手事项：先完整阅读本节，再从 Draft PR #1 当前 head 审查本专项提交，特别确认授权例外只修改 `0007`、`0031` 无真实 diff、新迁移测试的数据库保护条件充分。`npm install` 按现有锁文件安装测试依赖时报告 4 个 high severity advisories，本轮未执行会改动依赖的 `npm audit fix`；后续应另开依赖安全专项评估。不得修改 `ahamark.db`，不得删除上述证据卷。
-
-> **当前仓库状态（2026-07-28）：** 本地 `master` 功能基线位于
-> `2377cd3`（包含线性代数批改第 1–4 部分），尚未 push；Alembic
-> 唯一 head 为 `0025_ai_grading_audit_contract`。第 5 部分离线评测命令见
-> `scripts/linear_algebra_offline_evaluate.py`；所有样本均为本地 Codex 生成的合成数据。
-> Assignment Generation（编排、元数据/文件分析、题目提取、答案与 Rubric 草稿、集中复核发布、
-> Provider 调用审计）已按受控、仅建议方式落地。Provider 默认 `unavailable`，外部请求默认
-> `false`，`suggestion-only=true`；AI 不能自动发布作业，也不能写入最终成绩。
-> **REAL-PROVIDER QUALITY PENDING**。本地开发阶段由 Codex 代为执行需要 API 的草稿生成，
-> 结果仍需教师确认。合入 `master` 不代表已部署，
-> 本次合并也没有自动执行任何数据库迁移。本项目仍不代表 Production Ready。
-
-> 原定第一至第八部分均已正式关闭，并已形成连续、可追溯的八提交链。第八部分功能基线为
-> `cc9146a5edf001817915c020f7aa26bc8053b989`；本地预生产门禁 8A–8E 及 Edge 已 PASS，正式 Run 为
-> `v8-final-20260725-c6568104`，证据入口见
-> [`docs/PREPRODUCTION-READINESS.md`](docs/PREPRODUCTION-READINESS.md)。该门禁只证明本地 API
-> 层故障切换，不建立生产高可用或灾备，项目等级仍为 C。
->
-> 批改闭环最终集成基线包含 `4c6266b` 与 `8746e18`：Structured Rubric 使用题目真实满分，
-> `manual_only` 可绑定空 `validation_rule`，集中审查过滤 stale/superseded 并限制人工解决动作，
-> 浏览器门禁有界；failed ReportJob 只能创建新任务重试，XLSX 所有外部文本列均防公式注入。
-
-AhaMark 是面向教师的 AI 作业批改与学情分析平台。当前已实现数据库会话认证、Submission OCR 工程链路、教师评分复核、不可变成绩发布、异步 Excel/中文 PDF 报告和版本化学情统计。RapidOCR 是真实本地印刷体 OCR；当前没有真实主观题 AI Provider，主观题必须人工评分。第五部分权限与文件安全、第六部分开发机有界容量及第七部分开发环境备份/故障恢复均已完成定义范围内验收。整体等级仍为 **C（内部演示或开发测试）**，不适合真实学生数据、真实教学试点、生产部署或公网开放。
-
-## 当前可用的教师流程
-
-- 作业创建向导支持试卷拖拽/点击上传、文件状态展示、页面缩略图预览和当前页切换。
-- 截止时间支持“无截止时间”或手动设置日期与时间。
-- 已发布作业详情页提供“上传学生作业”入口；教师可创建批改批次并上传 PDF/PNG/JPG/JPEG。
-- 学生作业文件会按文件名中的学号或班级内唯一姓名自动匹配，歧义匹配需教师确认。
-- 集中审查将问题翻译为教师可理解的说明，已解决问题默认收起，未解决阻塞项优先展示。
-- AI Provider 当前默认不可用；由 Codex 代跑草稿生成时，结果仍作为待教师确认的建议，不自动发布或写入最终成绩。
-
-## 本地运行与数据位置
-
-推荐在 D 盘工作区运行：
+| 组件       | 技术与职责                                                             |
+| ---------- | ---------------------------------------------------------------------- |
+| Web        | Next.js 15、React 19、TypeScript、Tailwind CSS 4；教师工作台与分析页面 |
+| API        | FastAPI、SQLAlchemy 2、Alembic；认证、权限、工作流与正式数据契约       |
+| Worker     | Celery；文件处理、识别、生成、报表等异步任务                           |
+| PostgreSQL | 生产关系数据库和审计事实来源                                           |
+| Redis      | Celery broker/result backend 与 production 登录共享限速                |
+| MinIO      | 原文件、衍生图片与报表对象存储                                         |
+| Nginx      | node2 唯一对外 HTTPS 入口                                              |
+
+```text
+浏览器 → Nginx → Web / API → PostgreSQL
+                         ├→ Redis → Worker
+                         └→ MinIO
+```
+
+## 快速开始
+
+### Docker Compose（推荐）
 
 ```powershell
-cd D:\OpenAIData\Workspaces\AhaMark
 Copy-Item .env.example .env
+# 编辑 .env，替换开发环境专用凭据
 docker compose up --build -d
+docker compose ps
 Invoke-WebRequest -UseBasicParsing http://localhost:8000/health
+Invoke-WebRequest -UseBasicParsing http://localhost:8000/ready
 ```
 
-Web 地址为 <http://localhost:3000>，API 健康检查为 <http://localhost:8000/health>。
-Docker 数据、项目工作区和桌面交付文件已迁移到 `D:\OpenAIData`；C 盘保留的路径只是兼容性目录联接。
-不要提交 `.env`、数据库文件、`node_modules` 或 `.next`。
+默认开发入口：Web <http://localhost:3000>，API <http://localhost:8000>。
 
-## 第七部分：开发环境恢复验收
+不要提交 `.env`、数据库文件、`node_modules`、`.next`、运行密钥或对象存储数据。
 
-第七部分 7A–7D 为 PASS：
+### 本机进程
 
-- PostgreSQL 独立逻辑备份恢复：开发环境 PASS
-- MinIO 独立对象恢复、metadata、引用、文件解析及孤儿对账：开发环境 PASS
-- 单 API/单 Worker 的 Worker、Redis、MinIO 故障恢复：开发环境 PASS
-- 运维文档、脱敏摘要和证据收口：PASS
-
-正式证据入口：
-
-- [备份恢复手册](docs/BACKUP-RESTORE.md)
-- [故障恢复手册](docs/FAILURE-RECOVERY.md)
-- [备份恢复摘要](docs/backup-restore-verification.json)
-- [故障恢复摘要](docs/failure-recovery-verification.json)
-
-本结论不建立生产灾备、生产高可用、生产 RPO/RTO、SLA 或多实例恢复能力。异地、加密、
-增量和长期备份均未验证。观察 RPO 为 0 秒仅因备份窗口无源写入；2.314 秒仅是独立数据库
-恢复耗时。Broker visibility timeout 为 15 秒，正式重投完成观察值为 102.230 秒。
-
-第一部分基线入口：`docs/PROJECT-BASELINE.md`。能力证据、数据安全边界和统一产品措辞分别见 `docs/CAPABILITY-EVIDENCE-MATRIX.md`、`docs/DATA-SECURITY-BOUNDARIES.md`、`docs/PRODUCT-CAPABILITY-STATEMENTS.md`。这些文档严格区分实现、自动化验证、真实环境证据和生产可用性。
-
-## 教师认证与安全边界
-
-正式会话认证位于 `app/api/auth.py`：密码使用标准库 scrypt（独立随机盐），登录创建随机数据库会话，浏览器只保存 HttpOnly `ahamark_session` Cookie；另有 SameSite=Lax CSRF Cookie，带会话的写请求必须发送 `X-CSRF-Token`。会话默认 12 小时，支持撤销、过期、当前用户与退出。production 登录限速使用 Redis 共享固定窗口状态，已验证双 API 实例累计失败次数；默认窗口 300 秒、阈值 5 次，Redis 不可用时 fail closed。限速 key 使用 HMAC，不包含明文密码。生产环境 Cookie 自动 Secure，且 `APP_ENV=production` 时绝不回退到 demo actor。
-
-当前未开放公共注册。管理员在受控环境中执行 `python -m app.cli.create_teacher --email teacher@example.com --display-name 教师姓名`，按不回显提示输入密码，然后访问 `/login`。前端使用 Cookie，不把长期令牌写入 localStorage；教师布局通过 `/auth/me` 保护。开发期 demo actor 只有 `DEMO_ACTOR_ENABLED=true` 且非 production 时可用。共享限速仅在本地预生产式双 API 环境验证，不代表公网 DDoS、WAF 或生产攻击面能力。
-
-## 线性代数主观题批改（第 1–5 部分）
-
-当前闭环是“本地 Codex/离线建议 → 数学验证与证据约束 → 教师复核 → TeacherReview/最终成绩”，
-AI 不自动定分、不创建 GradeRelease。题型 registry、严格引用/版本护栏、Worker 审计闭环和教师复核
-页面已实现；默认 Provider 仍为 `unavailable`，测试 Fake 仅限 `APP_ENV=test`，不代表真实 Provider。
-
-离线评测只使用合成数据，不上传文件、不调用外部 API：
-
-```powershell
-$env:PYTHONPATH='apps/api;.'
-python scripts/linear_algebra_offline_evaluate.py data/linear_algebra_evaluation_v1.json `
-  --output docs/linear-algebra-evaluation-v1-report.json
-```
-
-评测集覆盖 24 例和全部 registry 题型；当前报告要求 `false_verified=0`、引用拦截率与
-manual/unsupported 遵从率 100%、状态准确率至少 95%，并保留人工复核证据、隐私、成本和延迟
-作为未来真实 Provider 的前置门槛。当前安全模式 gate 通过不等于生产可用或真实质量验证。
-
-## 最终成绩、发布与分析
-
-唯一最终成绩入口是 `FinalScoreService`：Submission 必须属于当前教师且为 `finalized`，每个 Submission 只取版本最高的 `SubmissionScoreSnapshot.status=complete`，并严格校验 details。绝不回退到 GradingResult、AI 建议、临时 TeacherReview、incomplete 或 superseded 数据。没有快照是“未完成”，不是零分。
-
-新版 details schema 包含题目 ID/题号/题型、最终分/满分、TeacherReview ID、最终错误代码/评语、知识点 ID、评分方法和确认时间；校验题目不重复、分值范围、题目存在、顶层分数与分题和一致。旧快照缺少必填字段时不会进入发布或统计。
-
-`GradeRelease` 以作业/班级递增 version 保存发布记录，`GradeReleaseItem` 固定具体 ScoreSnapshot ID。released 的产品含义仅是“教师已确认发布数据，尚未发送到学生端”，不是学生已收到。修改单个学生后，`confirm-results` 会列出学生与变化题目，只生成该学生的新快照并复用其他学生的旧快照；新发布版本保留完整历史。旧 `POST /api/grade-releases` 已标记 deprecated 并稳定返回 `410 GRADE_RELEASE_CREATION_RETIRED`，每次调用会记录客户端来源和替代入口，不产生正式成绩写入。
-
-主观题建议按 Rubric 分项保存简短理由和答案区域依据；零分、满分及置信度临界结果会自动二次复核。同题同版本的相同答案若出现分数或分项差异，只进入教师“需检查”队列，不会自动改分或形成正式成绩。
-
-Excel 是真实 `.xlsx`，包含“成绩总表、题目统计、知识点统计、导出说明”。学号强制文本，缺失成绩不写零，外部文本防公式注入。API 只创建 ReportJob 并派发 job ID；`workers/tasks/reports.py` 幂等生成、写对象存储、登记 StoredFile。该边界已有自动化测试及真实 Celery/MinIO 冒烟。个人与批量学生 PDF 使用仓库内 Noto Sans SC TTF，来源、许可证和校验值见 `apps/api/assets/fonts/SOURCE.md`。
-
-AnalyticsSnapshot 固定 GradeRelease，旧快照不覆盖。后端统一计算参与人数、平均/最高/最低/中位数、归一化分数段、题目得分率/满分率/零分率、客观题正确率、知识点掌握率、教师确认错误频次和透明 A/B/C/D 临时分层。未完成学生不进入分母；一题多知识点时完整计入每个知识点并明确样本。主观题不显示“正确率”。RuleBased 教学建议只引用快照 metrics 的题目 ID、得分率和样本数；没有真实 AI 教学助手。
-
-主要 API：
-
-- `GET /api/assignments/{assignment}/classes/{class}/grade-readiness`
-- `POST /api/grading-batches/{batch}/confirm-results`（唯一正式成绩创建入口）
-- `GET /api/grade-releases`、`GET /api/grade-releases/{id}`、`POST .../cancel`
-- `POST /api/grade-releases/{id}/reports`、`GET /api/report-jobs/{id}`、`GET .../download`
-- `POST /api/grade-releases/{id}/analytics`
-- `POST /api/analytics/{id}/insights`
-
-当前仓库 Alembic 唯一 head 为 `0024_nullable_publish_readiness_due_at`；`0010_report_student`
-是下述报告与学情功能对应的历史迁移节点。`/analytics` 已包含加载、空、错误、小样本、0–100%
-图表、键盘可访问表格和数据版本选择。分数段、题目、知识点、最终错误类型均可分页下钻；班级、
-学生及知识点历史趋势只读取每份作业最新有效发布版本，缺失作业不记零。学生详情路由为
-`/analytics/students/{studentId}`，展示发布成绩、各题最终值、知识点、教师确认评语、
-ScoreRevision 与真实 ReportJob 状态。
-
-Analytics 7.1 新增 API：
-
-- `GET /api/analytics/{snapshot}/score-bands/{band}/students`
-- `GET /api/analytics/{snapshot}/questions/{question}/students`
-- `GET /api/analytics/{snapshot}/knowledge-points/{knowledge_point}`
-- `GET /api/analytics/{snapshot}/errors/{error_type}`
-- `GET /api/classes/{class}/analytics/trends`
-- `GET /api/students/{student}/analytics/trends`、`GET /api/students/{student}/analytics`
-- `GET /api/classes/{class}/knowledge-points/{knowledge_point}/trend`
-- `GET /api/students/{student}/knowledge-points/{knowledge_point}/trend`
-- `GET /api/students/{student}/report-jobs`
-- `GET/PATCH /api/teaching-insights/{insight}`、`POST .../confirm`、`POST .../regenerate`、`POST .../invalidate`
-
-所有下钻使用 CurrentUser，并校验 AnalyticsSnapshot、Assignment、Class 与固定 GradeRelease 的所有权；列表默认 20 条、最多 100 条并稳定排序。教学建议明确标记为“规则型教学建议”，保留原始内容及编辑历史，确认后不可静默修改，evidence 数字在确认时与固定 AnalyticsSnapshot 再校验。前端未引入图表库，使用原生 HTML/CSS，因此无新增许可证和锁文件变化。
-
-历史上的后续接手条件包含浏览器闭环、性能、安全专项、代理和隔离矩阵；第五部分权限与
-文件安全、第六部分开发机容量和第七部分开发环境恢复现已完成定义范围内验收。生产容量、
-生产灾备、高可用、正式部署和运维体系仍未建立。当前仍没有真实主观题 AI Provider，
-主观题必须教师人工评分。
-
-## 验收与交付入口
-
-- 最终验收：`docs/FINAL-ACCEPTANCE.md`
-- 安全与文件策略：`docs/SECURITY-AUDIT.md`、`docs/FILE-SECURITY.md`
-- 性能结果：`docs/PERFORMANCE.md`、`docs/performance-results.json`
-- 部署、代理、备份恢复和排障：`docs/OPERATIONS.md`
-- 最终交接：`docs/HANDOFF.md`
-
-本地生产样式代理（不含 TLS）使用：
-
-```powershell
-docker compose -f docker-compose.yml -f docker-compose.proxy.yml up --build -d
-Invoke-WebRequest -UseBasicParsing http://localhost:8080/health
-```
-
-50 人合成数据可重复初始化与安全清理：
-
-```powershell
-docker compose exec -T api python -m app.cli.seed_performance_demo
-python scripts/performance_smoke.py
-docker compose exec -T api python -m app.cli.cleanup_performance_demo --confirm-marker performance50.synthetic.invalid
-```
-
-清理命令只接受固定 marker，并在事务中校验固定教师 ID/邮箱、打印范围；不会删除结构、Bucket、未知对象或 Docker Volume。
-
-### Analytics 7.2 真实验证与 UI
-
-非破坏性更新测试栈（保留 PostgreSQL、Redis、MinIO 命名卷）：
-
-```powershell
-docker compose up --build -d api worker web
-docker compose exec -T api alembic upgrade head
-docker compose exec -T api python -m app.cli.seed_analytics_demo
-python scripts/verify_analytics_http.py docs/analytics72-http-verification.json
-node scripts/analytics_browser_smoke.mjs
-```
-
-`seed_analytics_demo` 使用固定 UUID 和 `analytics72.synthetic.invalid` 标记，幂等创建两名合成教师、两个隔离班级、三名主场景学生、三份不同满分作业、三次 GradeRelease、一次缺交、两个 KnowledgePoint、两种最终错误类型、ScoreRevision、completed/failed ReportJob 和规则型 TeachingInsight。数据均为合成值；重复执行不会重复插入。验证完成后，只能用明确标记清理：
-
-```powershell
-docker compose exec -T api python -m app.cli.cleanup_analytics_demo --confirm-marker analytics72.synthetic.invalid
-```
-
-清理命令先验证固定教师 ID 与合成邮箱，只删除这两个 owner 的数据；不要用 `docker compose down -v`。真实 HTTP 脚本使用 Cookie+CSRF，验证四类分页下钻、稳定排序、三类趋势、学生详情、ScoreRevision、报告重新生成、TeachingInsight 生命周期、404/422 和 Teacher B 隔离，并将无密码、Cookie 或 CSRF 的结果写入 `docs/analytics72-http-verification.json`。
-
-Analytics UI 现提供规则建议查看、evidence、编辑、草稿、确认、重新生成、失效、状态、loading/disabled 和成功/错误提示；明确标记为规则型建议。学生详情提供 0–100% 学生得分率折线图、按 KnowledgePoint ID 的掌握率折线图及等价表格。failed、expired、partially_completed 报告按钮调用 `POST /api/report-jobs/{id}/retry` 创建新 ReportJob；不是恢复原任务。completed 报告每次重新请求短期签名 URL。
-
-Analytics 范围的无头 Edge 冒烟覆盖 Teacher A 登录、选择真实发布、分数段下钻、
-Insight 编辑确认、学生和知识点趋势，以及 Teacher B 学生详情拒绝。完整业务浏览器
-E2E、第五部分安全专项和第六部分开发机有界容量现已完成。第六部分在单 API/单 Worker
-合成环境覆盖 50 名不同学生报告、Fake/RapidOCR 至 250 页及 200 人/100 题 Analytics；
-最大规模 Analytics 学生读取约 8 秒。生产容量、SLA、多实例扩展、故障恢复和生产部署
-验收仍属于后续范围。
-
-## 学生作业与批改流程
-
-教师为已发布且 PaperVersion/RubricVersion 完整的作业创建 GradingBatch，上传 PDF/PNG/JPG/JPEG。后端使用随机对象键保存文件，学号精确匹配优先，其次是班级内唯一姓名；重名、多个标识或无标识只生成待确认记录。一个学生的多张图片或 PDF 页面按文件顺序归并为同一 Submission，原文件和 SubmissionPage 均保留，不静默覆盖重复校验值。
-
-Submission OCR 数据与试卷 RecognitionJob/PaperPage 隔离：学生域使用 SubmissionRecognitionJob、SubmissionPage、StudentAnswer 和 StudentAnswerRegion，坐标仍为未旋转原始页左上角 0–1。`recognized_*` 永久保留原始值，`corrected_*` 有值时评分优先读取修正值。空白、低置信、公式不可用和失败是不同状态。现有 RapidOCR 转换/预处理组件可复用于学生页；第六部分已完成 Fake OCR 的 Celery/MinIO 150/200/250 页编排和独立 RapidOCR 清晰印刷体 100/150/250 页吞吐阶梯，但二者不能互相替代，也不证明真实学生答卷准确率、手写或公式能力。
-
-客观题 `single_choice`、`multiple_choice`、`true_false`、`fill_blank` 采用大小写与空格规范化后的确定性精确匹配，使用标准答案及可接受答案。单位/精度等无法由明确规则判断时应进入人工复核。主观题使用统一 GradingProvider；默认 UnavailableProvider 返回 `score=null`。FakeGradingProvider 只允许非 production 自动化测试，production 配置 fake 会安全降级为 unavailable，绝不能作为真实 AI 成绩。
-
-教师复核支持接受、修改、拒绝、手动评分和需要更多信息。修正答案会使旧建议 superseded；每次最终分数/评语变化写 ScoreRevision。低置信、OCR/公式异常、`score=null`、Provider unavailable、修正答案和 Rubric 版本变化均不能直接成为最终成绩。当前 API 未开放“一键无条件接受”，批量接受必须在后续 UI 完善时复用同一后端资格规则。
-
-`POST /api/submissions/{id}/finalize` 会逐题检查答案、教师最终分、分值范围、强制复核和当前 RubricVersion，并生成新的 SubmissionScoreSnapshot 版本而不覆盖旧版本。第七部分只能读取最新 `status=complete` 快照；`details` 保存每题 question/answer/review ID、最终分、满分、错误类型和评语。AI/规则 GradingResult 不是最终成绩来源。
-
-学生作业与批改子系统对应迁移为 `0006_submissions_grading_review`；仓库当前 Alembic 唯一 head
-为 `0023_assignment_provider_invocation_audit`：
-
-```powershell
-python -m alembic upgrade head
-python -m alembic upgrade head --sql
-python -m pytest -q
-npm.cmd run format
-npm.cmd run lint
-npm.cmd run typecheck
-npm.cmd run test
-npm.cmd run build
-```
-
-## 技术栈与本地运行
-
-- Web：Next.js 15、React 19、TypeScript、Tailwind CSS 4。
-- API：FastAPI、SQLAlchemy 2、Alembic；生产数据库为 PostgreSQL。
-- Worker：Celery + Redis；对象存储：MinIO。
-- 文字 OCR：产品默认 `unavailable`；首选开源基线为 Tesseract 5.3.0 + Apache-2.0 `chi_sim/eng`，使用独立锁定镜像且必须显式配置路径、版本、哈希与 NOTICE；RapidOCR 3.9.2 仅保留仓库外实验对照并继续 hard-off。
+要求 Python 3.11+ 和 Node.js/npm：
 
 ```powershell
 Copy-Item .env.example .env
@@ -875,57 +165,80 @@ python -m venv .venv
 npm.cmd install
 .\.venv\Scripts\python.exe -m alembic upgrade head
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir apps/api --reload
+```
+
+另开终端启动 Worker 和 Web：
+
+```powershell
 .\.venv\Scripts\python.exe -m celery -A workers.celery_app:celery_app worker --loglevel=INFO
 npm.cmd run dev
 ```
 
-复制 `.env.example` 为 `.env`、替换专用凭据后运行 `docker compose up --build -d`。Compose 定义 PostgreSQL 16、Redis 7、MinIO、API、Worker 和 Web；2026-07-22 已完成空库迁移、六服务启动、Celery 往返和 MinIO 上传/读取/签名 URL 冒烟。
+## 账号与登录
 
-## 分值完整性规则
+正式认证使用数据库会话和 HttpOnly Cookie。密码使用带随机盐的 scrypt；写请求同时需要 SameSite=Lax CSRF Cookie 与 `X-CSRF-Token`。production 默认会话 12 小时、Cookie 为 Secure，Redis 登录限速默认 300 秒内 5 次失败，Redis 不可用时 fail closed。
 
-迁移 `0005_nullable_question_score` 允许草稿/OCR 题目的 `Question.max_score` 为 `null`。未知分值不会写入 0、1 或其他哨兵值：候选可保留 `suggested_score=null`，确认后成为“分值未设置”的待完善题目。此类题目不能保存 Rubric、不能发布；发布检查返回题目 ID、题号和步骤：`QUESTION_SCORE_REQUIRED` 与 `ASSIGNMENT_TOTAL_SCORE_INCOMPLETE`。总分只汇总已知值，同时报告完整性错误。手工题目输入仍要求正数。
-
-## OCR Provider 与边界
-
-配置 `RECOGNITION_PROVIDER`：
-
-- `tesseract`：首选开源印刷体 OCR。默认关闭；使用 `apps/api/Dockerfile.tesseract` 构建 API/Worker，并提供 `.env.example` 列出的绝对路径、精确版本和 SHA-256 后才可启动。只输出普通文字、坐标和置信度，不生成 LaTeX；真实上线前仍须完成脱敏试卷 benchmark。
-- `rapidocr`：保留给经审计的本地印刷体 OCR，但当前产品不可启用；仅安装 `[ocr]` 不会开放能力。运行时下载永久禁止，未来必须使用仓库外只读、外部哈希锚定且许可证已审批的 `det/cls/rec` 三模型 bundle；PP-OCRv6 字符表来自已验证识别模型的 ONNX metadata，字体仅用于可视化，均不再作为推理 bundle 必需文件。输出仍只允许普通文字、页内坐标和置信度，不生成或修复 LaTeX。
-- `fake`：只允许非生产自动化测试。`APP_ENV=production` 时选择 fake 会降级为 unavailable，不能用它评估准确率或宣称真实 OCR 可用。
-- `unavailable`（默认）：明确禁用识别，但转换/预处理仍可用。
-
-仓库外真实引擎最小验证仅使用运行时合成、无个人信息的小图：Windows 与 Linux 无网络环境都已完成清晰印刷体推理；Windows 另覆盖中文、中英数字、低对比度、GaussianBlur(2.2) 和轻旋转 3°。Unicode 数学样本中的积分段发生明显字符/次序退化，因此该证据只证明离线 ABI、基础印刷文字和安全合同，不代表真实教学、手写、公式、表格或几何准确率，也未写产品 RecognitionBlock。公式 provider 独立为 unavailable；普通数学字符只保留为 text 并进入人工复核。DOCX 仍因缺少 LibreOffice headless 返回 `DOCX_CONVERTER_UNAVAILABLE`。
-
-## 文件与异步链路
-
-API 创建 RecognitionJob 后只向 Celery 发送 job ID；派发失败会把数据库任务标为 `failed/WORKER_UNAVAILABLE`。Worker 从数据库和对象存储重新读取输入，写入 rendered/processed/thumbnail 键及页面、Block、Candidate。任务和页面重试复用数据库页面记录；状态以数据库为用户可见真相。
-
-MinIO 原始键位于 `assignments/...`，衍生键位于 `recognition/{owner}/{job}/{page}/{kind}-{uuid}.png`，API 逐级校验 owner 后返回短期签名 URL。当前实现只按明确对象键操作，没有宽泛孤儿清理。2026-07-22 已在专用 Docker 测试栈完成 PostgreSQL 在线迁移与回滚再升级、Redis/Celery 消费、MinIO 上传/读取和签名 URL 生成；这是开发环境连通性证据，不是生产容量或安全证明。
-
-## 健康与验证
-
-`/health` 保持轻量；`/ready` 在短超时内分别报告 `postgresql`、`redis`、`celery_worker`、`minio`、`text_ocr`、`formula_ocr` 的 available/unavailable/degraded 状态，不返回凭据。FakeProvider 只会让文字 OCR 显示 degraded。
-
-PostgreSQL 专用测试库示例（执行 downgrade 前必须再次确认目标不是生产库）：
+当前代码创建账号：
 
 ```powershell
-$env:DATABASE_URL='postgresql+psycopg://ahamark:<password>@localhost:5432/ahamark_55_migration_test'
-python -m alembic upgrade head
-python -m alembic current
-python -m alembic downgrade 0004_recognition_pipeline
-python -m alembic upgrade head
+python -m app.cli.create_teacher --username teacher01 --display-name "教师"
+python -m app.cli.create_student --username student01 --display-name "学生"
 ```
 
-离线 DDL 与完整质量命令：
+命令会在终端中两次询问密码且不回显。仓库不提供公共注册。`DEMO_ACTOR_ENABLED` 只允许非 production 开发环境使用。
+
+注意：node2 尚未部署本次用户名版本，线上界面仍保持旧镜像行为；不要在迁移和切换完成前按上述新契约操作线上实例。
+
+## 教师主流程
+
+1. 创建作业，填写名称、截止时间和发布班级。
+2. 一次选择或拖入多个 PDF/PNG/JPG；前端先做格式、空文件和单文件大小校验，再按顺序上传。
+3. 系统整理试卷并生成题目、答案和 Structured Rubric 候选。
+4. 教师逐题核对；必要时旋转页面、手动框选或追加跨页区域。
+5. 发布检查只接受当前 active paper、完整分值、确认答案和 active Structured Rubric Set。
+6. 已发布作业可创建批改批次并上传学生答卷。
+7. 系统匹配学生、处理页面并生成识别与评分建议；歧义、低置信、stale 或 Provider unavailable 均进入人工复核。
+8. 教师接受或修改建议，最终生成版本化成绩快照，再明确发布成绩记录。
+
+手动切题默认关闭，只有教师点击“开始手动切题”后才接受一次拖框；切页、旋转或退出会丢弃未保存框。自动切题和重跑保留历史区域，但只有当前 confirmed region 可进入后续证据链。
+
+## OCR、公式与 AI 边界
+
+`RECOGNITION_PROVIDER` 支持以下状态：
+
+- `unavailable`（默认）：禁用识别，但文件转换和预处理仍可用。
+- `tesseract`：首选开源印刷体 OCR 基线；默认关闭，必须显式提供固定版本、路径、哈希和 NOTICE。只输出普通文字、坐标和置信度，不生成 LaTeX。
+- `rapidocr`：实验对照，产品 runtime 与模型下载继续 hard-off；不得因安装依赖而自动启用。
+- `fake`：只允许非 production 自动化测试；production 会安全降级为 unavailable。
+
+公式 Provider 默认 unavailable，公式区域自动检测默认关闭。当前合成与离线评测只验证合同、拒绝边界和可重复性，不代表真实试卷、手写、公式、表格或复杂版面准确率。
+
+私有 Gold 工具完全离线，输出必须人工复核。任何 Codex 草稿中的助手元话术、猜写、Markdown 或正文 LaTeX 都会 fail closed；轻量正文校对集不能称为结构化 Gold 或生产验证。
+
+## 成绩发布与分析
+
+唯一正式成绩来源是 `FinalScoreService` 读取的最新完整 `SubmissionScoreSnapshot`。系统不会回退到 AI 建议、临时 `TeacherReview`、不完整或已 superseded 数据。
+
+`GradeRelease` 固定具体快照并按作业/班级递增版本；released 只表示教师确认了发布数据，不表示学生已经收到。报表由 Worker 生成真实 `.xlsx` 或 PDF，学号按文本处理，外部文本防公式注入，缺失成绩不写零。
+
+AnalyticsSnapshot 固定 GradeRelease，提供分数段、题目、知识点、错误类型和趋势下钻。主观题展示得分率，不使用“正确率”；教学建议明确标记为规则型建议，不冒充 AI 教学助手。
+
+## 测试与质量门禁
+
+### 后端
 
 ```powershell
-$env:DATABASE_URL='postgresql+psycopg://ahamark:integration-only@127.0.0.1:5432/ahamark_55_migration_test'
-python -m alembic upgrade head --sql
-python -m alembic downgrade 0005_nullable_question_score:0004_recognition_pipeline --sql
 python -m ruff format --check apps/api workers tests
 python -m ruff check apps/api workers tests
 python -m mypy
 python -m pytest -q
+python -m alembic heads
+python -m alembic upgrade head --sql
+```
+
+### 前端
+
+```powershell
 npm.cmd run format
 npm.cmd run lint
 npm.cmd run typecheck
@@ -933,7 +246,68 @@ npm.cmd run test
 npm.cmd run build
 ```
 
-历史验证记录详见 `docs/HANDOFF.md`。第七部分关闭轮当时复用刚完成的后端门禁：
-113 passed、2 skipped，Ruff format/check 113 files，mypy 52 files；7D 另执行 JSON、原始
-证据哈希、Markdown UTF-8、相对链接、陈旧口径、敏感字段和 Git diff 门禁。该轮结束时
-第七部分工作树仍未暂存、未提交、未推送或部署；随后第一至第八部分均已提交。
+### 每次提交前
+
+```powershell
+git diff --check
+git status --short
+```
+
+同时必须：
+
+- 确认 `ahamark.db` 未变化或不存在。
+- 对新增 diff 做秘密、凭据、私有资料、身份字段、图片/正文和二进制聚合扫描。
+- 涉及迁移时确认 Alembic 只有一个 head，并在专用测试库验证升级；任何 downgrade 前先确认绝非生产库。
+- 涉及前端时运行 Prettier、ESLint、TypeScript、Vitest 和 production build。
+- 只报告本轮实际运行的结果，不沿用历史测试数字冒充当前验证。
+
+## 部署与运维
+
+node2 使用 `shr` 用户的 Rootless Docker。专用文件：
+
+- `docker-compose.preproduction.yml`
+- `docker-compose.node2.yml`
+- `deploy/nginx/node2.conf`
+- `deploy/node2/prepare-runtime.sh`
+
+部署前必须备份 Compose、Nginx、runtime、证书和 PostgreSQL，并验证备份可读；固定镜像标签和 SHA-256。只重建明确服务，不操作未知容器、卷、Bucket 或其他宿主端口。
+
+公网地址：<https://222.195.89.236:13300>。当前为自签名证书且无来源白名单。不要把通用 `docker-compose.yml` 或 `docker-compose.proxy.yml` 直接用于 node2：它们会发布开发端口，不符合 node2 的单入口边界。
+
+完整流程见：[运维手册](docs/OPERATIONS.md)、[备份恢复](docs/BACKUP-RESTORE.md)、[故障恢复](docs/FAILURE-RECOVERY.md)和[预生产就绪](docs/PREPRODUCTION-READINESS.md)。
+
+## 文档索引
+
+| 主题           | 文档                                                                                           |
+| -------------- | ---------------------------------------------------------------------------------------------- |
+| 项目基线       | [PROJECT-BASELINE.md](docs/PROJECT-BASELINE.md)                                                |
+| 能力证据       | [CAPABILITY-EVIDENCE-MATRIX.md](docs/CAPABILITY-EVIDENCE-MATRIX.md)                            |
+| 数据安全边界   | [DATA-SECURITY-BOUNDARIES.md](docs/DATA-SECURITY-BOUNDARIES.md)                                |
+| 产品口径       | [PRODUCT-CAPABILITY-STATEMENTS.md](docs/PRODUCT-CAPABILITY-STATEMENTS.md)                      |
+| 权限矩阵       | [AUTHORIZATION-MATRIX.md](docs/AUTHORIZATION-MATRIX.md)                                        |
+| 文件安全       | [FILE-SECURITY.md](docs/FILE-SECURITY.md)                                                      |
+| 作业生成       | [ASSIGNMENT-GENERATION-ORCHESTRATION.md](docs/ASSIGNMENT-GENERATION-ORCHESTRATION.md)          |
+| 中央审查与发布 | [ASSIGNMENT-CENTRAL-REVIEW-PUBLISH.md](docs/ASSIGNMENT-CENTRAL-REVIEW-PUBLISH.md)              |
+| 业务 E2E       | [BUSINESS-E2E.md](docs/BUSINESS-E2E.md)                                                        |
+| 成绩正确性     | [SCORE-CORRECTNESS.md](docs/SCORE-CORRECTNESS.md)                                              |
+| 性能与容量     | [PERFORMANCE.md](docs/PERFORMANCE.md)、[PERFORMANCE-CAPACITY.md](docs/PERFORMANCE-CAPACITY.md) |
+| 最终验收       | [FINAL-ACCEPTANCE.md](docs/FINAL-ACCEPTANCE.md)                                                |
+| 历史交接       | [HANDOFF.md](docs/HANDOFF.md) 与 Git 历史                                                      |
+
+## 精简变更账本
+
+这里只保留仍影响当前接手决策的记录；实现细节和历史测试证据使用 `git log --oneline`、对应提交 diff 与 `docs/` 验收材料追溯。
+
+| 日期       | 提交/状态        | 结论                                                                        |
+| ---------- | ---------------- | --------------------------------------------------------------------------- |
+| 2026-08-17 | `9b129bc`        | 管理员发布用户名账号；已推送，未部署，node2 仍为旧邮箱登录版本              |
+| 2026-08-17 | `0da6dd9`        | node2 允许公网 IP Host 与 origin；已部署                                    |
+| 2026-08-17 | `cfe2752`        | Rootless Docker 将唯一 Nginx 入口改为宿主 13300；已部署                     |
+| 2026-08-17 | `f050618`        | 拒绝 Codex 助手元话术草稿；未部署                                           |
+| 2026-08-17 | `4a2cf2a`        | 私有识别快速正文核对模式；未部署，私有工作已暂停                            |
+| 2026-08-15 | `5eda608`        | node2 当前应用镜像基线；schema 为 0048                                      |
+| 2026-08-07 | `5ae3a78` 及后续 | 选择性实现手动切题和当前 Structured-only 教师流程；没有整分支合并合作者代码 |
+
+GitHub 合作者审计最近结论：Draft PR #1 的 head 已是目标分支祖先，不重复合并；`gyh--001` 的旧迁移链、外部 OpenAI 调用、隐私面、依赖漂移和部署改动不能整分支合入。该任务现由另一 Codex 任务负责，后续以其最新独立审查结果为准。
+
+本次 README 整理只重组文档，不同步 node2、不运行迁移、不修改数据库、不创建账号，也不处理私有识别材料。
