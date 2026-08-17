@@ -63,12 +63,21 @@ PROMPT: Final = """你是私有数学页面识别草稿助手。
 只分析随本次请求附加的一张图片，不调用 shell、文件工具、网络搜索、OCR 或外部知识。
 
 严格要求：
-1. 按页面自然阅读顺序逐字转录可见正文，保留换行；使用线性 Unicode 数学文本，不使用 Markdown。
-2. question_numbers 只写真正题号，不写章节号、页码或页眉序号。
-3. formula_drafts 按完整数学表达式给出 linear_text、LaTeX、页面内相对位置说明；不拆成无意义单字符。
-4. 看不清或结构不确定时不得猜测，在正文使用“⟦不清⟧”，并写入 uncertainties；公式 uncertain=true。
-5. 所有内容只是待人工核对草稿，manual_review_required 必须为 true；不得声称准确率、置信度或已核对。
-6. 严格按给定 JSON schema 输出，不添加字段。
+1. draft_text 只逐字转录图片中实际可见的笔画和文字，按页面自然阅读顺序保留换行。
+   不得根据题号、公式逻辑、教材常识或上下文补写图片中没有的题干、条件、连接词、
+   推导步骤或结论，也不得纠正原图。
+2. draft_text 只能使用线性 Unicode 数学文本，不得包含 Markdown、美元定界符、反斜杠
+   或任何 LaTeX 命令。LaTeX 只允许出现在 formula_drafts.latex。正文公式使用 ∇、×、
+   ·、∂、√、Σ、∫、上下标线性记法和 [分子]/[分母] 等可读 Unicode 形式。
+3. 圈号、小题号、省略号、删除痕迹和原图已有连接词只在确实可见时转录；不得把推测的
+   小题编号或说明性文字补进 draft_text。
+4. question_numbers 只写真正题号，不写章节号、页码或页眉序号。
+5. formula_drafts 按完整数学表达式给出 linear_text、LaTeX、页面内相对位置说明；
+   linear_text 同样不得含 LaTeX，不拆成无意义单字符。
+6. 看不清、被遮挡或结构不确定时不得猜测，在正文对应位置使用“⟦不清⟧”，并写入
+   uncertainties；公式 uncertain=true。宁可留不清标记，也不要补全合理文本。
+7. 所有内容只是待人工核对草稿，manual_review_required 必须为 true；不得声称准确率、置信度或已核对。
+8. 严格按给定 JSON schema 输出，不添加字段。
 """
 
 Runner = Callable[[Path, Path, Path, Path], dict[str, Any]]
@@ -153,6 +162,8 @@ def validate_result(payload: object) -> dict[str, Any]:
         raise ValueError("Codex result has unexpected fields")
     if not isinstance(payload["draft_text"], str) or not payload["draft_text"].strip():
         raise ValueError("Codex result draft_text must be non-empty")
+    if any(marker in payload["draft_text"] for marker in ("\\", "$", "```")):
+        raise ValueError("Codex result draft_text must be plain linear Unicode, not LaTeX")
     for key in ("question_numbers", "uncertainties"):
         value = payload[key]
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
@@ -167,6 +178,8 @@ def validate_result(payload: object) -> dict[str, Any]:
             isinstance(formula[key], str) for key in ("linear_text", "latex", "location_hint")
         ) or not isinstance(formula["uncertain"], bool):
             raise ValueError("Codex formula draft has invalid field types")
+        if any(marker in formula["linear_text"] for marker in ("\\", "$", "```")):
+            raise ValueError("Codex formula linear_text must be plain linear Unicode")
     if payload["manual_review_required"] is not True:
         raise ValueError("Codex result must require manual review")
     return payload

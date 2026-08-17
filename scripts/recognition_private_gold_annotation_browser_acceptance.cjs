@@ -100,7 +100,7 @@ async function main() {
       dataset_id: datasetId,
       cases: cases.map((item, index) => ({
         case_id: item.case_id,
-        draft_text: index ? "" : "Codex 不得覆盖已载入草稿",
+        draft_text: index ? "Codex 第二页可见建议" : "Codex 不得覆盖已载入草稿",
         question_numbers: index ? [] : ["1"],
         formula_drafts: index
           ? []
@@ -113,6 +113,26 @@ async function main() {
               },
             ],
         uncertainties: index ? [] : ["合成不确定项"],
+        manual_review_required: true,
+      })),
+    }),
+  );
+  const unsafeCodexDraftsPath = path.join(
+    temporaryRoot,
+    "codex-drafts-unsafe.json",
+  );
+  fs.writeFileSync(
+    unsafeCodexDraftsPath,
+    JSON.stringify({
+      schema_version: "recognition-private-codex-drafts-v1",
+      private: true,
+      dataset_id: datasetId,
+      cases: cases.map((item) => ({
+        case_id: item.case_id,
+        draft_text: String.raw`可见文字 \(\mathbf{x}\)`,
+        question_numbers: [],
+        formula_drafts: [],
+        uncertainties: [],
         manual_review_required: true,
       })),
     }),
@@ -223,11 +243,19 @@ async function main() {
     assert.equal(await page.locator("#codexSuggestions").isVisible(), true);
     assert.match(
       await page.locator("#codexSuggestionsSummary").textContent(),
-      /1 条，必须人工核对/,
+      /1 条公式，必须人工核对/,
     );
     await page.locator("#codexSuggestions > summary").click();
     assert.equal(
-      await page.locator("#codexSuggestionList textarea").first().inputValue(),
+      await page.locator(".codex-draft-text").inputValue(),
+      "Codex 不得覆盖已载入草稿",
+    );
+    assert.equal(await page.locator(".codex-adopt-text").isDisabled(), true);
+    assert.equal(
+      await page
+        .locator(".formula-card:not(.codex-text-suggestion) textarea")
+        .first()
+        .inputValue(),
       "CODEX_ONLY_PRIVATE_DRAFT",
     );
     assert.match(
@@ -238,6 +266,32 @@ async function main() {
       await page.locator("#codexSuggestions").textContent(),
       /不确定项（1 处|合成不确定项/,
     );
+    await page.locator("#pages .page").nth(1).click();
+    assert.equal(await page.locator("#expectedText").inputValue(), "");
+    assert.equal(await page.locator(".codex-adopt-text").isEnabled(), true);
+    await page.locator(".codex-adopt-text").click();
+    assert.equal(
+      await page.locator("#expectedText").inputValue(),
+      "Codex 第二页可见建议",
+    );
+    assert.equal(await page.locator("#textReviewed").isChecked(), false);
+    await page.locator("#expectedText").fill("");
+    await page.locator("#pages .page").first().click();
+    await page.locator("#expectedText").fill(String.raw`旧正文 \(x\)`);
+    await page.locator("#drafts").setInputFiles(unsafeCodexDraftsPath);
+    assert.equal(await page.locator(".codex-adopt-text").isDisabled(), true);
+    assert.match(
+      await page.locator(".codex-draft-warning").textContent(),
+      /含 LaTeX\/Markdown 标记，禁止采用/,
+    );
+    assert.equal(
+      await page.locator(".codex-clear-existing-markup").isEnabled(),
+      true,
+    );
+    await page.locator(".codex-clear-existing-markup").click();
+    assert.equal(await page.locator("#expectedText").inputValue(), "");
+    await page.locator("#expectedText").fill("1. 求 x² 的极限");
+    await page.locator("#codexSuggestions > summary").click();
     assert.match(
       await page.locator("#degradations").textContent(),
       /清晰，无明显退化（clean）/,

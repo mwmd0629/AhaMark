@@ -136,6 +136,8 @@
 
 ## 接手必读：当前状态、问题与下一步
 
+> 2026-08-17 Codex 正文线性格式与防猜写门禁 P29（开发完成，本条对应提交，未部署）：针对私有 Codex 草稿曾把 `\\mathbf`、`\\nabla`、`\\frac` 等 LaTeX 直接写进线性正文，并根据数学上下文补写图片中未出现的题干或连接词的问题，生成提示现明确要求只逐字转录可见笔画，不得按题号、公式逻辑、教材常识或上下文补全、纠错或增加说明；看不清必须写 `⟦不清⟧` 并进入不确定项。生成端对 `draft_text` 和公式 `linear_text` 中的反斜杠、美元定界符及 Markdown fence 严格 fail closed，LaTeX 只允许位于公式建议的 `latex` 字段。标注页不再把任何 Codex 正文自动写入 `expected_text`，而是在只读建议区显式提示遗漏/猜写风险；只有正文为空且建议为纯线性 Unicode 时，人工点击“采用为正文草稿”才会写入，并继续撤销 `text_reviewed`。旧 v1 草稿仍可加载查看，但含 LaTeX/Markdown 的正文建议禁用采用按钮；此前已进入 localStorage 的未核对 LaTeX 正文可在建议区显式一键清除，已核对正文绝不自动清除。OCR 草稿原有的空白页填入行为不变。合成 Python `8 passed`，离线 Edge 两页端到端通过且产品写入为 0，数据库守卫 unchanged。未自动接受模型建议为 Gold，未改 schema、数据库、产品 Provider、模型、公式自动检测或网络边界，未部署。
+
 > 2026-08-17 普通数学输入双重积分补充 P28（开发完成，本条对应提交，未部署）：针对标注时粘贴 `∫∫` 会被有限语法转换器按未知字符拒绝的问题，新增确定性的 `iint_S`、`∫∫_S`、`∬_S` 三种等价输入并生成 `\\iint_{S}` 草稿，同时接受单积分 Unicode `∫_a^b`。界面新增“重积分”模板按钮，完全离线结构预览显示 `∬`；下限/积分区域仍必须显式填写，缺失时继续 fail closed，自动结果仍为 `pending`，不会自动核对或写入 Gold。纯转换器 16 个生成用例与 16 个歧义拒绝通过，离线 Edge 两页端到端通过且产品写入为 0，Prettier 与 `git diff --check` 通过。测试只使用合成变量，不含私有截图正文；未改 schema、数据库、产品 Provider、模型或网络边界，未部署。
 
 > 2026-08-16 私有标注 Codex 识别草稿 P27（开发完成，本条对应提交，未部署）：按用户对当前指定私有资料的明确授权，私有 Gold 标注草稿阶段暂停使用 Tesseract，改由已登录 Codex CLI 逐页生成待核对正文、真实题号候选、公式线性文本/LaTeX 草稿和不确定项。新增独立 `recognition_private_codex_drafts.py`，必须显式传入上传授权标记，只接受匿名 UUID PNG，强制 seed、图片和输出位于仓库外；调用固定为 ephemeral、忽略用户规则、read-only、无搜索，按页串行执行并在每页后原子写入可断点续跑的 `recognition-private-codex-drafts-v1`。所有结果固定 `manual_review_required=true`，不含 confidence，不是 Gold、准确率或生产证据。标注页继续兼容旧 `recognition-private-drafts-v1`，新增 Codex 草稿严格校验；正文只填空白且未核对页面，题号/公式建议只在当前浏览器内存显示，公式建议不会自动创建 FormulaRegion、写入 localStorage/Gold 或标记 reviewed。一次仓库外匿名单页实跑成功生成严格 JSON；仅报告结构计数，未把正文、图片、路径或身份信息写入 Git/数据库/公开日志。合成单元测试 `4 passed`、离线 Edge 两页端到端通过且网络请求为 0、Ruff、strict mypy、Node 语法与 `git diff --check` 通过；Prettier 已机械格式化目标 HTML。产品 Provider、默认 Compose、Tesseract/RapidOCR 代码和开关均未修改，当前变化只服务于经授权的仓库外私有标注草稿，不部署、不自动识别生产数据。
@@ -287,6 +289,8 @@
 ### 当前事实（以当前工作树重新验证为准）
 
 - 2026-08-16：当前指定私有 Gold 标注草稿已按用户授权暂停 Tesseract，使用仓库外、逐页、可断点续跑的 Codex CLI 草稿生成；所有输出固定要求人工复核，公式只显示为内存建议，不自动建框、不写 Gold。产品识别 Provider 与默认开关未改变，未部署。
+
+- 2026-08-17：P29 已禁止 Codex 正文/线性公式携带 LaTeX 或 Markdown，并把 Codex 正文改为只读建议、默认不写入 Gold 工作区；只有纯线性 Unicode 建议可由人工显式采用，猜写与不清内容仍须逐字核对，未改 schema/API/数据库/模型/开关，未部署。
 
 - 2026-08-17：P28 已让普通数学输入转换器接受 `iint_S`、`∫∫_S`、`∬_S` 和 Unicode 单积分，界面新增“重积分”按钮与 `∬` 离线结构预览；积分区域仍必须显式填写，结果仍待人工核对，未改 schema/API/数据库/模型/开关，未部署。
 

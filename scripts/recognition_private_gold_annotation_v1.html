@@ -530,8 +530,10 @@
           <div class="hint">
             标注页面本身全程离线，不上传图片或正文。可载入旧 OCR
             草稿或经用户明确授权、在仓库外生成的 Codex 草稿；浏览器只按匿名 UUID
-            匹配，进度保存在本机
-            localStorage。正文保留线性可读文本；分式、根号、上下标等二维公式应另画公式框并填写
+            匹配，进度保存在本机 localStorage。旧 OCR
+            草稿仍只填入空白正文；Codex
+            正文只作为只读建议显示，必须逐页人工采用，含 LaTeX/Markdown
+            标记的建议禁止采用。正文保留线性可读文本；分式、根号、上下标等二维公式应另画公式框并填写
             LaTeX。公式卡片优先使用严格的普通输入生成草稿；原始 LaTeX
             仅在“高级编辑”中按需修改。
             若页面可见姓名、学号等身份信息，必须先在独立图片副本中遮挡，再选择“已使用去标识副本”。
@@ -616,7 +618,9 @@
           ><span id="regionCount">0 个区域</span>
         </div>
         <details id="codexSuggestions" hidden>
-          <summary id="codexSuggestionsSummary">Codex 公式草稿</summary>
+          <summary id="codexSuggestionsSummary">
+            Codex 正文、题号与公式建议
+          </summary>
           <div class="hint">
             这里只显示可复制建议，不会自动创建公式框、写入 Gold
             或标记已核对。请先在原图上框住完整公式，再按需复制到普通输入或高级编辑。
@@ -692,6 +696,8 @@
           drawMode = "question";
         const imageUrls = new Map();
         const codexSuggestions = new Map();
+        const hasDraftMarkup = (value) =>
+          value.includes("\\") || value.includes("$") || value.includes("```");
         const plainInputs = new Map();
         const readyPlainInputs = new Map();
         const conversionTimers = new Map();
@@ -975,7 +981,84 @@
           }
           details.hidden = false;
           $("codexSuggestionsSummary").textContent =
-            `Codex 公式草稿（${suggestion.formula_drafts.length} 条，必须人工核对）`;
+            `Codex 正文、题号与公式建议（${suggestion.formula_drafts.length} 条公式，必须人工核对）`;
+          const textCard = document.createElement("div");
+          textCard.className = "formula-card codex-text-suggestion";
+          const textHeading = document.createElement("strong");
+          textHeading.textContent = "正文建议（不会自动写入正文）";
+          const textLabel = document.createElement("label");
+          textLabel.textContent = "只读建议；必须逐字对照原图";
+          const textDraft = document.createElement("textarea");
+          textDraft.className = "codex-draft-text";
+          textDraft.readOnly = true;
+          textDraft.value = suggestion.draft_text;
+          const unsafeMarkup = hasDraftMarkup(suggestion.draft_text);
+          const textWarning = document.createElement("div");
+          textWarning.className = "hint codex-draft-warning";
+          textWarning.textContent = unsafeMarkup
+            ? "该旧建议含 LaTeX/Markdown 标记，禁止采用为正文；请人工改成线性 Unicode 或重新生成。"
+            : "模型可能遗漏或补写内容；采用后仍保持正文待核对。";
+          const adoptText = document.createElement("button");
+          adoptText.type = "button";
+          adoptText.className = "codex-adopt-text";
+          adoptText.textContent = "人工采用为正文草稿";
+          adoptText.disabled =
+            unsafeMarkup ||
+            !suggestion.draft_text.trim() ||
+            Boolean(current()?.expected_text);
+          adoptText.onclick = () => {
+            const item = current();
+            if (!item || hasDraftMarkup(suggestion.draft_text)) return;
+            if (item.expected_text) {
+              updateStatus("正文已有内容，Codex 建议不会覆盖；请手动对照修改");
+              return;
+            }
+            item.expected_text = suggestion.draft_text.replace(/\r\n/g, "\n");
+            item.text_reviewed = false;
+            $("expectedText").value = item.expected_text;
+            $("textReviewed").checked = false;
+            adoptText.disabled = true;
+            save();
+            renderList();
+            updateStatus("已人工采用为正文草稿；仍须逐字对照原图核对");
+          };
+          textCard.append(
+            textHeading,
+            textLabel,
+            textDraft,
+            textWarning,
+            adoptText,
+          );
+          const activeItem = current();
+          if (activeItem && hasDraftMarkup(activeItem.expected_text)) {
+            const cleanupWarning = document.createElement("div");
+            cleanupWarning.className = "hint codex-existing-markup-warning";
+            cleanupWarning.textContent = activeItem.text_reviewed
+              ? "当前正文含 LaTeX/Markdown 且已标记核对，不能自动清除；请人工复查。"
+              : "当前未核对正文含旧 LaTeX/Markdown，可清除后重新对照原图。";
+            const cleanup = document.createElement("button");
+            cleanup.type = "button";
+            cleanup.className = "codex-clear-existing-markup";
+            cleanup.textContent = "清除当前未核对的 LaTeX 正文";
+            cleanup.disabled = activeItem.text_reviewed;
+            cleanup.onclick = () => {
+              const item = current();
+              if (
+                !item ||
+                item.text_reviewed ||
+                !hasDraftMarkup(item.expected_text)
+              )
+                return;
+              item.expected_text = "";
+              $("expectedText").value = "";
+              save();
+              renderList();
+              cleanup.disabled = true;
+              updateStatus("已清除当前未核对的 LaTeX 正文；请重新对照原图转录");
+            };
+            textCard.append(cleanupWarning, cleanup);
+          }
+          container.append(textCard);
           const questionHint = document.createElement("div");
           questionHint.className = "hint";
           questionHint.textContent = suggestion.question_numbers.length
@@ -1827,7 +1910,7 @@
             codexSuggestions.clear();
             let filled = 0;
             for (const item of state.cases) {
-              if (!item.expected_text && !item.text_reviewed) {
+              if (!isCodex && !item.expected_text && !item.text_reviewed) {
                 item.expected_text = drafts.get(item.case_id).draft_text;
                 filled += 1;
               }
@@ -1837,7 +1920,9 @@
             selectCase(active);
             save();
             updateStatus(
-              `已填入 ${filled} 页${isCodex ? " Codex" : " OCR"} 草稿；仍须逐页对照图片核对`,
+              isCodex
+                ? `已载入 ${drafts.size} 页 Codex 建议；正文未自动填入，必须逐页人工采用并核对`
+                : `已填入 ${filled} 页 OCR 草稿；仍须逐页对照图片核对`,
             );
           } catch (error) {
             updateStatus(`草稿载入失败：${error.message}`);

@@ -8,6 +8,7 @@ import pytest
 
 from scripts.recognition_private_codex_drafts import (
     DRAFT_VERSION,
+    PROMPT,
     generate_drafts,
     validate_result,
 )
@@ -131,6 +132,38 @@ def test_validate_result_rejects_automatic_review_and_unknown_fields() -> None:
     payload["confidence"] = 0.99
     with pytest.raises(ValueError, match="unexpected fields"):
         validate_result(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("draft_text", r"可见文字 \\mathbf{x}", "plain linear Unicode"),
+        ("draft_text", "$x$", "plain linear Unicode"),
+        ("linear_text", r"\\frac{a}{b}", "formula linear_text"),
+    ],
+)
+def test_validate_result_rejects_latex_outside_formula_latex(
+    field: str, value: str, message: str
+) -> None:
+    payload = result_for(Path(f"{uid(100)}.png"))
+    if field == "linear_text":
+        formulas = payload["formula_drafts"]
+        assert isinstance(formulas, list)
+        formulas[0][field] = value
+    else:
+        payload[field] = value
+    with pytest.raises(ValueError, match=message):
+        validate_result(payload)
+
+
+def test_prompt_forbids_inference_and_keeps_latex_out_of_draft_text() -> None:
+    for requirement in (
+        "不得根据题号、公式逻辑、教材常识或上下文补写",
+        "不得包含 Markdown、美元定界符、反斜杠",
+        "LaTeX 只允许出现在 formula_drafts.latex",
+        "宁可留不清标记，也不要补全合理文本",
+    ):
+        assert requirement in PROMPT
 
 
 def test_generate_drafts_never_calls_runner_for_completed_checkpoint(tmp_path: Path) -> None:
