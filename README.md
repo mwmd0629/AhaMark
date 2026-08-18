@@ -30,8 +30,8 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 | 应用基线          | `9b129bc43961d296642b6fcb6cb461907f70a367`；后续 README 与合并门禁修复不改变运行逻辑                         |
 | 远端状态          | 本地与 `origin/codex/integrate-question-page-cutter` 为 `0 ahead / 0 behind`                                 |
 | 数据库迁移        | Alembic 单 head：`0049_usernames`                                                                            |
-| 最新开发          | 全离线公式 OCR 与本地 Qwen 建议服务已以 `de22415` 提交并推送；尚未上传或部署，node2 仍保持旧版           |
-| node2 在线版本    | API/Web/Worker 为 `5eda608`，schema 为 `0048_class_resources`；旧邮箱登录和文字 OCR available                |
+| 最新开发          | 全离线公式 OCR 与本地 Qwen 建议服务已以 `de22415` 实现、`0594d10` 镜像部署；本分支状态账本已更新          |
+| node2 在线版本    | API/Web/Worker 为 `0594d10`，schema 为 `0049_usernames`；文字、公式 OCR 与本地建议 Provider available       |
 | node2 入口        | `https://222.195.89.236:13300`；自签名证书；公网可达，无来源白名单                                           |
 | 部署范围          | 只发布 Nginx `0.0.0.0:13300 -> 8443`；数据库、Redis、MinIO、API、Web、Worker、Docker socket 均无宿主发布端口 |
 | 私有识别工作      | 暂停；不得继续处理、上传或提交私有 OCR/Gold、图片、正文或来源映射，除非用户再次明确授权                      |
@@ -41,7 +41,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 2026-08-18 用户要求由 Codex 全程完成、不接第三方在线 Provider，并授权继续开发。当前工作树已接入两个只在 `local-ai` Compose profile 中启用的内网服务：固定 `PaddlePaddle/PP-FormulaNet_plus-M` 公式模型（revision `712e6e2e4c313b1ea163be5c350127b82662c58d`）和固定 `Qwen/Qwen3-4B-GGUF` 的 `Qwen3-4B-Q4_K_M.gguf`，由官方 llama.cpp CPU server 提供 OpenAI-compatible JSON Schema 接口。两者均不发布宿主端口，运行时不下载模型，模型卷只读；应用只允许显式 host allowlist 的 Compose HTTP，拒绝 IP、metadata host、localhost 和未授权外部端点。评分、Stage 4 AI grading 与作业生成只产出 suggestion，继续要求教师复核，外部 Provider 请求在 node2 Compose 中固定关闭。
 
-模型获取脚本只接受新建或空目录，固定 URL、revision、大小和 SHA-256，下载到 `.part` 后验签再发布。公式三文件 SHA-256 分别为 `8333a7f650766a748e273c550d278601dd19dfeee1c4b01038ff632f134d9884`、`f16ef9b5c8227da70d3ec969a5195f4d62c1154427b883f4d6cff07633654041`、`87b5f3d7f2b2fe553627d77b37f496608ca150ebd0ef62d362591edca47b5538`，生成清单 SHA-256 为 `19bb16d0ba17771ce24dfce716d9f10f80c3df626ecc9b960283e28810190018`；Qwen GGUF SHA-256 为 `7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5`。本地固定资产获取已通过。公式候选镜像在 `--network none`、只读根文件系统和只读模型挂载下 readiness 为 200，合成公式图片经真实 HTTP 推理返回 LaTeX 候选并带 `UNCALIBRATED_CONFIDENCE`、`TEACHER_REVIEW_REQUIRED`；这不是准确率。固定 digest `ghcr.io/ggml-org/llama.cpp:server@sha256:092d1291f2bcf59ff727fa3af855fb9bd4759d6bff860f6fbfd5e3e377e12625` 在同样无外网条件下加载 Qwen，健康检查为 200，显式关闭 Qwen3 thinking 后 JSON Schema 请求成功，实测容器内存约 2.35 GiB。全仓 Ruff、strict mypy（128 个源文件）、Compose 默认/`local-ai` 双配置通过；全部 120 个后端测试文件按固定排序分为三个独立 TEMP/数据库组，合计 `1062 passed, 19 skipped`（1081 项）、零失败，三组均为 `ahamark.db unchanged`。前端 Prettier、ESLint、TypeScript、`38 files / 234 tests` 与 production build 19 页通过，只有不阻断构建的既有 SWC lockfile 修补警告。实现已以 `de22415` 提交并推送；提交哈希候选镜像均已构建：API `sha256:32eb9b73409eec61a944565960baedefa211816b0b65689a4d1293a9245a10b4`（188836865 bytes）、Web `sha256:36e19e70ee8261452b16a0584d63b32db62062ea375eccd74be01d51cb08bdd5`（66252967 bytes）、Formula `sha256:5e13e614dd7c225cb01c82bec685a35b046d627ce6d6c0a535375b43617a827b`（542075507 bytes），llama.cpp 固定镜像为 `sha256:092d1291f2bcf59ff727fa3af855fb9bd4759d6bff860f6fbfd5e3e377e12625`（310736848 bytes）；API 镜像迁移头为 `0049_usernames`。node2 硬件清单 SSH 在认证前被远端关闭，尚未取得；本段模型和镜像尚未上传或部署，node2 三项 Provider 状态没有改变。
+模型获取脚本固定 URL、revision、大小和 SHA-256，下载到 `.part` 后验签再发布。公式清单 SHA-256 为 `19bb16d0ba17771ce24dfce716d9f10f80c3df626ecc9b960283e28810190018`，Qwen GGUF SHA-256 为 `7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5`；上传包外层及全部内层哈希均通过。node2 容量为 192 个逻辑 CPU、约 270 GB Docker 可见内存、`/data` 约 7.38 TB 可用。最终部署使用 RapidOCR 专用 API `ahamark/api:0594d10`、Web `ahamark/web:0594d10`、Formula `ahamark/formula:0594d10` 和由固定 digest 验证后加本地标签的 llama.cpp；迁移 `0048 -> 0049`、Formula/Qwen 健康、滚动切换和公网 `/`、`/health`、`/ready` 均通过。最近完整备份为 `/data/shr/ahamark-backups/pre-local-ai-0594d10-20260818T155113Z`；前两次运行分别因公式模型目录路径和 UID 999 只读权限门禁失败并完整回滚，最终以新卷、目录 `0555`、文件 `0444` 部署成功。公式和评分/生成只提供候选，继续要求教师确认；这不是识别准确率或无人复核自动判卷证据。
 
 2026-08-18 已获用户授权自主完成后续开发与部署。production-safe RapidOCR bundle 接线已经完成本地开发和验证：默认 API 镜像继续关闭 OCR，node2 专用 `Dockerfile.rapidocr` 固定 `rapidocr==3.9.2`、`onnxruntime==1.28.0`，并把 wheel 内三份 ONNX 复制到固定目录；清单固定模型路径、大小、SHA-256、运行时版本、bundle/license approval UUID，清单 SHA-256 为 `f84336fc78cb51cd0ee223ee3c04158eb2f968af6fa8ffd31051b821f843ff5b`，NOTICE 明确仅批准本地印刷体文字 OCR。运行时下载仍被配置和代码双重禁止，启动/readiness 校验清单与模型，推理前再次检查文件身份，异常稳定 fail-closed。node2 Compose 的启用参数来自 `runtime.env` 且默认关闭，旧 `runtime.env` 与 `5eda608` 回滚路径保持兼容。
 
@@ -105,16 +105,16 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 ### 已知未完成项
 
-1. 用户名登录和 `789a59d` RapidOCR 固定 bundle 尚未同步 node2；代码、提交哈希镜像、上传和独立镜像诊断均已完成，但部署自动化最终仍在 `image_validation` 阶段中止。服务器已完整回滚到 `5eda608 + 0048`，未创建用户名账号；再次部署前必须先把部署脚本改为可审计的服务器文件工件并逐项保留失败命令/返回码，不直接重复本轮命令。
+1. 用户名登录、固定 RapidOCR、公式 OCR 与本地 Qwen 建议服务已同步 node2；尚未创建或验收管理员用户名账号，登录、上传、切题、识别、教师修正、人工评分/复核的完整浏览器流程仍未验收。
 2. 公网入口仍使用自签名证书；手机 Safari 登录和完整教师流程尚未验收。
 3. 公网端口无来源限制；若后续恢复“仅校园网”目标，需要由 iKuai/防火墙实施边界并做内外双向实测。
 4. 私有 OCR/Gold 的两页修复输出位于仓库外，未合并或覆盖原 60 页草稿；保持暂停。
 5. 真实 OCR、手写、公式、复杂版面和真实 Provider 质量没有生产证据。
-6. 全离线公式 OCR 与本地 Qwen 候选服务已完成本地链路验证，代码已以 `de22415` 提交推送且三个提交哈希镜像已构建，但 node2 容量尚未只读确认，模型和镜像尚未上传，线上仍为 unavailable。部署前必须取得内存、CPU、磁盘清单并验证至少 8 GiB 可用内存和足够 Docker/模型空间；不满足则保持 unavailable，不以 swap 强行上线。
+6. 全离线公式 OCR 与本地 Qwen 候选服务线上状态为 available，但仅有合成链路和健康证据；不得把 available 或单次合成推理称为真实准确率、可靠手写识别或可无人复核自动判卷。
 
 ### 下一步顺序
 
-下一步仅用一次可见 SSH 会话只读取得 node2 CPU/内存/磁盘，并在容量满足时上传已验签模型和带提交哈希的 API/Web/Formula/llama.cpp 镜像归档。不得直接重复旧 SSH 管道脚本。部署流程必须使用带固定 SHA-256、LF 换行、逐命令返回码和持久化非秘密阶段日志的服务器文件工件，在不停止服务的前提下完成全部 image-validation dry-run；只有 dry-run 全绿后，才重新增量备份当前 `5eda608 + 0048`，执行 `0048 -> 0049`、滚动切换 API-A/B、Worker、Web、Nginx 与内部 local-ai 服务，并验证公网 `/`、`/health`、`/ready`、用户名登录界面、无网络合成文字/公式 OCR 和本地 JSON Schema 建议。任一硬门禁失败即恢复旧配置、`5eda608` 与 0048 备份；Provider 质量没有真实证据时仍只能作为需教师确认的建议。
+下一步保持当前 `0594d10 + 0049`，不再变更服务器；在不使用真实学生资料、不创建账号、不发布作业或成绩的前提下，可另行用脱敏合成材料验收用户名登录、上传、切题、文字/公式识别、教师修正和人工评分/复核。公网仍为自签名证书且无来源白名单；Provider 质量没有真实证据时只能作为需教师确认的建议。任何后续升级仍须先备份并保留 `5eda608 + 0048` 回滚路径。
 
 ## 产品能力与边界
 
@@ -196,7 +196,7 @@ python -m app.cli.create_student --username student01 --display-name "学生"
 
 命令会在终端中两次询问密码且不回显。仓库不提供公共注册。`DEMO_ACTOR_ENABLED` 只允许非 production 开发环境使用。
 
-注意：node2 尚未部署本次用户名版本，线上界面仍保持旧镜像行为；不要在迁移和切换完成前按上述新契约操作线上实例。
+注意：node2 已部署用户名版本和 `0049_usernames`，但未创建或验收管理员用户名账号；不要把迁移完成等同于登录业务流程已验收。
 
 ## 教师主流程
 
@@ -309,6 +309,7 @@ node2 使用 `shr` 用户的 Rootless Docker。专用文件：
 
 | 日期       | 提交/状态        | 结论                                                                        |
 | ---------- | ---------------- | --------------------------------------------------------------------------- |
+| 2026-08-18 | `0594d10` 已部署 | `0049`、固定文字/公式 OCR、本地 Qwen 建议服务上线；公网 readiness 全部 available |
 | 2026-08-18 | `789a59d` 未部署 | 固定 RapidOCR bundle 已推送；部署脚本在 image validation 中止并回滚到旧版   |
 | 2026-08-18 | node2 完整回滚   | `056f039` 因文字 OCR unavailable 回滚；应用/schema 恢复 `5eda608 + 0048`    |
 | 2026-08-17 | `9b129bc`        | 管理员发布用户名账号；已推送，未部署，node2 仍为旧邮箱登录版本              |
@@ -316,9 +317,9 @@ node2 使用 `shr` 用户的 Rootless Docker。专用文件：
 | 2026-08-17 | `cfe2752`        | Rootless Docker 将唯一 Nginx 入口改为宿主 13300；已部署                     |
 | 2026-08-17 | `f050618`        | 拒绝 Codex 助手元话术草稿；未部署                                           |
 | 2026-08-17 | `4a2cf2a`        | 私有识别快速正文核对模式；未部署，私有工作已暂停                            |
-| 2026-08-15 | `5eda608`        | node2 当前应用镜像基线；schema 为 0048                                      |
+| 2026-08-15 | `5eda608`        | node2 旧回滚镜像基线；schema 为 0048                                        |
 | 2026-08-07 | `5ae3a78` 及后续 | 选择性实现手动切题和当前 Structured-only 教师流程；没有整分支合并合作者代码 |
 
 GitHub 合作者审计最近结论：Draft PR #1 的 head 已是目标分支祖先，不重复合并；`gyh--001` 的旧迁移链、外部 OpenAI 调用、隐私面、依赖漂移和部署改动不能整分支合入。该任务现由另一 Codex 任务负责，后续以其最新独立审查结果为准。
 
-本次操作未创建账号、未处理私有识别材料、未发布作业或成绩；`789a59d` 未上线，node2 应用与数据库均保持原基线。2026-08-18 最后一次外部只读检查确认 `/`、`/health`、`/ready` 均为 HTTP 200，Worker 为 1，文字 OCR available，公式 OCR 与 assignment generation provider unavailable；这只是运行状态，不是识别准确率或自动判卷验收。升级、降级和三次 `789a59d` 完整备份均保留且已验证。
+本次操作未创建账号、未处理私有识别材料、未发布作业或成绩。2026-08-18 最后一次外部独立检查确认 `/`、`/health` 均为 HTTP 200，`/ready` 为 `ready=true`，Worker 为 1，文字 OCR、公式 OCR、主观评分、AI 评分和作业生成 Provider 均 available；后三类为本地 Qwen suggestion-only，公式和评分继续明确要求教师确认。这只是运行状态和合成链路证据，不是识别准确率或自动判卷验收。最终备份及旧 `5eda608 + 0048` 回滚路径均保留；一次疑似 SSH 密码误发后已由用户在可见 `passwd` 终端轮换，账本不记录任何凭据。
