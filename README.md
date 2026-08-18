@@ -23,19 +23,19 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 ### 30 秒摘要
 
-| 项目              | 当前事实（2026-08-18）                                                                                       |
+| 项目              | 当前事实（2026-08-19）                                                                                       |
 | ----------------- | ------------------------------------------------------------------------------------------------------------ |
 | 正确工作区        | `C:\Users\Lenovo\.codex\worktrees\06f7\AhaMark`                                                              |
-| 目标分支          | `codex/integrate-question-page-cutter`                                                                       |
-| 应用基线          | `9b129bc43961d296642b6fcb6cb461907f70a367`；后续 README 与合并门禁修复不改变运行逻辑                         |
-| 远端状态          | 本地与 `origin/codex/integrate-question-page-cutter` 为 `0 ahead / 0 behind`                                 |
+| 工作分支          | `codex/integrate-question-page-cutter`；已通过合并提交 `7e88fae` 汇入 `master`                               |
+| 应用基线          | 产品实现 `de22415`；node2 镜像 `0594d10`；GitHub 主线 `7e88fae`                                             |
+| 远端状态          | `HEAD`、`origin/master` 与 `origin/codex/integrate-question-page-cutter` 均为 `7e88fae`                      |
 | 数据库迁移        | Alembic 单 head：`0049_usernames`                                                                            |
-| 最新开发          | 全离线公式 OCR 与本地 Qwen 建议服务已以 `de22415` 实现、`0594d10` 镜像部署；本分支状态账本已更新          |
+| 最新开发          | 全离线公式 OCR 与本地 Qwen 建议服务已实现并部署，代码和部署账本已进入 GitHub `master`                       |
 | node2 在线版本    | API/Web/Worker 为 `0594d10`，schema 为 `0049_usernames`；文字、公式 OCR 与本地建议 Provider available       |
 | node2 入口        | `https://222.195.89.236:13300`；自签名证书；公网可达，无来源白名单                                           |
 | 部署范围          | 只发布 Nginx `0.0.0.0:13300 -> 8443`；数据库、Redis、MinIO、API、Web、Worker、Docker socket 均无宿主发布端口 |
 | 私有识别工作      | 暂停；不得继续处理、上传或提交私有 OCR/Gold、图片、正文或来源映射，除非用户再次明确授权                      |
-| GitHub 合作者任务 | 已交由另一 Codex 任务处理；本任务不继续合并候选代码                                                          |
+| 主线合并          | `7e88fae` 仅汇合历史，相对已验证代码树无文件差异；未强推，远端主线与功能分支一致                             |
 
 ### 当前开发事实
 
@@ -45,7 +45,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 2026-08-18 已获用户授权自主完成后续开发与部署。production-safe RapidOCR bundle 接线已经完成本地开发和验证：默认 API 镜像继续关闭 OCR，node2 专用 `Dockerfile.rapidocr` 固定 `rapidocr==3.9.2`、`onnxruntime==1.28.0`，并把 wheel 内三份 ONNX 复制到固定目录；清单固定模型路径、大小、SHA-256、运行时版本、bundle/license approval UUID，清单 SHA-256 为 `f84336fc78cb51cd0ee223ee3c04158eb2f968af6fa8ffd31051b821f843ff5b`，NOTICE 明确仅批准本地印刷体文字 OCR。运行时下载仍被配置和代码双重禁止，启动/readiness 校验清单与模型，推理前再次检查文件身份，异常稳定 fail-closed。node2 Compose 的启用参数来自 `runtime.env` 且默认关闭，旧 `runtime.env` 与 `5eda608` 回滚路径保持兼容。
 
-真实候选镜像在 `--network none` 下用合成印刷体图片完成一次离线推理：readiness 为 true，返回 2 个文字块并识别出 `AhaMark` 与 `123`；这只证明固定镜像链路可运行，不是准确率。该验证同时发现 RapidOCR v3 的 boxes 为 NumPy 数组，适配器现以有界形状检查后转换，并新增回归测试。后端全量唯一计数为 `1052 passed, 19 skipped`，零真实失败；三组初跑的 15 个失败均为外置 `--basetemp` 被数据库安全守卫拒绝，修正进程 `TEMP/TMP` 后相关 10 文件 `50 passed, 1 skipped`，所有运行均为 `ahamark.db unchanged`。全仓 Ruff、strict mypy（127 个源文件）、Alembic 单 head `0049_usernames` 通过；前端 Prettier、ESLint、TypeScript、`38 files / 234 tests` 和 production build 19 页通过；node2 Compose 在 OCR 默认关闭和显式固定 bundle 开启两种配置下均通过 `config --quiet`。实现已以 `789a59d` 提交并推送；node2 当前仍为 `5eda608 + 0048`，本段代码尚未部署。
+真实候选镜像在 `--network none` 下用合成印刷体图片完成一次离线推理：readiness 为 true，返回 2 个文字块并识别出 `AhaMark` 与 `123`；这只证明固定镜像链路可运行，不是准确率。该验证同时发现 RapidOCR v3 的 boxes 为 NumPy 数组，适配器现以有界形状检查后转换，并新增回归测试。后端全量唯一计数为 `1052 passed, 19 skipped`，零真实失败；三组初跑的 15 个失败均为外置 `--basetemp` 被数据库安全守卫拒绝，修正进程 `TEMP/TMP` 后相关 10 文件 `50 passed, 1 skipped`，所有运行均为 `ahamark.db unchanged`。全仓 Ruff、strict mypy（127 个源文件）、Alembic 单 head `0049_usernames` 通过；前端 Prettier、ESLint、TypeScript、`38 files / 234 tests` 和 production build 19 页通过；node2 Compose 在 OCR 默认关闭和显式固定 bundle 开启两种配置下均通过 `config --quiet`。实现已以 `789a59d` 提交并推送；该段记录的是当时尚未部署的候选状态，后续已由 `0594d10 + 0049` 正式替代。
 
 2026-08-18 尝试部署 `056f039`：镜像双层 SHA-256、Compose、Nginx、`0048 -> 0049` 迁移、用户名回填和新 API-A/B 健康均通过；既有 1 个用户回填后 username 空值和重复数均为 0。切换后公网 `/ready` 暴露文字 OCR 从 available 降为 unavailable，因此按失败门禁将 API/Web/Worker 和 `runtime.env` 滚动恢复为 `5eda608`，公网 `/`、`/ready`、1 个 Worker 和文字 OCR 随后恢复 available，登录页也恢复旧邮箱界面。经用户单独授权并在新建、验证 `0049` PostgreSQL 备份后，数据库已事务性 downgrade 到 `0048_class_resources`，`users.username` 列确认不存在，旧 `migrate` 容器以 0 退出；node2 已完整恢复原应用/schema 基线。
 
@@ -309,10 +309,11 @@ node2 使用 `shr` 用户的 Rootless Docker。专用文件：
 
 | 日期       | 提交/状态        | 结论                                                                        |
 | ---------- | ---------------- | --------------------------------------------------------------------------- |
+| 2026-08-19 | `7e88fae`        | 功能分支与最新远端历史正常合并并推送 `master`；代码树相对首父无变化         |
 | 2026-08-18 | `0594d10` 已部署 | `0049`、固定文字/公式 OCR、本地 Qwen 建议服务上线；公网 readiness 全部 available |
 | 2026-08-18 | `789a59d` 未部署 | 固定 RapidOCR bundle 已推送；部署脚本在 image validation 中止并回滚到旧版   |
 | 2026-08-18 | node2 完整回滚   | `056f039` 因文字 OCR unavailable 回滚；应用/schema 恢复 `5eda608 + 0048`    |
-| 2026-08-17 | `9b129bc`        | 管理员发布用户名账号；已推送，未部署，node2 仍为旧邮箱登录版本              |
+| 2026-08-17 | `9b129bc`        | 管理员发布用户名账号；当时未部署，后随 `0594d10 + 0049` 上线                |
 | 2026-08-17 | `0da6dd9`        | node2 允许公网 IP Host 与 origin；已部署                                    |
 | 2026-08-17 | `cfe2752`        | Rootless Docker 将唯一 Nginx 入口改为宿主 13300；已部署                     |
 | 2026-08-17 | `f050618`        | 拒绝 Codex 助手元话术草稿；未部署                                           |
@@ -320,6 +321,6 @@ node2 使用 `shr` 用户的 Rootless Docker。专用文件：
 | 2026-08-15 | `5eda608`        | node2 旧回滚镜像基线；schema 为 0048                                        |
 | 2026-08-07 | `5ae3a78` 及后续 | 选择性实现手动切题和当前 Structured-only 教师流程；没有整分支合并合作者代码 |
 
-GitHub 合作者审计最近结论：Draft PR #1 的 head 已是目标分支祖先，不重复合并；`gyh--001` 的旧迁移链、外部 OpenAI 调用、隐私面、依赖漂移和部署改动不能整分支合入。该任务现由另一 Codex 任务负责，后续以其最新独立审查结果为准。
+GitHub 合并结论：产品代码此前通过 PR #2 进入 `master`；后续离线 Provider、部署账本及两条分支历史已由 `7e88fae` 正常合并，`origin/master` 与当前功能分支一致。Draft PR #1 的 head 已是祖先，不重复合并；`gyh--001` 的旧迁移链、外部 OpenAI 调用、隐私面、依赖漂移和部署改动仍不得整分支合入。
 
-本次操作未创建账号、未处理私有识别材料、未发布作业或成绩。2026-08-18 最后一次外部独立检查确认 `/`、`/health` 均为 HTTP 200，`/ready` 为 `ready=true`，Worker 为 1，文字 OCR、公式 OCR、主观评分、AI 评分和作业生成 Provider 均 available；后三类为本地 Qwen suggestion-only，公式和评分继续明确要求教师确认。这只是运行状态和合成链路证据，不是识别准确率或自动判卷验收。最终备份及旧 `5eda608 + 0048` 回滚路径均保留；一次疑似 SSH 密码误发后已由用户在可见 `passwd` 终端轮换，账本不记录任何凭据。
+本次操作未创建账号、未处理私有识别材料、未发布作业或成绩。2026-08-19 最后一次外部独立检查确认 `/`、`/health` 均为 HTTP 200，`/ready` 为 `ready=true`，Worker 为 1，文字 OCR、公式 OCR、主观评分、AI 评分和作业生成 Provider 均 available；后三类为本地 Qwen suggestion-only，公式和评分继续明确要求教师确认。这只是运行状态和合成链路证据，不是识别准确率或自动判卷验收。最终备份及旧 `5eda608 + 0048` 回滚路径均保留；一次疑似 SSH 密码误发后已由用户在可见 `passwd` 终端轮换，账本不记录任何凭据。
