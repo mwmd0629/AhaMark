@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Icon } from "@/components/icons";
-import { Card, DemoBadge, PageHeader } from "@/components/ui";
+import { Card, PageHeader } from "@/components/ui";
 
 const guides = [
   {
@@ -58,7 +58,6 @@ export default function HelpPage() {
       <PageHeader
         title="使用帮助"
         description="了解教师端完整流程、常见问题和当前能力边界。"
-        eyebrow={<DemoBadge />}
       />
       <section>
         <h2 className="mb-4 text-lg font-semibold">从哪里开始</h2>

@@ -211,13 +211,6 @@ export function Badge({ status }: { status: keyof typeof badgeMap }) {
     </span>
   );
 }
-export function DemoBadge() {
-  return (
-    <span className="inline-flex rounded-full border border-dashed border-[var(--brand-500)] px-2 py-0.5 text-[11px] font-semibold text-[var(--brand-700)]">
-      演示数据
-    </span>
-  );
-}
 export function Progress({ value, label }: { value: number; label?: string }) {
   return (
     <div className="grid gap-1.5">

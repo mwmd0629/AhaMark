@@ -3,16 +3,21 @@ import hmac
 import secrets
 import threading
 import time
+import uuid
 from collections import defaultdict, deque
 from datetime import timedelta
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 
 import structlog
-from app.api.actor import authenticated_session, digest
+from app.api.actor import Actor, authenticated_session, digest
+from app.api.domain import ApiProblem
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.models import (
+    ArchiveStatus,
+    AuditLog,
     Role,
+    SchoolClass,
     Status,
     Student,
     StudentAccountLink,
@@ -22,7 +27,7 @@ from app.models import (
     now_utc,
 )
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, EmailStr, Field, TypeAdapter, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, TypeAdapter, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -240,6 +245,121 @@ def change_password(
     user.must_change_password = False
     db.commit()
     return user_view(db, user)
+
+
+PREFERENCE_ACTION = "user_preferences.update"
+PREFERENCE_RESOURCE = "user_preferences"
+
+
+class TeacherPreferenceValues(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    default_class_id: uuid.UUID | None = None
+    rubric_status_filter: Literal["all", "draft", "confirmed", "retired"] = "all"
+    rubric_page_size: Literal[10, 20, 50] = 20
+    compact_rubric_cards: bool = False
+
+
+class TeacherPreferenceUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=0)
+    display_name: str = Field(min_length=1, max_length=120)
+    preferences: TeacherPreferenceValues
+
+    @field_validator("display_name")
+    @classmethod
+    def normalize_display_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("display_name 不能为空")
+        return value
+
+
+def _latest_preferences(db: Session, user_id: uuid.UUID) -> AuditLog | None:
+    return db.scalar(
+        select(AuditLog)
+        .where(
+            AuditLog.actor_id == user_id,
+            AuditLog.action == PREFERENCE_ACTION,
+            AuditLog.resource_type == PREFERENCE_RESOURCE,
+            AuditLog.resource_id == str(user_id),
+        )
+        .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+        .limit(1)
+    )
+
+
+def _preference_view(db: Session, user: User) -> dict[str, Any]:
+    latest = _latest_preferences(db, user.id)
+    metadata = latest.metadata_ if latest is not None else {}
+    raw_preferences = metadata.get("preferences", {})
+    try:
+        preferences = TeacherPreferenceValues.model_validate(raw_preferences)
+    except ValueError:
+        preferences = TeacherPreferenceValues()
+    return {
+        "profile": {"display_name": user.display_name, "email": user.email},
+        "preferences": preferences.model_dump(mode="json"),
+        "revision": int(metadata.get("revision", 0)),
+        "updated_at": latest.created_at if latest is not None else None,
+        "server_managed": {
+            "external_ai_enabled": get_settings().ai_external_requests_enabled,
+            "ai_configuration_editable": False,
+        },
+    }
+
+
+@router.get("/preferences")
+def get_preferences(db: Db, actor: Actor) -> dict[str, Any]:
+    user = db.get(User, actor.id)
+    if user is None:
+        raise ApiProblem(404, "USER_NOT_FOUND", "用户不存在")
+    return _preference_view(db, user)
+
+
+@router.put("/preferences")
+def update_preferences(payload: TeacherPreferenceUpdate, db: Db, actor: Actor) -> dict[str, Any]:
+    user = db.scalar(select(User).where(User.id == actor.id).with_for_update())
+    if user is None:
+        raise ApiProblem(404, "USER_NOT_FOUND", "用户不存在")
+    latest = _latest_preferences(db, user.id)
+    current_revision = int(latest.metadata_.get("revision", 0)) if latest is not None else 0
+    if payload.expected_revision != current_revision:
+        raise ApiProblem(
+            409,
+            "PREFERENCES_VERSION_CONFLICT",
+            "设置已在其他页面更新，请刷新后重试",
+            {"current_revision": current_revision},
+        )
+    default_class_id = payload.preferences.default_class_id
+    if default_class_id is not None:
+        owned_class = db.scalar(
+            select(SchoolClass.id).where(
+                SchoolClass.id == default_class_id,
+                SchoolClass.owner_id == actor.id,
+                SchoolClass.status == ArchiveStatus.active,
+            )
+        )
+        if owned_class is None:
+            raise ApiProblem(422, "DEFAULT_CLASS_NOT_AVAILABLE", "默认班级不存在或已归档")
+    user.display_name = payload.display_name
+    next_revision = current_revision + 1
+    db.add(
+        AuditLog(
+            actor_id=actor.id,
+            action=PREFERENCE_ACTION,
+            resource_type=PREFERENCE_RESOURCE,
+            resource_id=str(actor.id),
+            metadata_={
+                "schema_version": 1,
+                "revision": next_revision,
+                "preferences": payload.preferences.model_dump(mode="json"),
+            },
+        )
+    )
+    db.commit()
+    return _preference_view(db, user)
 
 
 @router.post("/logout", status_code=204)

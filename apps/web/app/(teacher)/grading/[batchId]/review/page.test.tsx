@@ -194,7 +194,7 @@ it("uses an inline teacher scoring form and validates criterion totals", async (
 
   fireEvent.click(await screen.findByRole("button", { name: "手动评分" }));
   expect(
-    screen.getByRole("region", { name: "教师评分表单" }),
+    await screen.findByRole("region", { name: "教师评分表单" }),
   ).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("评分项 1 得分"), {
     target: { value: "4" },

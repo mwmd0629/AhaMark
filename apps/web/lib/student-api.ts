@@ -175,6 +175,59 @@ export type TeacherReviewRequest = {
   student_answer_id?: string;
 };
 
+export type TeacherWrongQuestion = {
+  id: string;
+  student_answer_id: string;
+  student_id: string;
+  student_name: string;
+  student_number: string;
+  class_id: string;
+  class_name: string;
+  assignment_id: string;
+  assignment_title: string;
+  submission_id: string;
+  grading_batch_id: string;
+  question_id: string;
+  question_number?: string | null;
+  question_type?: string | null;
+  question_content?: string | null;
+  student_answer?: string | null;
+  score: string;
+  max_score: string;
+  feedback?: string | null;
+  error_type?: string | null;
+  knowledge_point_ids: string[];
+  score_snapshot_id: string;
+  score_snapshot_version: number;
+  grade_release_id: string;
+  grade_release_version: number;
+  release_mode: string;
+  released_at?: string | null;
+  thread_id?: string | null;
+  thread_status?: string | null;
+  review_request_id?: string | null;
+  review_status?: string | null;
+  review_decision?: string | null;
+};
+
+export type TeacherWrongQuestionResponse = {
+  items: TeacherWrongQuestion[];
+  page: number;
+  page_size: number;
+  total: number;
+  pages: number;
+  summary: {
+    total_wrong_questions: number;
+    affected_students: number;
+    knowledge_point_count: number;
+    pending_review_count: number;
+  };
+  facets: {
+    classes: Array<{ id: string; name: string }>;
+    assignments: Array<{ id: string; title: string; class_ids: string[] }>;
+  };
+};
+
 function uploadFile(
   assignment: Pick<StudentAssignment, "id" | "class_id">,
   file: File,
@@ -635,4 +688,11 @@ export const teacherReviewRequestsApi = {
       method: "PATCH",
       body: JSON.stringify(input),
     }),
+};
+
+export const teacherPracticeApi = {
+  wrongQuestions: (query = "") =>
+    request<TeacherWrongQuestionResponse>(
+      `/api/teacher/wrong-questions${query ? `?${query}` : ""}`,
+    ),
 };

@@ -23,6 +23,7 @@ from app.api.student_portal import (
     decide_teacher_review_request,
     delete_teaching_resource,
     list_student_resources,
+    list_teacher_wrong_questions,
     publish_teaching_resource,
     revoke_student_account_link,
     student_results,
@@ -476,6 +477,50 @@ def test_released_wrong_question_creates_only_an_ai_suggestion_job() -> None:
         )
         db.commit()
 
+        teacher_actor = CurrentActor(teacher.id, teacher.email)
+        teacher_wrong = list_teacher_wrong_questions(db, teacher_actor)
+        assert teacher_wrong["total"] == 1
+        assert teacher_wrong["summary"] == {
+            "total_wrong_questions": 1,
+            "affected_students": 1,
+            "knowledge_point_count": 0,
+            "pending_review_count": 0,
+        }
+        assert teacher_wrong["items"][0] == {
+            **teacher_wrong["items"][0],
+            "student_name": student.name,
+            "student_number": student.student_number,
+            "class_id": str(school_class.id),
+            "class_name": school_class.name,
+            "assignment_id": str(assignment.id),
+            "assignment_title": assignment.title,
+            "question_content": "Explain the concept.",
+            "student_answer": "A partially correct answer.",
+            "score": "2",
+            "max_score": "10",
+            "feedback": "Review the concept.",
+            "error_type": "concept",
+            "review_status": None,
+        }
+        assert teacher_wrong["facets"]["classes"] == [
+            {"id": str(school_class.id), "name": school_class.name}
+        ]
+        assert (
+            list_teacher_wrong_questions(
+                db,
+                CurrentActor(uuid.uuid4(), "other-teacher@example.com"),
+            )["total"]
+            == 0
+        )
+        assert (
+            list_teacher_wrong_questions(
+                db,
+                teacher_actor,
+                class_id=uuid.uuid4(),
+            )["total"]
+            == 0
+        )
+
         actor = CurrentActor(student_user.id, student_user.email)
         release.release_mode = "feedback_only"
         db.commit()
@@ -527,6 +572,14 @@ def test_released_wrong_question_creates_only_an_ai_suggestion_job() -> None:
         )
         assert updated["status"] == "pending"
         assert "学生补充" in updated["student_question"]
+        pending_teacher_wrong = list_teacher_wrong_questions(
+            db,
+            teacher_actor,
+            review_state="open",
+        )
+        assert pending_teacher_wrong["total"] == 1
+        assert pending_teacher_wrong["summary"]["pending_review_count"] == 1
+        assert pending_teacher_wrong["items"][0]["review_status"] == "pending"
 
         revoke_student_account_link(
             student.id,

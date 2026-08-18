@@ -1335,6 +1335,252 @@ def student_wrong_questions(db: Db, actor: Actor) -> dict[str, Any]:
     return {"items": items, "total": len(items)}
 
 
+def _teacher_wrong_items(db: Session, teacher_id: uuid.UUID) -> list[dict[str, Any]]:
+    rows = db.execute(
+        select(
+            GradeReleaseItem,
+            GradeRelease,
+            SubmissionScoreSnapshot,
+            Submission,
+            Assignment,
+            SchoolClass,
+            Student,
+        )
+        .join(GradeRelease, GradeRelease.id == GradeReleaseItem.grade_release_id)
+        .join(
+            SubmissionScoreSnapshot,
+            SubmissionScoreSnapshot.id == GradeReleaseItem.score_snapshot_id,
+        )
+        .join(Submission, Submission.id == GradeReleaseItem.submission_id)
+        .join(Assignment, Assignment.id == GradeRelease.assignment_id)
+        .join(SchoolClass, SchoolClass.id == GradeRelease.class_id)
+        .join(Student, Student.id == GradeReleaseItem.student_id)
+        .where(
+            GradeRelease.owner_id == teacher_id,
+            Assignment.owner_id == teacher_id,
+            SchoolClass.owner_id == teacher_id,
+            Student.owner_id == teacher_id,
+            GradeRelease.status == "released",
+            GradeReleaseItem.status == "included",
+            SubmissionScoreSnapshot.status == "complete",
+            Submission.status == "finalized",
+            Submission.finalized_at.is_not(None),
+            Submission.owner_id == teacher_id,
+            Submission.student_id == GradeReleaseItem.student_id,
+            Submission.id == SubmissionScoreSnapshot.submission_id,
+            Submission.assignment_id == GradeRelease.assignment_id,
+            Submission.class_id == GradeRelease.class_id,
+            SubmissionScoreSnapshot.assignment_id == GradeRelease.assignment_id,
+            SubmissionScoreSnapshot.student_id == GradeReleaseItem.student_id,
+            SubmissionScoreSnapshot.generated_by == teacher_id,
+        )
+        .order_by(
+            GradeRelease.version.desc(),
+            GradeRelease.released_at.desc(),
+            Assignment.title,
+            Student.student_number,
+        )
+    ).all()
+    latest: dict[tuple[uuid.UUID, uuid.UUID, uuid.UUID], tuple[Any, ...]] = {}
+    for row in rows:
+        release_item, release = row[0], row[1]
+        latest.setdefault(
+            (release.assignment_id, release.class_id, release_item.student_id), tuple(row)
+        )
+
+    items: list[dict[str, Any]] = []
+    for (
+        _release_item,
+        release,
+        snapshot,
+        submission,
+        assignment,
+        school_class,
+        student,
+    ) in latest.values():
+        for raw in snapshot.details or []:
+            try:
+                score = Decimal(str(raw.get("score")))
+                maximum = Decimal(str(raw.get("max_score")))
+                answer_id = uuid.UUID(str(raw.get("student_answer_id")))
+                question_id = uuid.UUID(str(raw.get("question_id")))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            if score >= maximum:
+                continue
+            knowledge_points = raw.get("knowledge_point_ids", [])
+            if not isinstance(knowledge_points, list):
+                knowledge_points = []
+            items.append(
+                {
+                    "id": f"{snapshot.id}:{answer_id}",
+                    "student_answer_id": str(answer_id),
+                    "student_id": str(student.id),
+                    "student_name": student.name,
+                    "student_number": student.student_number,
+                    "class_id": str(school_class.id),
+                    "class_name": school_class.name,
+                    "assignment_id": str(assignment.id),
+                    "assignment_title": assignment.title,
+                    "submission_id": str(submission.id),
+                    "grading_batch_id": str(submission.grading_batch_id),
+                    "question_id": str(question_id),
+                    "question_number": raw.get("question_number"),
+                    "question_type": raw.get("question_type"),
+                    "question_content": raw.get("question_text"),
+                    "student_answer": raw.get("student_answer_text"),
+                    "score": str(score),
+                    "max_score": str(maximum),
+                    "feedback": raw.get("final_feedback", raw.get("feedback")),
+                    "error_type": raw.get("final_error_type", raw.get("error_type")),
+                    "knowledge_point_ids": [str(value) for value in knowledge_points],
+                    "score_snapshot_id": str(snapshot.id),
+                    "score_snapshot_version": snapshot.version,
+                    "grade_release_id": str(release.id),
+                    "grade_release_version": release.version,
+                    "release_mode": release.release_mode,
+                    "released_at": release.released_at,
+                    "_answer_uuid": answer_id,
+                    "_snapshot_uuid": snapshot.id,
+                }
+            )
+
+    if items:
+        threads = db.scalars(
+            select(WrongQuestionThread).where(
+                WrongQuestionThread.student_answer_id.in_({item["_answer_uuid"] for item in items}),
+                WrongQuestionThread.score_snapshot_id.in_(
+                    {item["_snapshot_uuid"] for item in items}
+                ),
+            )
+        ).all()
+    else:
+        threads = []
+    thread_by_context = {
+        (thread.student_answer_id, thread.score_snapshot_id): thread for thread in threads
+    }
+    review_by_thread = {
+        review.thread_id: review
+        for review in (
+            db.scalars(
+                select(StudentTeacherReviewRequest).where(
+                    StudentTeacherReviewRequest.teacher_id == teacher_id,
+                    StudentTeacherReviewRequest.thread_id.in_({thread.id for thread in threads}),
+                )
+            ).all()
+            if threads
+            else []
+        )
+    }
+    for item in items:
+        answer_uuid = item.pop("_answer_uuid")
+        snapshot_uuid = item.pop("_snapshot_uuid")
+        thread = thread_by_context.get((answer_uuid, snapshot_uuid))
+        review = review_by_thread.get(thread.id) if thread else None
+        item.update(
+            thread_id=str(thread.id) if thread else None,
+            thread_status=thread.status if thread else None,
+            review_request_id=str(review.id) if review else None,
+            review_status=review.status if review else None,
+            review_decision=review.decision if review else None,
+        )
+    return items
+
+
+@router.get("/teacher/wrong-questions", tags=["teacher-practice"])
+def list_teacher_wrong_questions(
+    db: Db,
+    actor: Actor,
+    class_id: Annotated[uuid.UUID | None, Query()] = None,
+    assignment_id: Annotated[uuid.UUID | None, Query()] = None,
+    review_state: Annotated[Literal["all", "not_requested", "open", "closed"], Query()] = "all",
+    search: Annotated[str | None, Query(max_length=120)] = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 30,
+) -> dict[str, Any]:
+    all_items = _teacher_wrong_items(db, actor.id)
+    classes = {
+        item["class_id"]: {"id": item["class_id"], "name": item["class_name"]} for item in all_items
+    }
+    assignments: dict[str, dict[str, Any]] = {}
+    for item in all_items:
+        facet = assignments.setdefault(
+            item["assignment_id"],
+            {
+                "id": item["assignment_id"],
+                "title": item["assignment_title"],
+                "class_ids": set(),
+            },
+        )
+        facet["class_ids"].add(item["class_id"])
+
+    normalized_search = search.strip().casefold() if search else ""
+    filtered: list[dict[str, Any]] = []
+    for item in all_items:
+        if class_id is not None and item["class_id"] != str(class_id):
+            continue
+        if assignment_id is not None and item["assignment_id"] != str(assignment_id):
+            continue
+        review_status = item.get("review_status")
+        closed = review_status in {"resolved", "rejected"}
+        if review_state == "not_requested" and review_status is not None:
+            continue
+        if review_state == "open" and (review_status is None or closed):
+            continue
+        if review_state == "closed" and not closed:
+            continue
+        if normalized_search:
+            searchable = " ".join(
+                str(value or "")
+                for value in (
+                    item["student_name"],
+                    item["student_number"],
+                    item["assignment_title"],
+                    item["question_number"],
+                    item["question_content"],
+                    item["error_type"],
+                    " ".join(item["knowledge_point_ids"]),
+                )
+            ).casefold()
+            if normalized_search not in searchable:
+                continue
+        filtered.append(item)
+
+    total = len(filtered)
+    start = (page - 1) * page_size
+    visible = filtered[start : start + page_size]
+    return {
+        "items": visible,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "pages": (total + page_size - 1) // page_size,
+        "summary": {
+            "total_wrong_questions": total,
+            "affected_students": len({item["student_id"] for item in filtered}),
+            "knowledge_point_count": len(
+                {point for item in filtered for point in item["knowledge_point_ids"] if point}
+            ),
+            "pending_review_count": sum(
+                item.get("review_status") not in {None, "resolved", "rejected"} for item in filtered
+            ),
+        },
+        "facets": {
+            "classes": sorted(classes.values(), key=lambda item: (item["name"], item["id"])),
+            "assignments": sorted(
+                (
+                    {
+                        **item,
+                        "class_ids": sorted(item["class_ids"]),
+                    }
+                    for item in assignments.values()
+                ),
+                key=lambda item: (item["title"], item["id"]),
+            ),
+        },
+    }
+
+
 def _accessible_wrong_item(
     db: Session, actor_id: uuid.UUID, answer_id: uuid.UUID
 ) -> dict[str, Any]:

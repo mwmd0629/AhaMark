@@ -25,31 +25,180 @@ def _timestamps() -> list[sa.Column]:
     ]
 
 
-def upgrade() -> None:
-    with op.batch_alter_table("users") as batch:
-        batch.add_column(
-            sa.Column(
-                "must_change_password",
-                sa.Boolean(),
-                nullable=False,
-                server_default=sa.false(),
+def _column(table: str, name: str) -> dict[str, object] | None:
+    return next(
+        (item for item in sa.inspect(op.get_bind()).get_columns(table) if item["name"] == name),
+        None,
+    )
+
+
+def _ensure_column(table: str, column: sa.Column) -> bool:
+    """Return true when the caller must add ``column`` in its batch block."""
+
+    existing = _column(table, str(column.name))
+    if existing is None:
+        return True
+    if existing["nullable"] != column.nullable:
+        raise RuntimeError(f"incompatible existing column: {table}.{column.name}")
+    actual_type = existing["type"]
+    if (
+        isinstance(column.type, sa.String)
+        and getattr(actual_type, "length", None) != column.type.length
+    ):
+        raise RuntimeError(f"incompatible existing column: {table}.{column.name}")
+    if isinstance(column.type, sa.Boolean) and not isinstance(actual_type, sa.Boolean):
+        raise RuntimeError(f"incompatible existing column: {table}.{column.name}")
+    if isinstance(column.type, sa.Uuid) and op.get_bind().dialect.name != "sqlite":
+        if actual_type._type_affinity is not column.type._type_affinity:
+            raise RuntimeError(f"incompatible existing column: {table}.{column.name}")
+    return False
+
+
+def _has_foreign_key(
+    table: str, columns: list[str], referred_table: str, referred_columns: list[str]
+) -> bool:
+    return any(
+        item["constrained_columns"] == columns
+        and item["referred_table"] == referred_table
+        and item["referred_columns"] == referred_columns
+        for item in sa.inspect(op.get_bind()).get_foreign_keys(table)
+    )
+
+
+def _has_unique(table: str, columns: list[str]) -> bool:
+    return any(
+        item["column_names"] == columns
+        for item in sa.inspect(op.get_bind()).get_unique_constraints(table)
+    )
+
+
+def _has_index(table: str, name: str, columns: list[str]) -> bool:
+    existing = next(
+        (item for item in sa.inspect(op.get_bind()).get_indexes(table) if item["name"] == name),
+        None,
+    )
+    if existing is None:
+        return False
+    if existing["column_names"] != columns or existing["unique"]:
+        raise RuntimeError(f"incompatible existing index: {name}")
+    return True
+
+
+def _upgrade_portal_columns() -> None:
+    must_change_password = sa.Column(
+        "must_change_password",
+        sa.Boolean(),
+        nullable=False,
+        server_default=sa.false(),
+    )
+    submitted_by = sa.Column("submitted_by_user_id", sa.Uuid(), nullable=True)
+    idempotency_key = sa.Column("student_idempotency_key", sa.String(length=128), nullable=True)
+
+    if op.get_context().as_sql:
+        with op.batch_alter_table("users") as batch:
+            batch.add_column(must_change_password)
+        with op.batch_alter_table("submissions") as batch:
+            batch.add_column(submitted_by)
+            batch.add_column(idempotency_key)
+            batch.create_foreign_key(
+                "fk_submissions_submitted_by_user_id_users",
+                "users",
+                ["submitted_by_user_id"],
+                ["id"],
+                ondelete="RESTRICT",
             )
-        )
+            batch.create_unique_constraint(
+                "uq_student_submission_idempotency",
+                ["submitted_by_user_id", "student_idempotency_key"],
+            )
+            batch.create_index("ix_submissions_submitted_by_user_id", ["submitted_by_user_id"])
+        return
+
+    add_password = _ensure_column("users", must_change_password)
+    with op.batch_alter_table("users") as batch:
+        if add_password:
+            batch.add_column(must_change_password)
+
+    add_submitted_by = _ensure_column("submissions", submitted_by)
+    add_idempotency = _ensure_column("submissions", idempotency_key)
+    has_foreign_key = _has_foreign_key("submissions", ["submitted_by_user_id"], "users", ["id"])
+    has_unique = _has_unique("submissions", ["submitted_by_user_id", "student_idempotency_key"])
+    has_index = _has_index(
+        "submissions", "ix_submissions_submitted_by_user_id", ["submitted_by_user_id"]
+    )
     with op.batch_alter_table("submissions") as batch:
-        batch.add_column(sa.Column("submitted_by_user_id", sa.Uuid(), nullable=True))
-        batch.add_column(sa.Column("student_idempotency_key", sa.String(length=128), nullable=True))
-        batch.create_foreign_key(
-            "fk_submissions_submitted_by_user_id_users",
-            "users",
-            ["submitted_by_user_id"],
-            ["id"],
-            ondelete="RESTRICT",
-        )
-        batch.create_unique_constraint(
-            "uq_student_submission_idempotency",
-            ["submitted_by_user_id", "student_idempotency_key"],
-        )
-        batch.create_index("ix_submissions_submitted_by_user_id", ["submitted_by_user_id"])
+        if add_submitted_by:
+            batch.add_column(submitted_by)
+        if add_idempotency:
+            batch.add_column(idempotency_key)
+        if not has_foreign_key:
+            batch.create_foreign_key(
+                "fk_submissions_submitted_by_user_id_users",
+                "users",
+                ["submitted_by_user_id"],
+                ["id"],
+                ondelete="RESTRICT",
+            )
+        if not has_unique:
+            batch.create_unique_constraint(
+                "uq_student_submission_idempotency",
+                ["submitted_by_user_id", "student_idempotency_key"],
+            )
+        if not has_index:
+            batch.create_index("ix_submissions_submitted_by_user_id", ["submitted_by_user_id"])
+
+
+def _downgrade_portal_columns() -> None:
+    if op.get_context().as_sql:
+        with op.batch_alter_table("submissions") as batch:
+            batch.drop_index("ix_submissions_submitted_by_user_id")
+            batch.drop_constraint("uq_student_submission_idempotency", type_="unique")
+            batch.drop_constraint("fk_submissions_submitted_by_user_id_users", type_="foreignkey")
+            batch.drop_column("student_idempotency_key")
+            batch.drop_column("submitted_by_user_id")
+        with op.batch_alter_table("users") as batch:
+            batch.drop_column("must_change_password")
+        return
+
+    inspector = sa.inspect(op.get_bind())
+    submission_columns = {item["name"] for item in inspector.get_columns("submissions")}
+    index_names = {item["name"] for item in inspector.get_indexes("submissions")}
+    unique_name = next(
+        (
+            item["name"]
+            for item in inspector.get_unique_constraints("submissions")
+            if item["column_names"] == ["submitted_by_user_id", "student_idempotency_key"]
+            and item["name"]
+        ),
+        None,
+    )
+    foreign_key_name = next(
+        (
+            item["name"]
+            for item in inspector.get_foreign_keys("submissions")
+            if item["constrained_columns"] == ["submitted_by_user_id"] and item["name"]
+        ),
+        None,
+    )
+    with op.batch_alter_table("submissions") as batch:
+        if "ix_submissions_submitted_by_user_id" in index_names:
+            batch.drop_index("ix_submissions_submitted_by_user_id")
+        if unique_name:
+            batch.drop_constraint(unique_name, type_="unique")
+        if foreign_key_name:
+            batch.drop_constraint(foreign_key_name, type_="foreignkey")
+        if "student_idempotency_key" in submission_columns:
+            batch.drop_column("student_idempotency_key")
+        if "submitted_by_user_id" in submission_columns:
+            batch.drop_column("submitted_by_user_id")
+
+    if _column("users", "must_change_password") is not None:
+        with op.batch_alter_table("users") as batch:
+            batch.drop_column("must_change_password")
+
+
+def upgrade() -> None:
+    _upgrade_portal_columns()
 
     op.create_table(
         "student_account_links",
@@ -315,11 +464,4 @@ def downgrade() -> None:
         "student_account_links",
     ):
         op.drop_table(name)
-    with op.batch_alter_table("submissions") as batch:
-        batch.drop_index("ix_submissions_submitted_by_user_id")
-        batch.drop_constraint("uq_student_submission_idempotency", type_="unique")
-        batch.drop_constraint("fk_submissions_submitted_by_user_id_users", type_="foreignkey")
-        batch.drop_column("student_idempotency_key")
-        batch.drop_column("submitted_by_user_id")
-    with op.batch_alter_table("users") as batch:
-        batch.drop_column("must_change_password")
+    _downgrade_portal_columns()

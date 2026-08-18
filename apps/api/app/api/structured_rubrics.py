@@ -10,6 +10,7 @@ from app.db.session import get_db
 from app.math_validation.stale import stale_for_question
 from app.models import (
     Assignment,
+    AssignmentClass,
     PaperVersion,
     Question,
     ReferenceAnswerVersion,
@@ -18,9 +19,9 @@ from app.models import (
     now_utc,
 )
 from app.rubrics.validation import validate_rubric
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/api", tags=["structured-rubrics"])
@@ -236,6 +237,98 @@ def _rubric_json(db: Session, item: StructuredRubricVersion) -> dict[str, Any]:
             }
             for c in criteria
         ],
+    }
+
+
+@router.get("/structured-rubrics")
+def rubric_catalog(
+    db: Db,
+    actor: Actor,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=50),
+    search: str = Query("", max_length=100),
+    status: Literal["draft", "confirmed", "retired"] | None = None,
+    class_id: uuid.UUID | None = None,
+    subject: str | None = Query(None, max_length=80),
+) -> dict[str, Any]:
+    filters: list[Any] = [Assignment.owner_id == actor.id]
+    normalized_search = search.strip()
+    if normalized_search:
+        pattern = f"%{normalized_search}%"
+        filters.append(
+            or_(
+                StructuredRubricVersion.title.ilike(pattern),
+                Assignment.title.ilike(pattern),
+                Question.question_number.ilike(pattern),
+                Question.content_text.ilike(pattern),
+            )
+        )
+    if status is not None:
+        filters.append(StructuredRubricVersion.status == status)
+    if subject is not None:
+        filters.append(Assignment.subject == subject)
+    if class_id is not None:
+        filters.append(
+            Assignment.id.in_(
+                select(AssignmentClass.assignment_id).where(
+                    AssignmentClass.class_id == class_id
+                )
+            )
+        )
+
+    joined = (
+        select(StructuredRubricVersion, Question, Assignment)
+        .join(Question, Question.id == StructuredRubricVersion.question_id)
+        .join(PaperVersion, PaperVersion.id == Question.paper_version_id)
+        .join(Assignment, Assignment.id == PaperVersion.assignment_id)
+        .where(*filters)
+    )
+    total = (
+        db.scalar(
+            select(func.count(StructuredRubricVersion.id))
+            .select_from(StructuredRubricVersion)
+            .join(Question, Question.id == StructuredRubricVersion.question_id)
+            .join(PaperVersion, PaperVersion.id == Question.paper_version_id)
+            .join(Assignment, Assignment.id == PaperVersion.assignment_id)
+            .where(*filters)
+        )
+        or 0
+    )
+    rows = db.execute(
+        joined.order_by(
+            StructuredRubricVersion.created_at.desc(), StructuredRubricVersion.id.desc()
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return {
+        "items": [
+            {
+                "rubric": _rubric_json(db, rubric),
+                "created_at": rubric.created_at,
+                "confirmed_at": rubric.confirmed_at,
+                "assignment": {
+                    "id": str(assignment.id),
+                    "title": assignment.title,
+                    "subject": assignment.subject,
+                    "grade": assignment.grade,
+                    "status": assignment.status,
+                },
+                "question": {
+                    "id": str(question.id),
+                    "question_number": question.question_number,
+                    "content_text": (question.content_text or "")[:500],
+                    "max_score": (
+                        str(question.max_score) if question.max_score is not None else None
+                    ),
+                },
+            }
+            for rubric, question, assignment in rows
+        ],
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "pages": (total + page_size - 1) // page_size,
     }
 
 

@@ -255,6 +255,21 @@ export type AuthUser = {
   landing_surface:
     "teacher" | "student" | "change_password" | "account_unavailable";
 };
+export type TeacherPreferences = {
+  profile: { display_name: string; email: string };
+  preferences: {
+    default_class_id: string | null;
+    rubric_status_filter: "all" | "draft" | "confirmed" | "retired";
+    rubric_page_size: 10 | 20 | 50;
+    compact_rubric_cards: boolean;
+  };
+  revision: number;
+  updated_at: string | null;
+  server_managed: {
+    external_ai_enabled: boolean;
+    ai_configuration_editable: false;
+  };
+};
 export const authApi = {
   login: (email: string, password: string) =>
     request<AuthUser>("/auth/login", {
@@ -269,6 +284,16 @@ export const authApi = {
         current_password: currentPassword,
         new_password: newPassword,
       }),
+    }),
+  preferences: () => request<TeacherPreferences>("/auth/preferences"),
+  updatePreferences: (data: {
+    expected_revision: number;
+    display_name: string;
+    preferences: TeacherPreferences["preferences"];
+  }) =>
+    request<TeacherPreferences>("/auth/preferences", {
+      method: "PUT",
+      body: JSON.stringify(data),
     }),
   logout: () => request<void>("/auth/logout", { method: "POST" }),
 };
@@ -1400,6 +1425,25 @@ export type StructuredRubric = {
   criteria: StructuredCriterion[];
 };
 
+export type RubricCatalogRecord = {
+  rubric: StructuredRubric;
+  created_at: string;
+  confirmed_at: string | null;
+  assignment: {
+    id: string;
+    title: string;
+    subject?: string;
+    grade?: string;
+    status: AssignmentStatus;
+  };
+  question: {
+    id: string;
+    question_number: string;
+    content_text: string;
+    max_score?: string | null;
+  };
+};
+
 export type ReferenceAnswerVersion = {
   id: string;
   question_id: string;
@@ -1419,6 +1463,10 @@ export type ReferenceAnswerVersion = {
 };
 
 export const structuredRubricApi = {
+  catalog: (query = "") =>
+    request<Page<RubricCatalogRecord>>(
+      `/api/structured-rubrics${query ? `?${query}` : ""}`,
+    ),
   references: (questionId: string) =>
     request<ReferenceAnswerVersion[]>(
       `/api/questions/${questionId}/reference-answers`,
