@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import base64
 import binascii
-import ipaddress
 import json
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, TypeVar
@@ -21,6 +19,7 @@ from app.assignment_generation.answer_rubric import (
 from app.assignment_generation.question_extraction import ExtractionOutput
 from app.assignment_generation.schemas import FileAnalysisOutput, MetadataProviderOutput
 from app.core.config import Settings
+from app.core.provider_endpoints import ProviderEndpointError, safe_provider_base_url
 from app.recognition.text_integrity import CHARACTER_ENCODING_CORRUPTION_DETECTED
 
 StageName = Literal[
@@ -128,22 +127,22 @@ class DeterministicFakeAssignmentGenerationProvider:
         )
 
 
-def _safe_base_url(value: str, *, allow_private_for_tests: bool) -> str:
-    parsed = urllib.parse.urlsplit(value)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-        raise ValueError("provider_endpoint_not_allowed")
-    host = parsed.hostname.rstrip(".").lower()
-    if host in {"localhost", "localhost.localdomain", "metadata.google.internal"}:
-        raise ValueError("provider_endpoint_not_allowed")
+def _safe_base_url(value: str, settings: Settings) -> str:
     try:
-        address = ipaddress.ip_address(host)
-    except ValueError:
-        address = None
-    if address is not None and not address.is_global and not allow_private_for_tests:
-        raise ValueError("provider_endpoint_not_allowed")
-    if host.endswith((".local", ".internal", ".localhost")) and not allow_private_for_tests:
-        raise ValueError("provider_endpoint_not_allowed")
-    return value.rstrip("/")
+        return safe_provider_base_url(
+            value,
+            allow_external_https=settings.assignment_generation_allow_external_provider_requests,
+            allow_local_http=(
+                settings.assignment_generation_allow_local_provider_requests
+                or (
+                    settings.app_env.lower() == "test"
+                    and settings.assignment_generation_allow_private_base_url_for_tests
+                )
+            ),
+            allowed_local_hosts=settings.assignment_generation_allowed_local_hosts,
+        )
+    except ProviderEndpointError as exc:
+        raise ValueError("provider_endpoint_not_allowed") from exc
 
 
 def _decode_image_size(data_url: str) -> int:
@@ -173,6 +172,19 @@ def _output_text(envelope: dict[str, Any]) -> str:
     raise ValueError("provider_empty_response")
 
 
+def _chat_output_text(envelope: dict[str, Any]) -> str:
+    choices = envelope.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise ValueError("provider_empty_response")
+    message = choices[0].get("message")
+    if not isinstance(message, dict):
+        raise ValueError("provider_empty_response")
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("provider_empty_response")
+    return content
+
+
 class OpenAICompatibleAssignmentGenerationProvider:
     name, endpoint_mode = "openai_compatible", "responses"
 
@@ -192,13 +204,7 @@ class OpenAICompatibleAssignmentGenerationProvider:
         ):
             return self._reject("provider_configuration_incomplete")
         try:
-            base_url = _safe_base_url(
-                self.s.assignment_generation_base_url,
-                allow_private_for_tests=(
-                    self.s.app_env.lower() == "test"
-                    and self.s.assignment_generation_allow_private_base_url_for_tests
-                ),
-            )
+            base_url = _safe_base_url(self.s.assignment_generation_base_url, self.s)
         except ValueError:
             return self._reject("provider_endpoint_not_allowed")
 
@@ -246,24 +252,49 @@ class OpenAICompatibleAssignmentGenerationProvider:
             for image in images
         )
         model_class = STAGE_MODELS[stage]
-        body = {
-            "model": self.s.assignment_generation_model,
-            "instructions": SYSTEM_PROMPT,
-            "input": [{"role": "user", "content": content}],
-            "text": {
-                "format": {
+        local_mode = self.s.assignment_generation_provider == "local_openai_compatible"
+        if local_mode and images:
+            return self._reject("local_text_model_image_input_unsupported")
+        if local_mode:
+            body = {
+                "model": self.s.assignment_generation_model,
+                "temperature": 0,
+                "chat_template_kwargs": {"enable_thinking": False},
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": content[0]["text"]},
+                ],
+                "response_format": {
                     "type": "json_schema",
-                    "name": f"assignment_generation_{stage}",
-                    "strict": True,
-                    "schema": model_class.model_json_schema(),
-                }
-            },
-            "max_output_tokens": self.s.assignment_generation_max_output_tokens,
-            "store": False,
-        }
+                    "json_schema": {
+                        "name": f"assignment_{stage}",
+                        "strict": True,
+                        "schema": model_class.model_json_schema(),
+                    },
+                },
+                "max_tokens": self.s.assignment_generation_max_output_tokens,
+            }
+            endpoint = base_url + "/chat/completions"
+        else:
+            body = {
+                "model": self.s.assignment_generation_model,
+                "instructions": SYSTEM_PROMPT,
+                "input": [{"role": "user", "content": content}],
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": f"assignment_generation_{stage}",
+                        "strict": True,
+                        "schema": model_class.model_json_schema(),
+                    }
+                },
+                "max_output_tokens": self.s.assignment_generation_max_output_tokens,
+                "store": False,
+            }
+            endpoint = base_url + "/responses"
         request_hash = canonical_hash({"stage": stage, "body": body})
         request = urllib.request.Request(
-            base_url + "/responses",
+            endpoint,
             data=json.dumps(body).encode("utf-8"),
             headers={
                 "Authorization": "Bearer " + self.s.assignment_generation_api_key,
@@ -279,11 +310,13 @@ class OpenAICompatibleAssignmentGenerationProvider:
                 ) as response:
                     envelope = json.loads(response.read())
                     request_id = response.headers.get("x-request-id") or envelope.get("id")
-                raw = json.loads(_output_text(envelope))
+                raw = json.loads(
+                    _chat_output_text(envelope) if local_mode else _output_text(envelope)
+                )
                 output = model_class.model_validate(raw)
                 usage = envelope.get("usage") or {}
-                input_tokens = usage.get("input_tokens")
-                output_tokens = usage.get("output_tokens")
+                input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
+                output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
                 cost = None
                 if isinstance(input_tokens, int) and isinstance(output_tokens, int):
                     cost = (
@@ -379,7 +412,7 @@ def select_provider(settings: Settings, requested: str | None = None) -> Provide
     mode = requested or settings.assignment_generation_provider
     if mode == "codex_local":
         return ProviderSelection("codex_local", "internal_work_queue", True, None)
-    if mode not in {"unavailable", "fake", "openai_compatible"}:
+    if mode not in {"unavailable", "fake", "openai_compatible", "local_openai_compatible"}:
         mode = "unavailable"
     if mode == "fake" and settings.app_env != "test":
         return ProviderSelection(
@@ -403,12 +436,29 @@ def select_provider(settings: Settings, requested: str | None = None) -> Provide
             configured,
             None if configured else "PROVIDER_CONFIGURATION_INCOMPLETE",
         )
+    if mode == "local_openai_compatible":
+        if not settings.assignment_generation_allow_local_provider_requests:
+            return ProviderSelection(
+                "unavailable", "disabled", False, "PROVIDER_LOCAL_REQUESTS_DISABLED"
+            )
+        configured = bool(
+            settings.assignment_generation_base_url
+            and settings.assignment_generation_api_key
+            and settings.assignment_generation_model
+            and settings.assignment_generation_allowed_local_hosts
+        )
+        return ProviderSelection(
+            "local_openai_compatible",
+            "chat_completions",
+            configured,
+            None if configured else "PROVIDER_CONFIGURATION_INCOMPLETE",
+        )
     return ProviderSelection("unavailable", "unavailable", False, "PROVIDER_UNAVAILABLE")
 
 
 def provider_from_settings(settings: Settings) -> AssignmentGenerationProvider:
     selection = select_provider(settings)
-    if selection.name == "openai_compatible" and selection.available:
+    if selection.name in {"openai_compatible", "local_openai_compatible"} and selection.available:
         return OpenAICompatibleAssignmentGenerationProvider(settings)
     if selection.name == "fake" and selection.available:
         return DeterministicFakeAssignmentGenerationProvider()

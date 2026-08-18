@@ -78,6 +78,7 @@ class Settings(BaseSettings):
     formula_recognition_max_pixels: int = Field(default=8_000_000, ge=1, le=40_000_000)
     formula_recognition_max_candidates: int = Field(default=5, ge=1, le=10)
     formula_recognition_config_version: str = "formula-recognition-v1"
+    formula_recognition_allow_local_http: bool = False
     formula_region_detection_enabled: bool = False
     formula_region_detection_model_download_allowed: bool = False
     answer_recognition_provider: str = "unavailable"
@@ -89,17 +90,26 @@ class Settings(BaseSettings):
     answer_recognition_margin_pixels: int = 12
     answer_recognition_config_version: str = "answer-evidence-v1"
     grading_provider: str = "unavailable"
+    grading_allow_external_provider_requests: bool = False
+    grading_allow_local_provider_requests: bool = False
+    grading_allowed_local_hosts: list[str] = []
     grading_base_url: str | None = None
     grading_api_key: str | None = None
     grading_model: str | None = None
     grading_timeout_seconds: float = 30.0
+    grading_max_output_tokens: int = Field(default=4000, ge=128, le=8000)
     grading_prompt_version: str = "subjective-v1"
     grading_config_version: str = "2026-07-22"
     grading_auto_accept_confidence: float = 0.95
     ai_grading_provider: str = "unavailable"
+    ai_grading_allow_external_provider_requests: bool = False
+    ai_grading_allow_local_provider_requests: bool = False
+    ai_grading_allowed_local_hosts: list[str] = []
     assignment_generation_enabled: bool = True
     assignment_generation_provider: str = "unavailable"
     assignment_generation_allow_external_provider_requests: bool = False
+    assignment_generation_allow_local_provider_requests: bool = False
+    assignment_generation_allowed_local_hosts: list[str] = []
     assignment_generation_allow_teacher_start: bool = True
     assignment_generation_suggestion_only: bool = True
     assignment_generation_real_provider_quality_passed: bool = False
@@ -281,14 +291,50 @@ class Settings(BaseSettings):
                 )
             if not self.formula_recognition_allowed_hosts:
                 errors.append("FORMULA_RECOGNITION_ALLOWED_HOSTS is required")
+            if self.formula_recognition_allow_local_http and not any(
+                self.formula_recognition_allowed_hosts
+            ):
+                errors.append("local formula provider requires an allowed host")
         if self.answer_recognition_provider.lower() == "fake":
             errors.append("ANSWER_RECOGNITION_PROVIDER cannot be fake")
         if self.grading_provider.lower() == "fake":
             errors.append("GRADING_PROVIDER cannot be fake")
+        if self.grading_provider.lower() == "local_openai_compatible":
+            if not self.grading_allow_local_provider_requests:
+                errors.append("local GRADING_PROVIDER requests must be explicitly enabled")
+            if not self.grading_allowed_local_hosts:
+                errors.append("local GRADING_PROVIDER requires an allowed host")
+            if not self.grading_base_url or not self.grading_model:
+                errors.append("local GRADING_PROVIDER configuration is incomplete")
+            if not self.grading_api_key or len(self.grading_api_key) < 32:
+                errors.append("local GRADING_PROVIDER API key must be at least 32 characters")
         if self.ai_grading_provider.lower() == "fake":
             errors.append("AI_GRADING_PROVIDER cannot be fake")
+        if self.ai_grading_provider.lower() == "local_openai_compatible":
+            if not self.ai_grading_allow_local_provider_requests:
+                errors.append("local AI_GRADING_PROVIDER requests must be explicitly enabled")
+            if not self.ai_grading_allowed_local_hosts:
+                errors.append("local AI_GRADING_PROVIDER requires an allowed host")
+            if not self.ai_grading_base_url or not self.ai_grading_model:
+                errors.append("local AI_GRADING_PROVIDER configuration is incomplete")
+            if not self.ai_grading_api_key or len(self.ai_grading_api_key) < 32:
+                errors.append("local AI_GRADING_PROVIDER API key must be at least 32 characters")
         if self.assignment_generation_provider.lower() == "fake":
             errors.append("ASSIGNMENT_GENERATION_PROVIDER cannot be fake")
+        if self.assignment_generation_provider.lower() == "local_openai_compatible":
+            if not self.assignment_generation_allow_local_provider_requests:
+                errors.append("local ASSIGNMENT_GENERATION_PROVIDER requests must be enabled")
+            if not self.assignment_generation_allowed_local_hosts:
+                errors.append("local ASSIGNMENT_GENERATION_PROVIDER requires an allowed host")
+            if not self.assignment_generation_base_url or not self.assignment_generation_model:
+                errors.append("local ASSIGNMENT_GENERATION_PROVIDER configuration is incomplete")
+            if (
+                not self.assignment_generation_api_key
+                or len(self.assignment_generation_api_key) < 32
+            ):
+                errors.append(
+                    "local ASSIGNMENT_GENERATION_PROVIDER API key must be at least 32 characters"
+                )
         if not self.assignment_generation_suggestion_only:
             errors.append("ASSIGNMENT_GENERATION_SUGGESTION_ONLY must be true")
         if self.session_hmac_secret.lower() in weak or len(self.session_hmac_secret) < 32:

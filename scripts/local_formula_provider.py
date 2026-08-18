@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import os
+import re
 import secrets
 import threading
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Protocol
@@ -17,6 +21,15 @@ PROVIDER_VERSION = "paddleocr-3.7.0-paddle-3.3.1-PP-FormulaNet-plus-M"
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_IMAGE_PIXELS = 8_000_000
 ALLOWED_REGION_KINDS = {"inline", "display", "unknown"}
+FORMULA_BUNDLE_SCHEMA_VERSION = "ahamark-formula-bundle-v1"
+REQUIRED_MODEL_FILES = {"inference.json", "inference.pdiparams", "inference.yml"}
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True)
+class FormulaBundle:
+    root: Path
+    identities: dict[str, tuple[int, int, int]]
 
 
 class FormulaModel(Protocol):
@@ -25,7 +38,7 @@ class FormulaModel(Protocol):
 
 class PaddleFormulaModel:
     def __init__(self, model_dir: Path) -> None:
-        from paddleocr import FormulaRecognition
+        from paddleocr import FormulaRecognition  # type: ignore[import-not-found]
 
         self._model = FormulaRecognition(
             model_name="PP-FormulaNet_plus-M",
@@ -51,15 +64,83 @@ def _model_dir() -> Path:
     if not raw:
         raise RuntimeError("AHAMARK_FORMULA_MODEL_DIR is required")
     path = Path(raw).resolve()
-    required = {"inference.json", "inference.pdiparams", "inference.yml"}
-    if not path.is_dir() or not required.issubset(item.name for item in path.iterdir()):
+    if not path.is_dir() or not REQUIRED_MODEL_FILES.issubset(
+        item.name for item in path.iterdir()
+    ):
         raise RuntimeError("AHAMARK_FORMULA_MODEL_DIR does not contain a complete model")
     return path
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+@lru_cache(maxsize=1)
+def validate_formula_bundle() -> FormulaBundle:
+    root = _model_dir()
+    manifest_path = root / "manifest.json"
+    expected_manifest_sha = os.environ.get("AHAMARK_FORMULA_MANIFEST_SHA256", "").lower()
+    if not _SHA256.fullmatch(expected_manifest_sha):
+        raise RuntimeError("AHAMARK_FORMULA_MANIFEST_SHA256 is required")
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise RuntimeError("formula model manifest is missing or unsafe")
+    if _sha256(manifest_path) != expected_manifest_sha:
+        raise RuntimeError("formula model manifest hash mismatch")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("formula model manifest is invalid") from exc
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != FORMULA_BUNDLE_SCHEMA_VERSION
+    ):
+        raise RuntimeError("formula model manifest schema is invalid")
+    files = manifest.get("files")
+    if not isinstance(files, list) or len(files) != len(REQUIRED_MODEL_FILES):
+        raise RuntimeError("formula model manifest file list is invalid")
+    identities: dict[str, tuple[int, int, int]] = {}
+    seen: set[str] = set()
+    for item in files:
+        if not isinstance(item, dict):
+            raise RuntimeError("formula model manifest entry is invalid")
+        name, size, expected_sha = item.get("path"), item.get("size"), item.get("sha256")
+        if name not in REQUIRED_MODEL_FILES or name in seen:
+            raise RuntimeError("formula model manifest path is invalid")
+        if not isinstance(size, int) or size <= 0 or not isinstance(expected_sha, str):
+            raise RuntimeError("formula model manifest identity is invalid")
+        if not _SHA256.fullmatch(expected_sha):
+            raise RuntimeError("formula model manifest hash is invalid")
+        seen.add(name)
+        path = root / name
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError("formula model file is missing or unsafe")
+        stat = path.stat()
+        if stat.st_size != size or _sha256(path) != expected_sha:
+            raise RuntimeError("formula model file identity mismatch")
+        identities[name] = (stat.st_size, stat.st_mtime_ns, stat.st_ino)
+    if seen != REQUIRED_MODEL_FILES:
+        raise RuntimeError("formula model manifest is incomplete")
+    return FormulaBundle(root, identities)
+
+
+def verify_formula_bundle_identity(bundle: FormulaBundle) -> None:
+    for name, expected in bundle.identities.items():
+        path = bundle.root / name
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError("formula model file identity changed")
+        stat = path.stat()
+        if (stat.st_size, stat.st_mtime_ns, stat.st_ino) != expected:
+            raise RuntimeError("formula model file identity changed")
+
+
 @lru_cache(maxsize=1)
 def get_model() -> FormulaModel:
-    return PaddleFormulaModel(_model_dir())
+    bundle = validate_formula_bundle()
+    return PaddleFormulaModel(bundle.root)
 
 
 def _extract_latex(result: object) -> str:
@@ -89,6 +170,7 @@ def ready(authorization: Annotated[str | None, Header()] = None) -> dict[str, st
     if authorization is None or not secrets.compare_digest(authorization, expected):
         raise HTTPException(status_code=401, detail="invalid provider credentials")
     get_model()
+    verify_formula_bundle_identity(validate_formula_bundle())
     return {
         "status": "ready",
         "provider": PROVIDER_NAME,
@@ -113,15 +195,16 @@ def recognize(
     if not content or len(content) > MAX_IMAGE_BYTES:
         raise HTTPException(status_code=413, detail="formula crop exceeds the size limit")
     try:
-        image = Image.open(io.BytesIO(content))
-        image.load()
-        image = image.convert("RGB")
+        with Image.open(io.BytesIO(content)) as source:
+            source.load()
+            image = source.convert("RGB")
     except (UnidentifiedImageError, OSError) as exc:
         raise HTTPException(status_code=422, detail="invalid formula crop") from exc
     if image.width * image.height > MAX_IMAGE_PIXELS:
         raise HTTPException(status_code=413, detail="formula crop exceeds the pixel limit")
 
     try:
+        verify_formula_bundle_identity(validate_formula_bundle())
         model_input = np.asarray(image, dtype=np.uint8)
         results = list(get_model().predict(model_input, batch_size=1))
     except Exception as exc:

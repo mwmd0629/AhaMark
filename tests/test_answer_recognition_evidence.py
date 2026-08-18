@@ -70,11 +70,15 @@ def test_fake_answer_provider_is_available_only_in_test(
 def prepared(*, two_regions: bool = False) -> tuple[object, object, uuid.UUID, StudentAnswer]:
     db, storage, _batch_id, submission_id, _question_id = workflow()
     settings = get_settings()
+    previous_recognition_provider = settings.recognition_provider
     settings.recognition_provider = "fake"
-    processing = client.post(
-        f"/api/submissions/{submission_id}/processing-jobs?run_now=true",
-        json={"idempotency_key": f"prepare-{uuid.uuid4()}"},
-    )
+    try:
+        processing = client.post(
+            f"/api/submissions/{submission_id}/processing-jobs?run_now=true",
+            json={"idempotency_key": f"prepare-{uuid.uuid4()}"},
+        )
+    finally:
+        settings.recognition_provider = previous_recognition_provider
     assert processing.status_code == 201, processing.text
     answer = db.scalar(select(StudentAnswer).where(StudentAnswer.submission_id == submission_id))
     assert answer is not None

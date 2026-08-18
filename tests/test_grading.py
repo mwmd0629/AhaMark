@@ -139,6 +139,7 @@ def configured_provider() -> OpenAICompatibleGradingProvider:
         Settings(
             app_env="test",
             grading_provider="openai_compatible",
+            grading_allow_external_provider_requests=True,
             grading_base_url="https://provider.invalid/v1",
             grading_api_key="test-only",
             grading_model="test-model",

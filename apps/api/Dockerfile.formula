@@ -1,0 +1,25 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+
+WORKDIR /app
+RUN groupadd --system ahamark && useradd --system --gid ahamark --home /app ahamark
+COPY pyproject.toml ./
+COPY apps/api/app ./apps/api/app
+COPY workers ./workers
+COPY scripts/local_formula_provider.py ./scripts/local_formula_provider.py
+RUN python -m pip install --no-cache-dir ".[formula]" \
+    && chown -R ahamark:ahamark /app
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends libgl1 libglib2.0-0 libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PADDLE_PDX_CACHE_HOME=/tmp/paddlex \
+    XDG_CACHE_HOME=/tmp/cache
+
+USER ahamark
+EXPOSE 8765
+CMD ["python", "-m", "uvicorn", "scripts.local_formula_provider:app", "--host", "0.0.0.0", "--port", "8765", "--no-access-log", "--no-server-header"]

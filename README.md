@@ -30,7 +30,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 | 应用基线          | `9b129bc43961d296642b6fcb6cb461907f70a367`；后续 README 与合并门禁修复不改变运行逻辑                         |
 | 远端状态          | 本地与 `origin/codex/integrate-question-page-cutter` 为 `0 ahead / 0 behind`                                 |
 | 数据库迁移        | Alembic 单 head：`0049_usernames`                                                                            |
-| 最新开发          | `789a59d` production-safe RapidOCR 固定 bundle 已提交并推送；node2 受保护部署未通过，未上线                  |
+| 最新开发          | 全离线公式 OCR 与本地 Qwen 建议服务正在本分支验证；尚未提交、上传或部署，node2 仍保持旧版                 |
 | node2 在线版本    | API/Web/Worker 为 `5eda608`，schema 为 `0048_class_resources`；旧邮箱登录和文字 OCR available                |
 | node2 入口        | `https://222.195.89.236:13300`；自签名证书；公网可达，无来源白名单                                           |
 | 部署范围          | 只发布 Nginx `0.0.0.0:13300 -> 8443`；数据库、Redis、MinIO、API、Web、Worker、Docker socket 均无宿主发布端口 |
@@ -38,6 +38,10 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 | GitHub 合作者任务 | 已交由另一 Codex 任务处理；本任务不继续合并候选代码                                                          |
 
 ### 当前开发事实
+
+2026-08-18 用户要求由 Codex 全程完成、不接第三方在线 Provider，并授权继续开发。当前工作树已接入两个只在 `local-ai` Compose profile 中启用的内网服务：固定 `PaddlePaddle/PP-FormulaNet_plus-M` 公式模型（revision `712e6e2e4c313b1ea163be5c350127b82662c58d`）和固定 `Qwen/Qwen3-4B-GGUF` 的 `Qwen3-4B-Q4_K_M.gguf`，由官方 llama.cpp CPU server 提供 OpenAI-compatible JSON Schema 接口。两者均不发布宿主端口，运行时不下载模型，模型卷只读；应用只允许显式 host allowlist 的 Compose HTTP，拒绝 IP、metadata host、localhost 和未授权外部端点。评分、Stage 4 AI grading 与作业生成只产出 suggestion，继续要求教师复核，外部 Provider 请求在 node2 Compose 中固定关闭。
+
+模型获取脚本只接受新建或空目录，固定 URL、revision、大小和 SHA-256，下载到 `.part` 后验签再发布。公式三文件 SHA-256 分别为 `8333a7f650766a748e273c550d278601dd19dfeee1c4b01038ff632f134d9884`、`f16ef9b5c8227da70d3ec969a5195f4d62c1154427b883f4d6cff07633654041`、`87b5f3d7f2b2fe553627d77b37f496608ca150ebd0ef62d362591edca47b5538`，生成清单 SHA-256 为 `19bb16d0ba17771ce24dfce716d9f10f80c3df626ecc9b960283e28810190018`；Qwen GGUF SHA-256 为 `7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5`。本地固定资产获取已通过。公式候选镜像在 `--network none`、只读根文件系统和只读模型挂载下 readiness 为 200，合成公式图片经真实 HTTP 推理返回 LaTeX 候选并带 `UNCALIBRATED_CONFIDENCE`、`TEACHER_REVIEW_REQUIRED`；这不是准确率。固定 digest `ghcr.io/ggml-org/llama.cpp:server@sha256:092d1291f2bcf59ff727fa3af855fb9bd4759d6bff860f6fbfd5e3e377e12625` 在同样无外网条件下加载 Qwen，健康检查为 200，显式关闭 Qwen3 thinking 后 JSON Schema 请求成功，实测容器内存约 2.35 GiB。全仓 Ruff、strict mypy（128 个源文件）、Compose 默认/`local-ai` 双配置通过；全部 120 个后端测试文件按固定排序分为三个独立 TEMP/数据库组，合计 `1062 passed, 19 skipped`（1081 项）、零失败，三组均为 `ahamark.db unchanged`。前端 Prettier、ESLint、TypeScript、`38 files / 234 tests` 与 production build 19 页通过，只有不阻断构建的既有 SWC lockfile 修补警告。node2 硬件清单 SSH 在认证前被远端关闭，尚未取得；本段功能尚未提交、上传或部署，node2 三项 Provider 状态没有改变。
 
 2026-08-18 已获用户授权自主完成后续开发与部署。production-safe RapidOCR bundle 接线已经完成本地开发和验证：默认 API 镜像继续关闭 OCR，node2 专用 `Dockerfile.rapidocr` 固定 `rapidocr==3.9.2`、`onnxruntime==1.28.0`，并把 wheel 内三份 ONNX 复制到固定目录；清单固定模型路径、大小、SHA-256、运行时版本、bundle/license approval UUID，清单 SHA-256 为 `f84336fc78cb51cd0ee223ee3c04158eb2f968af6fa8ffd31051b821f843ff5b`，NOTICE 明确仅批准本地印刷体文字 OCR。运行时下载仍被配置和代码双重禁止，启动/readiness 校验清单与模型，推理前再次检查文件身份，异常稳定 fail-closed。node2 Compose 的启用参数来自 `runtime.env` 且默认关闭，旧 `runtime.env` 与 `5eda608` 回滚路径保持兼容。
 
@@ -106,10 +110,11 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 3. 公网端口无来源限制；若后续恢复“仅校园网”目标，需要由 iKuai/防火墙实施边界并做内外双向实测。
 4. 私有 OCR/Gold 的两页修复输出位于仓库外，未合并或覆盖原 60 页草稿；保持暂停。
 5. 真实 OCR、手写、公式、复杂版面和真实 Provider 质量没有生产证据。
+6. 全离线公式 OCR 与本地 Qwen 候选服务已完成本地链路验证，但 node2 容量尚未只读确认，代码尚未提交，模型和镜像尚未上传，线上仍为 unavailable。部署前必须取得内存、CPU、磁盘清单并验证至少 8 GiB 可用内存和足够 Docker/模型空间；不满足则保持 unavailable，不以 swap 强行上线。
 
 ### 下一步顺序
 
-下一步不得直接重复本轮 SSH 管道脚本。先把部署流程整理为带固定 SHA-256、LF 换行、逐命令返回码和持久化非秘密阶段日志的服务器文件工件，在不停止服务的前提下完成全部 image-validation dry-run；只有 dry-run 全绿后，才重新增量备份当前 `5eda608 + 0048`，执行 `0048 -> 0049`、滚动切换 API-A/B、Worker、Web、Nginx，并验证公网 `/`、`/health`、`/ready`、用户名登录界面和无网络合成文字 OCR。任一硬门禁失败即恢复旧配置、`5eda608` 与 0048 备份。
+下一步先完成全仓测试、严格类型检查、镜像固定与 Git 提交推送；随后仅用一次可见 SSH 会话只读取得 node2 CPU/内存/磁盘，并在容量满足时上传已验签模型和带提交哈希的 API/Web/Formula/llama.cpp 镜像归档。不得直接重复旧 SSH 管道脚本。部署流程必须使用带固定 SHA-256、LF 换行、逐命令返回码和持久化非秘密阶段日志的服务器文件工件，在不停止服务的前提下完成全部 image-validation dry-run；只有 dry-run 全绿后，才重新增量备份当前 `5eda608 + 0048`，执行 `0048 -> 0049`、滚动切换 API-A/B、Worker、Web、Nginx 与内部 local-ai 服务，并验证公网 `/`、`/health`、`/ready`、用户名登录界面、无网络合成文字/公式 OCR 和本地 JSON Schema 建议。任一硬门禁失败即恢复旧配置、`5eda608` 与 0048 备份；Provider 质量没有真实证据时仍只能作为需教师确认的建议。
 
 ## 产品能力与边界
 

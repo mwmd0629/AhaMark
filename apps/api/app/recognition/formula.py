@@ -10,6 +10,7 @@ import httpx
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps, ImageStat, UnidentifiedImageError
 
 from app.core.config import Settings
+from app.core.provider_endpoints import ProviderEndpointError, safe_provider_base_url
 from app.recognition.pipeline import PageArtifact, RecognitionError
 
 FORMULA_EVAL_SCHEMA_VERSION = "formula-ocr-eval-v1"
@@ -256,24 +257,22 @@ def _provider_endpoint(settings: Settings) -> str:
     value = settings.formula_recognition_base_url
     if not value:
         raise RecognitionError("FORMULA_PROVIDER_UNAVAILABLE", "公式识别服务地址未配置")
-    parsed = urllib.parse.urlsplit(value)
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise RecognitionError("FORMULA_PROVIDER_ENDPOINT_REJECTED", "公式识别服务地址不安全")
-    if settings.app_env.lower() == "production" and parsed.scheme != "https":
-        raise RecognitionError(
-            "FORMULA_PROVIDER_ENDPOINT_REJECTED", "生产公式识别服务必须使用 HTTPS"
+    try:
+        base_url = safe_provider_base_url(
+            value,
+            allow_external_https=True,
+            allow_local_http=settings.formula_recognition_allow_local_http,
+            allowed_local_hosts=settings.formula_recognition_allowed_hosts,
         )
-    allowed = {host.rstrip(".").lower() for host in settings.formula_recognition_allowed_hosts}
-    if parsed.hostname.rstrip(".").lower() not in allowed:
+    except ProviderEndpointError as exc:
+        raise RecognitionError(
+            "FORMULA_PROVIDER_ENDPOINT_REJECTED", "公式识别服务地址不安全"
+        ) from exc
+    host = urllib.parse.urlsplit(base_url).hostname
+    allowed = {item.rstrip(".").lower() for item in settings.formula_recognition_allowed_hosts}
+    if host is None or host.rstrip(".").lower() not in allowed:
         raise RecognitionError("FORMULA_PROVIDER_ENDPOINT_REJECTED", "公式识别服务主机不在白名单")
-    return value.rstrip("/") + "/v1/formulas/recognize"
+    return base_url + "/v1/formulas/recognize"
 
 
 class HttpFormulaProvider:

@@ -7,12 +7,39 @@ from urllib.request import Request, urlopen
 
 from app.assignment_generation.providers import select_provider as select_assignment_provider
 from app.core.config import Settings
+from app.core.provider_endpoints import ProviderEndpointError, safe_provider_base_url
 from app.recognition.formula import HttpFormulaProvider, formula_provider_from_settings
 from app.recognition.pipeline import provider_from_settings, safe_provider_readiness
 from redis import Redis
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
+
+
+def _local_model_available(
+    *,
+    base_url: str | None,
+    api_key: str | None,
+    allow_local: bool,
+    allowed_hosts: list[str],
+) -> bool:
+    if not base_url or not api_key or not allow_local or not allowed_hosts:
+        return False
+    try:
+        endpoint = safe_provider_base_url(
+            base_url,
+            allow_external_https=False,
+            allow_local_http=True,
+            allowed_local_hosts=allowed_hosts,
+        )
+        request = Request(
+            endpoint.removesuffix("/v1") + "/health",
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        with urlopen(request, timeout=1.0) as response:
+            return int(response.status) == 200
+    except (ProviderEndpointError, OSError, TimeoutError):
+        return False
 
 
 def dependency_readiness(db: Session, settings: Settings) -> dict[str, Any]:
@@ -65,11 +92,49 @@ def dependency_readiness(db: Session, settings: Settings) -> dict[str, Any]:
     except Exception:
         components["celery_worker"] = {"status": "degraded", "hard_dependency": False}
     assignment_provider = select_assignment_provider(settings)
+    assignment_available = assignment_provider.available
+    if assignment_provider.name == "local_openai_compatible":
+        assignment_available = _local_model_available(
+            base_url=settings.assignment_generation_base_url,
+            api_key=settings.assignment_generation_api_key,
+            allow_local=settings.assignment_generation_allow_local_provider_requests,
+            allowed_hosts=settings.assignment_generation_allowed_local_hosts,
+        )
     components["assignment_generation_provider"] = {
-        "status": "available" if assignment_provider.available else "unavailable",
+        "status": "available" if assignment_available else "unavailable",
         "provider": assignment_provider.name,
         "hard_dependency": False,
         "suggestion_only": True,
+    }
+    grading_available = False
+    if settings.grading_provider.lower() == "local_openai_compatible":
+        grading_available = _local_model_available(
+            base_url=settings.grading_base_url,
+            api_key=settings.grading_api_key,
+            allow_local=settings.grading_allow_local_provider_requests,
+            allowed_hosts=settings.grading_allowed_local_hosts,
+        )
+    components["subjective_grading_provider"] = {
+        "status": "available" if grading_available else "unavailable",
+        "provider": settings.grading_provider.lower(),
+        "hard_dependency": False,
+        "suggestion_only": True,
+        "human_confirmation_required": True,
+    }
+    ai_grading_available = False
+    if settings.ai_grading_provider.lower() == "local_openai_compatible":
+        ai_grading_available = _local_model_available(
+            base_url=settings.ai_grading_base_url,
+            api_key=settings.ai_grading_api_key,
+            allow_local=settings.ai_grading_allow_local_provider_requests,
+            allowed_hosts=settings.ai_grading_allowed_local_hosts,
+        )
+    components["ai_grading_provider"] = {
+        "status": "available" if ai_grading_available else "unavailable",
+        "provider": settings.ai_grading_provider.lower(),
+        "hard_dependency": False,
+        "suggestion_only": True,
+        "human_confirmation_required": True,
     }
     recognition_provider = provider_from_settings(settings)
     recognition_available, _ = safe_provider_readiness(recognition_provider)

@@ -198,6 +198,7 @@ def test_http_formula_provider_requires_allowlist_and_validates_response() -> No
         formula_recognition_base_url="http://formula.internal:8010",
         formula_recognition_api_key=SecretStr("synthetic-token"),
         formula_recognition_allowed_hosts=["formula.internal"],
+        formula_recognition_allow_local_http=True,
     )
 
     def handler(request: httpx.Request) -> httpx.Response:

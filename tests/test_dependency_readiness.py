@@ -102,6 +102,7 @@ def test_formula_http_readiness_is_bounded_authenticated_and_soft(
     settings.formula_recognition_base_url = "http://formula.internal:8765"
     settings.formula_recognition_api_key = SecretStr("synthetic-formula-readiness-token-32-chars")
     settings.formula_recognition_allowed_hosts = ["formula.internal"]
+    settings.formula_recognition_allow_local_http = True
     observed: dict[str, object] = {}
 
     def ready_response(request: object, *, timeout: float) -> FakeResponse:
@@ -134,6 +135,7 @@ def test_formula_http_readiness_failure_is_unavailable_but_soft(
     settings.formula_recognition_base_url = "http://formula.internal:8765"
     settings.formula_recognition_api_key = SecretStr("synthetic-formula-readiness-token-32-chars")
     settings.formula_recognition_allowed_hosts = ["formula.internal"]
+    settings.formula_recognition_allow_local_http = True
     original_urlopen = __import__("app.core.readiness", fromlist=["urlopen"]).urlopen
 
     def fail_formula(request: object, **kwargs: object) -> object:
@@ -146,6 +148,33 @@ def test_formula_http_readiness_failure_is_unavailable_but_soft(
 
     assert result["ready"] is True
     assert result["components"]["formula_ocr"]["status"] == "unavailable"
+
+
+def test_local_llm_readiness_requires_live_internal_health(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = configure(monkeypatch)
+    for prefix in ("grading", "ai_grading", "assignment_generation"):
+        setattr(settings, f"{prefix}_provider", "local_openai_compatible")
+        setattr(settings, f"{prefix}_allow_local_provider_requests", True)
+        setattr(settings, f"{prefix}_allowed_local_hosts", ["local-llm"])
+        setattr(settings, f"{prefix}_base_url", "http://local-llm:8080/v1")
+        setattr(settings, f"{prefix}_api_key", "local-readiness-key-32-characters")
+        setattr(settings, f"{prefix}_model", "local-model")
+    observed: list[str] = []
+
+    def ready_response(request: object, **_kwargs: object) -> FakeResponse:
+        if hasattr(request, "full_url"):
+            observed.append(str(request.full_url))
+        return FakeResponse()
+
+    monkeypatch.setattr("app.core.readiness.urlopen", ready_response)
+    result = dependency_readiness(FakeDb(), settings)
+
+    assert result["components"]["assignment_generation_provider"]["status"] == "available"
+    assert result["components"]["subjective_grading_provider"]["status"] == "available"
+    assert result["components"]["ai_grading_provider"]["status"] == "available"
+    assert observed.count("http://local-llm:8080/health") == 3
 
 
 def test_compose_uses_ready_and_nginx_retries_503() -> None:

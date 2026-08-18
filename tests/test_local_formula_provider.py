@@ -24,11 +24,22 @@ def _png() -> bytes:
     return output.getvalue()
 
 
+def _allow_synthetic_bundle(monkeypatch) -> None:
+    synthetic_bundle = object()
+    monkeypatch.setattr(
+        local_formula_provider, "validate_formula_bundle", lambda: synthetic_bundle
+    )
+    monkeypatch.setattr(
+        local_formula_provider, "verify_formula_bundle_identity", lambda _bundle: None
+    )
+
+
 def test_local_formula_provider_returns_one_uncalibrated_candidate(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("AHAMARK_FORMULA_PROVIDER_TOKEN", "synthetic-local-token-with-32-characters")
     monkeypatch.setattr(local_formula_provider, "get_model", lambda: _SyntheticModel())
+    _allow_synthetic_bundle(monkeypatch)
 
     response = TestClient(local_formula_provider.app).post(
         "/v1/formulas/recognize",
@@ -50,6 +61,7 @@ def test_local_formula_provider_returns_one_uncalibrated_candidate(
 def test_local_formula_provider_ready_loads_model(monkeypatch) -> None:
     monkeypatch.setenv("AHAMARK_FORMULA_PROVIDER_TOKEN", "synthetic-local-token-with-32-characters")
     monkeypatch.setattr(local_formula_provider, "get_model", lambda: _SyntheticModel())
+    _allow_synthetic_bundle(monkeypatch)
 
     response = TestClient(local_formula_provider.app).get(
         "/ready",

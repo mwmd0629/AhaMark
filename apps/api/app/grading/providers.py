@@ -10,6 +10,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from app.core.config import Settings
+from app.core.provider_endpoints import ProviderEndpointError, safe_provider_base_url
 
 
 @dataclass(frozen=True)
@@ -108,10 +109,32 @@ class OpenAICompatibleGradingProvider:
                 "评分 Provider 配置不完整，已转人工评分",
                 abstain_reason="provider_configuration_incomplete",
             )
+        try:
+            base_url = safe_provider_base_url(
+                self.settings.grading_base_url,
+                allow_external_https=self.settings.grading_allow_external_provider_requests,
+                allow_local_http=self.settings.grading_allow_local_provider_requests,
+                allowed_local_hosts=self.settings.grading_allowed_local_hosts,
+            )
+        except ProviderEndpointError:
+            return GradeSuggestion(
+                None,
+                None,
+                "评分 Provider 地址未获授权，已转人工评分",
+                abstain_reason="provider_endpoint_not_allowed",
+            )
         payload = {
             "model": self.settings.grading_model,
             "temperature": 0,
-            "response_format": {"type": "json_object"},
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "grading_suggestion",
+                    "strict": True,
+                    "schema": ProviderOutput.model_json_schema(),
+                },
+            },
+            "max_tokens": self.settings.grading_max_output_tokens,
             "messages": [
                 {
                     "role": "system",
@@ -139,8 +162,10 @@ class OpenAICompatibleGradingProvider:
                 },
             ],
         }
+        if self.settings.grading_provider == "local_openai_compatible":
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         request = urllib.request.Request(
-            self.settings.grading_base_url.rstrip("/") + "/chat/completions",
+            base_url + "/chat/completions",
             data=json.dumps(payload, ensure_ascii=False).encode(),
             headers={
                 "Authorization": f"Bearer {self.settings.grading_api_key}",
@@ -228,7 +253,7 @@ def provider_from_settings(settings: Settings) -> GradingProvider:
     name = getattr(settings, "grading_provider", "unavailable").lower()
     if name == "fake" and settings.app_env.lower() != "production":
         return FakeGradingProvider()
-    if name in {"openai", "openai_compatible", "compatible"}:
+    if name in {"openai", "openai_compatible", "compatible", "local_openai_compatible"}:
         return OpenAICompatibleGradingProvider(settings)
     return UnavailableProvider()
 
