@@ -30,7 +30,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 | 应用基线          | `9b129bc43961d296642b6fcb6cb461907f70a367`；后续 README 与合并门禁修复不改变运行逻辑                         |
 | 远端状态          | 本地与 `origin/codex/integrate-question-page-cutter` 为 `0 ahead / 0 behind`                                 |
 | 数据库迁移        | Alembic 单 head：`0049_usernames`                                                                            |
-| 最新开发          | production-safe RapidOCR 固定 bundle 接线和真实离线推理已通过本地门禁；尚待提交并重新部署                    |
+| 最新开发          | `789a59d` production-safe RapidOCR 固定 bundle 已提交并推送；node2 受保护部署未通过，未上线                  |
 | node2 在线版本    | API/Web/Worker 为 `5eda608`，schema 为 `0048_class_resources`；旧邮箱登录和文字 OCR available                |
 | node2 入口        | `https://222.195.89.236:13300`；自签名证书；公网可达，无来源白名单                                           |
 | 部署范围          | 只发布 Nginx `0.0.0.0:13300 -> 8443`；数据库、Redis、MinIO、API、Web、Worker、Docker socket 均无宿主发布端口 |
@@ -41,11 +41,13 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 2026-08-18 已获用户授权自主完成后续开发与部署。production-safe RapidOCR bundle 接线已经完成本地开发和验证：默认 API 镜像继续关闭 OCR，node2 专用 `Dockerfile.rapidocr` 固定 `rapidocr==3.9.2`、`onnxruntime==1.28.0`，并把 wheel 内三份 ONNX 复制到固定目录；清单固定模型路径、大小、SHA-256、运行时版本、bundle/license approval UUID，清单 SHA-256 为 `f84336fc78cb51cd0ee223ee3c04158eb2f968af6fa8ffd31051b821f843ff5b`，NOTICE 明确仅批准本地印刷体文字 OCR。运行时下载仍被配置和代码双重禁止，启动/readiness 校验清单与模型，推理前再次检查文件身份，异常稳定 fail-closed。node2 Compose 的启用参数来自 `runtime.env` 且默认关闭，旧 `runtime.env` 与 `5eda608` 回滚路径保持兼容。
 
-真实候选镜像在 `--network none` 下用合成印刷体图片完成一次离线推理：readiness 为 true，返回 2 个文字块并识别出 `AhaMark` 与 `123`；这只证明固定镜像链路可运行，不是准确率。该验证同时发现 RapidOCR v3 的 boxes 为 NumPy 数组，适配器现以有界形状检查后转换，并新增回归测试。后端全量唯一计数为 `1052 passed, 19 skipped`，零真实失败；三组初跑的 15 个失败均为外置 `--basetemp` 被数据库安全守卫拒绝，修正进程 `TEMP/TMP` 后相关 10 文件 `50 passed, 1 skipped`，所有运行均为 `ahamark.db unchanged`。全仓 Ruff、strict mypy（127 个源文件）、Alembic 单 head `0049_usernames` 通过；前端 Prettier、ESLint、TypeScript、`38 files / 234 tests` 和 production build 19 页通过；node2 Compose 在 OCR 默认关闭和显式固定 bundle 开启两种配置下均通过 `config --quiet`。node2 当前仍为 `5eda608 + 0048`，本段代码尚未部署。
+真实候选镜像在 `--network none` 下用合成印刷体图片完成一次离线推理：readiness 为 true，返回 2 个文字块并识别出 `AhaMark` 与 `123`；这只证明固定镜像链路可运行，不是准确率。该验证同时发现 RapidOCR v3 的 boxes 为 NumPy 数组，适配器现以有界形状检查后转换，并新增回归测试。后端全量唯一计数为 `1052 passed, 19 skipped`，零真实失败；三组初跑的 15 个失败均为外置 `--basetemp` 被数据库安全守卫拒绝，修正进程 `TEMP/TMP` 后相关 10 文件 `50 passed, 1 skipped`，所有运行均为 `ahamark.db unchanged`。全仓 Ruff、strict mypy（127 个源文件）、Alembic 单 head `0049_usernames` 通过；前端 Prettier、ESLint、TypeScript、`38 files / 234 tests` 和 production build 19 页通过；node2 Compose 在 OCR 默认关闭和显式固定 bundle 开启两种配置下均通过 `config --quiet`。实现已以 `789a59d` 提交并推送；node2 当前仍为 `5eda608 + 0048`，本段代码尚未部署。
 
 2026-08-18 尝试部署 `056f039`：镜像双层 SHA-256、Compose、Nginx、`0048 -> 0049` 迁移、用户名回填和新 API-A/B 健康均通过；既有 1 个用户回填后 username 空值和重复数均为 0。切换后公网 `/ready` 暴露文字 OCR 从 available 降为 unavailable，因此按失败门禁将 API/Web/Worker 和 `runtime.env` 滚动恢复为 `5eda608`，公网 `/`、`/ready`、1 个 Worker 和文字 OCR 随后恢复 available，登录页也恢复旧邮箱界面。经用户单独授权并在新建、验证 `0049` PostgreSQL 备份后，数据库已事务性 downgrade 到 `0048_class_resources`，`users.username` 列确认不存在，旧 `migrate` 容器以 0 退出；node2 已完整恢复原应用/schema 基线。
 
 根因不是简单漏装依赖：`056f039` 的生产 `provider_from_settings()` 对 RapidOCR 不接入 engine factory；仓库虽有 artifact/runtime 离线验证组件，但没有 production bundle wiring，符合“RapidOCR runtime/download hard-off”边界。曾构建一个 `.[ocr]` 本地候选，确认只装包仍不能恢复 Provider 后已撤销 Dockerfile 改动，候选未上传、未部署、未提交。恢复文字 OCR 需要单独设计经审计的固定 artifact 接线和测试，不能在服务器临时安装或启用运行时下载。
+
+2026-08-18 随后对 `789a59d` 执行受保护部署。上传归档和候选 Compose 完整；服务器独立只读诊断确认 API/Web 镜像 ID 分别为 `sha256:1fa11b99a46d38ee2b1048d937537c6cc2d543258871b605f48cf52bf9d81d6b`、`sha256:acd8f0e9f8d7ea5c08f0b35ff9479b93ef5bff0f99d6eba4f8407e6fbd5abd80`，镜像内 head 为 `0049_usernames`，候选 runtime 明确启用固定 OCR，Compose 解析出的应用镜像均为 `789a59d`。部署自动化先后暴露 SSH stdin、Windows CRLF 与 Compose 子进程继承输入造成的提前结束；修复为服务器临时文件执行后，最终尝试仍在脚本 `image_validation` 阶段中止。最终尝试没有进入 `0048 -> 0049` 迁移，自动回滚确认数据库仍为 `0048_class_resources`、应用仍为 `5eda608`。按操作约定已停止继续尝试，不能把 `789a59d` 描述为已部署。
 
 管理员账号登录已经从邮箱改为用户名：
 
@@ -84,6 +86,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 - 账号创建后的 PostgreSQL 备份：`/data/shr/ahamark-backups/post-account-20260815T075913Z-5eda608`
 - 本次升级前完整备份：`/data/shr/ahamark-backups/pre-upgrade-056f039-20260818T050009Z`；PostgreSQL custom dump、MinIO 归档、配置、证书和 SHA-256 清单均已验证
 - `0049` downgrade 前 PostgreSQL 备份：`/data/shr/ahamark-backups/pre-downgrade-0049-20260818T064159Z`；custom dump 为 583866 bytes，`pg_restore --list` 1232 行，SHA-256 校验通过
+- `789a59d` 三次进入完整备份阶段的备份：`/data/shr/ahamark-backups/pre-upgrade-789a59d-20260818T095021Z`、`pre-upgrade-789a59d-20260818T095958Z`、`pre-upgrade-789a59d-20260818T100725Z`；每次 PostgreSQL custom dump、`pg_restore --list`、MinIO 归档和 `SHA256SUMS` 均通过，最终一次 PostgreSQL dump 为 583538 bytes、列表 1231 行
 
 ### 安全边界
 
@@ -98,7 +101,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 ### 已知未完成项
 
-1. 用户名登录尚未同步 node2；本次尝试已完整回滚到 `5eda608 + 0048`，未创建用户名账号。production-safe RapidOCR artifact wiring 已通过本地门禁，下一步是提交、构建提交哈希镜像并按备份/回滚门禁重新部署。
+1. 用户名登录和 `789a59d` RapidOCR 固定 bundle 尚未同步 node2；代码、提交哈希镜像、上传和独立镜像诊断均已完成，但部署自动化最终仍在 `image_validation` 阶段中止。服务器已完整回滚到 `5eda608 + 0048`，未创建用户名账号；再次部署前必须先把部署脚本改为可审计的服务器文件工件并逐项保留失败命令/返回码，不直接重复本轮命令。
 2. 公网入口仍使用自签名证书；手机 Safari 登录和完整教师流程尚未验收。
 3. 公网端口无来源限制；若后续恢复“仅校园网”目标，需要由 iKuai/防火墙实施边界并做内外双向实测。
 4. 私有 OCR/Gold 的两页修复输出位于仓库外，未合并或覆盖原 60 页草稿；保持暂停。
@@ -106,7 +109,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 ### 下一步顺序
 
-下一步先提交并推送本地已验证的 RapidOCR 固定 bundle 接线，再以提交哈希构建 API/Web 镜像。部署前复核并增量备份当前 `5eda608 + 0048`，更新已备份的 Compose/Nginx 与 `runtime.env`，验证 config/Nginx/端口唯一暴露规则；随后执行 `0048 -> 0049`、滚动切换 API-A/B、Worker、Web、Nginx，验证公网 `/`、`/health`、`/ready`、用户名登录界面和无网络合成文字 OCR。任一硬门禁失败即恢复旧配置、`5eda608` 与 0048 备份。
+下一步不得直接重复本轮 SSH 管道脚本。先把部署流程整理为带固定 SHA-256、LF 换行、逐命令返回码和持久化非秘密阶段日志的服务器文件工件，在不停止服务的前提下完成全部 image-validation dry-run；只有 dry-run 全绿后，才重新增量备份当前 `5eda608 + 0048`，执行 `0048 -> 0049`、滚动切换 API-A/B、Worker、Web、Nginx，并验证公网 `/`、`/health`、`/ready`、用户名登录界面和无网络合成文字 OCR。任一硬门禁失败即恢复旧配置、`5eda608` 与 0048 备份。
 
 ## 产品能力与边界
 
@@ -301,6 +304,7 @@ node2 使用 `shr` 用户的 Rootless Docker。专用文件：
 
 | 日期       | 提交/状态        | 结论                                                                        |
 | ---------- | ---------------- | --------------------------------------------------------------------------- |
+| 2026-08-18 | `789a59d` 未部署 | 固定 RapidOCR bundle 已推送；部署脚本在 image validation 中止并回滚到旧版   |
 | 2026-08-18 | node2 完整回滚   | `056f039` 因文字 OCR unavailable 回滚；应用/schema 恢复 `5eda608 + 0048`    |
 | 2026-08-17 | `9b129bc`        | 管理员发布用户名账号；已推送，未部署，node2 仍为旧邮箱登录版本              |
 | 2026-08-17 | `0da6dd9`        | node2 允许公网 IP Host 与 origin；已部署                                    |
@@ -312,4 +316,4 @@ node2 使用 `shr` 用户的 Rootless Docker。专用文件：
 
 GitHub 合作者审计最近结论：Draft PR #1 的 head 已是目标分支祖先，不重复合并；`gyh--001` 的旧迁移链、外部 OpenAI 调用、隐私面、依赖漂移和部署改动不能整分支合入。该任务现由另一 Codex 任务负责，后续以其最新独立审查结果为准。
 
-本次操作未创建账号、未处理私有识别材料、未发布作业或成绩；node2 应用与数据库均已回滚到原基线，升级和降级前备份均保留且已验证。
+本次操作未创建账号、未处理私有识别材料、未发布作业或成绩；`789a59d` 未上线，node2 应用与数据库均保持原基线。2026-08-18 最后一次外部只读检查确认 `/`、`/health`、`/ready` 均为 HTTP 200，Worker 为 1，文字 OCR available，公式 OCR 与 assignment generation provider unavailable；这只是运行状态，不是识别准确率或自动判卷验收。升级、降级和三次 `789a59d` 完整备份均保留且已验证。
