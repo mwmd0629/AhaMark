@@ -23,21 +23,25 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 ### 30 秒摘要
 
-| 项目              | 当前事实（2026-08-17）                                                                                       |
+| 项目              | 当前事实（2026-08-18）                                                                                       |
 | ----------------- | ------------------------------------------------------------------------------------------------------------ |
 | 正确工作区        | `C:\Users\Lenovo\.codex\worktrees\06f7\AhaMark`                                                              |
 | 目标分支          | `codex/integrate-question-page-cutter`                                                                       |
 | 应用基线          | `9b129bc43961d296642b6fcb6cb461907f70a367`；后续 README 与合并门禁修复不改变运行逻辑                         |
 | 远端状态          | 本地与 `origin/codex/integrate-question-page-cutter` 为 `0 ahead / 0 behind`                                 |
 | 数据库迁移        | Alembic 单 head：`0049_usernames`                                                                            |
-| 最新开发          | 管理员发布用户名账号；代码、迁移和本地镜像已完成，**尚未部署**                                               |
-| node2 在线版本    | 仍运行 `ahamark/api:5eda608`、`ahamark/web:5eda608` 和 schema `0048_class_resources`                         |
+| 最新开发          | 用户名 schema 已迁移；`056f039` 应用因文字 OCR 回归已回滚，用户名登录界面当前未上线                          |
+| node2 在线版本    | API/Web/Worker 已恢复 `5eda608`；schema 保留 `0049_usernames`；旧邮箱登录和文字 OCR available                |
 | node2 入口        | `https://222.195.89.236:13300`；自签名证书；公网可达，无来源白名单                                           |
 | 部署范围          | 只发布 Nginx `0.0.0.0:13300 -> 8443`；数据库、Redis、MinIO、API、Web、Worker、Docker socket 均无宿主发布端口 |
 | 私有识别工作      | 暂停；不得继续处理、上传或提交私有 OCR/Gold、图片、正文或来源映射，除非用户再次明确授权                      |
 | GitHub 合作者任务 | 已交由另一 Codex 任务处理；本任务不继续合并候选代码                                                          |
 
 ### 当前开发事实
+
+2026-08-18 尝试部署 `056f039`：镜像双层 SHA-256、Compose、Nginx、`0048 -> 0049` 迁移、用户名回填和新 API-A/B 健康均通过；既有 1 个用户回填后 username 空值和重复数均为 0。切换后公网 `/ready` 暴露文字 OCR 从 available 降为 unavailable，因此按失败门禁将 API/Web/Worker 和 `runtime.env` 滚动恢复为 `5eda608`，公网 `/`、`/ready`、1 个 Worker 和文字 OCR 随后恢复 available，登录页也恢复旧邮箱界面。数据库没有自动 downgrade，保留 `0049_usernames`；旧应用在该 schema 上已实测 healthy，但不得使用旧 CLI 创建新账号。
+
+根因不是简单漏装依赖：`056f039` 的生产 `provider_from_settings()` 对 RapidOCR 不接入 engine factory；仓库虽有 artifact/runtime 离线验证组件，但没有 production bundle wiring，符合“RapidOCR runtime/download hard-off”边界。曾构建一个 `.[ocr]` 本地候选，确认只装包仍不能恢复 Provider 后已撤销 Dockerfile 改动，候选未上传、未部署、未提交。恢复文字 OCR 需要单独设计经审计的固定 artifact 接线和测试，不能在服务器临时安装或启用运行时下载。
 
 管理员账号登录已经从邮箱改为用户名：
 
@@ -74,6 +78,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 - 实验室高位端口切换前：`/data/shr/ahamark-backups/lab-port-20260817T115028Z`
 - 公网 Host 切换前：`/data/shr/ahamark-backups/public-host-before-20260817T123633Z`
 - 账号创建后的 PostgreSQL 备份：`/data/shr/ahamark-backups/post-account-20260815T075913Z-5eda608`
+- 本次升级前完整备份：`/data/shr/ahamark-backups/pre-upgrade-056f039-20260818T050009Z`；PostgreSQL custom dump、MinIO 归档、配置、证书和 SHA-256 清单均已验证
 
 ### 安全边界
 
@@ -88,7 +93,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 ### 已知未完成项
 
-1. 用户名登录尚未同步 node2：未上传镜像、未执行 0049 迁移、未切换容器、未创建用户名账号。
+1. node2 已执行 `0049_usernames`，但应用因 OCR 回归恢复 `5eda608`，线上仍为邮箱登录；未创建用户名账号。后续要么经单独审查授权 downgrade 到 0048，要么先实现并验证 production-safe RapidOCR artifact wiring 再部署用户名应用。
 2. 公网入口仍使用自签名证书；手机 Safari 登录和完整教师流程尚未验收。
 3. 公网端口无来源限制；若后续恢复“仅校园网”目标，需要由 iKuai/防火墙实施边界并做内外双向实测。
 4. 私有 OCR/Gold 的两页修复输出位于仓库外，未合并或覆盖原 60 页草稿；保持暂停。
@@ -96,18 +101,11 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 ### 下一步顺序
 
-若用户明确要求部署用户名版本：
+下一步必须先由用户在以下方向中明确选择，不能直接再次切换：
 
-1. 实时核对 node2 服务、schema、端口、磁盘和备份目录。
-2. 新建 PostgreSQL custom-format 备份并验证 `pg_restore --list`。
-3. 上传并校验本地镜像归档，加载固定标签。
-4. 使用新 API 镜像执行 `alembic upgrade head`，确认唯一 head 为 `0049_usernames`。
-5. 只重建 API A/B、Worker 和 Web；保持 Nginx 13300 边界不变。
-6. 交互式创建用户名账号，密码只由用户输入。
-7. 验收 `/`、`/health`、`/ready`、用户名登录、退出和教师核心流程；确认 production 邮箱登录失败。
-8. 更新本状态账本，记录备份、镜像、迁移、验收和回滚事实后再提交。
-
-当前用户已明确“不急着同步服务器”，所以以上步骤均未执行。
+1. 保持当前兼容状态：`5eda608` 应用 + `0049` schema；不创建账号、不运行旧 CLI。
+2. 单独审查并授权 `0049 -> 0048` downgrade；先确认没有用户名账号或迁移后业务写入，再执行并复核旧基线。
+3. 新增 production-safe RapidOCR artifact wiring：固定模型、版本、路径、SHA-256 和 NOTICE，禁止运行时下载；通过离线推理、readiness、隐私与回滚门禁后，再重新部署用户名版本。
 
 ## 产品能力与边界
 
@@ -302,6 +300,7 @@ node2 使用 `shr` 用户的 Rootless Docker。专用文件：
 
 | 日期       | 提交/状态        | 结论                                                                        |
 | ---------- | ---------------- | --------------------------------------------------------------------------- |
+| 2026-08-18 | node2 部署回滚   | `0049` 迁移成功；`056f039` 因文字 OCR unavailable 回滚应用至 `5eda608`      |
 | 2026-08-17 | `9b129bc`        | 管理员发布用户名账号；已推送，未部署，node2 仍为旧邮箱登录版本              |
 | 2026-08-17 | `0da6dd9`        | node2 允许公网 IP Host 与 origin；已部署                                    |
 | 2026-08-17 | `cfe2752`        | Rootless Docker 将唯一 Nginx 入口改为宿主 13300；已部署                     |
@@ -312,4 +311,4 @@ node2 使用 `shr` 用户的 Rootless Docker。专用文件：
 
 GitHub 合作者审计最近结论：Draft PR #1 的 head 已是目标分支祖先，不重复合并；`gyh--001` 的旧迁移链、外部 OpenAI 调用、隐私面、依赖漂移和部署改动不能整分支合入。该任务现由另一 Codex 任务负责，后续以其最新独立审查结果为准。
 
-本次 README 整理只重组文档，不同步 node2、不运行迁移、不修改数据库、不创建账号，也不处理私有识别材料。
+本次操作未创建账号、未处理私有识别材料、未发布作业或成绩；node2 应用已回滚，数据库保留 `0049_usernames`，任何 downgrade 需另行授权。
