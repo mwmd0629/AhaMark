@@ -213,19 +213,32 @@ function csrfToken(): string | undefined {
 }
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_URL}${path}`, {
-    cache: "no-store",
-    credentials: "include",
-    ...init,
-    headers:
-      init?.body instanceof FormData
-        ? { "X-CSRF-Token": csrfToken() ?? "", ...init.headers }
-        : {
-            "Content-Type": "application/json",
-            "X-CSRF-Token": csrfToken() ?? "",
-            ...init?.headers,
-          },
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_URL}${path}`, {
+      cache: "no-store",
+      credentials: "include",
+      ...init,
+      headers:
+        init?.body instanceof FormData
+          ? { "X-CSRF-Token": csrfToken() ?? "", ...init.headers }
+          : {
+              "Content-Type": "application/json",
+              "X-CSRF-Token": csrfToken() ?? "",
+              ...init?.headers,
+            },
+    });
+  } catch (reason) {
+    if (reason instanceof DOMException && reason.name === "AbortError") {
+      throw reason;
+    }
+    throw new ApiError(0, {
+      code: "NETWORK_ERROR",
+      message: "无法连接服务器，请检查网络或确认后端服务已启动。",
+      details: {},
+      request_id: "",
+    });
+  }
   if (!response.ok) {
     throw new ApiError(response.status, await apiErrorBody(response));
   }

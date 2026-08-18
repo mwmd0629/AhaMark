@@ -7,7 +7,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import LoginPage from "./page";
-import { authApi } from "@/lib/api";
+import { ApiError, authApi } from "@/lib/api";
 
 const { replace } = vi.hoisted(() => ({ replace: vi.fn() }));
 
@@ -101,4 +101,37 @@ it("ends an unavailable account session instead of routing it to the teacher she
   await screen.findByRole("alert");
   expect(authApi.logout).toHaveBeenCalledTimes(1);
   expect(replace).not.toHaveBeenCalled();
+});
+
+it("shows a server connection message when the API cannot be reached", async () => {
+  vi.mocked(authApi.login).mockRejectedValueOnce(
+    new ApiError(0, {
+      code: "NETWORK_ERROR",
+      message: "无法连接服务器，请检查网络或确认后端服务已启动。",
+      details: {},
+      request_id: "",
+    }),
+  );
+  render(<LoginPage />);
+  submitLogin();
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "无法连接服务器，请检查网络或确认后端服务已启动。",
+  );
+  expect(screen.getByRole("button", { name: "登录" })).toBeEnabled();
+  expect(replace).not.toHaveBeenCalled();
+  expect(authApi.logout).not.toHaveBeenCalled();
+});
+
+it("keeps the backend authentication message for invalid credentials", async () => {
+  vi.mocked(authApi.login).mockRejectedValueOnce(
+    new ApiError(401, {
+      code: "HTTP_401",
+      message: "邮箱或密码错误",
+      details: {},
+      request_id: "request-1",
+    }),
+  );
+  render(<LoginPage />);
+  submitLogin();
+  expect(await screen.findByRole("alert")).toHaveTextContent("邮箱或密码错误");
 });
