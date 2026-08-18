@@ -6,7 +6,8 @@ import unicodedata
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, BinaryIO, Protocol
+from functools import lru_cache
+from typing import TYPE_CHECKING, Any, BinaryIO, Protocol
 
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps, UnidentifiedImageError
 
@@ -14,6 +15,9 @@ from app.core.config import Settings
 from app.recognition.question_numbers import normalize_question_number
 from app.recognition.text_integrity import inspect_text_integrity
 from app.storage.base import ObjectStorage
+
+if TYPE_CHECKING:
+    from app.recognition.rapidocr_artifacts import ValidatedRapidOcrBundle
 
 
 class RecognitionError(RuntimeError):
@@ -530,12 +534,39 @@ def validate_rapidocr_input(page: PageArtifact) -> None:
 
 
 def _raw_sequence(value: object, label: str) -> Sequence[object]:
+    if type(value).__module__.startswith("numpy"):
+        shape = getattr(value, "shape", None)
+        tolist = getattr(value, "tolist", None)
+        if (
+            not isinstance(shape, tuple)
+            or not shape
+            or len(shape) > 3
+            or any(
+                isinstance(item, bool) or not isinstance(item, int) or item < 0
+                for item in shape
+            )
+            or math.prod(shape) > RAPIDOCR_MAX_BLOCKS * 8
+            or not callable(tolist)
+        ):
+            raise _output_invalid(f"RapidOCR {label} 数组形状无效")
+        try:
+            value = tolist()
+        except Exception as exc:
+            raise _output_invalid(f"RapidOCR {label} 数组无法转换") from exc
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
         raise _output_invalid(f"RapidOCR {label} 必须是序列")
     return value
 
 
 def _finite_number(value: object, label: str) -> float:
+    if type(value).__module__.startswith("numpy"):
+        item = getattr(value, "item", None)
+        if not callable(item):
+            raise _output_invalid(f"RapidOCR {label} 必须是有限数值")
+        try:
+            value = item()
+        except Exception as exc:
+            raise _output_invalid(f"RapidOCR {label} 必须是有限数值") from exc
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise _output_invalid(f"RapidOCR {label} 必须是有限数值")
     normalized = float(value)
@@ -653,15 +684,22 @@ class RapidOcrProvider:
         *,
         engine_factory: Callable[[], Any] | None = None,
         version: str = "unavailable",
+        readiness_check: Callable[[], None] | None = None,
     ) -> None:
         self.version = version if engine_factory is not None else "unavailable"
         self._engine_factory = engine_factory
+        self._readiness_check = readiness_check
         self._engine: Any | None = None
 
     def available(self) -> tuple[bool, str | None]:
         if self._engine_factory is None:
             return False, "RapidOCR 真实运行时尚未授权；不会导入或下载模型"
-        return True, "仅测试注入的本地 OCR engine；不支持可靠手写或公式识别"
+        if self._readiness_check is not None:
+            try:
+                self._readiness_check()
+            except Exception:
+                return False, "RapidOCR 本地运行材料未通过完整性校验"
+        return True, "本地印刷体文字 OCR 可用；手写与公式必须人工复核"
 
     def recognize(self, page: PageArtifact) -> list[ProviderBlock]:
         validate_rapidocr_input(page)
@@ -678,6 +716,17 @@ class RapidOcrProvider:
         return parse_rapidocr_output(output, page)
 
 
+@lru_cache(maxsize=8)
+def _validated_rapidocr_bundle(
+    root: str, manifest_sha256: str
+) -> "ValidatedRapidOcrBundle":
+    from app.recognition.rapidocr_artifacts import validate_rapidocr_artifact_bundle
+
+    return validate_rapidocr_artifact_bundle(
+        root, expected_manifest_sha256=manifest_sha256
+    )
+
+
 def provider_from_settings(settings: Settings) -> RecognitionProvider:
     if settings.recognition_provider == "fake" and settings.app_env.lower() != "production":
         return FakeProvider()
@@ -687,7 +736,23 @@ def provider_from_settings(settings: Settings) -> RecognitionProvider:
             or settings.recognition_rapidocr_model_download_allowed
         ):
             return UnavailableProvider("RapidOCR 运行时未授权，且禁止在服务进程中下载模型")
-        return RapidOcrProvider()
+        root = settings.recognition_rapidocr_artifact_root
+        manifest_sha256 = settings.recognition_rapidocr_manifest_sha256
+        if root is None or manifest_sha256 is None:
+            return UnavailableProvider("RapidOCR 本地运行材料配置不完整")
+        try:
+            from app.recognition.rapidocr_artifacts import ensure_rapidocr_bundle_unchanged
+            from app.recognition.rapidocr_runtime import rapidocr_engine_factory
+
+            bundle = _validated_rapidocr_bundle(root, manifest_sha256)
+            ensure_rapidocr_bundle_unchanged(bundle)
+            return RapidOcrProvider(
+                engine_factory=rapidocr_engine_factory(bundle),
+                version=f"rapidocr-{bundle.rapidocr_version}/onnxruntime-{bundle.onnxruntime_version}",
+                readiness_check=lambda: ensure_rapidocr_bundle_unchanged(bundle),
+            )
+        except Exception:
+            return UnavailableProvider("RapidOCR 本地运行材料未通过完整性校验")
     if settings.recognition_provider == "tesseract":
         if not settings.recognition_tesseract_runtime_enabled:
             return UnavailableProvider("Tesseract 本地运行时尚未配置")

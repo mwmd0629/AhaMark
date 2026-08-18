@@ -30,7 +30,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 | 应用基线          | `9b129bc43961d296642b6fcb6cb461907f70a367`；后续 README 与合并门禁修复不改变运行逻辑                         |
 | 远端状态          | 本地与 `origin/codex/integrate-question-page-cutter` 为 `0 ahead / 0 behind`                                 |
 | 数据库迁移        | Alembic 单 head：`0049_usernames`                                                                            |
-| 最新开发          | 用户名版本部署因文字 OCR 回归已完整回滚，用户名登录界面当前未上线                                            |
+| 最新开发          | production-safe RapidOCR 固定 bundle 接线和真实离线推理已通过本地门禁；尚待提交并重新部署                    |
 | node2 在线版本    | API/Web/Worker 为 `5eda608`，schema 为 `0048_class_resources`；旧邮箱登录和文字 OCR available                |
 | node2 入口        | `https://222.195.89.236:13300`；自签名证书；公网可达，无来源白名单                                           |
 | 部署范围          | 只发布 Nginx `0.0.0.0:13300 -> 8443`；数据库、Redis、MinIO、API、Web、Worker、Docker socket 均无宿主发布端口 |
@@ -38,6 +38,10 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 | GitHub 合作者任务 | 已交由另一 Codex 任务处理；本任务不继续合并候选代码                                                          |
 
 ### 当前开发事实
+
+2026-08-18 已获用户授权自主完成后续开发与部署。production-safe RapidOCR bundle 接线已经完成本地开发和验证：默认 API 镜像继续关闭 OCR，node2 专用 `Dockerfile.rapidocr` 固定 `rapidocr==3.9.2`、`onnxruntime==1.28.0`，并把 wheel 内三份 ONNX 复制到固定目录；清单固定模型路径、大小、SHA-256、运行时版本、bundle/license approval UUID，清单 SHA-256 为 `f84336fc78cb51cd0ee223ee3c04158eb2f968af6fa8ffd31051b821f843ff5b`，NOTICE 明确仅批准本地印刷体文字 OCR。运行时下载仍被配置和代码双重禁止，启动/readiness 校验清单与模型，推理前再次检查文件身份，异常稳定 fail-closed。node2 Compose 的启用参数来自 `runtime.env` 且默认关闭，旧 `runtime.env` 与 `5eda608` 回滚路径保持兼容。
+
+真实候选镜像在 `--network none` 下用合成印刷体图片完成一次离线推理：readiness 为 true，返回 2 个文字块并识别出 `AhaMark` 与 `123`；这只证明固定镜像链路可运行，不是准确率。该验证同时发现 RapidOCR v3 的 boxes 为 NumPy 数组，适配器现以有界形状检查后转换，并新增回归测试。后端全量唯一计数为 `1052 passed, 19 skipped`，零真实失败；三组初跑的 15 个失败均为外置 `--basetemp` 被数据库安全守卫拒绝，修正进程 `TEMP/TMP` 后相关 10 文件 `50 passed, 1 skipped`，所有运行均为 `ahamark.db unchanged`。全仓 Ruff、strict mypy（127 个源文件）、Alembic 单 head `0049_usernames` 通过；前端 Prettier、ESLint、TypeScript、`38 files / 234 tests` 和 production build 19 页通过；node2 Compose 在 OCR 默认关闭和显式固定 bundle 开启两种配置下均通过 `config --quiet`。node2 当前仍为 `5eda608 + 0048`，本段代码尚未部署。
 
 2026-08-18 尝试部署 `056f039`：镜像双层 SHA-256、Compose、Nginx、`0048 -> 0049` 迁移、用户名回填和新 API-A/B 健康均通过；既有 1 个用户回填后 username 空值和重复数均为 0。切换后公网 `/ready` 暴露文字 OCR 从 available 降为 unavailable，因此按失败门禁将 API/Web/Worker 和 `runtime.env` 滚动恢复为 `5eda608`，公网 `/`、`/ready`、1 个 Worker 和文字 OCR 随后恢复 available，登录页也恢复旧邮箱界面。经用户单独授权并在新建、验证 `0049` PostgreSQL 备份后，数据库已事务性 downgrade 到 `0048_class_resources`，`users.username` 列确认不存在，旧 `migrate` 容器以 0 退出；node2 已完整恢复原应用/schema 基线。
 
@@ -86,7 +90,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 - 不把私有图片、正文、姓名、学号、原文件名、来源映射、密码、令牌或连接串写入 Git、数据库迁移、公开日志或聊天。
 - 不把 OCR confidence、合成评测或 Fake Provider 指标称为真实准确率。
 - AI/Codex 只能生成 suggestion；不得自动确认答案、评分标准、最终成绩或成绩发布。
-- RapidOCR runtime/download 继续 hard-off；公式区域自动检测默认关闭。
+- RapidOCR 默认 runtime 与所有运行时下载继续 hard-off；只有固定清单、显式启用的 node2 专用镜像可运行本地印刷体 OCR。公式区域自动检测默认关闭。
 - 不暴露 PostgreSQL、Redis、MinIO、内部 API、Web 开发端口或 Docker socket。
 - 不使用 `git reset --hard`、`git checkout --`、强制推送、`docker compose down -v` 或 `docker system prune`。
 - 不处理未知卷、非空 Bucket、其他用户容器或 node2 上既有的 80/81/443/8080/8081 服务。
@@ -94,7 +98,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 ### 已知未完成项
 
-1. 用户名登录尚未同步 node2；本次尝试已完整回滚到 `5eda608 + 0048`，未创建用户名账号。再次部署前必须先解决并验证 production-safe RapidOCR artifact wiring，或由用户明确接受新版文字 OCR unavailable。
+1. 用户名登录尚未同步 node2；本次尝试已完整回滚到 `5eda608 + 0048`，未创建用户名账号。production-safe RapidOCR artifact wiring 已通过本地门禁，下一步是提交、构建提交哈希镜像并按备份/回滚门禁重新部署。
 2. 公网入口仍使用自签名证书；手机 Safari 登录和完整教师流程尚未验收。
 3. 公网端口无来源限制；若后续恢复“仅校园网”目标，需要由 iKuai/防火墙实施边界并做内外双向实测。
 4. 私有 OCR/Gold 的两页修复输出位于仓库外，未合并或覆盖原 60 页草稿；保持暂停。
@@ -102,7 +106,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 ### 下一步顺序
 
-下一步不能直接再次切换。若仍需用户名版本，先新增 production-safe RapidOCR artifact wiring：固定模型、版本、路径、SHA-256 和 NOTICE，禁止运行时下载；通过离线推理、readiness、隐私与回滚门禁后，再重新部署。若产品决定接受新版文字 OCR unavailable，也必须由用户明确确认该能力降级。
+下一步先提交并推送本地已验证的 RapidOCR 固定 bundle 接线，再以提交哈希构建 API/Web 镜像。部署前复核并增量备份当前 `5eda608 + 0048`，更新已备份的 Compose/Nginx 与 `runtime.env`，验证 config/Nginx/端口唯一暴露规则；随后执行 `0048 -> 0049`、滚动切换 API-A/B、Worker、Web、Nginx，验证公网 `/`、`/health`、`/ready`、用户名登录界面和无网络合成文字 OCR。任一硬门禁失败即恢复旧配置、`5eda608` 与 0048 备份。
 
 ## 产品能力与边界
 

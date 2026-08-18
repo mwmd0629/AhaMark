@@ -31,6 +31,24 @@ def _output(
     )
 
 
+class _NumpyLikeBoxes:
+    __module__ = "numpy"
+
+    shape = (1, 4, 2)
+
+    def tolist(self) -> list[list[list[float]]]:
+        return [[[10.0, 10.0], [30.0, 10.0], [30.0, 20.0], [10.0, 20.0]]]
+
+
+def test_numpy_box_array_from_real_rapidocr_v3_is_normalized() -> None:
+    blocks = parse_rapidocr_output(
+        _output(boxes=_NumpyLikeBoxes(), texts=("text",), scores=(0.9,)), _page()
+    )
+
+    assert len(blocks) == 1
+    assert blocks[0].text == "text"
+
+
 def test_rapidocr_flags_default_closed_and_reject_true_in_every_environment() -> None:
     settings = Settings(_env_file=None)
     assert settings.recognition_rapidocr_runtime_enabled is False

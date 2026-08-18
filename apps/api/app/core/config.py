@@ -1,3 +1,5 @@
+import os
+import re
 from functools import lru_cache
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -53,6 +55,8 @@ class Settings(BaseSettings):
     recognition_config_version: str = "2026-07-22"
     recognition_rapidocr_runtime_enabled: bool = False
     recognition_rapidocr_model_download_allowed: bool = False
+    recognition_rapidocr_artifact_root: str | None = None
+    recognition_rapidocr_manifest_sha256: str | None = None
     recognition_tesseract_runtime_enabled: bool = False
     recognition_tesseract_binary_path: str | None = None
     recognition_tesseract_data_root: str | None = None
@@ -197,12 +201,22 @@ class Settings(BaseSettings):
                 "formula region detection configuration rejected: "
                 + "; ".join(formula_region_errors)
             )
-        rapidocr_errors = []
+        rapidocr_errors: list[str] = []
         if self.recognition_rapidocr_runtime_enabled:
-            rapidocr_errors.append(
-                "RECOGNITION_RAPIDOCR_RUNTIME_ENABLED must remain false until an audited "
-                "explicit-model adapter exists"
-            )
+            if self.recognition_provider != "rapidocr":
+                rapidocr_errors.append("RECOGNITION_PROVIDER must be rapidocr")
+            if not self.recognition_rapidocr_artifact_root or not os.path.isabs(
+                self.recognition_rapidocr_artifact_root
+            ):
+                rapidocr_errors.append(
+                    "RECOGNITION_RAPIDOCR_ARTIFACT_ROOT must be an absolute path"
+                )
+            if not self.recognition_rapidocr_manifest_sha256 or not re.fullmatch(
+                r"[0-9a-f]{64}", self.recognition_rapidocr_manifest_sha256
+            ):
+                rapidocr_errors.append(
+                    "RECOGNITION_RAPIDOCR_MANIFEST_SHA256 must be lowercase SHA-256"
+                )
         if self.recognition_rapidocr_model_download_allowed:
             rapidocr_errors.append(
                 "RECOGNITION_RAPIDOCR_MODEL_DOWNLOAD_ALLOWED must remain false; "

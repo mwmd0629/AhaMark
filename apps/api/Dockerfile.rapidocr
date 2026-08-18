@@ -1,0 +1,25 @@
+FROM python:3.12-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 libgl1 libxcb1 && \
+    rm -rf /var/lib/apt/lists/*
+COPY pyproject.toml .
+RUN mkdir -p /app/app /app/workers
+RUN pip install --no-cache-dir ".[ocr]"
+COPY apps/api/app /app/app
+COPY apps/api/assets /app/assets
+COPY workers /app/workers
+COPY deploy/rapidocr/manifest.json /opt/ahamark/rapidocr-artifacts/manifest.json
+COPY deploy/rapidocr/NOTICE.md /opt/ahamark/licenses/RAPIDOCR-NOTICE.md
+RUN mkdir -p /opt/ahamark/rapidocr-artifacts/artifacts && \
+    cp /usr/local/lib/python3.12/site-packages/rapidocr/models/PP-OCRv6_det_small.onnx /opt/ahamark/rapidocr-artifacts/artifacts/det.onnx && \
+    cp /usr/local/lib/python3.12/site-packages/rapidocr/models/ch_ppocr_mobile_v2.0_cls_mobile.onnx /opt/ahamark/rapidocr-artifacts/artifacts/cls.onnx && \
+    cp /usr/local/lib/python3.12/site-packages/rapidocr/models/PP-OCRv6_rec_small.onnx /opt/ahamark/rapidocr-artifacts/artifacts/rec.onnx
+COPY scripts /app/scripts
+COPY alembic.ini /app/
+COPY apps/api/alembic /app/apps/api/alembic
+ARG RAPIDOCR_MANIFEST_SHA256
+RUN test -n "$RAPIDOCR_MANIFEST_SHA256" && \
+    python -c "from app.recognition.rapidocr_artifacts import validate_rapidocr_artifact_bundle; validate_rapidocr_artifact_bundle('/opt/ahamark/rapidocr-artifacts', expected_manifest_sha256='$RAPIDOCR_MANIFEST_SHA256')"
+EXPOSE 8000
+CMD ["uvicorn","app.main:app","--host","0.0.0.0","--port","8000"]
