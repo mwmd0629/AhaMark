@@ -12,6 +12,7 @@ from app.api.assignment_central_review import (
     Disposition,
     PublishInput,
     _issue_blocks_review_bundle,
+    current_inputs,
     digest,
     disposition,
     owned_assignment,
@@ -79,6 +80,38 @@ def test_publish_contract_requires_server_readiness_and_explicit_true() -> None:
         pass
     else:
         raise AssertionError("explicit_confirmation=false must be rejected")
+
+
+def test_central_review_rejects_incomplete_required_ai_generation() -> None:
+    client.get("/api/classes")
+    with SessionLocal() as db:
+        actor = db.scalar(select(User).where(User.email == "demo-teacher@ahamark.local"))
+        assert actor is not None
+        assignment = Assignment(owner_id=actor.id, title="incomplete AI generation")
+        db.add(assignment)
+        db.flush()
+        db.add(
+            AssignmentGenerationJob(
+                owner_id=actor.id,
+                assignment_id=assignment.id,
+                generation=1,
+                status="partial",
+                idempotency_key=f"incomplete-ai-{uuid.uuid4()}",
+                request_fingerprint="a" * 64,
+                source_snapshot_hash="b" * 64,
+                provider_config_version="test",
+                prompt_version="test",
+                schema_version="test",
+            )
+        )
+        db.flush()
+
+        with pytest.raises(ApiProblem) as caught:
+            current_inputs(db, assignment)
+
+        assert caught.value.status == 409
+        assert caught.value.code == "GENERATION_INCOMPLETE"
+        db.rollback()
 
 
 def test_stable_hash_ignores_mapping_insertion_order() -> None:

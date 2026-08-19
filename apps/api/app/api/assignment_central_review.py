@@ -168,6 +168,12 @@ def current_inputs(
     )
     if job is None:
         raise ApiProblem(409, "GENERATION_REQUIRED", "尚无可审查的生成任务")
+    if job.status not in {"review_required", "ready"}:
+        raise ApiProblem(
+            409,
+            "GENERATION_INCOMPLETE",
+            "AI 题目整理、答案与评分标准生成尚未完成",
+        )
     revision = db.scalar(
         select(AssignmentDraftRevision)
         .where(AssignmentDraftRevision.generation_job_id == job.id)

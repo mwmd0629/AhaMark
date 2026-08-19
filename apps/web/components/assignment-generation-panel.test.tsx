@@ -319,12 +319,12 @@ it("只展示仍需老师处理且属于作业表单的字段问题", async () =
   ]);
 });
 
-it("恢复 partial/unavailable、风险与草稿历史并允许单阶段重试", async () => {
-  const onContinueManually = vi.fn();
+it("AI 必经阶段不可用时阻止跳过并允许单阶段重试", async () => {
+  const onRequiredFlowReadyChange = vi.fn();
   render(
     <AssignmentGenerationPanel
       assignmentId="assignment-1"
-      onContinueManually={onContinueManually}
+      onRequiredFlowReadyChange={onRequiredFlowReadyChange}
     />,
   );
 
@@ -338,11 +338,10 @@ it("恢复 partial/unavailable、风险与草稿历史并允许单阶段重试",
   expect(
     screen.getByLabelText("处理详情").firstElementChild?.nextElementSibling,
   ).toHaveClass("border-[var(--neutral-300)]");
-  expect(screen.getByText("可继续手动核对")).toBeInTheDocument();
-  expect(screen.getByText("可选：AI 整理页面与抽取题目")).toBeInTheDocument();
-  expect(screen.getByText("可选：AI 生成答案与评分标准")).toBeInTheDocument();
-  expect(screen.getByText("可跳过（AI 辅助暂不可用）")).toBeInTheDocument();
-  expect(screen.getByText(/AI 辅助不会阻塞作业编辑/)).toBeInTheDocument();
+  expect(screen.getAllByText("AI 必经步骤未完成").length).toBeGreaterThan(0);
+  expect(screen.getByText("AI 整理页面与抽取题目")).toBeInTheDocument();
+  expect(screen.getByText("AI 生成答案与评分标准")).toBeInTheDocument();
+  expect(screen.getByText(/AI 整理与生成是必经流程/)).toBeInTheDocument();
   expect(screen.queryByText("查看详情")).not.toBeInTheDocument();
   expect(screen.queryByText("更多操作")).not.toBeInTheDocument();
   expect(screen.queryByText("阻断 2")).not.toBeInTheDocument();
@@ -354,8 +353,10 @@ it("恢复 partial/unavailable、风险与草稿历史并允许单阶段重试",
   ).not.toBeInTheDocument();
   expect(screen.queryByText("发布作业")).not.toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("button", { name: "不等 AI，手动核对" }));
-  expect(onContinueManually).toHaveBeenCalledOnce();
+  expect(
+    screen.queryByRole("button", { name: "不等 AI，手动核对" }),
+  ).not.toBeInTheDocument();
+  expect(onRequiredFlowReadyChange).toHaveBeenLastCalledWith(false);
 
   fireEvent.click(screen.getByRole("button", { name: "重试此阶段" }));
   await waitFor(() =>

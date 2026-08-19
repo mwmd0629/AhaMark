@@ -7,7 +7,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { AssignmentWizard } from "./assignment-wizard";
-import { assignmentsApi } from "@/lib/api";
+import { assignmentGenerationApi, assignmentsApi } from "@/lib/api";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn() }),
@@ -92,14 +92,42 @@ vi.mock("@/lib/api", async () => {
       ...actual.assignmentGenerationApi,
       capabilities: vi.fn().mockResolvedValue({
         enabled: true,
-        provider: "unavailable",
-        provider_status: "unavailable",
+        provider: "local_openai_compatible",
+        provider_status: "available",
         external_provider_requests: false,
         teacher_start_allowed: true,
         suggestion_only: true,
         real_provider_quality_passed: false,
       }),
-      listJobs: vi.fn().mockResolvedValue([]),
+      listJobs: vi.fn().mockResolvedValue([
+        {
+          id: "job-1",
+          assignment_id: "assignment-1",
+          generation: 1,
+          status: "review_required",
+          current_stage: "validating",
+          progress: 100,
+          source_snapshot_hash: "a".repeat(64),
+          provider_mode: "local_openai_compatible",
+          retryable: true,
+          created_at: "2026-07-25T00:00:00Z",
+          updated_at: "2026-07-25T00:00:00Z",
+          stages: [
+            "analyzing",
+            "processing_pages",
+            "extracting_questions",
+            "generating_rubrics",
+            "validating",
+          ].map((stage, index) => ({
+            id: `stage-${index + 1}`,
+            stage,
+            stage_generation: 1,
+            status: "completed",
+            result_payload: {},
+          })),
+          issues: [],
+        },
+      ]),
       listRevisions: vi.fn().mockResolvedValue([
         {
           id: "revision-1",
@@ -659,4 +687,41 @@ it("年级允许大学课程自定义教学层级并回填编辑值", async () =
   expect(grade).toHaveValue("大二");
   expect(grade).toHaveAttribute("placeholder", "如：大二、研究生、2026 级");
   expect(grade.tagName).toBe("INPUT");
+});
+
+it("AI 必经流程未完成时不能直接进入核对内容", async () => {
+  vi.mocked(assignmentGenerationApi.listJobs).mockResolvedValueOnce([
+    {
+      id: "job-blocked",
+      assignment_id: "assignment-1",
+      generation: 2,
+      status: "partial",
+      current_stage: "extracting_questions",
+      progress: 60,
+      source_snapshot_hash: "b".repeat(64),
+      provider_mode: "local_openai_compatible",
+      retryable: true,
+      created_at: "2026-07-25T02:00:00Z",
+      updated_at: "2026-07-25T02:00:00Z",
+      stages: [
+        {
+          id: "stage-blocked",
+          stage: "extracting_questions",
+          stage_generation: 1,
+          status: "unavailable",
+          result_payload: {},
+        },
+      ],
+      issues: [],
+    },
+  ]);
+
+  render(<AssignmentWizard assignmentId="assignment-1" initialStep={2} />);
+
+  await screen.findByRole("heading", { name: "线代期末" });
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: /核对内容/ })).toBeDisabled(),
+  );
+  expect(screen.getByText(/必须先完成 AI 整理与生成/)).toBeInTheDocument();
+  expect(screen.queryByText("评分标准")).not.toBeInTheDocument();
 });

@@ -40,8 +40,8 @@ const TERMINAL = new Set([
 const STAGES: { key: AssignmentGenerationStage; label: string }[] = [
   { key: "analyzing", label: "分析输入" },
   { key: "processing_pages", label: "检查页面" },
-  { key: "extracting_questions", label: "可选：AI 整理页面与抽取题目" },
-  { key: "generating_rubrics", label: "可选：AI 生成答案与评分标准" },
+  { key: "extracting_questions", label: "AI 整理页面与抽取题目" },
+  { key: "generating_rubrics", label: "AI 生成答案与评分标准" },
   { key: "validating", label: "结构验证" },
 ];
 const STATUS_LABEL: Record<string, string> = {
@@ -77,7 +77,7 @@ export function AssignmentGenerationPanel({
   onAssignmentChanged,
   onReviewInputsChanged,
   onFieldSuggestionsChanged,
-  onContinueManually,
+  onRequiredFlowReadyChange,
 }: {
   assignmentId: string;
   assignment?: AssignmentRecord;
@@ -86,7 +86,7 @@ export function AssignmentGenerationPanel({
   onFieldSuggestionsChanged?: (
     suggestions: AssignmentFieldSuggestion[],
   ) => void;
-  onContinueManually?: () => void;
+  onRequiredFlowReadyChange?: (ready: boolean) => void;
 }) {
   const [jobs, setJobs] = useState<AssignmentGenerationJob[]>([]);
   const [capabilities, setCapabilities] =
@@ -94,6 +94,7 @@ export function AssignmentGenerationPanel({
   const [revisions, setRevisions] = useState<AssignmentDraftRevision[]>([]);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [deletingFileId, setDeletingFileId] = useState("");
   const [fileAnalyses, setFileAnalyses] = useState<AssignmentFileAnalysis[]>(
@@ -198,12 +199,14 @@ export function AssignmentGenerationPanel({
         setFileAnalyses([]);
       }
       setError("");
+      setLoaded(true);
       return nextJobs;
     } catch (reason) {
       if (!mountedRef.current) return [];
       setError(
         reason instanceof ApiError ? reason.message : "无法恢复草稿生成任务",
       );
+      setLoaded(true);
       return [];
     }
   }, [assignmentId, hasConfirmedTotalScore, onFieldSuggestionsChanged]);
@@ -271,6 +274,17 @@ export function AssignmentGenerationPanel({
     configuredProviderReady &&
     current.provider_mode !== capabilities?.provider,
   );
+  const requiredFlowReady = Boolean(
+    current &&
+    !providerChanged &&
+    ["review_required", "ready"].includes(current.status) &&
+    (
+      ["extracting_questions", "generating_rubrics", "validating"] as const
+    ).every((stage) => latestStages.get(stage)?.status === "completed"),
+  );
+  useEffect(() => {
+    if (loaded) onRequiredFlowReadyChange?.(requiredFlowReady);
+  }, [loaded, onRequiredFlowReadyChange, requiredFlowReady]);
   const codexStageStatus = (
     stage: AssignmentGenerationStage,
     row: AssignmentGenerationJob["stages"][number] | undefined,
@@ -280,7 +294,7 @@ export function AssignmentGenerationPanel({
       ["extracting_questions", "generating_rubrics"].includes(stage) &&
       row.status === "unavailable"
     )
-      return providerChanged ? "旧任务未启用 AI" : "可跳过（AI 辅助暂不可用）";
+      return providerChanged ? "旧任务未启用 AI" : "AI 必经步骤未完成";
     return STATUS_LABEL[row.status] ?? row.status;
   };
 
@@ -447,7 +461,7 @@ export function AssignmentGenerationPanel({
                 : providerChanged
                   ? "本地 AI 已可用，请重新整理"
                   : current.status === "partial" && codexUnavailable
-                    ? "可继续手动核对"
+                    ? "AI 必经步骤未完成"
                     : (STATUS_LABEL[current.status] ?? current.status)}
             </strong>
             <div
@@ -468,17 +482,12 @@ export function AssignmentGenerationPanel({
               <p>
                 {providerChanged
                   ? "本地 AI 已经可用。当前记录来自旧配置，请重新整理以生成新的题目、答案和评分标准建议。"
-                  : "AI 辅助不会阻塞作业编辑。你可以先手动整理题目、答案和评分标准，需要时再回来重试。"}
+                  : "AI 整理与生成是必经流程。请恢复服务或重试失败阶段，完成后才能进入核对与发布。"}
               </p>
               <div className="flex flex-wrap gap-2">
                 {providerChanged && (
                   <Button disabled={busy} onClick={start}>
                     使用本地 AI 重新整理
-                  </Button>
-                )}
-                {onContinueManually && (
-                  <Button variant="outline" onClick={onContinueManually}>
-                    不等 AI，手动核对
                   </Button>
                 )}
               </div>

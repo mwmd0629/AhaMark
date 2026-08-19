@@ -71,6 +71,8 @@ export function AssignmentWizard({
   const [classResources, setClassResources] = useState<ClassResource[]>([]);
   const [selectedResourceIds, setSelectedResourceIds] = useState<string[]>([]);
   const [step, setStep] = useState(1);
+  const [requiredGenerationKnown, setRequiredGenerationKnown] = useState(false);
+  const [requiredGenerationReady, setRequiredGenerationReady] = useState(false);
   const [reviewInputsRevision, setReviewInputsRevision] = useState(0);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -167,7 +169,26 @@ export function AssignmentWizard({
     setReviewInputsRevision((current) => current + 1);
     await load();
   }, [load]);
+  const navigateToStep = useCallback(
+    (nextStep: number) => {
+      if (
+        nextStep > 1 &&
+        (!requiredGenerationKnown || !requiredGenerationReady)
+      ) {
+        setStep(1);
+        toast("必须先完成 AI 题目整理、答案与评分标准生成", "error");
+        return;
+      }
+      setStep(nextStep);
+    },
+    [requiredGenerationKnown, requiredGenerationReady, toast],
+  );
   useEffect(() => void load(), [load]);
+  useEffect(() => {
+    if (requiredGenerationKnown && !requiredGenerationReady && step > 1) {
+      setStep(1);
+    }
+  }, [requiredGenerationKnown, requiredGenerationReady, step]);
   useEffect(() => {
     if (!item?.classes.length) {
       setClassResources([]);
@@ -538,6 +559,10 @@ export function AssignmentWizard({
         Number(selectedClassIds.includes(left.id));
       return selectedDifference || left.name.localeCompare(right.name, "zh-CN");
     });
+  const visibleStep =
+    step > 1 && (!requiredGenerationKnown || !requiredGenerationReady)
+      ? 1
+      : step;
 
   return (
     <div className="space-y-6">
@@ -554,8 +579,12 @@ export function AssignmentWizard({
         {steps.map((label, index) => (
           <li key={label}>
             <button
-              onClick={() => setStep(index + 1)}
-              className={`w-full rounded-xl border p-3 text-left text-xs font-semibold ${step === index + 1 ? "border-[var(--brand-600)] bg-[var(--brand-50)] text-[var(--brand-700)]" : "bg-white"}`}
+              onClick={() => navigateToStep(index + 1)}
+              disabled={
+                index > 0 &&
+                (!requiredGenerationKnown || !requiredGenerationReady)
+              }
+              className={`w-full rounded-xl border p-3 text-left text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-50 ${visibleStep === index + 1 ? "border-[var(--brand-600)] bg-[var(--brand-50)] text-[var(--brand-700)]" : "bg-white"}`}
             >
               <span className="block text-[10px] opacity-60">
                 步骤 {index + 1}
@@ -572,18 +601,20 @@ export function AssignmentWizard({
       >
         <span className="text-slate-600">你现在在：</span>
         <strong>
-          第 {step} 步 · {steps[step - 1]}
+          第 {visibleStep} 步 · {steps[visibleStep - 1]}
         </strong>
         <span className="ml-2 text-slate-600">
-          {step === 1
-            ? "下一步核对题目、答案和评分标准"
-            : step === 2
+          {visibleStep === 1
+            ? requiredGenerationReady
+              ? "AI 必经流程已完成，下一步核对题目、答案和评分标准"
+              : "必须先完成 AI 整理与生成，之后才能核对内容"
+            : visibleStep === 2
               ? "下一步检查并确认发布"
               : "完成检查后由你确认发布"}
         </span>
       </div>
 
-      {step === 1 && (
+      {visibleStep === 1 && (
         <Card id="assignment-basics" className="scroll-mt-4 p-6">
           <form action={saveBasics} className="grid gap-4 md:grid-cols-2">
             <div className="space-y-1.5">
@@ -928,7 +959,7 @@ export function AssignmentWizard({
         </Card>
       )}
 
-      {step === 1 && (
+      {visibleStep === 1 && (
         <Card id="assignment-upload" className="scroll-mt-4 space-y-4 p-6">
           <h2 className="font-bold">上传题目与答案</h2>
           {classResources.length > 0 && (
@@ -1084,10 +1115,13 @@ export function AssignmentWizard({
         onAssignmentChanged={load}
         onReviewInputsChanged={refreshReviewInputs}
         onFieldSuggestionsChanged={setFieldSuggestions}
-        onContinueManually={() => setStep(2)}
+        onRequiredFlowReadyChange={(ready) => {
+          setRequiredGenerationKnown(true);
+          setRequiredGenerationReady(ready);
+        }}
       />
 
-      {step === 2 && (
+      {visibleStep === 2 && (
         <Card id="assignment-pages" className="scroll-mt-4 space-y-4 p-6">
           <details>
             <summary className="cursor-pointer rounded-lg px-3 py-2 font-bold hover:bg-[var(--neutral-50)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--brand-600)]">
@@ -1290,7 +1324,7 @@ export function AssignmentWizard({
         </Card>
       )}
 
-      {step === 2 && (
+      {visibleStep === 2 && (
         <div
           id="assignment-questions"
           className="scroll-mt-4 grid gap-5 lg:grid-cols-[320px_1fr]"
@@ -1533,29 +1567,30 @@ export function AssignmentWizard({
         </div>
       )}
 
-      {step === 2 && (
+      {visibleStep === 2 && (
         <Card id="assignment-rubrics" className="scroll-mt-4 space-y-4 p-6">
           <h2 className="font-bold">评分标准</h2>
           <AnswerRubricGenerationReview
             assignmentId={item.id}
             questions={item.paper_version?.questions ?? []}
           />
-          <Button variant="secondary" onClick={() => setStep(3)}>
+          <Button variant="secondary" onClick={() => navigateToStep(3)}>
             进入确认发布
           </Button>
         </Card>
       )}
 
-      {item.delivery_mode === "joint_exam" && (step === 1 || step === 3) && (
-        <JointExamTeamPanel assignmentId={item.id} onChanged={load} />
-      )}
+      {item.delivery_mode === "joint_exam" &&
+        (visibleStep === 1 || visibleStep === 3) && (
+          <JointExamTeamPanel assignmentId={item.id} onChanged={load} />
+        )}
 
-      {step === 3 && (
+      {visibleStep === 3 && (
         <AssignmentCentralReview
           item={item}
           reviewInputsRevision={reviewInputsRevision}
           onNavigate={(targetStep) =>
-            setStep(wizardStepForCompleteness(targetStep))
+            navigateToStep(wizardStepForCompleteness(targetStep))
           }
           onPublished={() => router.push(`/assignments/${item.id}`)}
         />
