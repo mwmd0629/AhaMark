@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from urllib.parse import unquote
 
 REPOSITORY_ROOT = Path(__file__).parents[1].resolve()
 
@@ -78,6 +79,16 @@ def test_docker_build_context_excludes_sensitive_runtime_artifacts() -> None:
         ".preproduction-assignment-generation/",
         ".pytest-tmp-*",
         ".mypy-tmp-*",
+        ".pytest-*",
+        ".pytest-cache-*",
+        ".mypy-*",
+        ".ruff-cache-*",
+        ".tmp-*",
+        "pytest-*",
+        "formula-eval-build/",
+        "formula-synthetic-acceptance/",
+        "/*资料*/",
+        "local-work/",
         "test-results/",
         "playwright-report/",
         ".playwright/",
@@ -181,3 +192,66 @@ def test_assignment_generation_example_keeps_safe_defaults() -> None:
     assert values["ASSIGNMENT_GENERATION_ALLOW_TEACHER_START"] == "true"
     assert values["ASSIGNMENT_GENERATION_SUGGESTION_ONLY"] == "true"
     assert values["ASSIGNMENT_GENERATION_REAL_PROVIDER_QUALITY_PASSED"] == "false"
+
+
+def test_repository_navigation_covers_major_directories() -> None:
+    navigation = {
+        "apps": "apps/README.md",
+        "data": "data/README.md",
+        "deploy": "deploy/README.md",
+        "docs": "docs/README.md",
+        "scripts": "scripts/README.md",
+        "tests": "tests/README.md",
+        "workers": "workers/README.md",
+    }
+    root_readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
+    for directory, readme in navigation.items():
+        assert (REPOSITORY_ROOT / directory).is_dir()
+        assert (REPOSITORY_ROOT / readme).is_file()
+        assert readme in root_readme
+
+
+def test_markdown_relative_links_resolve() -> None:
+    markdown_link = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+    missing: list[str] = []
+    tracked_markdown = (
+        subprocess.run(
+            ["git", "ls-files", "-z", "*.md"],
+            cwd=REPOSITORY_ROOT,
+            check=True,
+            capture_output=True,
+        )
+        .stdout.decode("utf-8")
+        .split("\0")
+    )
+    for relative_path in tracked_markdown:
+        if not relative_path:
+            continue
+        markdown_path = REPOSITORY_ROOT / relative_path
+        source = markdown_path.read_text(encoding="utf-8")
+        for match in markdown_link.finditer(source):
+            target = match.group(1).strip().strip("<>")
+            if not target or target.startswith(("#", "/", "http://", "https://", "mailto:")):
+                continue
+            relative_target = unquote(target.split("#", 1)[0])
+            if relative_target and not (markdown_path.parent / relative_target).exists():
+                missing.append(f"{markdown_path.relative_to(REPOSITORY_ROOT)} -> {target}")
+    assert missing == []
+
+
+def test_root_verification_scratch_directories_are_ignored() -> None:
+    rules = {
+        line.strip()
+        for line in (REPOSITORY_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert {
+        "/.mypy-*/",
+        "/.pytest-*/",
+        "/.pytest-cache-*/",
+        "/.ruff-cache-*/",
+        "/.tmp-*/",
+        "/pytest-*/",
+        "/formula-eval-build/",
+        "/formula-synthetic-acceptance/",
+    } <= rules

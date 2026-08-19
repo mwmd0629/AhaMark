@@ -9,6 +9,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 - [接手必读：当前状态、问题与下一步](#接手必读当前状态问题与下一步)
 - [产品能力与边界](#产品能力与边界)
 - [系统结构](#系统结构)
+- [仓库导航](#仓库导航)
 - [快速开始](#快速开始)
 - [账号与登录](#账号与登录)
 - [教师主流程](#教师主流程)
@@ -26,11 +27,11 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 | 项目           | 当前事实（2026-08-19）                                                                                       |
 | -------------- | ------------------------------------------------------------------------------------------------------------ |
 | 正确工作区     | `D:\OpenAIData\Workspaces\AhaMark`                                                                           |
-| 工作分支       | `codex/grading-confirm-results`；已整合本地账号运维提交 `9bccb91`                                               |
-| 应用基线       | 本地产品实现 `9bccb91`；node2 镜像仍为 `0594d10`；GitHub 主线仍为 `4f4a374`                                   |
-| 远端状态       | 本地包含尚未 push 的账号运维与状态账本提交；尚未部署                                                          |
+| 工作分支       | `codex/grading-confirm-results`；本地 HEAD 为 `2a6e0a5`，本轮仓库整理尚待提交                                  |
+| 应用基线       | 本地产品实现 `4e0dd57`；node2 镜像仍为 `0594d10`；GitHub 主线仍为 `4f4a374`                                   |
+| 远端状态       | 本地包含尚未 push 的账号运维、文档及仓库整理；尚未部署                                                        |
 | 数据库迁移     | Alembic 单 head：`0049_usernames`                                                                            |
-| 最新开发       | 本机新增教师/学生 CSV 批量建号、账号审计视图及管理员浏览器验收；尚未 push 或部署                           |
+| 最新开发       | 管理员批量运维之后完成全仓结构盘点与导航整理；未移动私有/未跟踪资料，尚未 push 或部署                         |
 | 本机业务验收   | 隔离合成环境 A–F 已通过并停在成绩发布前；公式不可读/重框专项通过；GradeRelease 为 0                          |
 | node2 在线版本 | API/Web/Worker 为 `0594d10`，schema 为 `0049_usernames`；文字、公式 OCR 与本地建议 Provider available        |
 | node2 入口     | `https://222.195.89.236:13300`；自签名证书；公网可达，无来源白名单                                           |
@@ -49,6 +50,8 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 2026-08-19 用户授权把已完成工作整合到当前 D 盘工作区。`codex/grading-confirm-results` 原 `278d899` 是完整功能分支的严格祖先，已使用 `git merge --ff-only` 无冲突快进至 `9bccb91`；该提交包含管理员账号运维、教师逐题复核体验和本机业务验收脚本改进。当前工作区原有公式评测及临时测试目录均为未跟踪内容，整合过程未修改、删除或纳入提交。D 盘复验前按 `.[dev]` 安装项目声明的开发依赖；账号/认证专项 `12 passed`、测试数据库守卫 `ahamark.db unchanged`、Ruff、strict mypy `131 source files`、前端 `40 files / 242 tests`、TypeScript、ESLint 和包含 `/admin/accounts` 的 20 页 production build 均通过。Next 构建仍出现既有 SWC lockfile 自动补丁网络告警，但编译、静态页面生成和构建进程成功。尚未 push、未登录 node2、未部署、未创建账号或发布成绩。
 
 2026-08-19 继续完成无需登录 node2 的管理员账号运维增强：管理员可下载模板并在浏览器本地预览 CSV，一次批量创建最多 200 个教师或学生账号；中英文表头和账号类型均受支持，无效行会在提交前标出，密码不进入预览、响应或审计。管理页新增最近账号操作，显示执行管理员、目标账号、动作和时间；后端为批量导入写逐账号及汇总审计，仍拒绝 CSV 创建管理员。合成账号浏览器闭环 9 个场景通过；账号/认证后端 `14 passed` 且 `ahamark.db unchanged`，Ruff、strict mypy `132 source files`、前端 `41 files / 246 tests`、TypeScript、ESLint、20 页 production build、Alembic 单 head `0049_usernames` 和业务 Compose 静态解析均通过。Docker Desktop 引擎因本机 Windows 服务权限被拒绝而无法启动，因此没有获得 PostgreSQL 实机迁移、容器重启或 Compose 健康证据；SQLite 也因既有迁移使用 PostgreSQL `JSONB` 而不能替代该证据。操作说明见 `docs/ADMIN-ACCOUNT-OPERATIONS.md`。本轮未 push、未登录 node2、未部署，也未创建真实账号。
+
+2026-08-19 对全仓 595 个已跟踪文件和根目录运行产物完成结构盘点：已跟踪文件没有内容完全重复项，现有 Markdown 相对链接没有断链。为避免破坏 API 导入、脚本默认路径、Compose 和历史证据引用，本轮不做无收益的大规模搬移；改为在 `apps/`、`data/`、`deploy/`、`docs/`、`scripts/`、`tests/`、`workers/` 增加职责与导航 README，并由根 README 提供统一仓库地图。`.gitignore` 和 `.dockerignore` 新增历史 pytest/mypy/ruff、临时验收、公式评测生成目录及本地资料目录规则，Git 状态不再扫描这些不可访问缓存，Docker 构建上下文也不再携带这些本地产物；新增硬化测试保证主要目录导航、Markdown 相对链接和忽略规则持续有效。原有 `.env`、数据库、公式评测结果和“数学分析资料整理”等本地资料均未读取、移动、删除或提交。仓库硬化专项 `9 passed`；仓库硬化、数据库隔离、node2 部署契约和业务浏览器契约联合为 `100 passed, 1 skipped`，两次数据库守卫均为 `ahamark.db unchanged`。Ruff、strict mypy `132 source files`、前端 `41 files / 246 tests`、TypeScript 和 ESLint 通过。全后端收集为 1094 项；一次与前端门禁并发的完整运行早期出现单个未留 traceback 的失败，串行 fail-fast 前段未复现，但因整套包含长耗时容量/恢复测试，本轮没有把中止运行当作全量通过证据。本轮未 push、未部署、未登录 node2。
 
 2026-08-18 用户要求由 Codex 全程完成、不接第三方在线 Provider，并授权继续开发。当前工作树已接入两个只在 `local-ai` Compose profile 中启用的内网服务：固定 `PaddlePaddle/PP-FormulaNet_plus-M` 公式模型（revision `712e6e2e4c313b1ea163be5c350127b82662c58d`）和固定 `Qwen/Qwen3-4B-GGUF` 的 `Qwen3-4B-Q4_K_M.gguf`，由官方 llama.cpp CPU server 提供 OpenAI-compatible JSON Schema 接口。两者均不发布宿主端口，运行时不下载模型，模型卷只读；应用只允许显式 host allowlist 的 Compose HTTP，拒绝 IP、metadata host、localhost 和未授权外部端点。评分、Stage 4 AI grading 与作业生成只产出 suggestion，继续要求教师复核，外部 Provider 请求在 node2 Compose 中固定关闭。
 
@@ -156,6 +159,20 @@ AhaMark 已实现教师侧的作业创建、资料整理、题目与区域确认
                          ├→ Redis → Worker
                          └→ MinIO
 ```
+
+## 仓库导航
+
+| 路径 | 内容 | 维护入口 |
+| --- | --- | --- |
+| `apps/` | API、迁移、CLI 与 Web 应用 | [apps/README.md](apps/README.md) |
+| `workers/` | Celery 异步任务 | [workers/README.md](workers/README.md) |
+| `tests/`、`test_support/` | 后端测试、fixture 与数据库隔离保护 | [tests/README.md](tests/README.md) |
+| `scripts/` | 浏览器验收、容量、评测和运维辅助脚本 | [scripts/README.md](scripts/README.md) |
+| `docs/` | 稳定说明与脱敏验收证据 | [docs/README.md](docs/README.md) |
+| `deploy/`、`docker-compose*.yml` | 镜像静态资源和环境编排 | [deploy/README.md](deploy/README.md) |
+| `data/` | 可版本化的公开或合成评测数据 | [data/README.md](data/README.md) |
+
+根目录只保留项目入口、依赖清单、Compose 文件和仓库规则。数据库、模型、日志、缓存、浏览器输出及本地评测构建均为运行产物，不属于源码结构。
 
 ## 快速开始
 

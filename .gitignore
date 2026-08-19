@@ -44,3 +44,14 @@ tests/.artifacts/
 /.preproduction-assignment-generation/
 .preproduction-assignment-generation/**/runtime.env
 .preproduction-assignment-generation/**/certs/*.key
+
+# Repository-root scratch directories created by local verification runs.
+# Keep durable evidence under docs/ and reusable fixtures under tests/fixtures/.
+/.mypy-*/
+/.pytest-*/
+/.pytest-cache-*/
+/.ruff-cache-*/
+/.tmp-*/
+/pytest-*/
+/formula-eval-build/
+/formula-synthetic-acceptance/
