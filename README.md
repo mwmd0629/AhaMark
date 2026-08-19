@@ -25,10 +25,10 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 | 项目           | 当前事实（2026-08-19）                                                                                       |
 | -------------- | ------------------------------------------------------------------------------------------------------------ |
-| 正确工作区     | `C:\Users\Lenovo\.codex\worktrees\06f7\AhaMark`                                                              |
-| 工作分支       | `codex/integrate-question-page-cutter`；已通过合并提交 `7e88fae` 汇入 `master`                               |
-| 应用基线       | 产品实现 `de22415`；node2 镜像 `0594d10`；GitHub 主线 `7e88fae`                                              |
-| 远端状态       | `HEAD`、`origin/master` 与 `origin/codex/integrate-question-page-cutter` 均为 `7e88fae`                      |
+| 正确工作区     | `D:\OpenAIData\Workspaces\AhaMark`                                                                           |
+| 工作分支       | `codex/grading-confirm-results`；已整合本地账号运维提交 `9bccb91`                                               |
+| 应用基线       | 本地产品实现 `9bccb91`；node2 镜像仍为 `0594d10`；GitHub 主线仍为 `4f4a374`                                   |
+| 远端状态       | 本地包含尚未 push 的账号运维与状态账本提交；尚未部署                                                          |
 | 数据库迁移     | Alembic 单 head：`0049_usernames`                                                                            |
 | 最新开发       | 全离线公式 OCR 与本地 Qwen 建议服务已实现并部署，代码和部署账本已进入 GitHub `master`                        |
 | 本机业务验收   | 隔离合成环境 A–F 已通过并停在成绩发布前；公式不可读/重框专项通过；GradeRelease 为 0                          |
@@ -45,6 +45,8 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 2026-08-19 继续完成教师逐题复核体验改进：评分入口按建议状态统一为唯一的“修改分数”或“手动评分”，进入编辑后自动定位并聚焦最终分数；分项缺失、越界或合计不一致会在表单内即时显示并禁用保存，校验通过后明确显示可保存状态；异常卡片不再重复展示同名入口，快捷键 E 统一描述为“打开评分”。TeacherReview 继续保留 `modified`/`manual_scored` 的教师决策语义，GradingResult 按既有正式契约投影为 `modified`。目标页 32 条测试、前端全量 `38 files / 235 tests`、TypeScript、ESLint、业务契约 62 条和重新构建后的本机 A–F 浏览器闭环均通过；仍在 GradeRelease 前停止。
 
 2026-08-19 在用户授权离线自主开发、无需登录 node2 的范围内，新增管理员账号运维闭环：`admin`、`teacher`、`student` 三类账号使用显式且互斥的创建角色，历史无角色教师继续兼容；管理员登录后进入 `/admin/accounts`，可查看分类与在线会话摘要、搜索筛选和分页、创建账号、修改展示姓名、启停账号及重置他人密码。停用和重置密码都会撤销目标账号全部未撤销会话；当前管理员不能停用或在该页面重置自身密码，至少保留一个启用管理员。所有写操作要求管理员会话与 CSRF，创建、更新、重置均写审计日志且不记录或回显密码。没有提供物理删除或角色直接变更，避免误删业务归属或越权迁移。账号/认证后端专项 `12 passed` 且测试数据库守卫确认 `ahamark.db unchanged`；strict mypy `131 source files`、全后端 Ruff、前端 TypeScript/ESLint、全量 `40 files / 242 tests` 和包含 `/admin/accounts` 的 20 页 production build 通过。该功能当前只完成本地代码和隔离测试，尚未部署 node2、尚未创建真实管理员账号。
+
+2026-08-19 用户授权把已完成工作整合到当前 D 盘工作区。`codex/grading-confirm-results` 原 `278d899` 是完整功能分支的严格祖先，已使用 `git merge --ff-only` 无冲突快进至 `9bccb91`；该提交包含管理员账号运维、教师逐题复核体验和本机业务验收脚本改进。当前工作区原有公式评测及临时测试目录均为未跟踪内容，整合过程未修改、删除或纳入提交。D 盘复验前按 `.[dev]` 安装项目声明的开发依赖；账号/认证专项 `12 passed`、测试数据库守卫 `ahamark.db unchanged`、Ruff、strict mypy `131 source files`、前端 `40 files / 242 tests`、TypeScript、ESLint 和包含 `/admin/accounts` 的 20 页 production build 均通过。Next 构建仍出现既有 SWC lockfile 自动补丁网络告警，但编译、静态页面生成和构建进程成功。尚未 push、未登录 node2、未部署、未创建账号或发布成绩。
 
 2026-08-18 用户要求由 Codex 全程完成、不接第三方在线 Provider，并授权继续开发。当前工作树已接入两个只在 `local-ai` Compose profile 中启用的内网服务：固定 `PaddlePaddle/PP-FormulaNet_plus-M` 公式模型（revision `712e6e2e4c313b1ea163be5c350127b82662c58d`）和固定 `Qwen/Qwen3-4B-GGUF` 的 `Qwen3-4B-Q4_K_M.gguf`，由官方 llama.cpp CPU server 提供 OpenAI-compatible JSON Schema 接口。两者均不发布宿主端口，运行时不下载模型，模型卷只读；应用只允许显式 host allowlist 的 Compose HTTP，拒绝 IP、metadata host、localhost 和未授权外部端点。评分、Stage 4 AI grading 与作业生成只产出 suggestion，继续要求教师复核，外部 Provider 请求在 node2 Compose 中固定关闭。
 
@@ -317,7 +319,7 @@ node2 使用 `shr` 用户的 Rootless Docker。专用文件：
 
 | 日期       | 提交/状态        | 结论                                                                             |
 | ---------- | ---------------- | -------------------------------------------------------------------------------- |
-| 2026-08-19 | 本地未部署       | 完成三类账号管理员运维、角色路由隔离、会话撤销、自锁保护和无密码审计；待部署验收 |
+| 2026-08-19 | `9bccb91` 本地    | 三类账号运维及教师复核改进已快进整合至 D 盘当前分支；未 push、未部署             |
 | 2026-08-19 | `7e88fae`        | 功能分支与最新远端历史正常合并并推送 `master`；代码树相对首父无变化              |
 | 2026-08-18 | `0594d10` 已部署 | `0049`、固定文字/公式 OCR、本地 Qwen 建议服务上线；公网 readiness 全部 available |
 | 2026-08-18 | `789a59d` 未部署 | 固定 RapidOCR bundle 已推送；部署脚本在 image validation 中止并回滚到旧版        |
