@@ -28,12 +28,12 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 | -------------- | ------------------------------------------------------------------------------------------------------------ |
 | 正确工作区     | `D:\OpenAIData\Workspaces\AhaMark`                                                                           |
 | 工作分支       | `codex/grading-confirm-results`；账号运维第二阶段提交为 `3142998`                                             |
-| 应用基线       | 本地产品实现 `3142998`；node2 镜像仍为 `0594d10`；GitHub 主线仍为 `4f4a374`                                   |
-| 远端状态       | 本地包含尚未 push 的账号运维、文档及仓库整理；尚未部署                                                        |
-| 数据库迁移     | 本地开发 Alembic 单 head：`0053_disable_forced_password_change`；node2 仍为 `0049_usernames`                 |
+| 应用基线       | 本地修复提交 `e375e55`；node2 API/Worker 为 `e375e55`、Web 为 `c444019`；GitHub 主线仍为 `4f4a374`            |
+| 远端状态       | 本地功能提交尚未 push；node2 已完成受保护部署并通过独立公网复验                                               |
+| 数据库迁移     | 本地与 node2 均为 Alembic 单 head：`0053_disable_forced_password_change`                                      |
 | 最新开发       | 合作者剩余能力已按当前架构吸收；账号改密调整为完全自愿，学生提交/错题/复核/资料/分析及本地学习助手已接入      |
 | 本机业务验收   | 隔离合成环境 A–F 已通过并停在成绩发布前；公式不可读/重框专项通过；GradeRelease 为 0                          |
-| node2 在线版本 | API/Web/Worker 为 `0594d10`，schema 为 `0049_usernames`；文字、公式 OCR 与本地建议 Provider available        |
+| node2 在线版本 | API/Worker `e375e55`、Web `c444019`、schema `0053`；文字、公式 OCR 与本地建议 Provider available             |
 | node2 入口     | `https://222.195.89.236:13300`；自签名证书；公网可达，无来源白名单                                           |
 | 部署范围       | 只发布 Nginx `0.0.0.0:13300 -> 8443`；数据库、Redis、MinIO、API、Web、Worker、Docker socket 均无宿主发布端口 |
 | 私有识别工作   | 暂停；不得继续处理、上传或提交私有 OCR/Gold、图片、正文或来源映射，除非用户再次明确授权                      |
@@ -67,7 +67,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 2026-08-19 按用户“全部吸收、自主开发”的授权继续处理 `origin/gyh--001` 剩余产品能力，仍不整分支合并、不改写历史迁移。新增账号自助改密，改密撤销其他会话并写审计；随后按用户决定以 `0053` 清除全部强制改密标记，新建账号和管理员重置密码均不阻断登录，改密入口仅供自愿使用。`0051` 建立学生正式错题复核申请，教师可维持原判、要求补充或带 `ScoreRevision` 改分，既有发布快照不被覆盖；`0052` 为现有班级资料增加显式学生发布/撤回，只有账号已关联且仍在班的学生可见和下载。学生端新增正式错题、复核状态、在线多文件/多版本提交、学习资料和基于最新正式成绩的学习分析；在线提交复用文件安全检查并进入教师批改批次，不依赖邮箱或文件名匹配。评分标准库沿用现有更完整的跨作业版本化模板实现，没有创建第二套重复模型。学习助手默认关闭，仅在显式启用本地 OpenAI-compatible Provider 且外部请求关闭时可用，只解释错因和提供练习建议，不能评分、改分或发布成绩。后端改动面联动为 `40 passed, 1 skipped`，数据库守卫为 `ahamark.db unchanged`；全仓 Ruff、strict mypy `123 source files`、前端首次全量 `45 files / 261 tests`、Prettier、TypeScript、ESLint 和 33 页 production build 通过。第二次前端全量出现一个既有评分页异步展开测试波动，目标文件单独复跑 `32 passed`。本地 PostgreSQL 升级前 custom dump 有 1221 个 TOC 条目，`0049 -> 0053` 实迁成功，现有强制改密标记数为 0；新增列/表核对通过，六项 Compose 服务健康，`/health`、`/ready` 与登录页均为 200。完整后端套件运行到 12% 仍零失败后因既有长耗时容量/识别用例停止，不能记为完整通过。本轮未登录 node2、未 push、未部署或发布成绩。
 
-2026-08-19 用户授权更新 node2。候选 `c444019` 的 API/Web 镜像、`0053` head 和固定 RapidOCR 清单本地校验通过；服务器先完成 PostgreSQL、MinIO、运行配置、Compose、Nginx 与证书备份并验证 SHA-256，备份为 `/data/shr/ahamark-backups/pre-upgrade-c444019-20260819T120754Z`。候选迁移容器随后在读取既有 Compose 传入的无引号方括号 host allowlist 时被 Pydantic Settings 拒绝，失败发生在连接数据库前；运行配置和业务容器尚未切换，公网 `/`、`/health`、`/ready` 复验仍为 200/available，线上继续保持 `0594d10 + 0049`。本地已为全部 host allowlist 增加 JSON、CSV 和 Compose 方括号格式兼容解析，并同步修正成功登录不累计失败次数后的 Redis 限流测试契约；预生产安全文件 `21 passed`，相关 Provider 联动累计 `35 passed`，Ruff、mypy 和数据库守卫通过。修复候选尚待重新构建和受保护部署。
+2026-08-19 用户授权更新 node2。候选 `c444019` 的 API/Web 镜像、`0053` head 和固定 RapidOCR 清单本地校验通过；服务器先完成 PostgreSQL、MinIO、运行配置、Compose、Nginx 与证书备份并验证 SHA-256，备份为 `/data/shr/ahamark-backups/pre-upgrade-c444019-20260819T120754Z`。候选迁移容器随后在读取既有 Compose 传入的无引号方括号 host allowlist 时被 Pydantic Settings 拒绝，失败发生在连接数据库前；运行配置和业务容器尚未切换，公网 `/`、`/health`、`/ready` 复验仍为 200/available。修复镜像 `e375e55` 上传后，第二次迁移仍在连接数据库前被相同错误阻止；比对镜像源码行号确认部署脚本加载旧 `runtime.env` 时把旧镜像标签导出到 Shell，优先级覆盖候选 env-file，实际再次运行的是旧镜像。第三次脚本清除旧镜像变量并核对 Compose 候选镜像后成功完成 `0049 -> 0053` 事务迁移和 API-A/B、Worker、Web 滚动切换；线上 API/Worker 为 `e375e55`，Web 为 `c444019`，既有 Formula/Qwen 镜像保持 `0594d10`，唯一公网端口仍为 13300。迁移后强制改密标记为 0，六项核心服务健康；独立公网复验 `/`、登录、主动改密、学生错题、教师复核、`/health` 均为 200，`/ready` 为 available、Worker 为 1，文字/公式 OCR 与本地建议 Provider available，评分和公式继续保留 suggestion-only/教师确认边界。未创建账号、未处理真实资料、未发布作业或成绩。代码提交尚未 push。
 
 2026-08-18 用户要求由 Codex 全程完成、不接第三方在线 Provider，并授权继续开发。当前工作树已接入两个只在 `local-ai` Compose profile 中启用的内网服务：固定 `PaddlePaddle/PP-FormulaNet_plus-M` 公式模型（revision `712e6e2e4c313b1ea163be5c350127b82662c58d`）和固定 `Qwen/Qwen3-4B-GGUF` 的 `Qwen3-4B-Q4_K_M.gguf`，由官方 llama.cpp CPU server 提供 OpenAI-compatible JSON Schema 接口。两者均不发布宿主端口，运行时不下载模型，模型卷只读；应用只允许显式 host allowlist 的 Compose HTTP，拒绝 IP、metadata host、localhost 和未授权外部端点。评分、Stage 4 AI grading 与作业生成只产出 suggestion，继续要求教师复核，外部 Provider 请求在 node2 Compose 中固定关闭。
 
@@ -135,7 +135,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 ### 已知未完成项
 
-1. 本地新增 `0050`–`0053`、自愿改密、学生提交/复核/资料/学习分析已经完成专项、PostgreSQL 与 Compose 验收；完整后端长耗时套件没有跑完，三类账号新页面的独立浏览器自动化闭环仍可补充。node2 仍停留在 `0594d10 + 0049`，未包含本轮能力。
+1. `0050`–`0053`、自愿改密、学生提交/复核/资料/学习分析已部署 node2 并完成 PostgreSQL、Compose 和公网只读验收；完整后端长耗时套件没有跑完，三类账号新页面的带登录浏览器自动化闭环仍可补充。
 2. 公网入口仍使用自签名证书；手机 Safari 登录和完整教师流程尚未验收。
 3. 公网端口无来源限制；若后续恢复“仅校园网”目标，需要由 iKuai/防火墙实施边界并做内外双向实测。
 4. 私有 OCR/Gold 的两页修复输出位于仓库外，未合并或覆盖原 60 页草稿；保持暂停。
@@ -144,7 +144,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 ### 下一步顺序
 
-下一步补充三类账号新页面的浏览器自动化闭环，并在方便长时间运行时完成剩余后端全量；发现问题只修本地，不登录或变更 node2。node2 保持当前 `0594d10 + 0049`。后续部署即使获得授权也必须先备份，并将本地学习助手保持默认关闭，只有本地 Provider 和教师确认边界通过复验后才可启用。
+下一步保持 node2 当前 API/Worker `e375e55`、Web `c444019` 与 schema `0053`，补充三类账号新页面的带登录浏览器自动化闭环，并在方便长时间运行时完成剩余后端全量。后续部署仍必须先备份；本地学习助手保持默认关闭，评分、生成和公式结果继续要求教师确认。
 
 ## 产品能力与边界
 
