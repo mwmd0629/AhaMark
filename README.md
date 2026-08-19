@@ -31,7 +31,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 | 应用基线       | 本地产品实现 `3142998`；node2 镜像仍为 `0594d10`；GitHub 主线仍为 `4f4a374`                                   |
 | 远端状态       | 本地包含尚未 push 的账号运维、文档及仓库整理；尚未部署                                                        |
 | 数据库迁移     | Alembic 单 head：`0049_usernames`                                                                            |
-| 最新开发       | 已选择性吸收协作者的网络错误、文件安全和教师设置改进并完成本机验证；尚未 push 或部署                          |
+| 最新开发       | 教师“错题与练习”已接入最新正式成绩发布快照并完成本机验证；尚未 push 或部署                                    |
 | 本机业务验收   | 隔离合成环境 A–F 已通过并停在成绩发布前；公式不可读/重框专项通过；GradeRelease 为 0                          |
 | node2 在线版本 | API/Web/Worker 为 `0594d10`，schema 为 `0049_usernames`；文字、公式 OCR 与本地建议 Provider available        |
 | node2 入口     | `https://222.195.89.236:13300`；自签名证书；公网可达，无来源白名单                                           |
@@ -56,6 +56,8 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 2026-08-19 完成管理员账号运维第二阶段的本机开发：账号表支持选择当前页的非本人账号并批量启用、停用或强制下线，每次最多 200 个目标；服务端要求显式确认、逐项返回成功与失败，批量停用继续保证至少一个启用管理员，并通过 PostgreSQL 行锁收紧并发停用保护。导出沿用当前搜索/类型/状态筛选，只包含账号状态与登录活动，UTF-8 CSV 对电子表格公式前缀做转义。新增账号安全面板，统计已识别账号 24 小时失败登录、活动会话、多设备、从未登录和 90 天未活动账号，并允许撤销非当前会话；失败登录审计不保存用户名、密码或客户端 IP。开发时同时修复成功登录也消耗失败限流额度的既有缺陷，现只累计失败且成功登录清零。所有批量和会话动作均受管理员会话、CSRF、二次确认语义和审计约束。账号/认证专项 `19 passed` 且 `ahamark.db unchanged`；全后端 Ruff、strict mypy `132 source files`、前端 `41 files / 249 tests`、Prettier、TypeScript、ESLint 和包含 `/admin/accounts` 的 20 页 production build 均通过。Next 构建仍只有既有 SWC lockfile 网络补丁告警，编译和构建成功。本轮未 push、未部署、未登录 node2，也未创建真实账号。
 
 2026-08-19 审查 `origin/gyh--001` 的 4 个独有提交后开始第一批选择性吸收，没有整分支合并，也没有修改历史迁移。浏览器请求失败现在统一为可识别的 `NETWORK_ERROR`，主动取消仍保留 `AbortError`；Office 检查改为解析关系 XML，并拒绝宏、ActiveX、嵌入对象、可执行内容和外部链接，PDF 额外拒绝脚本、自动动作、表单、附件及多媒体。教师设置页已连接真实账户偏好接口，可更新展示姓名并保存带版本号的工作台偏好，默认班级受租户归属校验，学生账号不能使用教师偏好接口，API 密钥和外部 AI 开关不会传给页面。两个无引用的历史演示文件已删除。后端相关 `40 passed`、前端全量 `42 files / 252 tests`、Ruff、strict mypy、TypeScript 和 ESLint 均通过；测试数据库守卫为 `ahamark.db unchanged`。本轮未登录 node2、未部署、未创建真实账号或发布成绩。
+
+2026-08-19 继续完善教师“错题与练习”：`/practice` 不再展示演示数据，改为只读取当前教师名下每个作业/班级的最新 released `GradeRelease` 及其固定正式快照，满分题自动排除；教师可按班级、作业、错误类型和学生/题目/知识点关键词筛选，并查看学生答案、最终反馈、得分率及原批改入口。接口复用正式成绩校验，题目必须属于发布试卷、答案必须属于对应提交与题目、知识点和学生必须属于当前教师；显式学生或管理员账号均不能访问，历史无角色教师继续兼容。页面不调用外部 AI，也不自动创建练习，教师可从真实错题判断后进入现有新建作业流程。相关后端联动 `32 passed`、前端全量 `43 files / 254 tests`、Ruff、strict mypy `133 source files`、Prettier、TypeScript、ESLint 和 production build 均通过；测试数据库守卫为 `ahamark.db unchanged`。全仓 Ruff 格式检查仍报告 21 个既有 CRLF/历史格式文件，本轮未批量改写无关文件。本轮未登录 node2、未部署、未创建真实账号或发布成绩。
 
 2026-08-18 用户要求由 Codex 全程完成、不接第三方在线 Provider，并授权继续开发。当前工作树已接入两个只在 `local-ai` Compose profile 中启用的内网服务：固定 `PaddlePaddle/PP-FormulaNet_plus-M` 公式模型（revision `712e6e2e4c313b1ea163be5c350127b82662c58d`）和固定 `Qwen/Qwen3-4B-GGUF` 的 `Qwen3-4B-Q4_K_M.gguf`，由官方 llama.cpp CPU server 提供 OpenAI-compatible JSON Schema 接口。两者均不发布宿主端口，运行时不下载模型，模型卷只读；应用只允许显式 host allowlist 的 Compose HTTP，拒绝 IP、metadata host、localhost 和未授权外部端点。评分、Stage 4 AI grading 与作业生成只产出 suggestion，继续要求教师复核，外部 Provider 请求在 node2 Compose 中固定关闭。
 
@@ -241,6 +243,7 @@ python -m app.cli.create_admin --username admin01 --display-name "管理员"
 6. 已发布作业可创建批改批次并上传学生答卷。
 7. 系统匹配学生、处理页面并生成识别与评分建议；歧义、低置信、stale 或 Provider unavailable 均进入人工复核。
 8. 教师接受或修改建议，最终生成版本化成绩快照，再明确发布成绩记录。
+9. “错题与练习”汇总每个作业/班级最新正式发布版本中的真实错题；教师筛选和复核后，可进入新建作业流程组织针对性练习。
 
 手动切题默认关闭，只有教师点击“开始手动切题”后才接受一次拖框；切页、旋转或退出会丢弃未保存框。自动切题和重跑保留历史区域，但只有当前 confirmed region 可进入后续证据链。
 
@@ -264,6 +267,8 @@ python -m app.cli.create_admin --username admin01 --display-name "管理员"
 `GradeRelease` 固定具体快照并按作业/班级递增版本；released 只表示教师确认了发布数据，不表示学生已经收到。报表由 Worker 生成真实 `.xlsx` 或 PDF，学号按文本处理，外部文本防公式注入，缺失成绩不写零。
 
 AnalyticsSnapshot 固定 GradeRelease，提供分数段、题目、知识点、错误类型和趋势下钻。主观题展示得分率，不使用“正确率”；教学建议明确标记为规则型建议，不冒充 AI 教学助手。
+
+教师错题视图同样只消费 `GradeRelease` 固定的正式快照，并且每个作业/班级只取最新发布版本；它不会读取可变的 AI 建议或临时评分结果，也不会自动生成或发布练习。
 
 ## 测试与质量门禁
 

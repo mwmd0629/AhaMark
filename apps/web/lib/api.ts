@@ -472,6 +472,53 @@ export type TeacherPreferences = {
     ai_configuration_editable: false;
   };
 };
+export type TeacherWrongQuestion = {
+  id: string;
+  grade_release_id: string;
+  grade_release_version: number;
+  released_at: string | null;
+  assignment_id: string;
+  assignment_title: string;
+  class_id: string;
+  class_name: string;
+  student_id: string;
+  student_name: string;
+  student_number: string;
+  submission_id: string;
+  grading_batch_id: string;
+  student_answer_id: string;
+  question_id: string;
+  question_number: string;
+  question_type: string;
+  question_content: string | null;
+  student_answer: string | null;
+  score: string;
+  max_score: string;
+  score_rate: number;
+  error_type: string | null;
+  feedback: string | null;
+  knowledge_point_ids: string[];
+  knowledge_points: Array<{ id: string; name: string }>;
+  snapshot_id: string;
+};
+export type TeacherWrongQuestionResponse = {
+  items: TeacherWrongQuestion[];
+  page: number;
+  page_size: number;
+  total: number;
+  pages: number;
+  summary: {
+    total_wrong_questions: number;
+    affected_students: number;
+    knowledge_point_count: number;
+    average_score_rate: number | null;
+  };
+  facets: {
+    classes: Array<{ id: string; name: string }>;
+    assignments: Array<{ id: string; title: string }>;
+    error_types: string[];
+  };
+};
 export const authApi = {
   login: (username: string, password: string) =>
     request<AuthUser>("/auth/login", {
@@ -490,6 +537,12 @@ export const authApi = {
       body: JSON.stringify(data),
     }),
   logout: () => request<void>("/auth/logout", { method: "POST" }),
+};
+export const teacherPracticeApi = {
+  wrongQuestions: (query = "") =>
+    request<TeacherWrongQuestionResponse>(
+      `/api/teacher/wrong-questions${query ? `?${query}` : ""}`,
+    ),
 };
 export type AccountType = "teacher" | "student" | "admin";
 export type ManagedAccount = {

@@ -26,6 +26,7 @@ from app.api.rubric_templates import router as rubric_templates_router
 from app.api.structured_rubrics import router as structured_rubrics_router
 from app.api.student_portal import router as student_portal_router
 from app.api.submission_processing import router as submission_processing_router
+from app.api.teacher_practice import router as teacher_practice_router
 from app.api.textbook_libraries import router as textbook_libraries_router
 from app.core.config import get_settings
 from app.core.readiness import dependency_readiness
@@ -64,6 +65,7 @@ router.include_router(rubric_templates_router)
 router.include_router(textbook_libraries_router)
 router.include_router(results_router)
 router.include_router(student_portal_router)
+router.include_router(teacher_practice_router)
 
 
 @router.get("/health")
