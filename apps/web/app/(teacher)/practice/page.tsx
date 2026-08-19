@@ -261,7 +261,7 @@ export default function PracticePage() {
       return `${index + 1}. ${item.assignment_title} · 第${item.question_number}题${points ? ` · 知识点：${points}` : ""}`;
     });
     const instructions = [
-      "请根据以下正式成绩错题来源重新设计练习题。创建后仍需由教师上传或编辑题目，并完成答案、评分标准和发布确认。",
+      "本练习用于巩固以下正式成绩中反映的薄弱点。练习题内容由教师另行设计并确认。",
       ...lines,
     ]
       .join("\n")

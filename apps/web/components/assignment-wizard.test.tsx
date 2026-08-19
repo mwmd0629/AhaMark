@@ -250,6 +250,37 @@ it("三步向导把基本信息和上传集中在准备作业", async () => {
   expect(screen.queryByText("添加题目")).not.toBeInTheDocument();
 });
 
+it("显示并保存练习草稿的作答要求或复习范围", async () => {
+  const current = await assignmentsApi.get("assignment-1");
+  vi.mocked(assignmentsApi.get).mockResolvedValueOnce({
+    ...current,
+    instructions: "1. 函数单元测验 · 第3题 · 知识点：函数单调性",
+  });
+  render(<AssignmentWizard assignmentId="assignment-1" initialStep={1} />);
+
+  const instructions = await screen.findByRole("textbox", {
+    name: "作答要求或复习范围",
+  });
+  expect(instructions).toHaveValue(
+    "1. 函数单元测验 · 第3题 · 知识点：函数单调性",
+  );
+  await screen.findByText("已选择 1 个班级");
+  fireEvent.change(instructions, {
+    target: { value: "重点复习函数单调性，并完成教师确认后的练习题。" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "保存并继续" }));
+
+  await waitFor(() =>
+    expect(assignmentsApi.update).toHaveBeenCalledWith(
+      "assignment-1",
+      expect.objectContaining({
+        instructions: "重点复习函数单调性，并完成教师确认后的练习题。",
+      }),
+      current.updated_at,
+    ),
+  );
+});
+
 it("面向大学课程显示可采用的名称建议且不覆盖已确认总分", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" initialStep={1} />);
 

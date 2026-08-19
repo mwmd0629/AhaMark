@@ -82,6 +82,22 @@ export default function AssignmentDetailPage({
           </p>
         </div>
       </Card>
+      {(item.description || item.instructions) && (
+        <Card className="grid gap-5 p-6 md:grid-cols-2">
+          <div>
+            <h2 className="font-bold">作业说明</h2>
+            <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700">
+              {item.description || "未填写"}
+            </p>
+          </div>
+          <div>
+            <h2 className="font-bold">作答要求或复习范围</h2>
+            <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700">
+              {item.instructions || "未填写"}
+            </p>
+          </div>
+        </Card>
+      )}
       {item.paper_version && item.status === "draft" && (
         <RecognitionWorkspace
           assignmentId={item.id}

@@ -78,6 +78,7 @@ export function AssignmentWizard({
   const [dueValue, setDueValue] = useState("");
   const [selectedClassIds, setSelectedClassIds] = useState<string[]>([]);
   const [classPickerOpen, setClassPickerOpen] = useState(false);
+  const [moreSettingsOpen, setMoreSettingsOpen] = useState(false);
   const [classQuery, setClassQuery] = useState("");
   const [deliveryMode, setDeliveryMode] = useState<
     "class_assignment" | "joint_exam"
@@ -192,6 +193,9 @@ export function AssignmentWizard({
   useEffect(() => {
     setDeliveryMode(item?.delivery_mode ?? "class_assignment");
   }, [item?.id, item?.delivery_mode]);
+  useEffect(() => {
+    setMoreSettingsOpen(Boolean(item?.instructions));
+  }, [item?.id, item?.instructions]);
   useEffect(() => {
     setAssignmentTitle(item?.title ?? "");
     setAssignmentSubject(item?.subject ?? "");
@@ -313,6 +317,7 @@ export function AssignmentWizard({
           subject,
           grade: String(form.get("grade")),
           description: String(form.get("description")),
+          instructions: String(form.get("instructions")),
           total_score: Number(form.get("total_score")),
           due_at: dueMode === "none" ? null : toIsoDateTime(dueValue),
         },
@@ -867,7 +872,13 @@ export function AssignmentWizard({
                 </Link>
               )}
             </fieldset>
-            <details className="md:col-span-2 rounded-xl border p-4">
+            <details
+              open={moreSettingsOpen}
+              onToggle={(event) =>
+                setMoreSettingsOpen(event.currentTarget.open)
+              }
+              className="md:col-span-2 rounded-xl border p-4"
+            >
               <summary className="cursor-pointer font-semibold">
                 更多设置
               </summary>
@@ -896,6 +907,16 @@ export function AssignmentWizard({
                     name="description"
                     defaultValue={item.description}
                     className="min-h-24 rounded-xl border p-3 font-normal"
+                  />
+                </label>
+                <label className="grid gap-1.5 text-sm font-medium md:col-span-2">
+                  作答要求或复习范围
+                  <textarea
+                    name="instructions"
+                    defaultValue={item.instructions}
+                    maxLength={4000}
+                    className="min-h-32 rounded-xl border p-3 font-normal"
+                    placeholder="填写学生需要遵循的要求、复习范围或练习重点"
                   />
                 </label>
               </div>
