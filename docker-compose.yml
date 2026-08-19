@@ -35,4 +35,26 @@ services:
     ports: ["3000:3000"]
     depends_on: {api: {condition: service_healthy}}
     healthcheck: {test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000"], interval: 10s, timeout: 3s, retries: 10}
-volumes: {postgres_data: {}, redis_data: {}, minio_data: {}}
+  local-llm:
+    profiles: ["local-ai"]
+    image: ${AHAMARK_LLM_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
+    command:
+      - --model
+      - /models/qwen3-4b/Qwen3-4B-Q4_K_M.gguf
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --api-key
+      - ${LOCAL_LLM_API_KEY:-disabled}
+      - --ctx-size
+      - ${LOCAL_LLM_CONTEXT_SIZE:-8192}
+      - --parallel
+      - "1"
+      - --jinja
+    expose: ["8080"]
+    volumes: [local_llm_models:/models:ro]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+volumes: {postgres_data: {}, redis_data: {}, minio_data: {}, local_llm_models: {}}

@@ -3,6 +3,7 @@ import json
 import uuid
 from decimal import Decimal
 
+import pytest
 from app.assignment_generation.question_extraction import materialize
 from app.assignment_generation.service import transition
 from app.core.config import Settings
@@ -52,14 +53,19 @@ class ProviderResponse(io.BytesIO):
         self.close()
 
 
-def configured() -> Settings:
+def configured(provider_mode: str = "openai_compatible") -> Settings:
+    local = provider_mode == "local_openai_compatible"
     return Settings(
         _env_file=None,
         app_env="test",
-        assignment_generation_provider="openai_compatible",
-        assignment_generation_allow_external_provider_requests=True,
-        assignment_generation_base_url="https://provider.invalid/v1",
-        assignment_generation_api_key="worker-e2e-secret-never-log",
+        assignment_generation_provider=provider_mode,
+        assignment_generation_allow_external_provider_requests=not local,
+        assignment_generation_allow_local_provider_requests=local,
+        assignment_generation_allowed_local_hosts=["local-llm"] if local else [],
+        assignment_generation_base_url=(
+            "http://local-llm:8080/v1" if local else "https://provider.invalid/v1"
+        ),
+        assignment_generation_api_key="p" * 32,
         assignment_generation_model="worker-e2e-model",
         assignment_generation_model_snapshot="worker-e2e-model-2026-07-26",
         assignment_generation_max_retries=0,
@@ -160,17 +166,24 @@ def answer_rubric_output(question_id: str) -> dict[str, object]:
     }
 
 
-def test_mocked_http_provider_worker_materializes_only_versioned_drafts(monkeypatch) -> None:
+@pytest.mark.parametrize("provider_mode", ["openai_compatible", "local_openai_compatible"])
+def test_mocked_http_provider_worker_materializes_only_versioned_drafts(
+    monkeypatch, provider_mode: str
+) -> None:
     assignment, stored, page = source_assignment()
-    settings = configured()
+    settings = configured(provider_mode)
     monkeypatch.setattr("app.api.assignment_generation.dispatch_job", lambda *_args: None)
     monkeypatch.setattr("app.assignment_generation.service.get_settings", lambda: settings)
     monkeypatch.setattr("workers.tasks.assignment_generation.get_settings", lambda: settings)
 
     def urlopen(request, **_kwargs):
         body = json.loads(request.data)
-        name = body["text"]["format"]["name"]
-        payload = json.loads(body["input"][0]["content"][0]["text"].split("\n", 1)[1])
+        if provider_mode == "local_openai_compatible":
+            name = body["response_format"]["json_schema"]["name"]
+            payload = json.loads(body["messages"][1]["content"].split("\n", 1)[1])
+        else:
+            name = body["text"]["format"]["name"]
+            payload = json.loads(body["input"][0]["content"][0]["text"].split("\n", 1)[1])
         if name.endswith("metadata_analysis"):
             output = {
                 "suggestions": [
@@ -277,11 +290,18 @@ def test_mocked_http_provider_worker_materializes_only_versioned_drafts(monkeypa
             }
         else:
             output = answer_rubric_output(payload["question"]["id"])
-        envelope = {
-            "id": "worker-e2e-response",
-            "output_text": json.dumps(output),
-            "usage": {"input_tokens": 10, "output_tokens": 10},
-        }
+        if provider_mode == "local_openai_compatible":
+            envelope = {
+                "id": "worker-e2e-response",
+                "choices": [{"message": {"content": json.dumps(output)}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 10},
+            }
+        else:
+            envelope = {
+                "id": "worker-e2e-response",
+                "output_text": json.dumps(output),
+                "usage": {"input_tokens": 10, "output_tokens": 10},
+            }
         return ProviderResponse(json.dumps(envelope).encode())
 
     monkeypatch.setattr("urllib.request.urlopen", urlopen)
@@ -289,7 +309,7 @@ def test_mocked_http_provider_worker_materializes_only_versioned_drafts(monkeypa
         f"/api/assignments/{assignment.id}/generation-jobs",
         json={
             "idempotency_key": "provider-worker-e2e-0001",
-            "provider_mode": "openai_compatible",
+            "provider_mode": provider_mode,
         },
     )
     assert response.status_code == 201
@@ -298,9 +318,29 @@ def test_mocked_http_provider_worker_materializes_only_versioned_drafts(monkeypa
     with SessionLocal() as db:
         _job, revision, claim = _claim_job(db, job_id, None)
         assert claim is None and revision is not None
-        assert _execute_stage(db, job_id, "analyzing") == "completed"
+        analyzing_status = _execute_stage(db, job_id, "analyzing")
+        if analyzing_status != "completed":
+            invocation = db.scalar(
+                select(AssignmentGenerationProviderInvocation)
+                .where(AssignmentGenerationProviderInvocation.job_id == job_id)
+                .order_by(AssignmentGenerationProviderInvocation.started_at.desc())
+            )
+            pytest.fail(
+                f"analyzing status={analyzing_status}, "
+                f"provider_error={invocation.error_code if invocation else 'missing'}"
+            )
         assert _execute_stage(db, job_id, "processing_pages") == "completed"
-        assert _execute_stage(db, job_id, "extracting_questions") == "completed"
+        extraction_status = _execute_stage(db, job_id, "extracting_questions")
+        if extraction_status != "completed":
+            invocation = db.scalar(
+                select(AssignmentGenerationProviderInvocation)
+                .where(AssignmentGenerationProviderInvocation.job_id == job_id)
+                .order_by(AssignmentGenerationProviderInvocation.started_at.desc())
+            )
+            pytest.fail(
+                f"extraction status={extraction_status}, "
+                f"provider_error={invocation.error_code if invocation else 'missing'}"
+            )
         candidate = db.scalar(
             select(AssignmentQuestionExtractionCandidate).where(
                 AssignmentQuestionExtractionCandidate.generation_job_id == job_id

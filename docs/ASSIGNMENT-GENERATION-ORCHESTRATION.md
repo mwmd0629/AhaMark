@@ -39,7 +39,7 @@
 
 ## Provider 与前端
 
-默认 Provider 为 `unavailable`。`fake` 仅用于测试；生产环境完全以服务器配置选择 Provider，客户端传入值不能改变 Provider、endpoint 或 model。`openai_compatible` 仅在服务器具备完整配置时调用固定 Responses endpoint；否则安全降级 unavailable。
+默认 Provider 为 `unavailable`。`fake` 仅用于测试；非测试环境完全以服务器配置选择 Provider，客户端传入值不能改变 Provider、endpoint 或 model。`openai_compatible` 仅在服务器具备完整配置时调用固定 Responses endpoint；`local_openai_compatible` 只允许显式列入 allowlist 的内网 HTTP 主机，并调用固定 Chat Completions JSON Schema endpoint；否则安全降级 unavailable。根 Compose 的 `local-ai` profile 可启动只读模型卷中的 llama.cpp/Qwen 服务，模型必须先由固定获取脚本完成大小与 SHA-256 校验。
 
 默认安全开关为 `ASSIGNMENT_GENERATION_ENABLED=true`、`ASSIGNMENT_GENERATION_PROVIDER=unavailable`、`ASSIGNMENT_GENERATION_ALLOW_EXTERNAL_PROVIDER_REQUESTS=false`、`ASSIGNMENT_GENERATION_ALLOW_TEACHER_START=true`、`ASSIGNMENT_GENERATION_SUGGESTION_ONLY=true`、`ASSIGNMENT_GENERATION_REAL_PROVIDER_QUALITY_PASSED=false`。教师界面从只读 capability API 获取这些服务器状态；启动请求不发送 Provider、endpoint 或 model。生产配置拒绝 fake 和非 suggestion-only 模式；已发布作业在创建生成任务前即被拒绝。
 

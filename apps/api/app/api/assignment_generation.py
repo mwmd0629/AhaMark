@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal, cast
 from app.api.actor import Actor
 from app.api.domain import ApiProblem, audit
 from app.assignment_generation.metadata_analysis import plain_text
+from app.assignment_generation.providers import select_provider
 from app.assignment_generation.question_extraction import eligible, materialize
 from app.assignment_generation.reference_bindings import build_reference_answer_bindings
 from app.assignment_generation.service import (
@@ -85,7 +86,9 @@ Db = Annotated[Session, Depends(get_db)]
 
 class CreateGenerationInput(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=128)
-    provider_mode: Literal["unavailable", "fake", "openai_compatible"] | None = None
+    provider_mode: (
+        Literal["unavailable", "fake", "openai_compatible", "local_openai_compatible"] | None
+    ) = None
     expected_source_snapshot: str | None = Field(None, pattern=r"^[0-9a-f]{64}$")
 
     @field_validator("idempotency_key")
@@ -237,12 +240,15 @@ class AcceptEligibleInput(BaseModel):
 @router.get("/api/assignment-generation-capabilities")
 def assignment_generation_capabilities(_actor: Actor) -> dict[str, Any]:
     settings = get_settings()
+    provider = select_provider(settings)
     return {
         "enabled": settings.assignment_generation_enabled,
-        "provider": "codex_local",
-        "provider_status": "available",
-        "provider_error_code": None,
-        "external_provider_requests": False,
+        "provider": provider.name,
+        "provider_status": "available" if provider.available else "unavailable",
+        "provider_error_code": provider.error_code,
+        "external_provider_requests": (
+            settings.assignment_generation_allow_external_provider_requests
+        ),
         "teacher_start_allowed": settings.assignment_generation_allow_teacher_start,
         "suggestion_only": settings.assignment_generation_suggestion_only,
         "real_provider_quality_passed": (

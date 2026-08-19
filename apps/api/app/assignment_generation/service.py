@@ -275,7 +275,7 @@ def create_job(
     requested_mode = (
         requested_provider
         if settings.app_env == "test" and requested_provider is not None
-        else "codex_local"
+        else settings.assignment_generation_provider
     )
     provider = select_provider(settings, requested_mode)
     request_fingerprint = canonical_hash(

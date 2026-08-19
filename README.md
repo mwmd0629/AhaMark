@@ -31,7 +31,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 | 应用基线       | 本地修复提交 `e375e55`；node2 API/Worker 为 `e375e55`、Web 为 `c444019`；GitHub 主线仍为 `4f4a374`           |
 | 远端状态       | 本地功能提交尚未 push；node2 已完成受保护部署并通过独立公网复验                                              |
 | 数据库迁移     | 本地与 node2 均为 Alembic 单 head：`0053_disable_forced_password_change`                                     |
-| 最新开发       | 作业整理中的 Codex 已明确改为可选辅助；不可用时教师可直接进入手动核对，原阶段仍可稍后重试                    |
+| 最新开发       | 本机作业生成已接通固定 Qwen 本地模型；旧任务可一键重新整理，AI 仍只生成待教师确认的建议                      |
 | 本机业务验收   | 隔离合成环境 A–F 已通过并停在成绩发布前；公式不可读/重框专项通过；GradeRelease 为 0                          |
 | node2 在线版本 | API/Worker `e375e55`、Web `c444019`、schema `0053`；文字、公式 OCR 与本地建议 Provider available             |
 | node2 入口     | `https://222.195.89.236:13300`；自签名证书；公网可达，无来源白名单                                           |
@@ -70,6 +70,8 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 2026-08-19 用户授权更新 node2。候选 `c444019` 的 API/Web 镜像、`0053` head 和固定 RapidOCR 清单本地校验通过；服务器先完成 PostgreSQL、MinIO、运行配置、Compose、Nginx 与证书备份并验证 SHA-256，备份为 `/data/shr/ahamark-backups/pre-upgrade-c444019-20260819T120754Z`。候选迁移容器随后在读取既有 Compose 传入的无引号方括号 host allowlist 时被 Pydantic Settings 拒绝，失败发生在连接数据库前；运行配置和业务容器尚未切换，公网 `/`、`/health`、`/ready` 复验仍为 200/available。修复镜像 `e375e55` 上传后，第二次迁移仍在连接数据库前被相同错误阻止；比对镜像源码行号确认部署脚本加载旧 `runtime.env` 时把旧镜像标签导出到 Shell，优先级覆盖候选 env-file，实际再次运行的是旧镜像。第三次脚本清除旧镜像变量并核对 Compose 候选镜像后成功完成 `0049 -> 0053` 事务迁移和 API-A/B、Worker、Web 滚动切换；线上 API/Worker 为 `e375e55`，Web 为 `c444019`，既有 Formula/Qwen 镜像保持 `0594d10`，唯一公网端口仍为 13300。迁移后强制改密标记为 0，六项核心服务健康；独立公网复验 `/`、登录、主动改密、学生错题、教师复核、`/health` 均为 200，`/ready` 为 available、Worker 为 1，文字/公式 OCR 与本地建议 Provider available，评分和公式继续保留 suggestion-only/教师确认边界。未创建账号、未处理真实资料、未发布作业或成绩。代码提交尚未 push。
 
 2026-08-19 改进教师作业整理的降级体验：Codex 页面整理、题目抽取、答案和评分标准生成均明确标记为“可选”，Codex 未连接时不再显示“等待 Codex 完成”，而是提示教师可继续手动核对，并提供“一键进入核对内容”的入口；原有单阶段重试仍保留。该改动不伪装后台任务，也不改变正式题目、答案和评分标准必须由教师确认的边界。生成面板与作业向导专项 `35 passed`，Prettier、TypeScript、ESLint 和 33 页 production build 均通过；Next 构建仍只有既有 SWC lockfile 联网补丁告警。该改动当前仅在本地，尚未部署 node2。
+
+2026-08-19 随后在本机启用真实的离线作业生成辅助：固定 `Qwen3-4B-Q4_K_M.gguf` 已下载到 AhaMark 专用 Docker 卷，文件大小 `2497280256` 字节且 SHA-256 `7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5` 验证通过；llama.cpp 服务仅暴露在 Compose 内网，模型卷只读，外部 Provider 请求保持关闭。修复了非测试任务无条件写死 `codex_local`、能力接口写死可用、本地 Provider 未进入 dispatcher、Worker 阶段和候选物化分支等接线缺陷；服务器配置现在决定实际 Provider，客户端不能选择 endpoint 或 model。现有作业的旧 `codex_local` 任务不会被静默改写，页面会显示“本地 AI 已可用”并提供“使用本地 AI 重新整理”；仍可选择完全手动核对。后端生成专项 `33 passed` 且数据库守卫为 `ahamark.db unchanged`，前端专项 `36 passed`，Ruff、strict mypy `136 source files`、TypeScript、ESLint 和本机 production build 均通过；本地 API、Worker、Web、PostgreSQL、Redis、MinIO 与 Qwen 共七项服务健康，`/ready` 显示生成 Provider `local_openai_compatible/available`、Worker 为 1。该能力只生成候选，教师确认与发布边界不变；当前只启用本机，未更新 node2。
 
 2026-08-18 用户要求由 Codex 全程完成、不接第三方在线 Provider，并授权继续开发。当前工作树已接入两个只在 `local-ai` Compose profile 中启用的内网服务：固定 `PaddlePaddle/PP-FormulaNet_plus-M` 公式模型（revision `712e6e2e4c313b1ea163be5c350127b82662c58d`）和固定 `Qwen/Qwen3-4B-GGUF` 的 `Qwen3-4B-Q4_K_M.gguf`，由官方 llama.cpp CPU server 提供 OpenAI-compatible JSON Schema 接口。两者均不发布宿主端口，运行时不下载模型，模型卷只读；应用只允许显式 host allowlist 的 Compose HTTP，拒绝 IP、metadata host、localhost 和未授权外部端点。评分、Stage 4 AI grading 与作业生成只产出 suggestion，继续要求教师复核，外部 Provider 请求在 node2 Compose 中固定关闭。
 

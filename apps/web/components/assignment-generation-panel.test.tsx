@@ -339,16 +339,10 @@ it("恢复 partial/unavailable、风险与草稿历史并允许单阶段重试",
     screen.getByLabelText("处理详情").firstElementChild?.nextElementSibling,
   ).toHaveClass("border-[var(--neutral-300)]");
   expect(screen.getByText("可继续手动核对")).toBeInTheDocument();
-  expect(
-    screen.getByText("可选：Codex 整理页面与抽取题目"),
-  ).toBeInTheDocument();
-  expect(
-    screen.getByText("可选：Codex 生成答案与评分标准"),
-  ).toBeInTheDocument();
-  expect(screen.getByText("可跳过（Codex 未连接）")).toBeInTheDocument();
-  expect(
-    screen.getByText(/Codex 是可选辅助，不会阻塞作业编辑/),
-  ).toBeInTheDocument();
+  expect(screen.getByText("可选：AI 整理页面与抽取题目")).toBeInTheDocument();
+  expect(screen.getByText("可选：AI 生成答案与评分标准")).toBeInTheDocument();
+  expect(screen.getByText("可跳过（AI 辅助暂不可用）")).toBeInTheDocument();
+  expect(screen.getByText(/AI 辅助不会阻塞作业编辑/)).toBeInTheDocument();
   expect(screen.queryByText("查看详情")).not.toBeInTheDocument();
   expect(screen.queryByText("更多操作")).not.toBeInTheDocument();
   expect(screen.queryByText("阻断 2")).not.toBeInTheDocument();
@@ -360,7 +354,7 @@ it("恢复 partial/unavailable、风险与草稿历史并允许单阶段重试",
   ).not.toBeInTheDocument();
   expect(screen.queryByText("发布作业")).not.toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("button", { name: "不等 Codex，手动核对" }));
+  fireEvent.click(screen.getByRole("button", { name: "不等 AI，手动核对" }));
   expect(onContinueManually).toHaveBeenCalledOnce();
 
   fireEvent.click(screen.getByRole("button", { name: "重试此阶段" }));
@@ -370,6 +364,37 @@ it("恢复 partial/unavailable、风险与草稿历史并允许单阶段重试",
       "extracting_questions",
     ),
   );
+});
+
+it("Provider 已恢复时引导旧任务使用本地 AI 重新整理", async () => {
+  mocks.capabilities.mockResolvedValue({
+    enabled: true,
+    provider: "local_openai_compatible",
+    provider_status: "available",
+    provider_error_code: null,
+    external_provider_requests: false,
+    teacher_start_allowed: true,
+    suggestion_only: true,
+    real_provider_quality_passed: false,
+  });
+  mocks.listJobs.mockResolvedValue([
+    { ...job(), provider_mode: "codex_local" },
+  ]);
+
+  render(<AssignmentGenerationPanel assignmentId="assignment-1" />);
+
+  expect(
+    await screen.findByText("本地 AI 已可用，请重新整理"),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText(/当前记录来自旧配置，请重新整理/),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "重试此阶段" }),
+  ).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "使用本地 AI 重新整理" }));
+  await waitFor(() => expect(mocks.start).toHaveBeenCalledOnce());
 });
 
 it("自动识别明确的文件用途，并把字段建议交给准备作业表单", async () => {

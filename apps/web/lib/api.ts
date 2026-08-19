@@ -3170,7 +3170,12 @@ export type AssignmentGenerationJob = {
   current_stage?: AssignmentGenerationStage | null;
   progress: number;
   source_snapshot_hash: string;
-  provider_mode: "unavailable" | "fake" | "openai_compatible";
+  provider_mode:
+    | "unavailable"
+    | "fake"
+    | "openai_compatible"
+    | "local_openai_compatible"
+    | "codex_local";
   retryable: boolean;
   error_code?: string | null;
   error_message?: string | null;
@@ -3200,7 +3205,12 @@ export type AssignmentGenerationJob = {
 };
 export type AssignmentGenerationCapabilities = {
   enabled: boolean;
-  provider: "unavailable" | "fake" | "openai_compatible";
+  provider:
+    | "unavailable"
+    | "fake"
+    | "openai_compatible"
+    | "local_openai_compatible"
+    | "codex_local";
   provider_status: "available" | "unavailable";
   provider_error_code?: string | null;
   external_provider_requests: boolean;

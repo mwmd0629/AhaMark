@@ -37,7 +37,7 @@ def dispatch_stage(
         )
     provider = (
         OpenAICompatibleAssignmentGenerationProvider(settings)
-        if selection.name == "openai_compatible"
+        if selection.name in {"openai_compatible", "local_openai_compatible"}
         else DeterministicFakeAssignmentGenerationProvider()
     )
     return DispatchedProviderResult(selection, provider.generate(stage, payload))

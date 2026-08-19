@@ -322,7 +322,11 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                 "files": [str(x.id) for x in files],
             }
         )
-        if provider.name == "openai_compatible" and provider.available and assignment is not None:
+        if (
+            provider.name in {"openai_compatible", "local_openai_compatible"}
+            and provider.available
+            and assignment is not None
+        ):
             dispatched = dispatch_stage(
                 get_settings(),
                 job.provider_mode,
@@ -448,7 +452,10 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
     elif stage == "processing_pages":
         pages = list(pages_for_job(db, job))
         provider = select_provider(get_settings(), job.provider_mode)
-        if provider.available and provider.name == "openai_compatible":
+        if provider.available and provider.name in {
+            "openai_compatible",
+            "local_openai_compatible",
+        }:
             file_ids = {page.stored_file_id for page in pages}
             files = list(db.scalars(select(StoredFile).where(StoredFile.id.in_(file_ids))).all())
             dispatched = dispatch_stage(
@@ -503,7 +510,7 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
             {"job_id": job.id, "stage": stage, "snapshot": job.source_snapshot_hash}
         )
         if provider.available and (
-            provider.name == "openai_compatible"
+            provider.name in {"openai_compatible", "local_openai_compatible"}
             or (provider.name == "fake" and stage == "generating_rubrics")
         ):
             if stage == "extracting_questions":
@@ -669,7 +676,15 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
             status = "completed"
             error_code = None
             result["capability"] = "trusted_local_text"
-        elif provider.name not in {"fake", "openai_compatible"} or not provider.available:
+        elif (
+            provider.name
+            not in {
+                "fake",
+                "openai_compatible",
+                "local_openai_compatible",
+            }
+            or not provider.available
+        ):
             status = "unavailable"
             waiting_for_codex = provider.name == "codex_local"
             error_code = (
@@ -741,7 +756,10 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                 "MANUAL_REVIEW_REQUIRED",
                 "基本信息未自动确认，班级和截止时间始终由教师设置",
             )
-        elif invocation is not None and invocation.provider == "openai_compatible":
+        elif invocation is not None and invocation.provider in {
+            "openai_compatible",
+            "local_openai_compatible",
+        }:
             try:
                 created = materialize_metadata(db, job, revision, metadata_output)
                 result["suggestion_count"] = created
@@ -843,7 +861,7 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
         stage == "processing_pages"
         and file_output is not None
         and invocation is not None
-        and invocation.provider == "openai_compatible"
+        and invocation.provider in {"openai_compatible", "local_openai_compatible"}
     ):
         try:
             counts = materialize_file_analysis(db, job, revision, file_output)

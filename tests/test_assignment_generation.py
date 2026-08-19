@@ -21,6 +21,7 @@ from app.assignment_generation.service import (
     transition,
 )
 from app.assignment_generation.snapshot import canonical_hash, canonical_json, source_snapshot_hash
+from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.main import app
 from app.models import (
@@ -1658,12 +1659,23 @@ def test_production_fake_degrades_to_unavailable():
     assert provider.error_code == "FAKE_PROVIDER_DISABLED_IN_PRODUCTION"
 
 
-def test_capabilities_are_server_owned_and_default_safe():
+def test_capabilities_are_server_owned_and_reflect_configured_provider(monkeypatch):
+    settings = get_settings().model_copy(
+        update={
+            "assignment_generation_provider": "local_openai_compatible",
+            "assignment_generation_allow_local_provider_requests": True,
+            "assignment_generation_allowed_local_hosts": ["local-llm"],
+            "assignment_generation_base_url": "http://local-llm:8080/v1",
+            "assignment_generation_api_key": "p" * 32,
+            "assignment_generation_model": "local-model",
+        }
+    )
+    monkeypatch.setattr("app.api.assignment_generation.get_settings", lambda: settings)
     response = client.get("/api/assignment-generation-capabilities")
     assert response.status_code == 200
     assert response.json() == {
         "enabled": True,
-        "provider": "codex_local",
+        "provider": "local_openai_compatible",
         "provider_status": "available",
         "provider_error_code": None,
         "external_provider_requests": False,
@@ -1671,6 +1683,34 @@ def test_capabilities_are_server_owned_and_default_safe():
         "suggestion_only": True,
         "real_provider_quality_passed": False,
     }
+
+
+def test_non_test_job_uses_the_server_configured_provider(monkeypatch):
+    settings = get_settings().model_copy(
+        update={
+            "app_env": "development",
+            "assignment_generation_provider": "local_openai_compatible",
+            "assignment_generation_allow_local_provider_requests": True,
+            "assignment_generation_allowed_local_hosts": ["local-llm"],
+            "assignment_generation_base_url": "http://local-llm:8080/v1",
+            "assignment_generation_api_key": "p" * 32,
+            "assignment_generation_model": "local-model",
+        }
+    )
+    monkeypatch.setattr("app.assignment_generation.service.get_settings", lambda: settings)
+    actor, assignment = actor_and_assignment()
+
+    with SessionLocal() as db:
+        job, _revision, _reused = create_job(
+            db,
+            actor.id,
+            assignment.id,
+            f"configured-provider-{uuid.uuid4()}",
+            "unavailable",
+            None,
+        )
+
+    assert job.provider_mode == "local_openai_compatible"
 
 
 def test_published_assignment_rejects_generation_before_job_creation(monkeypatch):
