@@ -158,3 +158,88 @@ def test_cli_accounts_receive_explicit_exclusive_roles() -> None:
         assert db.scalar(
             select(UserSession).where(UserSession.user_id == teacher.id)
         ) is None
+
+
+def test_bulk_import_creates_valid_rows_and_reports_row_errors_without_passwords() -> None:
+    admin = create_admin_account("root-admin", "平台主管", PASSWORD)
+    client = TestClient(app)
+    csrf = login(client, admin.username)
+    response = client.post(
+        "/admin/accounts/bulk",
+        headers={"x-csrf-token": csrf},
+        json={
+            "rows": [
+                {
+                    "username": "teacher-bulk-01",
+                    "display_name": "批量教师",
+                    "password": "bulk-pass-123",
+                    "account_type": "teacher",
+                },
+                {
+                    "username": "student-bulk-01",
+                    "display_name": "批量学生",
+                    "password": "bulk-pass-456",
+                    "account_type": "student",
+                },
+                {
+                    "username": "teacher-bulk-01",
+                    "display_name": "重复教师",
+                    "password": "bulk-pass-789",
+                    "account_type": "teacher",
+                },
+                {
+                    "username": "bad name",
+                    "display_name": "错误账号",
+                    "password": "bulk-pass-000",
+                    "account_type": "student",
+                },
+            ]
+        },
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["requested_count"] == 4
+    assert {item["username"] for item in body["created"]} == {
+        "teacher-bulk-01",
+        "student-bulk-01",
+    }
+    assert [item["row_number"] for item in body["errors"]] == [4, 5]
+    assert "bulk-pass" not in response.text
+
+    audit_response = client.get("/admin/accounts/audit")
+    assert audit_response.status_code == 200
+    audit_body = audit_response.json()
+    assert audit_body["total"] == 3
+    assert audit_body["items"][0]["action"] == "admin.account.bulk_create"
+    assert audit_body["items"][0]["details"] == {
+        "requested_count": 4,
+        "created_count": 2,
+        "error_count": 2,
+    }
+    assert "bulk-pass" not in audit_response.text
+
+
+def test_bulk_import_rejects_admin_rows_and_non_admin_audit_access() -> None:
+    admin = create_admin_account("root-admin", "平台主管", PASSWORD)
+    teacher = create_teacher("plain-teacher", "普通教师", PASSWORD)
+    admin_client, teacher_client = TestClient(app), TestClient(app)
+    admin_csrf = login(admin_client, admin.username)
+    login(teacher_client, teacher.username)
+    assert (
+        admin_client.post(
+            "/admin/accounts/bulk",
+            headers={"x-csrf-token": admin_csrf},
+            json={
+                "rows": [
+                    {
+                        "username": "bulk-admin",
+                        "display_name": "批量管理员",
+                        "password": PASSWORD,
+                        "account_type": "admin",
+                    }
+                ]
+            },
+        ).status_code
+        == 422
+    )
+    assert teacher_client.get("/admin/accounts/audit").status_code == 403

@@ -473,6 +473,20 @@ export type AccountList = {
   offset: number;
   summary: Record<AccountType, { total: number; active: number }>;
 };
+export type AccountAuditRecord = {
+  id: string;
+  action: string;
+  actor_username: string;
+  target_username: string | null;
+  details: Record<string, unknown>;
+  created_at: string;
+};
+export type AccountAuditList = {
+  items: AccountAuditRecord[];
+  total: number;
+  limit: number;
+  offset: number;
+};
 export const adminAccountsApi = {
   list: (filters?: {
     query?: string;
@@ -511,6 +525,24 @@ export const adminAccountsApi = {
       `/admin/accounts/${id}/reset-password`,
       { method: "POST", body: JSON.stringify({ password }) },
     ),
+  bulkCreate: (
+    rows: Array<{
+      username: string;
+      display_name: string;
+      password: string;
+      account_type: "teacher" | "student";
+    }>,
+  ) =>
+    request<{
+      created: ManagedAccount[];
+      errors: Array<{ row_number: number; username: string; message: string }>;
+      requested_count: number;
+    }>("/admin/accounts/bulk", {
+      method: "POST",
+      body: JSON.stringify({ rows }),
+    }),
+  audit: (offset = 0) =>
+    request<AccountAuditList>(`/admin/accounts/audit?offset=${offset}`),
 };
 export async function getHealth(signal?: AbortSignal): Promise<Health> {
   return request<Health>("/health", { signal });

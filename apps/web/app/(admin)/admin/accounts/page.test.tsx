@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   create: vi.fn(),
   update: vi.fn(),
   resetPassword: vi.fn(),
+  bulkCreate: vi.fn(),
+  audit: vi.fn(),
   toast: vi.fn(),
 }));
 
@@ -32,6 +34,8 @@ vi.mock("@/lib/api", async (load) => {
       create: mocks.create,
       update: mocks.update,
       resetPassword: mocks.resetPassword,
+      bulkCreate: mocks.bulkCreate,
+      audit: mocks.audit,
     },
   };
 });
@@ -76,6 +80,26 @@ beforeEach(() => {
   mocks.list.mockResolvedValue(listing);
   mocks.create.mockResolvedValue({});
   mocks.update.mockResolvedValue({});
+  mocks.bulkCreate.mockResolvedValue({
+    created: [{}],
+    errors: [],
+    requested_count: 1,
+  });
+  mocks.audit.mockResolvedValue({
+    items: [
+      {
+        id: "audit-1",
+        action: "admin.account.create",
+        actor_username: "root-admin",
+        target_username: "teacher-one",
+        details: {},
+        created_at: "2026-08-19T08:00:00Z",
+      },
+    ],
+    total: 1,
+    limit: 30,
+    offset: 0,
+  });
 });
 afterEach(cleanup);
 
@@ -86,6 +110,8 @@ it("shows three account categories and protects the current administrator", asyn
   expect(screen.getByText("学生账号")).toBeInTheDocument();
   expect(screen.getByText("管理员账号")).toBeInTheDocument();
   expect(screen.getByText("2 个在线会话")).toBeInTheDocument();
+  expect(screen.getByText("最近账号操作")).toBeInTheDocument();
+  expect(screen.getByText(/root-admin → teacher-one/)).toBeInTheDocument();
 
   const rootRow = screen.getByText("平台主管").closest("tr");
   expect(rootRow).not.toBeNull();
@@ -118,4 +144,37 @@ it("creates an account without echoing its password", async () => {
     }),
   );
   expect(mocks.toast).toHaveBeenCalledWith("账号已创建，可立即使用用户名登录");
+});
+
+it("previews a CSV without displaying passwords and imports valid rows", async () => {
+  render(<AdminAccountsPage />);
+  await screen.findByText("王老师");
+  fireEvent.click(screen.getByRole("button", { name: "批量导入" }));
+  const file = new File(["placeholder"], "accounts.csv", { type: "text/csv" });
+  Object.defineProperty(file, "text", {
+    value: vi
+      .fn()
+      .mockResolvedValue(
+        "username,display_name,account_type,password\n" +
+          "teacher-bulk,批量教师,teacher,secret-pass-123",
+      ),
+  });
+  fireEvent.change(screen.getByLabelText("选择 CSV 文件"), {
+    target: { files: [file] },
+  });
+
+  expect(await screen.findByText("teacher-bulk")).toBeInTheDocument();
+  expect(screen.getByText("可以导入")).toBeInTheDocument();
+  expect(screen.queryByText("secret-pass-123")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "导入有效账号" }));
+  await waitFor(() =>
+    expect(mocks.bulkCreate).toHaveBeenCalledWith([
+      {
+        username: "teacher-bulk",
+        display_name: "批量教师",
+        password: "secret-pass-123",
+        account_type: "teacher",
+      },
+    ]),
+  );
 });

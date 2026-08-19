@@ -27,6 +27,8 @@ x-app-env: &app-env
   CODEX_LOCAL_INTERNAL_TOKEN: ${BUSINESS_E2E_CODEX_LOCAL_INTERNAL_TOKEN:-phase3-business-e2e-codex-local-token-2026-only}
   BUSINESS_E2E_TEACHER_PASSWORD: Synthetic-Business-E2E-Only!
   BUSINESS_E2E_TEACHER_USERNAME: business-e2e-teacher
+  ADMIN_E2E_ADMIN_PASSWORD: Synthetic-Admin-E2E-Only!
+  ADMIN_E2E_ADMIN_USERNAME: admin-e2e-root
 
 services:
   postgres:

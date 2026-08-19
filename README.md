@@ -30,7 +30,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 | 应用基线       | 本地产品实现 `9bccb91`；node2 镜像仍为 `0594d10`；GitHub 主线仍为 `4f4a374`                                   |
 | 远端状态       | 本地包含尚未 push 的账号运维与状态账本提交；尚未部署                                                          |
 | 数据库迁移     | Alembic 单 head：`0049_usernames`                                                                            |
-| 最新开发       | 全离线公式 OCR 与本地 Qwen 建议服务已实现并部署，代码和部署账本已进入 GitHub `master`                        |
+| 最新开发       | 本机新增教师/学生 CSV 批量建号、账号审计视图及管理员浏览器验收；尚未 push 或部署                           |
 | 本机业务验收   | 隔离合成环境 A–F 已通过并停在成绩发布前；公式不可读/重框专项通过；GradeRelease 为 0                          |
 | node2 在线版本 | API/Web/Worker 为 `0594d10`，schema 为 `0049_usernames`；文字、公式 OCR 与本地建议 Provider available        |
 | node2 入口     | `https://222.195.89.236:13300`；自签名证书；公网可达，无来源白名单                                           |
@@ -47,6 +47,8 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 2026-08-19 在用户授权离线自主开发、无需登录 node2 的范围内，新增管理员账号运维闭环：`admin`、`teacher`、`student` 三类账号使用显式且互斥的创建角色，历史无角色教师继续兼容；管理员登录后进入 `/admin/accounts`，可查看分类与在线会话摘要、搜索筛选和分页、创建账号、修改展示姓名、启停账号及重置他人密码。停用和重置密码都会撤销目标账号全部未撤销会话；当前管理员不能停用或在该页面重置自身密码，至少保留一个启用管理员。所有写操作要求管理员会话与 CSRF，创建、更新、重置均写审计日志且不记录或回显密码。没有提供物理删除或角色直接变更，避免误删业务归属或越权迁移。账号/认证后端专项 `12 passed` 且测试数据库守卫确认 `ahamark.db unchanged`；strict mypy `131 source files`、全后端 Ruff、前端 TypeScript/ESLint、全量 `40 files / 242 tests` 和包含 `/admin/accounts` 的 20 页 production build 通过。该功能当前只完成本地代码和隔离测试，尚未部署 node2、尚未创建真实管理员账号。
 
 2026-08-19 用户授权把已完成工作整合到当前 D 盘工作区。`codex/grading-confirm-results` 原 `278d899` 是完整功能分支的严格祖先，已使用 `git merge --ff-only` 无冲突快进至 `9bccb91`；该提交包含管理员账号运维、教师逐题复核体验和本机业务验收脚本改进。当前工作区原有公式评测及临时测试目录均为未跟踪内容，整合过程未修改、删除或纳入提交。D 盘复验前按 `.[dev]` 安装项目声明的开发依赖；账号/认证专项 `12 passed`、测试数据库守卫 `ahamark.db unchanged`、Ruff、strict mypy `131 source files`、前端 `40 files / 242 tests`、TypeScript、ESLint 和包含 `/admin/accounts` 的 20 页 production build 均通过。Next 构建仍出现既有 SWC lockfile 自动补丁网络告警，但编译、静态页面生成和构建进程成功。尚未 push、未登录 node2、未部署、未创建账号或发布成绩。
+
+2026-08-19 继续完成无需登录 node2 的管理员账号运维增强：管理员可下载模板并在浏览器本地预览 CSV，一次批量创建最多 200 个教师或学生账号；中英文表头和账号类型均受支持，无效行会在提交前标出，密码不进入预览、响应或审计。管理页新增最近账号操作，显示执行管理员、目标账号、动作和时间；后端为批量导入写逐账号及汇总审计，仍拒绝 CSV 创建管理员。合成账号浏览器闭环 9 个场景通过；账号/认证后端 `14 passed` 且 `ahamark.db unchanged`，Ruff、strict mypy `132 source files`、前端 `41 files / 246 tests`、TypeScript、ESLint、20 页 production build、Alembic 单 head `0049_usernames` 和业务 Compose 静态解析均通过。Docker Desktop 引擎因本机 Windows 服务权限被拒绝而无法启动，因此没有获得 PostgreSQL 实机迁移、容器重启或 Compose 健康证据；SQLite 也因既有迁移使用 PostgreSQL `JSONB` 而不能替代该证据。操作说明见 `docs/ADMIN-ACCOUNT-OPERATIONS.md`。本轮未 push、未登录 node2、未部署，也未创建真实账号。
 
 2026-08-18 用户要求由 Codex 全程完成、不接第三方在线 Provider，并授权继续开发。当前工作树已接入两个只在 `local-ai` Compose profile 中启用的内网服务：固定 `PaddlePaddle/PP-FormulaNet_plus-M` 公式模型（revision `712e6e2e4c313b1ea163be5c350127b82662c58d`）和固定 `Qwen/Qwen3-4B-GGUF` 的 `Qwen3-4B-Q4_K_M.gguf`，由官方 llama.cpp CPU server 提供 OpenAI-compatible JSON Schema 接口。两者均不发布宿主端口，运行时不下载模型，模型卷只读；应用只允许显式 host allowlist 的 Compose HTTP，拒绝 IP、metadata host、localhost 和未授权外部端点。评分、Stage 4 AI grading 与作业生成只产出 suggestion，继续要求教师复核，外部 Provider 请求在 node2 Compose 中固定关闭。
 
@@ -114,7 +116,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 ### 已知未完成项
 
-1. 用户名登录、上传、切题、识别、教师修正和人工评分/复核已在本机隔离合成环境通过；node2 管理员用户名账号及公网真实部署链路仍未创建或验收。
+1. 用户名登录、上传、切题、识别、教师修正和人工评分/复核已在本机隔离合成环境通过；管理员账号运维浏览器闭环也已通过，但 PostgreSQL/Compose 实机迁移重启、node2 管理员用户名账号及公网真实部署链路仍未验收。
 2. 公网入口仍使用自签名证书；手机 Safari 登录和完整教师流程尚未验收。
 3. 公网端口无来源限制；若后续恢复“仅校园网”目标，需要由 iKuai/防火墙实施边界并做内外双向实测。
 4. 私有 OCR/Gold 的两页修复输出位于仓库外，未合并或覆盖原 60 页草稿；保持暂停。
@@ -123,7 +125,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 ### 下一步顺序
 
-下一步保持当前 `0594d10 + 0049`，不再变更服务器。本机无需再重复已经通过的 A–F 合成闭环；后续如获单独授权，再在 node2 上以脱敏材料验收管理员用户名登录和真实部署 Provider 链路，仍不得发布作业或成绩。公网仍为自签名证书且无来源白名单；Provider 质量没有真实证据时只能作为需教师确认的建议。任何后续升级仍须先备份并保留 `5eda608 + 0048` 回滚路径。
+下一步保持当前 `0594d10 + 0049`，不再变更服务器。本机无需再重复已经通过的 A–F 或管理员合成闭环；具备可用 Docker/PostgreSQL 环境后，先做备份、迁移、重启和健康复验。后续如获单独授权，再在 node2 上以脱敏材料验收管理员用户名登录和真实部署 Provider 链路，仍不得发布作业或成绩。公网仍为自签名证书且无来源白名单；Provider 质量没有真实证据时只能作为需教师确认的建议。任何后续升级仍须先备份并保留 `5eda608 + 0048` 回滚路径。
 
 ## 产品能力与边界
 
@@ -204,7 +206,7 @@ python -m app.cli.create_student --username student01 --display-name "学生"
 python -m app.cli.create_admin --username admin01 --display-name "管理员"
 ```
 
-命令会在终端中两次询问密码且不回显。三类新账号分别获得唯一的 `teacher`、`student` 或 `admin` 角色；已有无角色账号继续按历史教师兼容。管理员登录后自动进入 `/admin/accounts`，可创建账号、修改展示姓名、启用/停用和重置他人密码；停用与密码重置会强制旧会话退出。为避免业务数据悬空，管理端不提供物理删除和账号类型直接变更。仓库不提供公共注册、自助找回或账号申请。`DEMO_ACTOR_ENABLED` 只允许非 production 开发环境使用。
+命令会在终端中两次询问密码且不回显。三类新账号分别获得唯一的 `teacher`、`student` 或 `admin` 角色；已有无角色账号继续按历史教师兼容。管理员登录后自动进入 `/admin/accounts`，可创建账号、用 CSV 批量创建教师和学生、查看账号操作审计、修改展示姓名、启用/停用和重置他人密码；停用与密码重置会强制旧会话退出。为避免业务数据悬空，管理端不提供物理删除和账号类型直接变更。仓库不提供公共注册、自助找回或账号申请。`DEMO_ACTOR_ENABLED` 只允许非 production 开发环境使用。完整操作边界见 `docs/ADMIN-ACCOUNT-OPERATIONS.md`。
 
 注意：node2 已部署用户名版本和 `0049_usernames`，但未创建或验收管理员用户名账号；不要把迁移完成等同于登录业务流程已验收。
 
@@ -319,6 +321,7 @@ node2 使用 `shr` 用户的 Rootless Docker。专用文件：
 
 | 日期       | 提交/状态        | 结论                                                                             |
 | ---------- | ---------------- | -------------------------------------------------------------------------------- |
+| 2026-08-19 | 本地待提交       | CSV 批量建号、账号审计与 9 场景管理员浏览器验收通过；未 push、未部署             |
 | 2026-08-19 | `9bccb91` 本地    | 三类账号运维及教师复核改进已快进整合至 D 盘当前分支；未 push、未部署             |
 | 2026-08-19 | `7e88fae`        | 功能分支与最新远端历史正常合并并推送 `master`；代码树相对首父无变化              |
 | 2026-08-18 | `0594d10` 已部署 | `0049`、固定文字/公式 OCR、本地 Qwen 建议服务上线；公网 readiness 全部 available |

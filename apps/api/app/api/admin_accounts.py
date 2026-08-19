@@ -33,6 +33,17 @@ class PasswordReset(BaseModel):
     password: str = Field(min_length=8, max_length=256)
 
 
+class BulkAccountRow(BaseModel):
+    username: str = Field(max_length=64)
+    display_name: str = Field(max_length=120)
+    password: str = Field(max_length=256)
+    account_type: Literal["teacher", "student"]
+
+
+class BulkAccountCreate(BaseModel):
+    rows: list[BulkAccountRow] = Field(min_length=1, max_length=200)
+
+
 def require_admin(request: Request, db: Db) -> User:
     authenticated = authenticated_session(request, db)
     if authenticated is None:
@@ -94,6 +105,23 @@ def audit(
             action=action,
             resource_type="user_account",
             resource_id=str(target.id),
+            metadata_=details,
+        )
+    )
+
+
+def audit_event(
+    db: Session,
+    actor_id: uuid.UUID,
+    action: str,
+    details: dict[str, object],
+) -> None:
+    db.add(
+        AuditLog(
+            actor_id=actor_id,
+            action=action,
+            resource_type="user_account",
+            resource_id=None,
             metadata_=details,
         )
     )
@@ -192,6 +220,138 @@ def create_account(payload: AccountCreate, db: Db, admin: AdminUser) -> dict[str
         raise HTTPException(409, message) from exc
     db.refresh(user)
     return account_view(user, {})
+
+
+@router.post("/bulk", status_code=status.HTTP_201_CREATED)
+def bulk_create_accounts(
+    payload: BulkAccountCreate,
+    db: Db,
+    admin: AdminUser,
+) -> dict[str, object]:
+    created: list[User] = []
+    errors: list[dict[str, object]] = []
+    seen_usernames: set[str] = set()
+    for index, row in enumerate(payload.rows, start=2):
+        normalized_hint = row.username.strip().lower()
+        if normalized_hint in seen_usernames:
+            errors.append(
+                {
+                    "row_number": index,
+                    "username": normalized_hint,
+                    "message": "CSV 中用户名重复",
+                }
+            )
+            continue
+        seen_usernames.add(normalized_hint)
+        try:
+            user = create_managed_account(
+                db,
+                username=row.username,
+                display_name=row.display_name,
+                password=row.password,
+                account_type=row.account_type,
+            )
+        except ValueError as exc:
+            errors.append(
+                {
+                    "row_number": index,
+                    "username": normalized_hint,
+                    "message": str(exc),
+                }
+            )
+            continue
+        audit(
+            db,
+            admin.id,
+            "admin.account.create",
+            user,
+            {
+                "account_type": row.account_type,
+                "username": user.username,
+                "source": "csv_bulk",
+            },
+        )
+        created.append(user)
+    audit_event(
+        db,
+        admin.id,
+        "admin.account.bulk_create",
+        {
+            "requested_count": len(payload.rows),
+            "created_count": len(created),
+            "error_count": len(errors),
+        },
+    )
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "导入期间账号发生冲突，请刷新后重试") from exc
+    for user in created:
+        db.refresh(user)
+    return {
+        "created": [account_view(user, {}) for user in created],
+        "errors": errors,
+        "requested_count": len(payload.rows),
+    }
+
+
+@router.get("/audit")
+def list_account_audit(
+    db: Db,
+    admin: AdminUser,
+    limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, object]:
+    del admin
+    condition = AuditLog.action.like("admin.account.%")
+    total = db.scalar(select(func.count(AuditLog.id)).where(condition)) or 0
+    entries = list(
+        db.scalars(
+            select(AuditLog)
+            .where(condition)
+            .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+            .offset(offset)
+            .limit(limit)
+        ).all()
+    )
+    user_ids = {
+        user_id
+        for entry in entries
+        for user_id in (
+            entry.actor_id,
+            uuid.UUID(entry.resource_id) if entry.resource_id else None,
+        )
+        if user_id is not None
+    }
+    usernames = {
+        user.id: user.username
+        for user in db.scalars(select(User).where(User.id.in_(user_ids))).all()
+    }
+    return {
+        "items": [
+            {
+                "id": str(entry.id),
+                "action": entry.action,
+                "actor_username": (
+                    usernames.get(entry.actor_id, "已删除账号")
+                    if entry.actor_id is not None
+                    else "系统"
+                ),
+                "target_username": (
+                    usernames.get(uuid.UUID(entry.resource_id), "已删除账号")
+                    if entry.resource_id
+                    else None
+                ),
+                "details": entry.metadata_,
+                "created_at": entry.created_at,
+            }
+            for entry in entries
+        ],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.patch("/{account_id}")
