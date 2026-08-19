@@ -62,6 +62,7 @@ def create_managed_account(
         email=email,
         display_name=normalized_display_name,
         password_hash=hash_password(password),
+        must_change_password=False,
         status=Status.active,
         roles=[role],
     )

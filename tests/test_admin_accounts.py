@@ -110,7 +110,12 @@ def test_password_reset_and_disable_revoke_existing_sessions() -> None:
     )
 
     fresh_teacher = TestClient(app)
-    login(fresh_teacher, teacher.username, "replacement-pass-789")
+    fresh_login = fresh_teacher.post(
+        "/auth/login",
+        json={"username": teacher.username, "password": "replacement-pass-789"},
+    )
+    assert fresh_login.status_code == 200
+    assert fresh_login.json()["must_change_password"] is False
     disabled = admin_client.patch(
         f"/admin/accounts/{teacher.id}",
         headers={"x-csrf-token": admin_csrf},

@@ -81,6 +81,10 @@ class StudentPatch(BaseModel):
     status: ArchiveStatus | None = None
 
 
+class StudentAccountLinkInput(BaseModel):
+    user_id: uuid.UUID
+
+
 class GroupInput(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     description: str | None = Field(default=None, max_length=255)
@@ -264,6 +268,7 @@ def student_json(
     membership: ClassStudent | None = None,
     groups: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
+    linked_account = db.get(User, student.user_id) if student.user_id else None
     if groups is None:
         group_rows = db.execute(
             select(StudentGroup.id, StudentGroup.name)
@@ -281,6 +286,15 @@ def student_json(
         "gender": student.gender,
         "email": student.email,
         "account_linked": student.user_id is not None,
+        "linked_account": (
+            {
+                "id": str(linked_account.id),
+                "username": linked_account.username,
+                "display_name": linked_account.display_name,
+            }
+            if linked_account is not None
+            else None
+        ),
         "phone": student.phone,
         "status": student.status,
         "membership_status": membership.status if membership else None,
@@ -445,19 +459,68 @@ def edit_student(student_id: uuid.UUID, data: StudentPatch, db: Db, actor: Actor
     return student_json(db, item)
 
 
-@router.post("/students/{student_id}/account-link")
-def link_student_account(student_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
-    student = owned_student(db, actor.id, student_id)
-    if not student.email:
-        raise ApiProblem(422, "STUDENT_EMAIL_REQUIRED", "请先为学生填写登录邮箱")
-    user = db.scalar(
-        select(User).where(
-            func.lower(User.email) == student.email.strip().lower(),
+def _require_teacher_account(db: Session, actor_id: uuid.UUID) -> None:
+    user = db.get(User, actor_id)
+    if user is None:
+        raise ApiProblem(404, "USER_NOT_FOUND", "用户不存在")
+    roles = {role.name for role in user.roles}
+    if roles and roles != {"teacher"}:
+        raise ApiProblem(403, "TEACHER_ROLE_REQUIRED", "仅教师账号可以关联学生账号")
+
+
+@router.get("/student-account-candidates")
+def list_student_account_candidates(
+    db: Db,
+    actor: Actor,
+    search: str = Query(default="", max_length=64),
+) -> list[dict[str, str]]:
+    _require_teacher_account(db, actor.id)
+    linked_user_ids = select(Student.user_id).where(
+        Student.owner_id == actor.id,
+        Student.user_id.is_not(None),
+    )
+    query = (
+        select(User)
+        .join(UserRole, UserRole.user_id == User.id)
+        .join(Role, Role.id == UserRole.role_id)
+        .where(
+            Role.name == "student",
             User.status == Status.active,
+            User.username.is_not(None),
+            User.id.not_in(linked_user_ids),
         )
     )
-    if user is None:
-        raise ApiProblem(404, "STUDENT_ACCOUNT_NOT_FOUND", "未找到使用该邮箱的有效账号")
+    term = search.strip().casefold()
+    if term:
+        query = query.where(
+            or_(
+                func.lower(User.username).contains(term, autoescape=True),
+                func.lower(User.display_name).contains(term, autoescape=True),
+            )
+        )
+    users = db.scalars(query.order_by(User.username.asc()).limit(20)).all()
+    return [
+        {
+            "id": str(user.id),
+            "username": user.username or "",
+            "display_name": user.display_name,
+        }
+        for user in users
+    ]
+
+
+@router.post("/students/{student_id}/account-link")
+def link_student_account(
+    student_id: uuid.UUID,
+    data: StudentAccountLinkInput,
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    _require_teacher_account(db, actor.id)
+    student = owned_student(db, actor.id, student_id)
+    user = db.get(User, data.user_id)
+    if user is None or user.status != Status.active:
+        raise ApiProblem(404, "STUDENT_ACCOUNT_NOT_FOUND", "未找到可用的学生账号")
     conflict = db.scalar(
         select(Student.id).where(
             Student.owner_id == actor.id,

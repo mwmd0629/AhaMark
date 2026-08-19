@@ -452,6 +452,7 @@ export type AuthUser = {
   email: string;
   display_name: string;
   roles: string[];
+  must_change_password: boolean;
 };
 export type TeacherPreferences = {
   profile: {
@@ -526,6 +527,14 @@ export const authApi = {
       body: JSON.stringify({ username, password }),
     }),
   me: () => request<AuthUser>("/auth/me"),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<AuthUser>("/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    }),
   preferences: () => request<TeacherPreferences>("/auth/preferences"),
   updatePreferences: (data: {
     expected_revision: number;
@@ -731,6 +740,8 @@ export type ClassResource = {
   resource_type: "exercise" | "handout" | "reference" | "other";
   page_count: number;
   status: "ready" | "archived";
+  student_visible: boolean;
+  published_at?: string | null;
   file_name: string;
   content_type: string;
   size: number;
@@ -771,6 +782,18 @@ export const classesApi = {
       body,
     });
   },
+  setResourcePublication: (
+    classId: string,
+    resourceId: string,
+    studentVisible: boolean,
+  ) =>
+    request<ClassResource>(
+      `/api/classes/${classId}/resources/${resourceId}/publication`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ student_visible: studentVisible }),
+      },
+    ),
 };
 export type Group = {
   id: string;
@@ -787,10 +810,16 @@ export type Student = {
   phone?: string;
   status: "active" | "archived";
   account_linked: boolean;
+  linked_account?: StudentAccountCandidate | null;
   membership_status: "active" | "removed";
   joined_at: string;
   groups: Group[];
   assignment_history: [];
+};
+export type StudentAccountCandidate = {
+  id: string;
+  username: string;
+  display_name: string;
 };
 export const studentsApi = {
   list: (classId: string, query = "") =>
@@ -810,9 +839,14 @@ export const studentsApi = {
       method: "PATCH",
       body: JSON.stringify(data),
     }),
-  linkAccount: (studentId: string) =>
+  accountCandidates: (search = "") =>
+    request<StudentAccountCandidate[]>(
+      `/api/student-account-candidates${search ? `?${new URLSearchParams({ search })}` : ""}`,
+    ),
+  linkAccount: (studentId: string, userId: string) =>
     request<Student>(`/api/students/${studentId}/account-link`, {
       method: "POST",
+      body: JSON.stringify({ user_id: userId }),
     }),
   unlinkAccount: (studentId: string) =>
     request<void>(`/api/students/${studentId}/account-link`, {
@@ -2195,6 +2229,79 @@ export type StudentPortalAssignmentDetail = StudentPortalAssignment & {
   }>;
 };
 
+export type StudentReviewRequestSummary = {
+  id: string;
+  status: "pending" | "needs_information" | "resolved" | "cancelled";
+  resolution?: "upheld" | "score_changed" | "needs_information" | null;
+  teacher_response?: string | null;
+};
+
+export type StudentWrongQuestion = {
+  id: string;
+  grade_release_id: string;
+  assignment_title: string;
+  class_name: string;
+  question_id: string;
+  question_number: string;
+  question_content?: string | null;
+  student_answer?: string | null;
+  score: string;
+  max_score: string;
+  feedback?: string | null;
+  error_type?: string | null;
+  review_request?: StudentReviewRequestSummary | null;
+};
+
+export type StudentReviewRequest = StudentReviewRequestSummary & {
+  message: string;
+  created_at: string;
+  updated_at: string;
+  resolved_at?: string | null;
+  grade_release_id: string;
+  grade_release_version: number;
+  score_snapshot_id: string;
+  student_id: string;
+  student_name: string;
+  student_number: string;
+  assignment_id: string;
+  assignment_title: string;
+  class_id: string;
+  class_name: string;
+  student_answer_id: string;
+  question_id: string;
+  question_number: string;
+  question_content?: string | null;
+  student_answer?: string | null;
+};
+
+export type StudentOpenAssignment = {
+  assignment_id: string;
+  assignment_title: string;
+  description?: string | null;
+  instructions?: string | null;
+  class_id: string;
+  class_name: string;
+  student_id: string;
+  due_at?: string | null;
+  late: boolean;
+  attempts: Array<{
+    id: string;
+    attempt_number: number;
+    status: string;
+    submitted_at?: string | null;
+  }>;
+};
+
+export type StudentLearningAnalysis = {
+  wrong_question_count: number;
+  focus_knowledge_points: Array<{ name: string; count: number }>;
+  error_types: Array<{ name: string; count: number }>;
+  suggested_actions: string[];
+  source: "released_grade_snapshots";
+  suggestion_only: true;
+  assistant_enabled: boolean;
+};
+
 export const studentPortalApi = {
   me: () =>
     request<{
@@ -2214,6 +2321,72 @@ export const studentPortalApi = {
     ),
   reportUrl: (releaseId: string) =>
     `${API_URL}/api/student/assignments/${releaseId}/report.pdf`,
+  wrongQuestions: () =>
+    request<StudentWrongQuestion[]>("/api/student/wrong-questions"),
+  reviewRequests: () =>
+    request<StudentReviewRequest[]>("/api/student/review-requests"),
+  createReviewRequest: (
+    releaseId: string,
+    questionId: string,
+    message: string,
+  ) =>
+    request<StudentReviewRequest>(
+      `/api/student/wrong-questions/${releaseId}/${questionId}/review-requests`,
+      { method: "POST", body: JSON.stringify({ message }) },
+    ),
+  resources: () => request<ClassResource[]>("/api/student/resources"),
+  resourceDownloadUrl: (resourceId: string) =>
+    `${API_URL}/api/student/resources/${resourceId}/download`,
+  openAssignments: () =>
+    request<StudentOpenAssignment[]>("/api/student/open-assignments"),
+  submitAssignment: (assignmentId: string, files: File[]) => {
+    const body = new FormData();
+    files.forEach((file) => body.append("files", file));
+    return request<{
+      id: string;
+      attempt_number: number;
+      status: string;
+      submitted_at: string;
+      file_count: number;
+    }>(`/api/student/open-assignments/${assignmentId}/submissions`, {
+      method: "POST",
+      body,
+    });
+  },
+  learningAnalysis: () =>
+    request<StudentLearningAnalysis>("/api/student/learning-analysis"),
+  tutor: (releaseId: string, questionId: string, question?: string) =>
+    request<{
+      explanation: string;
+      next_steps: string[];
+      practice_prompts: string[];
+      provider: "local_model";
+      suggestion_only: true;
+      can_change_score: false;
+    }>(`/api/student/wrong-questions/${releaseId}/${questionId}/tutor`, {
+      method: "POST",
+      body: JSON.stringify({ question: question || null }),
+    }),
+};
+
+export const studentReviewRequestsApi = {
+  teacherList: (status?: string) =>
+    request<StudentReviewRequest[]>(
+      `/api/teacher/review-requests${status ? `?${new URLSearchParams({ status })}` : ""}`,
+    ),
+  resolve: (
+    requestId: string,
+    payload: {
+      resolution: "upheld" | "score_changed" | "needs_information";
+      response: string;
+      new_score?: string;
+      new_feedback?: string;
+    },
+  ) =>
+    request<StudentReviewRequest>(`/api/teacher/review-requests/${requestId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
 };
 
 export type SubmissionProcessingJob = {

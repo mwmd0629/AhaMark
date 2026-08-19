@@ -5,6 +5,7 @@ export const navigation = [
   { href: "/classes", label: "班级与学生", icon: "classes" },
   { href: "/analytics", label: "学情分析", icon: "analytics" },
   { href: "/practice", label: "错题与练习", icon: "practice" },
+  { href: "/review-requests", label: "学生复核", icon: "grading" },
   { href: "/rubrics", label: "评分模板", icon: "rubrics" },
   { href: "/settings", label: "设置", icon: "settings" },
 ] as const;

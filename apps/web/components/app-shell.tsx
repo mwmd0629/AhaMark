@@ -175,6 +175,13 @@ export function AppShell({ children }: { children: ReactNode }) {
                   </span>
                 }
               >
+                <Link
+                  role="menuitem"
+                  href="/change-password"
+                  className="block rounded-lg px-3 py-2 text-sm hover:bg-slate-50"
+                >
+                  修改密码
+                </Link>
                 <button
                   role="menuitem"
                   onClick={() =>

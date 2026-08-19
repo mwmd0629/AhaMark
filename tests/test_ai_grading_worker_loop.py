@@ -198,7 +198,15 @@ def test_migration_head_matches_strict_audit_models() -> None:
     assert class_resources_revision.down_revision == formula_recognition_revision.revision
     usernames_revision = script.get_revision("0049_usernames")
     assert usernames_revision.down_revision == class_resources_revision.revision
-    assert script.get_current_head() == usernames_revision.revision
+    password_change_revision = script.get_revision("0050_forced_password_change")
+    assert password_change_revision.down_revision == usernames_revision.revision
+    review_requests_revision = script.get_revision("0051_student_review_requests")
+    assert review_requests_revision.down_revision == password_change_revision.revision
+    resource_publication_revision = script.get_revision("0052_class_resource_publication")
+    assert resource_publication_revision.down_revision == review_requests_revision.revision
+    disable_forced_change_revision = script.get_revision("0053_disable_forced_password_change")
+    assert disable_forced_change_revision.down_revision == resource_publication_revision.revision
+    assert script.get_current_head() == disable_forced_change_revision.revision
     assert question_structure_revision.down_revision == rubric_templates_revision.revision
     assert rubric_templates_revision.down_revision == grading_review_revision.revision
     assert grading_review_revision.down_revision == question_anchor_revision.revision

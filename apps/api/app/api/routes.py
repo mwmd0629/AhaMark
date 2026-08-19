@@ -24,7 +24,10 @@ from app.api.recognition import router as recognition_router
 from app.api.results import router as results_router
 from app.api.rubric_templates import router as rubric_templates_router
 from app.api.structured_rubrics import router as structured_rubrics_router
+from app.api.student_learning import router as student_learning_router
 from app.api.student_portal import router as student_portal_router
+from app.api.student_review_requests import router as student_review_requests_router
+from app.api.student_submissions import router as student_submissions_router
 from app.api.submission_processing import router as submission_processing_router
 from app.api.teacher_practice import router as teacher_practice_router
 from app.api.textbook_libraries import router as textbook_libraries_router
@@ -65,6 +68,9 @@ router.include_router(rubric_templates_router)
 router.include_router(textbook_libraries_router)
 router.include_router(results_router)
 router.include_router(student_portal_router)
+router.include_router(student_learning_router)
+router.include_router(student_review_requests_router)
+router.include_router(student_submissions_router)
 router.include_router(teacher_practice_router)
 
 

@@ -677,6 +677,7 @@ def reset_password(
     if user.id == admin.id:
         raise HTTPException(409, "不能在此重置当前管理员密码，请由另一管理员操作")
     user.password_hash = hash_password(payload.password)
+    user.must_change_password = False
     revoked = revoke_sessions(db, user.id)
     audit(
         db,

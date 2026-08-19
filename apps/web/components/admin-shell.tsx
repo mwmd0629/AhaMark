@@ -25,6 +25,12 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
             <span className="hidden text-slate-600 sm:inline">
               {user?.display_name || user?.username}
             </span>
+            <Link
+              className="rounded-lg border px-3 py-2 hover:bg-slate-50"
+              href="/change-password"
+            >
+              修改密码
+            </Link>
             <button
               className="rounded-lg border px-3 py-2 hover:bg-slate-50"
               onClick={() =>

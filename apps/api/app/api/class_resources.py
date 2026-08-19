@@ -13,15 +13,20 @@ from app.models import (
     AssignmentClass,
     AssignmentStatus,
     ClassResource,
+    ClassStudent,
     FileStatus,
+    MembershipStatus,
     PaperPage,
     PaperVersion,
     StoredFile,
+    Student,
+    now_utc,
 )
 from app.security.files import UnsafeFile, inspect_upload, safe_filename
 from app.storage.base import ObjectStorage
 from app.storage.dependencies import get_storage
 from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -44,6 +49,8 @@ def resource_json(row: ClassResource, stored: StoredFile) -> dict[str, Any]:
         "resource_type": row.resource_type,
         "page_count": row.page_count,
         "status": row.status,
+        "student_visible": row.student_visible,
+        "published_at": row.published_at,
         "file_name": stored.original_name,
         "content_type": stored.content_type,
         "size": stored.size,
@@ -67,6 +74,115 @@ def list_class_resources(class_id: uuid.UUID, db: Db, actor: Actor) -> list[dict
         .order_by(ClassResource.created_at.desc(), ClassResource.id)
     )
     return [resource_json(row, stored) for row, stored in rows]
+
+
+@router.patch("/classes/{class_id}/resources/{resource_id}/publication")
+def set_class_resource_publication(
+    class_id: uuid.UUID,
+    resource_id: uuid.UUID,
+    data: dict[str, bool],
+    db: Db,
+    actor: Actor,
+) -> dict[str, Any]:
+    owned_class(db, actor.id, class_id)
+    if set(data) != {"student_visible"}:
+        raise ApiProblem(422, "CLASS_RESOURCE_PUBLICATION_INVALID", "发布参数无效")
+    row = db.scalar(
+        select(ClassResource)
+        .where(
+            ClassResource.id == resource_id,
+            ClassResource.class_id == class_id,
+            ClassResource.owner_id == actor.id,
+            ClassResource.status == "ready",
+        )
+        .with_for_update()
+    )
+    if row is None:
+        raise ApiProblem(404, "CLASS_RESOURCE_NOT_FOUND", "班级资料不存在")
+    stored = db.get(StoredFile, row.stored_file_id)
+    if stored is None or stored.status != FileStatus.ready:
+        raise ApiProblem(409, "CLASS_RESOURCE_SOURCE_INVALID", "班级资料文件不可用")
+    visible = bool(data["student_visible"])
+    row.student_visible = visible
+    row.published_at = now_utc() if visible else None
+    row.published_by = actor.id if visible else None
+    audit(
+        db,
+        actor.id,
+        "class_resource.publish" if visible else "class_resource.unpublish",
+        "class_resource",
+        row.id,
+        {"class_id": str(class_id), "student_visible": visible},
+    )
+    db.commit()
+    return resource_json(row, stored)
+
+
+def _student_resource(
+    db: Session, actor_id: uuid.UUID, resource_id: uuid.UUID
+) -> tuple[ClassResource, StoredFile]:
+    row = db.execute(
+        select(ClassResource, StoredFile)
+        .join(StoredFile, StoredFile.id == ClassResource.stored_file_id)
+        .join(ClassStudent, ClassStudent.class_id == ClassResource.class_id)
+        .join(Student, Student.id == ClassStudent.student_id)
+        .where(
+            ClassResource.id == resource_id,
+            ClassResource.student_visible.is_(True),
+            ClassResource.status == "ready",
+            StoredFile.status == FileStatus.ready,
+            Student.user_id == actor_id,
+            Student.status == ArchiveStatus.active,
+            Student.owner_id == ClassResource.owner_id,
+            ClassStudent.status == MembershipStatus.active,
+        )
+    ).first()
+    if row is None:
+        raise ApiProblem(404, "STUDENT_RESOURCE_NOT_FOUND", "资料不存在或尚未向学生发布")
+    return row[0], row[1]
+
+
+@router.get("/student/resources")
+def list_student_resources(db: Db, actor: Actor) -> list[dict[str, Any]]:
+    rows = db.execute(
+        select(ClassResource, StoredFile)
+        .join(StoredFile, StoredFile.id == ClassResource.stored_file_id)
+        .join(ClassStudent, ClassStudent.class_id == ClassResource.class_id)
+        .join(Student, Student.id == ClassStudent.student_id)
+        .where(
+            ClassResource.student_visible.is_(True),
+            ClassResource.status == "ready",
+            StoredFile.status == FileStatus.ready,
+            Student.user_id == actor.id,
+            Student.status == ArchiveStatus.active,
+            Student.owner_id == ClassResource.owner_id,
+            ClassStudent.status == MembershipStatus.active,
+        )
+        .order_by(ClassResource.published_at.desc(), ClassResource.id.desc())
+    ).all()
+    unique: dict[uuid.UUID, dict[str, Any]] = {}
+    for resource, stored in rows:
+        unique.setdefault(resource.id, resource_json(resource, stored))
+    return list(unique.values())
+
+
+@router.get("/student/resources/{resource_id}/download")
+def download_student_resource(
+    resource_id: uuid.UUID,
+    db: Db,
+    actor: Actor,
+    storage: Storage,
+) -> Response:
+    _resource, stored = _student_resource(db, actor.id, resource_id)
+    content = storage.get(stored.storage_key).read()
+    if hashlib.sha256(content).hexdigest() != stored.checksum:
+        raise ApiProblem(409, "CLASS_RESOURCE_CHANGED", "资料内容校验失败")
+    safe_name = stored.original_name.replace('"', "")
+    return Response(
+        content=content,
+        media_type=stored.content_type,
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+    )
 
 
 @router.post("/classes/{class_id}/resources", status_code=201)

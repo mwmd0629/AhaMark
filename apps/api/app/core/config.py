@@ -157,6 +157,7 @@ class Settings(BaseSettings):
     codex_local_internal_token: SecretStr | None = None
     codex_local_lease_seconds: int = Field(default=300, ge=30, le=3600)
     codex_local_max_claim: int = Field(default=20, ge=1, le=100)
+    student_learning_assistant_enabled: bool = False
     submission_max_files: int = 100
     submission_batch_max_bytes: int = 250 * 1024 * 1024
     submission_match_threshold: float = 0.95
@@ -195,6 +196,17 @@ class Settings(BaseSettings):
                     "CODEX_LOCAL_INTERNAL_TOKEN must be a strong value of at least "
                     "32 characters when CODEX_LOCAL_ENABLED is true"
                 )
+        if self.student_learning_assistant_enabled:
+            if self.ai_grading_provider != "local_openai_compatible":
+                raise ValueError(
+                    "STUDENT_LEARNING_ASSISTANT_ENABLED requires a local OpenAI-compatible provider"
+                )
+            if not self.ai_grading_allow_local_provider_requests:
+                raise ValueError(
+                    "STUDENT_LEARNING_ASSISTANT_ENABLED requires local provider requests enabled"
+                )
+            if self.ai_grading_allow_external_provider_requests:
+                raise ValueError("student learning assistant cannot use external provider requests")
         formula_region_errors = []
         if self.formula_region_detection_enabled:
             formula_region_errors.append(

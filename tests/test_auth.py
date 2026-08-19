@@ -7,7 +7,7 @@ from app.cli.create_teacher import create_teacher as initialize_teacher
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.main import app
-from app.models import Status, User, UserSession, now_utc
+from app.models import AuditLog, Status, User, UserSession, now_utc
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -87,12 +87,14 @@ def test_admin_can_initialize_teacher_without_storing_plaintext() -> None:
     assert user.email == "new-teacher@ahamark.local"
     assert user.password_hash != "not-plain-password"
     assert user.password_hash.startswith("scrypt$")
+    assert user.must_change_password is False
     login = TestClient(app).post(
         "/auth/login",
         json={"username": "new-teacher", "password": "not-plain-password"},
     )
     assert login.status_code == 200
     assert login.json()["roles"] == ["teacher"]
+    assert login.json()["must_change_password"] is False
 
 
 def test_admin_can_issue_student_username_and_public_registration_is_absent() -> None:
@@ -157,6 +159,59 @@ def test_successful_login_does_not_consume_failure_rate_limit() -> None:
             ).status_code
             == 401
         )
+
+
+def test_password_change_requires_current_password_and_revokes_other_sessions() -> None:
+    user = create_teacher("change-password@example.com")
+    current, other = TestClient(app), TestClient(app)
+    for client in (current, other):
+        login = client.post(
+            "/auth/login",
+            json={"username": "change-password", "password": "secure-pass-123"},
+        )
+        assert login.status_code == 200
+    csrf = current.cookies.get("ahamark_csrf")
+    assert csrf
+    rejected = current.post(
+        "/auth/change-password",
+        headers={"x-csrf-token": csrf},
+        json={"current_password": "wrong-pass-123", "new_password": "new-secure-pass-456"},
+    )
+    assert rejected.status_code == 401
+    changed = current.post(
+        "/auth/change-password",
+        headers={"x-csrf-token": csrf},
+        json={"current_password": "secure-pass-123", "new_password": "new-secure-pass-456"},
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["must_change_password"] is False
+    assert current.get("/auth/me").status_code == 200
+    assert other.get("/auth/me").status_code == 401
+    assert (
+        TestClient(app).post(
+            "/auth/login",
+            json={"username": "change-password", "password": "secure-pass-123"},
+        ).status_code
+        == 401
+    )
+    assert (
+        TestClient(app).post(
+            "/auth/login",
+            json={"username": "change-password", "password": "new-secure-pass-456"},
+        ).status_code
+        == 200
+    )
+    with SessionLocal() as db:
+        refreshed = db.get(User, user.id)
+        assert refreshed is not None and refreshed.must_change_password is False
+        event = db.scalar(
+            select(AuditLog).where(
+                AuditLog.actor_id == user.id,
+                AuditLog.action == "account.password_change",
+            )
+        )
+        assert event is not None
+        assert event.metadata_["revoked_session_count"] == 1
 
 
 def test_production_rejects_legacy_email_login(monkeypatch: pytest.MonkeyPatch) -> None:

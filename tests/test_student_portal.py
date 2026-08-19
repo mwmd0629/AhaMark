@@ -1,14 +1,19 @@
 import uuid
 
+from app.api import student_learning
 from app.api.auth import hash_password
+from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.main import app
 from app.models import (
     GradeRelease,
     GradeReleaseItem,
+    GradingResult,
     Role,
+    ScoreRevision,
     Status,
     Student,
+    StudentReviewRequest,
     Submission,
     User,
     UserRole,
@@ -16,12 +21,14 @@ from app.models import (
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from test_confirm_results_contract import _confirm, _confirmable_case, _readiness
+from test_submission_workflow import client
 
 
 def _student_account(email: str = "student@example.com") -> User:
     with SessionLocal() as db:
         role = Role(name="student", description="学生端账号")
         user = User(
+            username=email.split("@", 1)[0],
             email=email,
             display_name="合成学生账号",
             password_hash=hash_password("student-pass-123"),
@@ -43,12 +50,23 @@ def test_student_only_sees_explicitly_linked_and_published_formal_grade() -> Non
         student = case.db.get(Student, submission.student_id)
         assert student is not None
         account = _student_account()
-        student.email = account.email
-        case.db.commit()
 
-        linked = TestClient(app).post(f"/api/students/{student.id}/account-link")
+        candidates = TestClient(app).get("/api/student-account-candidates?search=student")
+        assert candidates.status_code == 200, candidates.text
+        assert candidates.json() == [
+            {
+                "id": str(account.id),
+                "username": "student",
+                "display_name": "合成学生账号",
+            }
+        ]
+        linked = TestClient(app).post(
+            f"/api/students/{student.id}/account-link",
+            json={"user_id": str(account.id)},
+        )
         assert linked.status_code == 200, linked.text
         assert linked.json()["account_linked"] is True
+        assert linked.json()["linked_account"]["username"] == "student"
 
         readiness = _readiness(case)
         confirmed = _confirm(
@@ -101,6 +119,161 @@ def test_student_only_sees_explicitly_linked_and_published_formal_grade() -> Non
         assert visible_at is not None
 
 
+def test_student_wrong_question_review_request_and_teacher_resolution(monkeypatch) -> None:
+    with _confirmable_case() as case:
+        submission = case.db.get(Submission, case.submission_id)
+        result = case.db.get(GradingResult, case.result_id)
+        assert submission is not None and submission.student_id is not None
+        assert result is not None and result.max_score is not None
+        result.score = result.max_score - 1
+        case.db.commit()
+        student = case.db.get(Student, submission.student_id)
+        assert student is not None
+        account = _student_account("review-student@example.com")
+        linked = client.post(
+            f"/api/students/{student.id}/account-link",
+            json={"user_id": str(account.id)},
+        )
+        assert linked.status_code == 200, linked.text
+
+        readiness = _readiness(case)
+        confirmed = _confirm(
+            case,
+            key=f"student-review-{uuid.uuid4()}",
+            review_hash=str(readiness["review_hash"]),
+        )
+        assert confirmed.status_code == 201, confirmed.text
+        release_id = confirmed.json()["grade_release_id"]
+        published = client.post(f"/api/grade-releases/{release_id}/publish-to-students")
+        assert published.status_code == 200
+
+        student_client = TestClient(app)
+        login = student_client.post(
+            "/auth/login",
+            json={"email": account.email, "password": "student-pass-123"},
+        )
+        assert login.status_code == 200
+        csrf = student_client.cookies.get("ahamark_csrf")
+        assert csrf
+        wrong = student_client.get("/api/student/wrong-questions")
+        assert wrong.status_code == 200, wrong.text
+        assert len(wrong.json()) == 1
+        question_id = wrong.json()[0]["question_id"]
+        analysis = student_client.get("/api/student/learning-analysis")
+        assert analysis.status_code == 200, analysis.text
+        assert analysis.json()["wrong_question_count"] == 1
+        assert analysis.json()["assistant_enabled"] is False
+        disabled_tutor = student_client.post(
+            f"/api/student/wrong-questions/{release_id}/{question_id}/tutor",
+            headers={"x-csrf-token": csrf},
+            json={"question": "我从哪一步开始错了？"},
+        )
+        assert disabled_tutor.status_code == 404
+        assert disabled_tutor.json()["code"] == "STUDENT_LEARNING_ASSISTANT_DISABLED"
+        settings = get_settings()
+        previous_assistant = settings.student_learning_assistant_enabled
+        previous_provider = settings.ai_grading_provider
+        previous_local = settings.ai_grading_allow_local_provider_requests
+        previous_url = settings.ai_grading_base_url
+        previous_model = settings.ai_grading_model
+        previous_key = settings.ai_grading_api_key
+
+        class LocalTutorResponse:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, object]:
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"explanation":"第一处错误在符号变换。",'
+                                    '"next_steps":["重做该步骤"],'
+                                    '"practice_prompts":["说明符号为何改变"]}'
+                                )
+                            }
+                        }
+                    ]
+                }
+
+        monkeypatch.setattr(
+            student_learning.httpx,
+            "post",
+            lambda *args, **kwargs: LocalTutorResponse(),
+        )
+        try:
+            settings.student_learning_assistant_enabled = True
+            settings.ai_grading_provider = "local_openai_compatible"
+            settings.ai_grading_allow_local_provider_requests = True
+            settings.ai_grading_base_url = "http://local-model:8080/v1"
+            settings.ai_grading_model = "local-test-model"
+            settings.ai_grading_api_key = "local-test-key-with-more-than-32-characters"
+            tutor = student_client.post(
+                f"/api/student/wrong-questions/{release_id}/{question_id}/tutor",
+                headers={"x-csrf-token": csrf},
+                json={"question": "我从哪一步开始错了？"},
+            )
+            assert tutor.status_code == 200, tutor.text
+            assert tutor.json()["provider"] == "local_model"
+            assert tutor.json()["suggestion_only"] is True
+            assert tutor.json()["can_change_score"] is False
+        finally:
+            settings.student_learning_assistant_enabled = previous_assistant
+            settings.ai_grading_provider = previous_provider
+            settings.ai_grading_allow_local_provider_requests = previous_local
+            settings.ai_grading_base_url = previous_url
+            settings.ai_grading_model = previous_model
+            settings.ai_grading_api_key = previous_key
+        created = student_client.post(
+            f"/api/student/wrong-questions/{release_id}/{question_id}/review-requests",
+            headers={"x-csrf-token": csrf},
+            json={"message": "请复核这道题的步骤分。"},
+        )
+        assert created.status_code == 201, created.text
+        request_id = created.json()["id"]
+        duplicate = student_client.post(
+            f"/api/student/wrong-questions/{release_id}/{question_id}/review-requests",
+            headers={"x-csrf-token": csrf},
+            json={"message": "重复申请"},
+        )
+        assert duplicate.status_code == 409
+        assert duplicate.json()["code"] == "REVIEW_REQUEST_ALREADY_OPEN"
+
+        queue = client.get("/api/teacher/review-requests")
+        assert queue.status_code == 200, queue.text
+        queued = next(item for item in queue.json() if item["id"] == request_id)
+        assert queued["student_id"] == str(student.id)
+        resolved = client.patch(
+            f"/api/teacher/review-requests/{request_id}",
+            json={
+                "resolution": "score_changed",
+                "response": "步骤分已补记；重新发布后会显示新成绩。",
+                "new_score": str(result.max_score),
+                "new_feedback": "复核后补记步骤分",
+            },
+        )
+        assert resolved.status_code == 200, resolved.text
+        assert resolved.json()["status"] == "resolved"
+        assert resolved.json()["resolution"] == "score_changed"
+
+        with SessionLocal() as db:
+            request = db.get(StudentReviewRequest, uuid.UUID(request_id))
+            assert request is not None and request.resolved_at is not None
+            revision = db.scalar(
+                select(ScoreRevision).where(
+                    ScoreRevision.student_answer_id == case.answer_id,
+                    ScoreRevision.reason.like("学生复核申请：%"),
+                )
+            )
+            assert revision is not None
+            assert revision.new_score == result.max_score
+
+        unchanged = student_client.get(f"/api/student/assignments/{release_id}")
+        assert unchanged.status_code == 200
+        assert unchanged.json()["questions"][0]["score"] == float(result.max_score - 1)
+
+
 def test_older_release_cannot_be_published_after_newer_formal_version() -> None:
     with _confirmable_case() as case:
         submission = case.db.get(Submission, case.submission_id)
@@ -108,9 +281,13 @@ def test_older_release_cannot_be_published_after_newer_formal_version() -> None:
         student = case.db.get(Student, submission.student_id)
         assert student is not None
         account = _student_account("out-of-order@example.com")
-        student.email = account.email
-        case.db.commit()
-        assert TestClient(app).post(f"/api/students/{student.id}/account-link").status_code == 200
+        assert (
+            TestClient(app).post(
+                f"/api/students/{student.id}/account-link",
+                json={"user_id": str(account.id)},
+            ).status_code
+            == 200
+        )
 
         readiness = _readiness(case)
         confirmed = _confirm(
@@ -211,6 +388,7 @@ def test_teacher_cannot_link_an_account_without_student_role() -> None:
         db.add(student)
         db.commit()
         student_id = student.id
+        teacher_id = teacher.id
 
     owner_client = TestClient(app)
     login = owner_client.post(
@@ -222,6 +400,7 @@ def test_teacher_cannot_link_an_account_without_student_role() -> None:
     response = owner_client.post(
         f"/api/students/{student_id}/account-link",
         headers={"x-csrf-token": csrf},
+        json={"user_id": str(teacher_id)},
     )
     assert response.status_code == 409
     assert response.json()["code"] == "ACCOUNT_NOT_STUDENT"

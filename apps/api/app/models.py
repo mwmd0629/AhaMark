@@ -136,6 +136,7 @@ class User(TimestampMixin, Base):
     )
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     display_name: Mapped[str] = mapped_column(String(120))
     status: Mapped[Status] = mapped_column(Enum(Status), default=Status.active, index=True)
     roles: Mapped[list["Role"]] = relationship(secondary="user_roles", back_populates="users")
@@ -218,6 +219,13 @@ class ClassResource(TimestampMixin, Base):
     resource_type: Mapped[str] = mapped_column(String(24), default="exercise", index=True)
     page_count: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20), default="ready", index=True)
+    student_visible: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, index=True
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT")
+    )
     metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
 
 
@@ -3164,6 +3172,51 @@ class GradeReleaseItem(Base):
     )
     status: Mapped[str] = mapped_column(String(30), default="included", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class StudentReviewRequest(TimestampMixin, Base):
+    __tablename__ = "student_review_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','needs_information','resolved','cancelled')",
+            name="ck_student_review_request_status",
+        ),
+        CheckConstraint(
+            "resolution IS NULL OR resolution IN ('upheld','score_changed','needs_information')",
+            name="ck_student_review_request_resolution",
+        ),
+        Index(
+            "ix_student_review_request_teacher_queue",
+            "owner_id",
+            "status",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    student_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("students.id", ondelete="RESTRICT"), index=True
+    )
+    requested_by: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), index=True
+    )
+    grade_release_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("grade_releases.id", ondelete="RESTRICT"), index=True
+    )
+    score_snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("submission_score_snapshots.id", ondelete="RESTRICT")
+    )
+    student_answer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("student_answers.id", ondelete="RESTRICT"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    message: Mapped[str] = mapped_column(Text)
+    teacher_response: Mapped[str | None] = mapped_column(Text)
+    resolution: Mapped[str | None] = mapped_column(String(32))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ReportJob(Base):

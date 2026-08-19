@@ -84,6 +84,28 @@ it("routes administrators to the account operations center", async () => {
   );
 });
 
+it("does not block login for a legacy forced-change flag", async () => {
+  mocks.login.mockResolvedValue({
+    id: "student-1",
+    username: "student01",
+    email: "student01@ahamark.local",
+    display_name: "测试学生",
+    roles: ["student"],
+    must_change_password: true,
+  });
+  render(<LoginPage />);
+  fireEvent.change(screen.getByLabelText("用户名"), {
+    target: { value: "student01" },
+  });
+  fireEvent.change(screen.getByLabelText("密码"), {
+    target: { value: "initial-pass-123" },
+  });
+  fireEvent.submit(
+    screen.getByRole("button", { name: "登录" }).closest("form")!,
+  );
+  await waitFor(() => expect(mocks.replace).toHaveBeenCalledWith("/student"));
+});
+
 it("shows a useful message and re-enables login when the API is unreachable", async () => {
   mocks.login.mockRejectedValueOnce(
     new ApiError(0, {

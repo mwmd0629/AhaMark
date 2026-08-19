@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   listStudents: vi.fn(),
   addStudent: vi.fn(),
   removeStudent: vi.fn(),
+  accountCandidates: vi.fn(),
   linkAccount: vi.fn(),
   listGroups: vi.fn(),
   createGroup: vi.fn(),
@@ -37,6 +38,7 @@ vi.mock("@/lib/api", () => ({
     list: mocks.listStudents,
     add: mocks.addStudent,
     remove: mocks.removeStudent,
+    accountCandidates: mocks.accountCandidates,
     linkAccount: mocks.linkAccount,
     unlinkAccount: vi.fn(),
   },
@@ -73,6 +75,8 @@ describe("class detail student creation", () => {
       pages: 0,
     });
     mocks.listGroups.mockResolvedValue([]);
+    mocks.accountCandidates.mockResolvedValue([]);
+    mocks.linkAccount.mockResolvedValue({});
     mocks.listResources.mockResolvedValue([
       {
         id: "resource-1",
@@ -148,5 +152,52 @@ describe("class detail student creation", () => {
     );
     expect(screen.getByLabelText("资料类型")).toHaveValue("exercise");
     expect(screen.getByRole("button", { name: "添加资料" })).toBeEnabled();
+  });
+
+  it("links a student account selected by username without requiring email", async () => {
+    mocks.listStudents.mockResolvedValue({
+      items: [
+        {
+          id: "student-1",
+          name: "演示学生",
+          student_number: "0001",
+          status: "active",
+          account_linked: false,
+          membership_status: "active",
+          joined_at: "2026-07-28T00:00:00Z",
+          groups: [],
+          assignment_history: [],
+        },
+      ],
+      page: 1,
+      page_size: 50,
+      total: 1,
+      pages: 1,
+    });
+    mocks.accountCandidates.mockResolvedValue([
+      {
+        id: "account-1",
+        username: "student01",
+        display_name: "演示学生账号",
+      },
+    ]);
+
+    render(
+      <ToastProvider>
+        <Suspense fallback={<div>加载中</div>}>
+          <ClassDetailPage params={Promise.resolve({ classId: "class-1" })} />
+        </Suspense>
+      </ToastProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "关联账号" }));
+    expect(await screen.findByText("用户名：student01")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("radio"));
+    fireEvent.click(screen.getByRole("button", { name: "确认关联" }));
+
+    await waitFor(() =>
+      expect(mocks.linkAccount).toHaveBeenCalledWith("student-1", "account-1"),
+    );
+    expect(await screen.findByText("学生登录账号已关联")).toBeInTheDocument();
   });
 });

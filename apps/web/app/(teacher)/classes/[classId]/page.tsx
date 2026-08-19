@@ -27,6 +27,7 @@ import {
   type Group,
   type ImportPreview,
   type Student,
+  type StudentAccountCandidate,
 } from "@/lib/api";
 import { useSmartRefresh } from "@/lib/use-smart-refresh";
 
@@ -47,6 +48,13 @@ export default function ClassDetailPage({
   const [groupId, setGroupId] = useState("");
   const [saving, setSaving] = useState(false);
   const [studentOpen, setStudentOpen] = useState(false);
+  const [accountStudent, setAccountStudent] = useState<Student>();
+  const [accountSearch, setAccountSearch] = useState("");
+  const [accountCandidates, setAccountCandidates] = useState<
+    StudentAccountCandidate[]
+  >([]);
+  const [accountCandidateId, setAccountCandidateId] = useState("");
+  const [accountLoading, setAccountLoading] = useState(false);
   const [preview, setPreview] = useState<ImportPreview>();
   const toast = useToast();
   const load = async (background = false) => {
@@ -83,6 +91,38 @@ export default function ClassDetailPage({
     enabled: !saving,
     intervalMs: 60_000,
   });
+  useEffect(() => {
+    if (!accountStudent) return;
+    let current = true;
+    const timer = window.setTimeout(async () => {
+      setAccountLoading(true);
+      try {
+        const candidates = await studentsApi.accountCandidates(accountSearch);
+        if (current) {
+          setAccountCandidates(candidates);
+          setAccountCandidateId((selected) =>
+            candidates.some((candidate) => candidate.id === selected)
+              ? selected
+              : "",
+          );
+        }
+      } catch (error) {
+        if (current) {
+          setAccountCandidates([]);
+          toast(
+            error instanceof ApiError ? error.body.message : "学生账号加载失败",
+            "error",
+          );
+        }
+      } finally {
+        if (current) setAccountLoading(false);
+      }
+    }, 200);
+    return () => {
+      current = false;
+      window.clearTimeout(timer);
+    };
+  }, [accountSearch, accountStudent?.id]);
   const addStudent = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setSaving(true);
@@ -162,6 +202,27 @@ export default function ClassDetailPage({
       setSaving(false);
     }
   };
+  const setResourcePublication = async (resource: ClassResource) => {
+    setSaving(true);
+    try {
+      await classesApi.setResourcePublication(
+        classId,
+        resource.id,
+        !resource.student_visible,
+      );
+      await load(true);
+      toast(
+        resource.student_visible ? "已停止向学生发布" : "资料已向本班学生发布",
+      );
+    } catch (error) {
+      toast(
+        error instanceof ApiError ? error.message : "资料发布状态更新失败",
+        "error",
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
   const confirm = async () => {
     if (!preview) return;
     setSaving(true);
@@ -201,12 +262,20 @@ export default function ClassDetailPage({
       setSaving(false);
     }
   };
-  const linkAccount = async (student: Student) => {
+  const openAccountLink = (student: Student) => {
+    setAccountStudent(student);
+    setAccountSearch("");
+    setAccountCandidates([]);
+    setAccountCandidateId("");
+  };
+  const linkAccount = async () => {
+    if (!accountStudent || !accountCandidateId) return;
     setSaving(true);
     try {
-      await studentsApi.linkAccount(student.id);
+      await studentsApi.linkAccount(accountStudent.id, accountCandidateId);
       toast("学生登录账号已关联");
       await load();
+      setAccountStudent(undefined);
     } catch (e) {
       toast(e instanceof ApiError ? e.body.message : "账号关联失败", "error");
     } finally {
@@ -255,7 +324,12 @@ export default function ClassDetailPage({
                   description="按字符串保存，保留前导零"
                   required
                 />
-                <Input name="email" type="email" label="邮箱（可选）" />
+                <Input
+                  name="email"
+                  type="email"
+                  label="联系邮箱（可选）"
+                  description="仅作为联系信息，不用于关联登录账号"
+                />
                 <Button loading={saving}>确认添加</Button>
               </form>
             </Dialog>
@@ -396,6 +470,80 @@ export default function ClassDetailPage({
           </>
         }
       />
+      <Dialog
+        title="关联学生登录账号"
+        description={
+          accountStudent
+            ? `为 ${accountStudent.name}（学号 ${accountStudent.student_number}）选择登录账号。邮箱不参与关联。`
+            : undefined
+        }
+        open={!!accountStudent}
+        onOpenChange={(open) => {
+          if (!open) setAccountStudent(undefined);
+        }}
+        trigger={<span className="hidden" />}
+      >
+        <div className="grid gap-4">
+          <Input
+            label="搜索学生账号"
+            placeholder="输入用户名或账号姓名"
+            value={accountSearch}
+            onChange={(event) => setAccountSearch(event.target.value)}
+          />
+          <div
+            className="max-h-64 space-y-2 overflow-y-auto"
+            aria-label="可关联的学生账号"
+          >
+            {accountLoading ? (
+              <p className="text-sm text-[var(--text-secondary)]">
+                正在加载账号…
+              </p>
+            ) : accountCandidates.length ? (
+              accountCandidates.map((candidate) => (
+                <label
+                  className="flex cursor-pointer items-center gap-3 rounded-lg border p-3 hover:bg-slate-50"
+                  key={candidate.id}
+                >
+                  <input
+                    type="radio"
+                    name="student_account"
+                    value={candidate.id}
+                    checked={accountCandidateId === candidate.id}
+                    onChange={() => setAccountCandidateId(candidate.id)}
+                  />
+                  <span className="grid text-sm">
+                    <span className="font-semibold">
+                      {candidate.display_name}
+                    </span>
+                    <span className="text-[var(--text-secondary)]">
+                      用户名：{candidate.username}
+                    </span>
+                  </span>
+                </label>
+              ))
+            ) : (
+              <p className="rounded-lg bg-slate-50 p-3 text-sm text-[var(--text-secondary)]">
+                没有可关联的启用学生账号。请先让管理员创建学生账号，或调整搜索词。
+              </p>
+            )}
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setAccountStudent(undefined)}
+            >
+              取消
+            </Button>
+            <Button
+              disabled={!accountCandidateId}
+              loading={saving}
+              onClick={() => void linkAccount()}
+            >
+              确认关联
+            </Button>
+          </div>
+        </div>
+      </Dialog>
       {klass.status === "archived" && (
         <Card className="border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
           该班级已归档，不能用于创建新作业；学生与历史关系均保留。
@@ -464,7 +612,7 @@ export default function ClassDetailPage({
                     {resource.file_name} · {resource.page_count} 页
                   </span>
                 </span>
-                <span className="text-sm text-slate-500">
+                <span className="flex items-center gap-2 text-sm text-slate-500">
                   {
                     {
                       exercise: "习题",
@@ -473,6 +621,13 @@ export default function ClassDetailPage({
                       other: "其他",
                     }[resource.resource_type]
                   }
+                  <Button
+                    variant="outline"
+                    disabled={saving}
+                    onClick={() => void setResourcePublication(resource)}
+                  >
+                    {resource.student_visible ? "停止发布" : "发布给学生"}
+                  </Button>
                 </span>
               </li>
             ))}
@@ -546,15 +701,21 @@ export default function ClassDetailPage({
                   </td>
                   <td>
                     {student.account_linked ? (
-                      <span className="text-sm text-emerald-700">已关联</span>
+                      <span className="grid text-sm text-emerald-700">
+                        <span>已关联</span>
+                        {student.linked_account?.username && (
+                          <span className="text-xs text-[var(--text-secondary)]">
+                            {student.linked_account.username}
+                          </span>
+                        )}
+                      </span>
                     ) : (
                       <Button
                         variant="ghost"
-                        disabled={saving || !student.email}
-                        title={student.email ? undefined : "请先填写学生邮箱"}
-                        onClick={() => void linkAccount(student)}
+                        disabled={saving}
+                        onClick={() => openAccountLink(student)}
                       >
-                        {student.email ? "关联账号" : "未填邮箱"}
+                        关联账号
                       </Button>
                     )}
                   </td>

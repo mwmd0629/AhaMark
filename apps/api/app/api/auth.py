@@ -181,6 +181,7 @@ def user_view(user: User, csrf_token: str | None = None) -> dict[str, Any]:
         "email": user.email,
         "display_name": user.display_name,
         "roles": sorted(role.name for role in user.roles),
+        "must_change_password": user.must_change_password,
         "csrf_token": csrf_token,
     }
 
@@ -252,6 +253,46 @@ def me(request: Request, db: Db) -> dict[str, Any]:
     if not authenticated:
         raise HTTPException(401, "请先登录")
     return user_view(authenticated[1])
+
+
+class ChangePasswordInput(BaseModel):
+    current_password: str = Field(min_length=8, max_length=256)
+    new_password: str = Field(min_length=12, max_length=256)
+
+
+@router.post("/change-password")
+def change_password(payload: ChangePasswordInput, request: Request, db: Db) -> dict[str, Any]:
+    authenticated = authenticated_session(request, db)
+    if not authenticated:
+        raise HTTPException(401, "请先登录")
+    current_session, user = authenticated
+    if not verify_password(payload.current_password, user.password_hash):
+        raise ApiProblem(401, "CURRENT_PASSWORD_INVALID", "当前密码错误")
+    if hmac.compare_digest(payload.current_password, payload.new_password):
+        raise ApiProblem(422, "PASSWORD_UNCHANGED", "新密码不能与当前密码相同")
+    user.password_hash = hash_password(payload.new_password)
+    user.must_change_password = False
+    now = now_utc()
+    sessions = db.scalars(
+        select(UserSession).where(
+            UserSession.user_id == user.id,
+            UserSession.id != current_session.id,
+            UserSession.revoked_at.is_(None),
+        )
+    ).all()
+    for session in sessions:
+        session.revoked_at = now
+    db.add(
+        AuditLog(
+            actor_id=user.id,
+            action="account.password_change",
+            resource_type="user_account",
+            resource_id=str(user.id),
+            metadata_={"revoked_session_count": len(sessions)},
+        )
+    )
+    db.commit()
+    return user_view(user)
 
 
 PREFERENCE_ACTION = "user_preferences.update"
