@@ -322,11 +322,7 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                 "files": [str(x.id) for x in files],
             }
         )
-        if (
-            provider.name in {"openai_compatible", "local_openai_compatible"}
-            and provider.available
-            and assignment is not None
-        ):
+        if provider.name == "openai_compatible" and provider.available and assignment is not None:
             dispatched = dispatch_stage(
                 get_settings(),
                 job.provider_mode,
@@ -376,7 +372,7 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                     "draft_only": True,
                 }
         elif (
-            provider.name in {"fake", "codex_local"}
+            provider.name in {"fake", "codex_local", "local_openai_compatible"}
             and provider.available
             and assignment is not None
         ):
@@ -452,10 +448,7 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
     elif stage == "processing_pages":
         pages = list(pages_for_job(db, job))
         provider = select_provider(get_settings(), job.provider_mode)
-        if provider.available and provider.name in {
-            "openai_compatible",
-            "local_openai_compatible",
-        }:
+        if provider.available and provider.name == "openai_compatible":
             file_ids = {page.stored_file_id for page in pages}
             files = list(db.scalars(select(StoredFile).where(StoredFile.id.in_(file_ids))).all())
             dispatched = dispatch_stage(
@@ -515,6 +508,30 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
         ):
             if stage == "extracting_questions":
                 pages = list(pages_for_job(db, job))
+                file_ids = {page.stored_file_id for page in pages}
+                question_file_analyses = list(
+                    db.scalars(
+                        select(AssignmentSourceFileAnalysis).where(
+                            AssignmentSourceFileAnalysis.draft_revision_id == revision.id,
+                            AssignmentSourceFileAnalysis.stored_file_id.in_(file_ids),
+                            AssignmentSourceFileAnalysis.analysis_status.in_(
+                                {"suggested", "confirmed"}
+                            ),
+                        )
+                    ).all()
+                )
+                question_file_ids = {
+                    analysis.stored_file_id
+                    for analysis in question_file_analyses
+                    if (
+                        analysis.teacher_confirmed_role or analysis.suggested_role
+                    )
+                    in {"question_paper", "question_and_answer"}
+                }
+                if question_file_ids:
+                    pages = [
+                        page for page in pages if page.stored_file_id in question_file_ids
+                    ]
                 blocks = list(
                     db.scalars(
                         select(RecognitionBlock).where(
@@ -571,7 +588,7 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                         .where(
                             AssignmentQuestionExtractionCandidate.draft_revision_id == revision.id,
                             AssignmentQuestionExtractionCandidate.status.in_(
-                                {"accepted", "modified"}
+                                {"suggested", "accepted", "modified"}
                             ),
                             Question.status == "active",
                         )
@@ -591,14 +608,22 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                             else None,
                         }
                     }
-                    answer_dispatch = dispatch_stage(
-                        get_settings(), job.provider_mode, "answer_generation", payload
-                    )
-                    answer_invocation = _record_invocation(db, job, row, answer_dispatch)
-                    rubric_dispatch = dispatch_stage(
-                        get_settings(), job.provider_mode, "rubric_generation", payload
-                    )
-                    rubric_invocation = _record_invocation(db, job, row, rubric_dispatch)
+                    if provider.name == "local_openai_compatible":
+                        answer_dispatch = rubric_dispatch = dispatch_stage(
+                            get_settings(), job.provider_mode, "rubric_generation", payload
+                        )
+                        answer_invocation = rubric_invocation = _record_invocation(
+                            db, job, row, answer_dispatch
+                        )
+                    else:
+                        answer_dispatch = dispatch_stage(
+                            get_settings(), job.provider_mode, "answer_generation", payload
+                        )
+                        answer_invocation = _record_invocation(db, job, row, answer_dispatch)
+                        rubric_dispatch = dispatch_stage(
+                            get_settings(), job.provider_mode, "rubric_generation", payload
+                        )
+                        rubric_invocation = _record_invocation(db, job, row, rubric_dispatch)
                     if not isinstance(
                         answer_dispatch.response.output, AnswerRubricProviderOutput
                     ) or not isinstance(
@@ -1356,13 +1381,14 @@ def _run(job_id: str, retry_stage: str | None) -> dict[str, Any]:
 def _guarded_run(job_id: str, retry_stage: str | None) -> dict[str, Any]:
     try:
         return _run(job_id, retry_stage)
-    except Exception:
+    except Exception as exc:
         # Persist a stable, redacted failure. Provider/database exceptions must
         # never expose credentials or signed URLs through the user-facing job.
         log.exception(
             "assignment_generation_failed",
             job_id=job_id,
             retry_stage=retry_stage,
+            exception_type=type(exc).__name__,
         )
         parsed = uuid.UUID(job_id)
         with SessionLocal() as db:
@@ -1566,8 +1592,8 @@ def _guarded_regenerate_question(
 @celery_app.task(
     name="ahamark.assignment_generation.regenerate_question",
     bind=True,
-    soft_time_limit=120,
-    time_limit=150,
+    soft_time_limit=1740,
+    time_limit=1800,
 )
 def regenerate_question(
     self: Any,
@@ -1593,8 +1619,8 @@ def regenerate_question(
 @celery_app.task(
     name="ahamark.assignment_generation.run",
     bind=True,
-    soft_time_limit=300,
-    time_limit=330,
+    soft_time_limit=3540,
+    time_limit=3600,
 )
 def run_assignment_generation(
     self: Any, job_id: str, retry_stage: str | None = None

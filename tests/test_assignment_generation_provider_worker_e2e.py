@@ -4,7 +4,6 @@ import uuid
 from decimal import Decimal
 
 import pytest
-from app.assignment_generation.question_extraction import materialize
 from app.assignment_generation.service import transition
 from app.core.config import Settings
 from app.db.session import SessionLocal
@@ -30,6 +29,9 @@ from app.models import (
     PaperPageOrganizationSuggestion,
     PaperVersion,
     Question,
+    RecognitionBlock,
+    RecognitionJob,
+    RecognitionStatus,
     ReferenceAnswerVersion,
     StoredFile,
     StructuredRubricVersion,
@@ -80,7 +82,7 @@ def fake_configured() -> Settings:
     )
 
 
-def source_assignment() -> tuple[Assignment, StoredFile, PaperPage]:
+def source_assignment() -> tuple[Assignment, StoredFile, PaperPage, RecognitionBlock]:
     TestClient(app).get("/api/classes")
     with SessionLocal() as db:
         actor = db.scalar(select(User).where(User.email == "demo-teacher@ahamark.local"))
@@ -116,11 +118,39 @@ def source_assignment() -> tuple[Assignment, StoredFile, PaperPage]:
             status="ready",
         )
         db.add(page)
+        recognition = RecognitionJob(
+            owner_id=actor.id,
+            paper_version_id=paper.id,
+            assignment_id=assignment.id,
+            status=RecognitionStatus.completed,
+            stage="completed",
+            progress=100,
+            provider="synthetic",
+            provider_version="worker-e2e",
+            config_version="worker-e2e",
+            idempotency_key=f"provider-worker-e2e-{uuid.uuid4()}",
+        )
+        db.add(recognition)
+        db.flush()
+        block = RecognitionBlock(
+            recognition_job_id=recognition.id,
+            paper_page_id=page.id,
+            block_type="question_number",
+            display_order=0,
+            text="1 计算 1+1。 5",
+            confidence=0.99,
+            x=0.1,
+            y=0.1,
+            width=0.8,
+            height=0.2,
+            source="synthetic",
+        )
+        db.add(block)
         db.commit()
-        for item in (assignment, stored, page):
+        for item in (assignment, stored, page, block):
             db.refresh(item)
             db.expunge(item)
-        return assignment, stored, page
+        return assignment, stored, page, block
 
 
 def answer_rubric_output(question_id: str) -> dict[str, object]:
@@ -170,7 +200,7 @@ def answer_rubric_output(question_id: str) -> dict[str, object]:
 def test_mocked_http_provider_worker_materializes_only_versioned_drafts(
     monkeypatch, provider_mode: str
 ) -> None:
-    assignment, stored, page = source_assignment()
+    assignment, stored, page, _block = source_assignment()
     settings = configured(provider_mode)
     monkeypatch.setattr("app.api.assignment_generation.dispatch_job", lambda *_args: None)
     monkeypatch.setattr("app.assignment_generation.service.get_settings", lambda: settings)
@@ -179,8 +209,12 @@ def test_mocked_http_provider_worker_materializes_only_versioned_drafts(
     def urlopen(request, **_kwargs):
         body = json.loads(request.data)
         if provider_mode == "local_openai_compatible":
-            name = body["response_format"]["json_schema"]["name"]
             payload = json.loads(body["messages"][1]["content"].split("\n", 1)[1])
+            name = (
+                "assignment_question_extraction"
+                if "blocks" in payload
+                else "assignment_rubric_generation"
+            )
         else:
             name = body["text"]["format"]["name"]
             payload = json.loads(body["input"][0]["content"][0]["text"].split("\n", 1)[1])
@@ -239,9 +273,22 @@ def test_mocked_http_provider_worker_materializes_only_versioned_drafts(
                 "prompt_injection_evidence": [],
             }
         elif name.endswith("question_extraction"):
-            output = {
-                "candidates": [
-                    {
+            if provider_mode == "local_openai_compatible":
+                output = {
+                    "questions": [
+                        {
+                            "block_ids": ["hallucinated-block-id"],
+                            "question_number": "1",
+                            "question_type": "计算题",
+                            "max_score": "5 分",
+                            "unexpected": "ignored",
+                        }
+                    ]
+                }
+            else:
+                output = {
+                    "candidates": [
+                        {
                         "ref": "q1",
                         "parent_ref": None,
                         "source_candidate_id": None,
@@ -285,15 +332,34 @@ def test_mocked_http_provider_worker_materializes_only_versioned_drafts(
                                 "cross_page_group": None,
                             }
                         ],
-                    }
-                ]
-            }
+                        }
+                    ]
+                }
         else:
-            output = answer_rubric_output(payload["question"]["id"])
+            output = (
+                {
+                    "answer": "2",
+                    "criteria": [
+                        {
+                            "title": "结果正确",
+                            "description": "答案为 2",
+                            "points": "2 分",
+                            "criterion_type": "result",
+                        }
+                    ],
+                }
+                if provider_mode == "local_openai_compatible"
+                else answer_rubric_output(payload["question"]["id"])
+            )
         if provider_mode == "local_openai_compatible":
+            content = (
+                '```json\n{"answer":"2"\n```'
+                if "question" in payload
+                else json.dumps(output)
+            )
             envelope = {
                 "id": "worker-e2e-response",
-                "choices": [{"message": {"content": json.dumps(output)}}],
+                "choices": [{"message": {"content": content}}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 10},
             }
         else:
@@ -360,9 +426,11 @@ def test_mocked_http_provider_worker_materializes_only_versioned_drafts(
                 )
             )
         )
-        candidate.status = "accepted"
-        question = materialize(db, candidate, regions)
-        db.commit()
+        assert regions
+        assert candidate.status == "suggested"
+        assert candidate.materialized_question_id is not None
+        question = db.get(Question, candidate.materialized_question_id)
+        assert question is not None
         assert _execute_stage(db, job_id, "generating_rubrics") == "completed"
         assert _execute_stage(db, job_id, "validating") == "completed"
         job = db.get(AssignmentGenerationJob, job_id)
@@ -370,20 +438,37 @@ def test_mocked_http_provider_worker_materializes_only_versioned_drafts(
         transition(job, "review_required")
         db.commit()
 
-        assert db.scalar(select(func.count()).select_from(AssignmentFieldSuggestion)) == 1
+        expected_field_suggestions = 6 if provider_mode == "local_openai_compatible" else 1
+        assert (
+            db.scalar(select(func.count()).select_from(AssignmentFieldSuggestion))
+            == expected_field_suggestions
+        )
         assert db.scalar(select(func.count()).select_from(AssignmentSourceFileAnalysis)) == 1
         assert db.scalar(select(func.count()).select_from(AssignmentPageAnalysis)) == 1
-        assert db.scalar(select(func.count()).select_from(PaperPageOrganizationSuggestion)) >= 1
+        page_suggestion_count = db.scalar(
+            select(func.count()).select_from(PaperPageOrganizationSuggestion)
+        )
+        if provider_mode == "openai_compatible":
+            assert page_suggestion_count >= 1
         assert db.scalar(select(func.count()).select_from(AssignmentAnswerDraftCandidate)) == 1
         assert db.scalar(select(func.count()).select_from(AssignmentRubricDraftCandidate)) == 1
         assert db.scalar(select(func.count()).select_from(AssignmentRubricCriterionDraft)) == 1
+        criterion = db.scalar(select(AssignmentRubricCriterionDraft))
+        assert criterion is not None and criterion.points == Decimal("5")
         assert db.scalar(select(func.count()).select_from(AssignmentRubricValidationResult)) == 1
+        expected_provider_invocations = 3 if provider_mode == "local_openai_compatible" else 5
         assert (
-            db.scalar(select(func.count()).select_from(AssignmentGenerationProviderInvocation)) == 5
+            db.scalar(select(func.count()).select_from(AssignmentGenerationProviderInvocation))
+            == expected_provider_invocations
         )
         invocations = list(db.scalars(select(AssignmentGenerationProviderInvocation)))
-        assert all(item.model == "worker-e2e-model" for item in invocations)
-        assert all(item.model_snapshot == "worker-e2e-model-2026-07-26" for item in invocations)
+        model_invocations = [item for item in invocations if item.model is not None]
+        assert len(model_invocations) == (2 if provider_mode == "local_openai_compatible" else 5)
+        assert all(item.model == "worker-e2e-model" for item in model_invocations)
+        assert all(
+            item.model_snapshot == "worker-e2e-model-2026-07-26"
+            for item in model_invocations
+        )
         assert all(item.provider_config_version for item in invocations)
         assert all(item.stage_generation == 1 for item in invocations)
         assert all(item.retry_count == 0 for item in invocations)
@@ -391,6 +476,8 @@ def test_mocked_http_provider_worker_materializes_only_versioned_drafts(
         answer = db.scalar(select(AssignmentAnswerDraftCandidate))
         assert answer is not None and answer.source_type == "ai_generated"
         assert answer.provenance["model_snapshot"] == "worker-e2e-model-2026-07-26"
+        if provider_mode == "local_openai_compatible":
+            assert answer.manual_required is True
         persisted_assignment = db.get(Assignment, assignment.id)
         assert persisted_assignment is not None and persisted_assignment.status.value == "draft"
         assert db.get(PaperPage, page.id).status == "ready"
@@ -410,7 +497,7 @@ def test_mocked_http_provider_worker_materializes_only_versioned_drafts(
 def test_fake_worker_uses_provider_dispatch_audit_and_never_legacy_candidates(
     monkeypatch,
 ) -> None:
-    assignment, _stored, _page = source_assignment()
+    assignment, _stored, _page, _block = source_assignment()
     settings = fake_configured()
     monkeypatch.setattr("app.api.assignment_generation.dispatch_job", lambda *_args: None)
     monkeypatch.setattr("app.assignment_generation.service.get_settings", lambda: settings)

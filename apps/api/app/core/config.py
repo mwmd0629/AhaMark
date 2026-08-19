@@ -128,6 +128,7 @@ class Settings(BaseSettings):
     assignment_generation_model: str | None = None
     assignment_generation_model_snapshot: str | None = None
     assignment_generation_timeout_seconds: float = 45.0
+    assignment_generation_local_timeout_seconds: float = 900.0
     assignment_generation_max_retries: int = 2
     assignment_generation_max_input_tokens: int = 16000
     assignment_generation_max_output_tokens: int = 4000

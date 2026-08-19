@@ -1830,8 +1830,12 @@ def test_guarded_worker_failure_is_logged_without_exposing_it_to_the_result(monk
     assert _guarded_run(job_id, None) == {"status": "failed"}
     assert logged == [
         (
-            "assignment_generation_failed",
-            {"job_id": job_id, "retry_stage": None},
+                "assignment_generation_failed",
+                {
+                    "job_id": job_id,
+                    "retry_stage": None,
+                    "exception_type": "RuntimeError",
+                },
         )
     ]
 

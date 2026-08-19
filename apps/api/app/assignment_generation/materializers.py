@@ -612,7 +612,7 @@ def materialize_rubric(
         )
     )
     for old in old_rows:
-        if old.status == "suggested":
+        if old.status in {"suggested", "manual_required"}:
             old.status = "superseded"
     version = max((old.candidate_version for old in old_rows), default=0) + 1
     rubric = AssignmentRubricDraftCandidate(

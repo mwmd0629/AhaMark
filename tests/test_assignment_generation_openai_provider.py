@@ -53,6 +53,18 @@ def envelope(raw: object) -> bytes:
     ).encode()
 
 
+def chat_envelope(raw: object) -> bytes:
+    return json.dumps(
+        {
+            "id": "chat_synthetic",
+            "choices": [
+                {"message": {"content": f"```json\n{json.dumps(raw)}\n```"}}
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+    ).encode()
+
+
 def test_success_uses_fixed_responses_endpoint_strict_schema_and_no_tools(monkeypatch) -> None:
     captured = {}
 
@@ -75,6 +87,35 @@ def test_success_uses_fixed_responses_endpoint_strict_schema_and_no_tools(monkey
     assert captured["body"]["text"]["format"]["type"] == "json_schema"
     assert "<script>" not in captured["body"]["input"][0]["content"][0]["text"]
     assert "publish" in captured["body"]["input"][0]["content"][0]["text"]
+
+
+def test_local_provider_uses_compact_json_mode_and_longer_timeout(monkeypatch) -> None:
+    captured = {}
+
+    def urlopen(request, **kwargs):
+        captured["url"] = request.full_url
+        captured["body"] = json.loads(request.data)
+        captured["timeout"] = kwargs["timeout"]
+        return Response(chat_envelope({"candidates": []}))
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    settings = configured(
+        assignment_generation_provider="local_openai_compatible",
+        assignment_generation_allow_external_provider_requests=False,
+        assignment_generation_allow_local_provider_requests=True,
+        assignment_generation_allowed_local_hosts=["local-llm"],
+        assignment_generation_base_url="http://local-llm:8080/v1",
+    )
+
+    result = OpenAICompatibleAssignmentGenerationProvider(settings).generate(
+        "question_extraction", {}
+    )
+
+    assert result.output is not None
+    assert captured["url"] == "http://local-llm:8080/v1/chat/completions"
+    assert captured["timeout"] == 900.0
+    assert captured["body"]["response_format"] == {"type": "json_object"}
+    assert "JSON CONTRACT" in captured["body"]["messages"][0]["content"]
 
 
 @pytest.mark.parametrize(

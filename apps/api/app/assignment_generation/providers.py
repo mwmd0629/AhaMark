@@ -3,13 +3,16 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Literal, Protocol, TypeVar
 
-from pydantic import BaseModel, ValidationError
+import structlog
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.ai_grading.providers import canonical_hash, sanitize_text
 from app.assignment_generation.answer_rubric import (
@@ -21,6 +24,8 @@ from app.assignment_generation.schemas import FileAnalysisOutput, MetadataProvid
 from app.core.config import Settings
 from app.core.provider_endpoints import ProviderEndpointError, safe_provider_base_url
 from app.recognition.text_integrity import CHARACTER_ENCODING_CORRUPTION_DETECTED
+
+log = structlog.get_logger()
 
 StageName = Literal[
     "metadata_analysis",
@@ -48,6 +53,325 @@ STAGE_MODELS: dict[StageName, type[BaseModel]] = {
     "answer_generation": AnswerRubricProviderOutput,
     "rubric_generation": AnswerRubricProviderOutput,
 }
+
+
+class LocalQuestionCandidate(BaseModel):
+    """Compact local-model output; deterministic fields are expanded server-side."""
+
+    model_config = ConfigDict(extra="ignore")
+    ref: str | None = Field(None, max_length=80)
+    block_ids: list[str] = Field(default_factory=list, max_length=100)
+    question_number: str | int | None = None
+    question_type: str = "other"
+    max_score: str | int | float | Decimal | None = None
+
+
+class LocalExtractionOutput(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    candidates: list[dict[str, Any]] = Field(max_length=500)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_question_alias(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "candidates" not in value and "questions" in value:
+            return {**value, "candidates": value["questions"]}
+        return value
+
+
+class LocalRubricCriterion(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    title: str = Field(min_length=1, max_length=160)
+    description: str = Field(min_length=1, max_length=2000)
+    points: str | int | float | Decimal | None = None
+    criterion_type: str = "other"
+
+
+class LocalAnswerRubricOutput(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    answer: str = Field(min_length=1, max_length=12000)
+    criteria: list[dict[str, Any]] = Field(min_length=1, max_length=20)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_answer_aliases(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        if not value.get("answer"):
+            for key in ("reference_answer", "raw_content", "normalized_content"):
+                if value.get(key):
+                    return {**value, "answer": value[key]}
+        return value
+
+
+_EXTRACTION_CONFIDENCE_FIELDS = {
+    "question_number",
+    "parent_relation",
+    "question_type",
+    "content_text",
+    "content_latex",
+    "max_score",
+    "difficulty",
+    "knowledge_points",
+    "regions",
+}
+
+
+def _expand_local_extraction(
+    compact: LocalExtractionOutput, payload: dict[str, Any]
+) -> ExtractionOutput:
+    blocks = {
+        str(item.get("id")): item
+        for item in payload.get("blocks", [])
+        if isinstance(item, dict) and item.get("id")
+    }
+    scored_question_blocks = [
+        (block_id, block)
+        for block_id, block in blocks.items()
+        if str(block.get("type") or "") == "question_number"
+        and re.search(r"\s\d+(?:\.\d+)?\s*(?:分)?$", str(block.get("text") or ""))
+    ]
+    raw_candidates = list(compact.candidates)
+    if scored_question_blocks:
+        raw_candidates = raw_candidates[: len(scored_question_blocks)]
+    if len(raw_candidates) < len(scored_question_blocks):
+        raw_candidates.extend({} for _ in range(len(scored_question_blocks) - len(raw_candidates)))
+    candidates: list[dict[str, Any]] = []
+    used_block_ids: set[str] = set()
+    for candidate_index, raw_item in enumerate(raw_candidates, start=1):
+        try:
+            item = LocalQuestionCandidate.model_validate(raw_item)
+        except ValidationError:
+            item = LocalQuestionCandidate(
+                ref=str(raw_item.get("ref") or "") or None,
+                block_ids=[
+                    str(value)
+                    for value in raw_item.get("block_ids", [])
+                    if isinstance(value, (str, int))
+                ],
+                question_number=(
+                    str(raw_item["question_number"])
+                    if raw_item.get("question_number") is not None
+                    else None
+                ),
+                question_type=str(raw_item.get("question_type") or "other"),
+                max_score=(
+                    str(raw_item["max_score"])
+                    if raw_item.get("max_score") is not None
+                    else None
+                ),
+            )
+        question_number = (
+            str(item.question_number).strip() if item.question_number is not None else None
+        )
+        if question_number:
+            number_match = re.search(r"\d+(?:[（(]\d+[)）])?", question_number)
+            question_number = number_match.group() if number_match else question_number
+        selected_ids = [block_id for block_id in item.block_ids if block_id in blocks]
+        if not selected_ids and question_number:
+            selected_ids = [
+                block_id
+                for block_id, block in blocks.items()
+                if block_id not in used_block_ids
+                and str(block.get("type") or "") == "question_number"
+                and re.match(
+                    rf"^\s*(?:第\s*)?{re.escape(question_number)}(?:\s*题|[.、）):：\s])",
+                    str(block.get("text") or ""),
+                )
+            ][:1]
+        if not selected_ids and candidate_index <= len(scored_question_blocks):
+            fallback_id, _fallback_block = scored_question_blocks[candidate_index - 1]
+            if fallback_id not in used_block_ids:
+                selected_ids = [fallback_id]
+        selected = []
+        for block_id in selected_ids:
+            block = blocks[block_id]
+            selected.append(block)
+            used_block_ids.add(block_id)
+        text = "\n".join(
+            str(block.get("text") or "").strip() for block in selected
+        ).strip()
+        if not text:
+            continue
+        if not question_number:
+            text_number = re.match(r"^\s*(?:第\s*)?(\d+(?:[（(]\d+[)）])?)", text)
+            question_number = text_number.group(1) if text_number else None
+        normalized_type = item.question_type.strip().lower()
+        if normalized_type not in {
+            "single_choice",
+            "multiple_choice",
+            "true_false",
+            "fill_blank",
+            "calculation",
+            "short_answer",
+            "proof",
+            "other",
+        }:
+            normalized_type = (
+                "proof"
+                if re.search(r"证明|proof", text, re.I)
+                else "calculation"
+                if re.search(r"计算|求|解", text)
+                else "short_answer"
+            )
+        score_match = re.search(r"\d+(?:\.\d+)?", str(item.max_score or ""))
+        if score_match is None:
+            score_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:分)?$", text)
+        max_score = Decimal(score_match.group()) if score_match else None
+        regions = []
+        for order, block in enumerate(selected):
+            bounds = block.get("bounds")
+            if not isinstance(bounds, list) or len(bounds) != 4:
+                raise ValueError("local extraction block bounds are invalid")
+            block_type = str(block.get("type") or "other")
+            region_type = block_type if block_type in {
+                "question_number",
+                "stem",
+                "subquestion",
+                "score",
+                "formula",
+                "figure",
+                "table",
+                "instructions",
+            } else "stem"
+            regions.append(
+                {
+                    "page_id": block.get("page_id"),
+                    "display_order": order,
+                    "region_type": region_type,
+                    "x": bounds[0],
+                    "y": bounds[1],
+                    "width": bounds[2],
+                    "height": bounds[3],
+                    "confidence": "0.80",
+                    "block_ids": [block.get("id")],
+                    "evidence": {"source": "local_compact_extraction"},
+                    "cross_page_group": None,
+                }
+            )
+        candidates.append(
+            {
+                "ref": f"q{candidate_index}",
+                "parent_ref": None,
+                "source_candidate_id": None,
+                "question_number": question_number,
+                "question_type": normalized_type,
+                "content_text": text,
+                "content_latex": None,
+                "max_score": max_score,
+                "difficulty": None,
+                "knowledge_points": [],
+                "field_confidences": {
+                    key: Decimal("0.80") for key in _EXTRACTION_CONFIDENCE_FIELDS
+                },
+                "overall_confidence": Decimal("0.80"),
+                "evidence": {
+                    "source": "local_compact_extraction",
+                    "block_ids": selected_ids,
+                },
+                "warning_codes": [],
+                "manual_required": normalized_type == "proof",
+                "regions": regions,
+            }
+        )
+    return ExtractionOutput.model_validate({"candidates": candidates})
+
+
+def _expand_local_answer_rubric(
+    compact: LocalAnswerRubricOutput, payload: dict[str, Any]
+) -> AnswerRubricProviderOutput:
+    question = payload.get("question")
+    if not isinstance(question, dict) or not question.get("id"):
+        raise ValueError("local answer rubric requires a question")
+    question_id = str(question["id"])
+    evidence = [
+        {
+            "kind": "question",
+            "reference_id": question_id,
+            "summary": "基于当前 AI 草稿题目生成，必须由教师确认",
+        }
+    ]
+    degradation_reason = "本地 AI 生成的答案与评分标准草稿需要教师确认"
+    criteria: list[dict[str, Any]] = []
+    allowed_types = {
+        "result",
+        "method",
+        "step",
+        "reasoning",
+        "proof",
+        "format",
+        "unit",
+        "precision",
+        "other",
+    }
+    for index, raw_item in enumerate(compact.criteria, start=1):
+        item = LocalRubricCriterion.model_validate(raw_item)
+        criterion_type = item.criterion_type.strip().lower()
+        if criterion_type not in allowed_types:
+            criterion_type = "other"
+        points_match = re.search(r"\d+(?:\.\d+)?", str(item.points or ""))
+        criteria.append(
+            {
+                "criterion_key": f"criterion_{index}",
+                "title": item.title,
+                "description": item.description,
+                "points": Decimal(points_match.group()) if points_match else None,
+                "criterion_type": criterion_type,
+                "required": True,
+                "dependency_keys": [],
+                "alternative_group": None,
+                "partial_credit_rule": {},
+                "deduction_rule": {},
+                "validation_rule": {"answer_type": "manual_only"},
+                "common_error_codes": [],
+                "feedback_template": "请教师依据该评分点复核后给分",
+                "confidence": 0.75,
+                "evidence": evidence,
+                "degradation_reason": degradation_reason,
+                "manual_required": True,
+            }
+        )
+    total_points = (
+        Decimal(str(question["max_score"]))
+        if question.get("max_score") is not None
+        else None
+    )
+    current_points = sum(
+        (
+            criterion_payload["points"]
+            for criterion_payload in criteria
+            if criterion_payload["points"] is not None
+        ),
+        Decimal("0"),
+    )
+    if total_points is not None and criteria and (
+        current_points != total_points
+        or any(criterion_payload["points"] is None for criterion_payload in criteria)
+    ):
+        equal_points = (total_points / len(criteria)).quantize(Decimal("0.01"))
+        for criterion_payload in criteria[:-1]:
+            criterion_payload["points"] = equal_points
+        criteria[-1]["points"] = total_points - equal_points * (len(criteria) - 1)
+    return AnswerRubricProviderOutput.model_validate(
+        {
+            "raw_content": compact.answer,
+            "normalized_content": compact.answer,
+            "structured_content": {},
+            "alternative_answers": [],
+            "title": "答案与评分标准草稿",
+            "requested_scoring_mode": "manual_only",
+            "total_points": total_points,
+            "allow_partial_credit": True,
+            "domain_requirements": {},
+            "validation_config": {"answer_type": "manual_only"},
+            "common_error_types": [],
+            "feedback_templates": {},
+            "confidence": 0.75,
+            "evidence": evidence,
+            "degradation_reason": degradation_reason,
+            "warning_codes": ["MANUAL_RUBRIC_REQUIRED"],
+            "criteria": criteria,
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -185,6 +509,18 @@ def _chat_output_text(envelope: dict[str, Any]) -> str:
     return content
 
 
+def _json_object(text: str) -> Any:
+    """Accept a JSON object with harmless Markdown/prose wrapping."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        return json.loads(text[start : end + 1])
+
+
 class OpenAICompatibleAssignmentGenerationProvider:
     name, endpoint_mode = "openai_compatible", "responses"
 
@@ -253,6 +589,30 @@ class OpenAICompatibleAssignmentGenerationProvider:
         )
         model_class = STAGE_MODELS[stage]
         local_mode = self.s.assignment_generation_provider == "local_openai_compatible"
+        response_model_class: type[BaseModel] = model_class
+        system_prompt = SYSTEM_PROMPT
+        if local_mode and stage == "question_extraction":
+            response_model_class = LocalExtractionOutput
+            system_prompt += (
+                " For question extraction, return one compact candidate per actual exam "
+                "question. Copy only supplied OCR block IDs; exclude instructions, headers, "
+                "and reference-answer entries. The server will derive text and regions."
+            )
+        elif local_mode and stage in {"answer_generation", "rubric_generation"}:
+            response_model_class = LocalAnswerRubricOutput
+            system_prompt += (
+                " For answer and rubric generation, return a concise answer plus only the "
+                "essential scoring criteria. The server will add audit, safety, and manual-"
+                "review fields. Use keys answer and criteria; each criterion must use title, "
+                "description, points, and criterion_type. Criterion points should sum to the "
+                "supplied maximum score."
+            )
+        if local_mode:
+            system_prompt += "\nJSON CONTRACT\n" + json.dumps(
+                response_model_class.model_json_schema(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         if local_mode and images:
             return self._reject("local_text_model_image_input_unsupported")
         if local_mode:
@@ -261,17 +621,10 @@ class OpenAICompatibleAssignmentGenerationProvider:
                 "temperature": 0,
                 "chat_template_kwargs": {"enable_thinking": False},
                 "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": content[0]["text"]},
                 ],
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": f"assignment_{stage}",
-                        "strict": True,
-                        "schema": model_class.model_json_schema(),
-                    },
-                },
+                "response_format": {"type": "json_object"},
                 "max_tokens": self.s.assignment_generation_max_output_tokens,
             }
             endpoint = base_url + "/chat/completions"
@@ -305,15 +658,47 @@ class OpenAICompatibleAssignmentGenerationProvider:
         max_attempts = max(1, self.s.assignment_generation_max_retries + 1)
         for attempt in range(1, max_attempts + 1):
             try:
-                with urllib.request.urlopen(
-                    request, timeout=self.s.assignment_generation_timeout_seconds
-                ) as response:
+                timeout = (
+                    self.s.assignment_generation_local_timeout_seconds
+                    if local_mode
+                    else self.s.assignment_generation_timeout_seconds
+                )
+                with urllib.request.urlopen(request, timeout=timeout) as response:
                     envelope = json.loads(response.read())
                     request_id = response.headers.get("x-request-id") or envelope.get("id")
-                raw = json.loads(
-                    _chat_output_text(envelope) if local_mode else _output_text(envelope)
-                )
-                output = model_class.model_validate(raw)
+                output_text = _chat_output_text(envelope) if local_mode else _output_text(envelope)
+                try:
+                    raw = _json_object(output_text)
+                except json.JSONDecodeError:
+                    if not local_mode or stage not in {"answer_generation", "rubric_generation"}:
+                        raise
+                    answer_match = re.search(
+                        r'"answer"\s*:\s*"((?:\\.|[^"\\])*)', output_text, re.S
+                    )
+                    answer = (
+                        answer_match.group(1).replace(r'\"', '"').replace(r"\n", "\n")
+                        if answer_match
+                        else output_text.strip()
+                    )
+                    raw = {
+                        "answer": answer[:12000] or "本地模型未返回可解析答案，必须由教师填写",
+                        "criteria": [
+                            {
+                                "title": "教师复核",
+                                "description": "本地模型返回非结构化草稿，必须由教师核对并整理",
+                                "points": (data_payload.get("question") or {}).get("max_score"),
+                                "criterion_type": "other",
+                            }
+                        ],
+                    }
+                parsed_output = response_model_class.model_validate(raw)
+                output: BaseModel
+                if isinstance(parsed_output, LocalExtractionOutput):
+                    output = _expand_local_extraction(parsed_output, data_payload)
+                elif isinstance(parsed_output, LocalAnswerRubricOutput):
+                    output = _expand_local_answer_rubric(parsed_output, data_payload)
+                else:
+                    output = parsed_output
                 usage = envelope.get("usage") or {}
                 input_tokens = usage.get("input_tokens", usage.get("prompt_tokens"))
                 output_tokens = usage.get("output_tokens", usage.get("completion_tokens"))
@@ -392,6 +777,18 @@ class OpenAICompatibleAssignmentGenerationProvider:
                     image_bytes=sum(image_sizes),
                 )
             except (json.JSONDecodeError, ValidationError, KeyError, TypeError, ValueError) as exc:
+                validation_paths = (
+                    ["/".join(str(part) for part in item["loc"]) for item in exc.errors()[:20]]
+                    if isinstance(exc, ValidationError)
+                    else []
+                )
+                log.warning(
+                    "assignment_generation_provider_output_rejected",
+                    stage=stage,
+                    local_mode=local_mode,
+                    exception_type=type(exc).__name__,
+                    validation_paths=validation_paths,
+                )
                 stable_errors = {"provider_refusal", "provider_empty_response"}
                 if CHARACTER_ENCODING_CORRUPTION_DETECTED in str(exc):
                     stable = CHARACTER_ENCODING_CORRUPTION_DETECTED
