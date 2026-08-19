@@ -14,7 +14,11 @@ const mocks = vi.hoisted(() => ({
   update: vi.fn(),
   resetPassword: vi.fn(),
   bulkCreate: vi.fn(),
+  bulkAction: vi.fn(),
   audit: vi.fn(),
+  security: vi.fn(),
+  revokeSession: vi.fn(),
+  exportUrl: vi.fn(),
   toast: vi.fn(),
 }));
 
@@ -35,7 +39,11 @@ vi.mock("@/lib/api", async (load) => {
       update: mocks.update,
       resetPassword: mocks.resetPassword,
       bulkCreate: mocks.bulkCreate,
+      bulkAction: mocks.bulkAction,
       audit: mocks.audit,
+      security: mocks.security,
+      revokeSession: mocks.revokeSession,
+      exportUrl: mocks.exportUrl,
     },
   };
 });
@@ -85,6 +93,51 @@ beforeEach(() => {
     errors: [],
     requested_count: 1,
   });
+  mocks.bulkAction.mockResolvedValue({
+    action: "deactivate",
+    requested_count: 1,
+    processed: [
+      {
+        account_id: "teacher-1",
+        username: "teacher-one",
+        status: "inactive",
+        changed: true,
+        sessions_revoked: 2,
+      },
+    ],
+    errors: [],
+  });
+  mocks.security.mockResolvedValue({
+    failed_logins_24h: 2,
+    active_sessions: 2,
+    accounts_with_multiple_sessions: 1,
+    never_logged_in_accounts: 3,
+    stale_accounts_90d: 1,
+    sessions: [
+      {
+        id: "session-current",
+        user_id: "admin-1",
+        username: "root-admin",
+        created_at: "2026-08-19T08:00:00Z",
+        last_seen_at: "2026-08-19T08:00:00Z",
+        expires_at: "2026-08-19T20:00:00Z",
+        is_current: true,
+      },
+      {
+        id: "session-teacher",
+        user_id: "teacher-1",
+        username: "teacher-one",
+        created_at: "2026-08-19T08:00:00Z",
+        last_seen_at: "2026-08-19T08:00:00Z",
+        expires_at: "2026-08-19T20:00:00Z",
+        is_current: false,
+      },
+    ],
+  });
+  mocks.revokeSession.mockResolvedValue({ ok: true });
+  mocks.exportUrl.mockReturnValue(
+    "http://localhost:8000/admin/accounts/export.csv",
+  );
   mocks.audit.mockResolvedValue({
     items: [
       {
@@ -101,7 +154,10 @@ beforeEach(() => {
     offset: 0,
   });
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 it("shows three account categories and protects the current administrator", async () => {
   render(<AdminAccountsPage />);
@@ -177,4 +233,55 @@ it("previews a CSV without displaying passwords and imports valid rows", async (
       },
     ]),
   );
+});
+
+it("requires confirmation for batch operations and shows partial result totals", async () => {
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<AdminAccountsPage />);
+  await screen.findByText("王老师");
+  fireEvent.click(screen.getByLabelText("选择账号 teacher-one"));
+  fireEvent.click(screen.getByRole("button", { name: "批量停用" }));
+
+  await waitFor(() =>
+    expect(mocks.bulkAction).toHaveBeenCalledWith(["teacher-1"], "deactivate"),
+  );
+  expect(window.confirm).toHaveBeenCalledWith(
+    expect.stringContaining("撤销其全部会话"),
+  );
+  expect(mocks.toast).toHaveBeenCalledWith(
+    "已处理 1 个账号，撤销 2 个会话",
+    "success",
+  );
+});
+
+it("shows security metrics and revokes a non-current session", async () => {
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<AdminAccountsPage />);
+  expect(await screen.findByText("账号安全")).toBeInTheDocument();
+  expect(screen.getByText("24 小时失败登录")).toBeInTheDocument();
+  expect(screen.getByText("多设备账号")).toBeInTheDocument();
+  expect(screen.getByText("当前会话")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "撤销会话" }));
+  await waitFor(() =>
+    expect(mocks.revokeSession).toHaveBeenCalledWith("session-teacher"),
+  );
+  expect(mocks.toast).toHaveBeenCalledWith("会话已撤销，该设备需要重新登录");
+});
+
+it("exports the account list with the current filters", async () => {
+  const click = vi
+    .spyOn(HTMLAnchorElement.prototype, "click")
+    .mockImplementation(() => undefined);
+  render(<AdminAccountsPage />);
+  await screen.findByText("王老师");
+  fireEvent.change(screen.getByLabelText("搜索"), {
+    target: { value: "teacher" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "导出当前清单" }));
+  expect(mocks.exportUrl).toHaveBeenCalledWith({
+    query: "teacher",
+    account_type: "",
+    status: "",
+  });
+  expect(click).toHaveBeenCalledOnce();
 });

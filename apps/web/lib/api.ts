@@ -487,6 +487,36 @@ export type AccountAuditList = {
   limit: number;
   offset: number;
 };
+export type AccountSecuritySession = {
+  id: string;
+  user_id: string;
+  username: string;
+  created_at: string;
+  last_seen_at: string;
+  expires_at: string;
+  is_current: boolean;
+};
+export type AccountSecurityOverview = {
+  failed_logins_24h: number;
+  active_sessions: number;
+  accounts_with_multiple_sessions: number;
+  never_logged_in_accounts: number;
+  stale_accounts_90d: number;
+  sessions: AccountSecuritySession[];
+};
+export type BulkAccountAction = "activate" | "deactivate" | "revoke_sessions";
+export type BulkAccountActionResult = {
+  action: BulkAccountAction;
+  requested_count: number;
+  processed: Array<{
+    account_id: string;
+    username: string;
+    status: "active" | "inactive";
+    changed: boolean;
+    sessions_revoked: number;
+  }>;
+  errors: Array<{ account_id: string; username?: string; message: string }>;
+};
 export const adminAccountsApi = {
   list: (filters?: {
     query?: string;
@@ -543,6 +573,33 @@ export const adminAccountsApi = {
     }),
   audit: (offset = 0) =>
     request<AccountAuditList>(`/admin/accounts/audit?offset=${offset}`),
+  bulkAction: (accountIds: string[], action: BulkAccountAction) =>
+    request<BulkAccountActionResult>("/admin/accounts/bulk-actions", {
+      method: "POST",
+      body: JSON.stringify({
+        account_ids: accountIds,
+        action,
+        confirmed: true,
+      }),
+    }),
+  security: () => request<AccountSecurityOverview>("/admin/accounts/security"),
+  revokeSession: (sessionId: string) =>
+    request<{ ok: boolean; session_id: string; username: string }>(
+      `/admin/accounts/sessions/${sessionId}/revoke`,
+      { method: "POST" },
+    ),
+  exportUrl: (filters?: {
+    query?: string;
+    account_type?: AccountType | "";
+    status?: "active" | "inactive" | "";
+  }) => {
+    const params = new URLSearchParams();
+    if (filters?.query) params.set("query", filters.query);
+    if (filters?.account_type) params.set("account_type", filters.account_type);
+    if (filters?.status) params.set("status", filters.status);
+    const suffix = params.size ? `?${params}` : "";
+    return `${API_URL}/admin/accounts/export.csv${suffix}`;
+  },
 };
 export async function getHealth(signal?: AbortSignal): Promise<Health> {
   return request<Health>("/health", { signal });

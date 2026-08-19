@@ -13,7 +13,7 @@ import structlog
 from app.api.actor import authenticated_session, digest
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.models import Status, User, UserSession, now_utc
+from app.models import AuditLog, Status, User, UserSession, now_utc
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr, Field, TypeAdapter, model_validator
 from sqlalchemy import select
@@ -106,10 +106,8 @@ def check_rate_limit(key: str) -> None:
                 settings.redis_url, socket_connect_timeout=1, socket_timeout=1
             )
             shared_key = rate_limit_key(key)
-            count = int(cast(int, client.incr(shared_key)))
-            if count == 1:
-                client.expire(shared_key, settings.auth_login_window_seconds)
-            if count > settings.auth_login_max_attempts:
+            count = int(cast(int | None, client.get(shared_key)) or 0)
+            if count >= settings.auth_login_max_attempts:
                 log.warning("auth_rate_limit_rejected", service="api")
                 raise HTTPException(429, "登录尝试过多，请稍后再试")
             return
@@ -126,7 +124,44 @@ def check_rate_limit(key: str) -> None:
             attempts.popleft()
         if len(attempts) >= settings.auth_login_max_attempts:
             raise HTTPException(429, "登录尝试过多，请稍后再试")
-        attempts.append(time.monotonic())
+
+
+def record_login_failure(key: str) -> None:
+    settings = get_settings()
+    if settings.app_env.lower() == "production":
+        if redis is None:
+            return
+        try:
+            client = redis.Redis.from_url(
+                settings.redis_url, socket_connect_timeout=1, socket_timeout=1
+            )
+            shared_key = rate_limit_key(key)
+            count = int(cast(int, client.incr(shared_key)))
+            if count == 1:
+                client.expire(shared_key, settings.auth_login_window_seconds)
+            return
+        except Exception:
+            log.error("auth_rate_limit_backend_unavailable", service="api")
+            return
+    with _attempt_lock:
+        _attempts[key].append(time.monotonic())
+
+
+def clear_login_failures(key: str) -> None:
+    settings = get_settings()
+    if settings.app_env.lower() == "production":
+        if redis is None:
+            return
+        try:
+            client = redis.Redis.from_url(
+                settings.redis_url, socket_connect_timeout=1, socket_timeout=1
+            )
+            client.delete(rate_limit_key(key))
+        except Exception:
+            log.warning("auth_rate_limit_clear_failed", service="api")
+        return
+    with _attempt_lock:
+        _attempts.pop(key, None)
 
 
 def user_view(user: User, csrf_token: str | None = None) -> dict[str, Any]:
@@ -143,7 +178,8 @@ def user_view(user: User, csrf_token: str | None = None) -> dict[str, Any]:
 @router.post("/login")
 def login(payload: LoginInput, request: Request, response: Response, db: Db) -> dict[str, Any]:
     identifier = payload.username or payload.email or ""
-    check_rate_limit(f"{request.client.host if request.client else 'unknown'}:{identifier}")
+    attempt_key = f"{request.client.host if request.client else 'unknown'}:{identifier}"
+    check_rate_limit(attempt_key)
     if payload.username is not None:
         user = db.scalar(select(User).where(User.username == payload.username))
     elif get_settings().app_env.lower() != "production" and payload.email is not None:
@@ -155,7 +191,20 @@ def login(payload: LoginInput, request: Request, response: Response, db: Db) -> 
         or user.status != Status.active
         or not verify_password(payload.password, user.password_hash)
     ):
+        record_login_failure(attempt_key)
+        if user is not None:
+            db.add(
+                AuditLog(
+                    actor_id=None,
+                    action="auth.login.failed",
+                    resource_type="user_account",
+                    resource_id=str(user.id),
+                    metadata_={"inactive_account": user.status != Status.active},
+                )
+            )
+            db.commit()
         raise HTTPException(401, "用户名或密码错误")
+    clear_login_failures(attempt_key)
     token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
     settings = get_settings()
     session = UserSession(

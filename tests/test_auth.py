@@ -123,6 +123,42 @@ def test_login_input_normalizes_username() -> None:
     assert payload.username == "teacher-a"
 
 
+def test_successful_login_does_not_consume_failure_rate_limit() -> None:
+    create_teacher("rate-limit@example.com")
+    client = TestClient(app)
+    for _ in range(7):
+        assert (
+            client.post(
+                "/auth/login",
+                json={"username": "rate-limit", "password": "secure-pass-123"},
+            ).status_code
+            == 200
+        )
+    for _ in range(3):
+        assert (
+            client.post(
+                "/auth/login",
+                json={"username": "rate-limit", "password": "wrong-pass-123"},
+            ).status_code
+            == 401
+        )
+    assert (
+        client.post(
+            "/auth/login",
+            json={"username": "rate-limit", "password": "secure-pass-123"},
+        ).status_code
+        == 200
+    )
+    for _ in range(3):
+        assert (
+            client.post(
+                "/auth/login",
+                json={"username": "rate-limit", "password": "wrong-pass-123"},
+            ).status_code
+            == 401
+        )
+
+
 def test_production_rejects_legacy_email_login(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.api import auth
 

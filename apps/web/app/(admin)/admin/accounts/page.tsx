@@ -20,7 +20,9 @@ import {
   ApiError,
   type AccountAuditList,
   type AccountList,
+  type AccountSecurityOverview,
   type AccountType,
+  type BulkAccountAction,
   type ManagedAccount,
 } from "@/lib/api";
 import {
@@ -39,6 +41,11 @@ const actionLabels: Record<string, string> = {
   "admin.account.bulk_create": "批量导入",
   "admin.account.update": "更新账号",
   "admin.account.password_reset": "重置密码",
+  "admin.account.bulk_activate": "批量启用",
+  "admin.account.bulk_deactivate": "批量停用",
+  "admin.account.bulk_revoke_sessions": "批量强制下线",
+  "admin.account.bulk_action": "批量操作汇总",
+  "admin.account.session_revoke": "撤销会话",
 };
 
 function errorMessage(reason: unknown) {
@@ -77,17 +84,26 @@ export default function AdminAccountsPage() {
   const [auditData, setAuditData] = useState<AccountAuditList | null>(null);
   const [auditError, setAuditError] = useState("");
   const [auditOffset, setAuditOffset] = useState(0);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [bulkActionErrors, setBulkActionErrors] = useState<
+    Array<{ account_id: string; username?: string; message: string }>
+  >([]);
+  const [securityData, setSecurityData] =
+    useState<AccountSecurityOverview | null>(null);
+  const [securityError, setSecurityError] = useState("");
 
   const load = useCallback(async () => {
     setError("");
     try {
-      setData(
-        await adminAccountsApi.list({
-          query,
-          account_type: accountType,
-          status,
-          offset,
-        }),
+      const result = await adminAccountsApi.list({
+        query,
+        account_type: accountType,
+        status,
+        offset,
+      });
+      setData(result);
+      setSelectedIds((current) =>
+        current.filter((id) => result.items.some((item) => item.id === id)),
       );
     } catch (reason) {
       setError(errorMessage(reason));
@@ -110,6 +126,19 @@ export default function AdminAccountsPage() {
   useEffect(() => {
     void loadAudit();
   }, [loadAudit]);
+
+  const loadSecurity = useCallback(async () => {
+    setSecurityError("");
+    try {
+      setSecurityData(await adminAccountsApi.security());
+    } catch (reason) {
+      setSecurityError(errorMessage(reason));
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadSecurity();
+  }, [loadSecurity]);
 
   function changeBulkOpen(open: boolean) {
     setBulkOpen(open);
@@ -267,6 +296,74 @@ export default function AdminAccountsPage() {
       setResetTarget(null);
       toast(`密码已重置，${result.sessions_revoked} 个会话已退出`);
       await load();
+    } catch (reason) {
+      toast(errorMessage(reason), "error");
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  function toggleSelected(id: string) {
+    setSelectedIds((current) =>
+      current.includes(id)
+        ? current.filter((candidate) => candidate !== id)
+        : [...current, id],
+    );
+  }
+
+  async function runBulkAction(action: BulkAccountAction) {
+    if (!selectedIds.length) return;
+    const descriptions: Record<BulkAccountAction, string> = {
+      activate: `启用选中的 ${selectedIds.length} 个账号`,
+      deactivate: `停用选中的 ${selectedIds.length} 个账号并撤销其全部会话`,
+      revoke_sessions: `强制选中的 ${selectedIds.length} 个账号退出所有设备`,
+    };
+    if (
+      !window.confirm(`${descriptions[action]}。此操作会写入审计记录，继续吗？`)
+    )
+      return;
+    setBusyId(`bulk-${action}`);
+    setBulkActionErrors([]);
+    try {
+      const result = await adminAccountsApi.bulkAction(selectedIds, action);
+      setBulkActionErrors(result.errors);
+      const sessionsRevoked = result.processed.reduce(
+        (total, item) => total + item.sessions_revoked,
+        0,
+      );
+      toast(
+        result.errors.length
+          ? `已处理 ${result.processed.length} 个账号，${result.errors.length} 个失败`
+          : `已处理 ${result.processed.length} 个账号，撤销 ${sessionsRevoked} 个会话`,
+        result.errors.length ? "error" : "success",
+      );
+      setSelectedIds([]);
+      await Promise.all([load(), loadAudit(), loadSecurity()]);
+    } catch (reason) {
+      toast(errorMessage(reason), "error");
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  function exportAccounts() {
+    const anchor = document.createElement("a");
+    anchor.href = adminAccountsApi.exportUrl({
+      query,
+      account_type: accountType,
+      status,
+    });
+    anchor.download = "ahamark-accounts.csv";
+    anchor.click();
+  }
+
+  async function revokeSession(sessionId: string, username: string) {
+    if (!window.confirm(`撤销 ${username} 的这个登录会话？`)) return;
+    setBusyId(`session-${sessionId}`);
+    try {
+      await adminAccountsApi.revokeSession(sessionId);
+      toast("会话已撤销，该设备需要重新登录");
+      await Promise.all([load(), loadAudit(), loadSecurity()]);
     } catch (reason) {
       toast(errorMessage(reason), "error");
     } finally {
@@ -474,6 +571,88 @@ export default function AdminAccountsPage() {
         ))}
       </section>
 
+      <Card className="p-5">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="font-bold">账号安全</h2>
+            <p className="mt-1 text-sm text-slate-500">
+              统计已识别账号的失败登录、长期未登录账号和当前活动会话。
+            </p>
+          </div>
+          <Button variant="ghost" onClick={() => void loadSecurity()}>
+            刷新
+          </Button>
+        </div>
+        {securityError ? (
+          <div className="mt-4">
+            <ErrorState
+              description={securityError}
+              retry={() => void loadSecurity()}
+            />
+          </div>
+        ) : !securityData ? (
+          <div className="mt-4 grid gap-3 sm:grid-cols-5">
+            {Array.from({ length: 5 }, (_, index) => (
+              <Skeleton key={index} className="h-20" />
+            ))}
+          </div>
+        ) : (
+          <>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+              {[
+                ["24 小时失败登录", securityData.failed_logins_24h],
+                ["活动会话", securityData.active_sessions],
+                ["多设备账号", securityData.accounts_with_multiple_sessions],
+                ["从未登录", securityData.never_logged_in_accounts],
+                ["90 天未活动", securityData.stale_accounts_90d],
+              ].map(([label, value]) => (
+                <div key={label} className="rounded-lg bg-slate-50 p-3">
+                  <p className="text-xs text-slate-500">{label}</p>
+                  <p className="mt-1 text-2xl font-bold">{value}</p>
+                </div>
+              ))}
+            </div>
+            <div className="mt-4 max-h-72 overflow-auto rounded-lg border">
+              {securityData.sessions.length === 0 ? (
+                <p className="p-4 text-sm text-slate-500">当前没有活动会话。</p>
+              ) : (
+                <div className="divide-y">
+                  {securityData.sessions.map((session) => (
+                    <div
+                      key={session.id}
+                      className="flex flex-col justify-between gap-2 p-3 text-sm sm:flex-row sm:items-center"
+                    >
+                      <div>
+                        <p className="font-semibold">{session.username}</p>
+                        <p className="mt-0.5 text-xs text-slate-500">
+                          最近活动 {formatTime(session.last_seen_at)} · 到期{" "}
+                          {formatTime(session.expires_at)}
+                        </p>
+                      </div>
+                      {session.is_current ? (
+                        <span className="text-xs font-semibold text-emerald-700">
+                          当前会话
+                        </span>
+                      ) : (
+                        <Button
+                          variant="outline"
+                          loading={busyId === `session-${session.id}`}
+                          onClick={() =>
+                            void revokeSession(session.id, session.username)
+                          }
+                        >
+                          撤销会话
+                        </Button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </Card>
+
       <Card className="p-4 sm:p-5">
         <form
           className="grid gap-3 sm:grid-cols-[minmax(240px,1fr)_180px_160px_auto]"
@@ -519,6 +698,62 @@ export default function AdminAccountsPage() {
         </form>
       </Card>
 
+      <Card className="grid gap-3 p-4">
+        <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+          <div>
+            <p className="font-semibold">批量运维</p>
+            <p className="mt-1 text-xs text-slate-500">
+              已选择 {selectedIds.length} 个账号；当前管理员不能加入高风险操作。
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="ghost" onClick={exportAccounts}>
+              导出当前清单
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={!selectedIds.length || busyId.startsWith("bulk-")}
+              loading={busyId === "bulk-activate"}
+              onClick={() => void runBulkAction("activate")}
+            >
+              批量启用
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!selectedIds.length || busyId.startsWith("bulk-")}
+              loading={busyId === "bulk-revoke_sessions"}
+              onClick={() => void runBulkAction("revoke_sessions")}
+            >
+              强制下线
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!selectedIds.length || busyId.startsWith("bulk-")}
+              loading={busyId === "bulk-deactivate"}
+              onClick={() => void runBulkAction("deactivate")}
+            >
+              批量停用
+            </Button>
+          </div>
+        </div>
+        {bulkActionErrors.length > 0 && (
+          <div
+            role="alert"
+            className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800"
+          >
+            <p className="font-semibold">以下账号未处理：</p>
+            {bulkActionErrors.map((item) => (
+              <p key={item.account_id} className="mt-1">
+                {item.username ?? item.account_id}：{item.message}
+              </p>
+            ))}
+          </div>
+        )}
+      </Card>
+
       {error ? (
         <ErrorState description={error} retry={() => void load()} />
       ) : !data ? (
@@ -538,6 +773,27 @@ export default function AdminAccountsPage() {
           <Table>
             <thead className="border-b bg-slate-50 text-xs text-slate-500">
               <tr>
+                <th className="w-12 px-5 py-3 font-semibold">
+                  <input
+                    type="checkbox"
+                    aria-label="选择本页账号"
+                    checked={
+                      data.items.some((item) => item.id !== currentUser?.id) &&
+                      data.items
+                        .filter((item) => item.id !== currentUser?.id)
+                        .every((item) => selectedIds.includes(item.id))
+                    }
+                    onChange={(event) =>
+                      setSelectedIds(
+                        event.target.checked
+                          ? data.items
+                              .filter((item) => item.id !== currentUser?.id)
+                              .map((item) => item.id)
+                          : [],
+                      )
+                    }
+                  />
+                </th>
                 <th className="px-5 py-3 font-semibold">账号</th>
                 <th className="px-5 py-3 font-semibold">类型</th>
                 <th className="px-5 py-3 font-semibold">状态</th>
@@ -550,6 +806,15 @@ export default function AdminAccountsPage() {
                 const isSelf = account.id === currentUser?.id;
                 return (
                   <tr key={account.id} className="hover:bg-slate-50/70">
+                    <td className="px-5 py-4">
+                      <input
+                        type="checkbox"
+                        aria-label={`选择账号 ${account.username}`}
+                        disabled={isSelf}
+                        checked={selectedIds.includes(account.id)}
+                        onChange={() => toggleSelected(account.id)}
+                      />
+                    </td>
                     <td className="px-5 py-4">
                       <p className="font-semibold">{account.display_name}</p>
                       <p className="mt-0.5 text-xs text-slate-500">

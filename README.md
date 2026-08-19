@@ -27,11 +27,11 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 | 项目           | 当前事实（2026-08-19）                                                                                       |
 | -------------- | ------------------------------------------------------------------------------------------------------------ |
 | 正确工作区     | `D:\OpenAIData\Workspaces\AhaMark`                                                                           |
-| 工作分支       | `codex/grading-confirm-results`；仓库整理提交为 `855d9fb`                                                       |
-| 应用基线       | 本地产品实现 `4e0dd57`；node2 镜像仍为 `0594d10`；GitHub 主线仍为 `4f4a374`                                   |
+| 工作分支       | `codex/grading-confirm-results`；本地 HEAD 为 `137e9a6`，账号运维第二阶段尚待提交                              |
+| 应用基线       | 本地工作树包含账号安全与批量运维增强；node2 镜像仍为 `0594d10`；GitHub 主线仍为 `4f4a374`                     |
 | 远端状态       | 本地包含尚未 push 的账号运维、文档及仓库整理；尚未部署                                                        |
 | 数据库迁移     | Alembic 单 head：`0049_usernames`                                                                            |
-| 最新开发       | 管理员批量运维之后完成全仓结构盘点与导航整理；未移动私有/未跟踪资料，尚未 push 或部署                         |
+| 最新开发       | 管理员批量启停/强制下线/导出与账号安全面板已完成本机开发验证；尚未 push 或部署                                |
 | 本机业务验收   | 隔离合成环境 A–F 已通过并停在成绩发布前；公式不可读/重框专项通过；GradeRelease 为 0                          |
 | node2 在线版本 | API/Web/Worker 为 `0594d10`，schema 为 `0049_usernames`；文字、公式 OCR 与本地建议 Provider available        |
 | node2 入口     | `https://222.195.89.236:13300`；自签名证书；公网可达，无来源白名单                                           |
@@ -52,6 +52,8 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 2026-08-19 继续完成无需登录 node2 的管理员账号运维增强：管理员可下载模板并在浏览器本地预览 CSV，一次批量创建最多 200 个教师或学生账号；中英文表头和账号类型均受支持，无效行会在提交前标出，密码不进入预览、响应或审计。管理页新增最近账号操作，显示执行管理员、目标账号、动作和时间；后端为批量导入写逐账号及汇总审计，仍拒绝 CSV 创建管理员。合成账号浏览器闭环 9 个场景通过；账号/认证后端 `14 passed` 且 `ahamark.db unchanged`，Ruff、strict mypy `132 source files`、前端 `41 files / 246 tests`、TypeScript、ESLint、20 页 production build、Alembic 单 head `0049_usernames` 和业务 Compose 静态解析均通过。Docker Desktop 引擎因本机 Windows 服务权限被拒绝而无法启动，因此没有获得 PostgreSQL 实机迁移、容器重启或 Compose 健康证据；SQLite 也因既有迁移使用 PostgreSQL `JSONB` 而不能替代该证据。操作说明见 `docs/ADMIN-ACCOUNT-OPERATIONS.md`。本轮未 push、未登录 node2、未部署，也未创建真实账号。
 
 2026-08-19 对全仓 595 个已跟踪文件和根目录运行产物完成结构盘点：已跟踪文件没有内容完全重复项，现有 Markdown 相对链接没有断链。为避免破坏 API 导入、脚本默认路径、Compose 和历史证据引用，本轮不做无收益的大规模搬移；改为在 `apps/`、`data/`、`deploy/`、`docs/`、`scripts/`、`tests/`、`workers/` 增加职责与导航 README，并由根 README 提供统一仓库地图。`.gitignore` 和 `.dockerignore` 新增历史 pytest/mypy/ruff、临时验收、公式评测生成目录及本地资料目录规则，Git 状态不再扫描这些不可访问缓存，Docker 构建上下文也不再携带这些本地产物；新增硬化测试保证主要目录导航、Markdown 相对链接和忽略规则持续有效。原有 `.env`、数据库、公式评测结果和“数学分析资料整理”等本地资料均未读取、移动、删除或提交。仓库硬化专项 `9 passed`；仓库硬化、数据库隔离、node2 部署契约和业务浏览器契约联合为 `100 passed, 1 skipped`，两次数据库守卫均为 `ahamark.db unchanged`。Ruff、strict mypy `132 source files`、前端 `41 files / 246 tests`、TypeScript 和 ESLint 通过。全后端收集为 1094 项；一次与前端门禁并发的完整运行早期出现单个未留 traceback 的失败，串行 fail-fast 前段未复现，但因整套包含长耗时容量/恢复测试，本轮没有把中止运行当作全量通过证据。本轮未 push、未部署、未登录 node2。
+
+2026-08-19 完成管理员账号运维第二阶段的本机开发：账号表支持选择当前页的非本人账号并批量启用、停用或强制下线，每次最多 200 个目标；服务端要求显式确认、逐项返回成功与失败，批量停用继续保证至少一个启用管理员，并通过 PostgreSQL 行锁收紧并发停用保护。导出沿用当前搜索/类型/状态筛选，只包含账号状态与登录活动，UTF-8 CSV 对电子表格公式前缀做转义。新增账号安全面板，统计已识别账号 24 小时失败登录、活动会话、多设备、从未登录和 90 天未活动账号，并允许撤销非当前会话；失败登录审计不保存用户名、密码或客户端 IP。开发时同时修复成功登录也消耗失败限流额度的既有缺陷，现只累计失败且成功登录清零。所有批量和会话动作均受管理员会话、CSRF、二次确认语义和审计约束。账号/认证专项 `19 passed` 且 `ahamark.db unchanged`；全后端 Ruff、strict mypy `132 source files`、前端 `41 files / 249 tests`、Prettier、TypeScript、ESLint 和包含 `/admin/accounts` 的 20 页 production build 均通过。Next 构建仍只有既有 SWC lockfile 网络补丁告警，编译和构建成功。本轮未 push、未部署、未登录 node2，也未创建真实账号。
 
 2026-08-18 用户要求由 Codex 全程完成、不接第三方在线 Provider，并授权继续开发。当前工作树已接入两个只在 `local-ai` Compose profile 中启用的内网服务：固定 `PaddlePaddle/PP-FormulaNet_plus-M` 公式模型（revision `712e6e2e4c313b1ea163be5c350127b82662c58d`）和固定 `Qwen/Qwen3-4B-GGUF` 的 `Qwen3-4B-Q4_K_M.gguf`，由官方 llama.cpp CPU server 提供 OpenAI-compatible JSON Schema 接口。两者均不发布宿主端口，运行时不下载模型，模型卷只读；应用只允许显式 host allowlist 的 Compose HTTP，拒绝 IP、metadata host、localhost 和未授权外部端点。评分、Stage 4 AI grading 与作业生成只产出 suggestion，继续要求教师复核，外部 Provider 请求在 node2 Compose 中固定关闭。
 
@@ -119,7 +121,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 ### 已知未完成项
 
-1. 用户名登录、上传、切题、识别、教师修正和人工评分/复核已在本机隔离合成环境通过；管理员账号运维浏览器闭环也已通过，但 PostgreSQL/Compose 实机迁移重启、node2 管理员用户名账号及公网真实部署链路仍未验收。
+1. 用户名登录、上传、切题、识别、教师修正和人工评分/复核已在本机隔离合成环境通过；管理员第一阶段浏览器闭环和第二阶段单元/集成门禁已通过，但第二阶段尚未取得独立浏览器闭环，PostgreSQL/Compose 实机迁移重启、node2 管理员用户名账号及公网真实部署链路仍未验收。
 2. 公网入口仍使用自签名证书；手机 Safari 登录和完整教师流程尚未验收。
 3. 公网端口无来源限制；若后续恢复“仅校园网”目标，需要由 iKuai/防火墙实施边界并做内外双向实测。
 4. 私有 OCR/Gold 的两页修复输出位于仓库外，未合并或覆盖原 60 页草稿；保持暂停。
@@ -223,7 +225,7 @@ python -m app.cli.create_student --username student01 --display-name "学生"
 python -m app.cli.create_admin --username admin01 --display-name "管理员"
 ```
 
-命令会在终端中两次询问密码且不回显。三类新账号分别获得唯一的 `teacher`、`student` 或 `admin` 角色；已有无角色账号继续按历史教师兼容。管理员登录后自动进入 `/admin/accounts`，可创建账号、用 CSV 批量创建教师和学生、查看账号操作审计、修改展示姓名、启用/停用和重置他人密码；停用与密码重置会强制旧会话退出。为避免业务数据悬空，管理端不提供物理删除和账号类型直接变更。仓库不提供公共注册、自助找回或账号申请。`DEMO_ACTOR_ENABLED` 只允许非 production 开发环境使用。完整操作边界见 `docs/ADMIN-ACCOUNT-OPERATIONS.md`。
+命令会在终端中两次询问密码且不回显。三类新账号分别获得唯一的 `teacher`、`student` 或 `admin` 角色；已有无角色账号继续按历史教师兼容。管理员登录后自动进入 `/admin/accounts`，可创建账号、用 CSV 批量创建教师和学生、批量启停或强制下线、按筛选导出账号、查看安全概览与活动会话、撤销非当前会话、查看账号操作审计、修改展示姓名和重置他人密码；停用与密码重置会强制旧会话退出。为避免业务数据悬空，管理端不提供物理删除和账号类型直接变更。仓库不提供公共注册、自助找回或账号申请。`DEMO_ACTOR_ENABLED` 只允许非 production 开发环境使用。完整操作边界见 `docs/ADMIN-ACCOUNT-OPERATIONS.md`。
 
 注意：node2 已部署用户名版本和 `0049_usernames`，但未创建或验收管理员用户名账号；不要把迁移完成等同于登录业务流程已验收。
 
@@ -338,6 +340,7 @@ node2 使用 `shr` 用户的 Rootless Docker。专用文件：
 
 | 日期       | 提交/状态        | 结论                                                                             |
 | ---------- | ---------------- | -------------------------------------------------------------------------------- |
+| 2026-08-19 | 本地待提交       | 管理员批量运维、安全面板、会话撤销与登录失败限流修复完成；未 push、未部署         |
 | 2026-08-19 | `855d9fb` 本地    | 全仓导航、临时产物隔离和结构硬化检查完成；未移动本地资料，未 push、未部署         |
 | 2026-08-19 | `4e0dd57` 本地    | CSV 批量建号、账号审计与 9 场景管理员浏览器验收通过；未 push、未部署             |
 | 2026-08-19 | `9bccb91` 本地    | 三类账号运维及教师复核改进已快进整合至 D 盘当前分支；未 push、未部署             |
