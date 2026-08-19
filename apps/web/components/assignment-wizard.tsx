@@ -1084,6 +1084,7 @@ export function AssignmentWizard({
         onAssignmentChanged={load}
         onReviewInputsChanged={refreshReviewInputs}
         onFieldSuggestionsChanged={setFieldSuggestions}
+        onContinueManually={() => setStep(2)}
       />
 
       {step === 2 && (

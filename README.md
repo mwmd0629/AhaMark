@@ -27,11 +27,11 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 | 项目           | 当前事实（2026-08-19）                                                                                       |
 | -------------- | ------------------------------------------------------------------------------------------------------------ |
 | 正确工作区     | `D:\OpenAIData\Workspaces\AhaMark`                                                                           |
-| 工作分支       | `codex/grading-confirm-results`；账号运维第二阶段提交为 `3142998`                                             |
-| 应用基线       | 本地修复提交 `e375e55`；node2 API/Worker 为 `e375e55`、Web 为 `c444019`；GitHub 主线仍为 `4f4a374`            |
-| 远端状态       | 本地功能提交尚未 push；node2 已完成受保护部署并通过独立公网复验                                               |
-| 数据库迁移     | 本地与 node2 均为 Alembic 单 head：`0053_disable_forced_password_change`                                      |
-| 最新开发       | 合作者剩余能力已按当前架构吸收；账号改密调整为完全自愿，学生提交/错题/复核/资料/分析及本地学习助手已接入      |
+| 工作分支       | `codex/grading-confirm-results`；账号运维第二阶段提交为 `3142998`                                            |
+| 应用基线       | 本地修复提交 `e375e55`；node2 API/Worker 为 `e375e55`、Web 为 `c444019`；GitHub 主线仍为 `4f4a374`           |
+| 远端状态       | 本地功能提交尚未 push；node2 已完成受保护部署并通过独立公网复验                                              |
+| 数据库迁移     | 本地与 node2 均为 Alembic 单 head：`0053_disable_forced_password_change`                                     |
+| 最新开发       | 作业整理中的 Codex 已明确改为可选辅助；不可用时教师可直接进入手动核对，原阶段仍可稍后重试                    |
 | 本机业务验收   | 隔离合成环境 A–F 已通过并停在成绩发布前；公式不可读/重框专项通过；GradeRelease 为 0                          |
 | node2 在线版本 | API/Worker `e375e55`、Web `c444019`、schema `0053`；文字、公式 OCR 与本地建议 Provider available             |
 | node2 入口     | `https://222.195.89.236:13300`；自签名证书；公网可达，无来源白名单                                           |
@@ -68,6 +68,8 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 2026-08-19 按用户“全部吸收、自主开发”的授权继续处理 `origin/gyh--001` 剩余产品能力，仍不整分支合并、不改写历史迁移。新增账号自助改密，改密撤销其他会话并写审计；随后按用户决定以 `0053` 清除全部强制改密标记，新建账号和管理员重置密码均不阻断登录，改密入口仅供自愿使用。`0051` 建立学生正式错题复核申请，教师可维持原判、要求补充或带 `ScoreRevision` 改分，既有发布快照不被覆盖；`0052` 为现有班级资料增加显式学生发布/撤回，只有账号已关联且仍在班的学生可见和下载。学生端新增正式错题、复核状态、在线多文件/多版本提交、学习资料和基于最新正式成绩的学习分析；在线提交复用文件安全检查并进入教师批改批次，不依赖邮箱或文件名匹配。评分标准库沿用现有更完整的跨作业版本化模板实现，没有创建第二套重复模型。学习助手默认关闭，仅在显式启用本地 OpenAI-compatible Provider 且外部请求关闭时可用，只解释错因和提供练习建议，不能评分、改分或发布成绩。后端改动面联动为 `40 passed, 1 skipped`，数据库守卫为 `ahamark.db unchanged`；全仓 Ruff、strict mypy `123 source files`、前端首次全量 `45 files / 261 tests`、Prettier、TypeScript、ESLint 和 33 页 production build 通过。第二次前端全量出现一个既有评分页异步展开测试波动，目标文件单独复跑 `32 passed`。本地 PostgreSQL 升级前 custom dump 有 1221 个 TOC 条目，`0049 -> 0053` 实迁成功，现有强制改密标记数为 0；新增列/表核对通过，六项 Compose 服务健康，`/health`、`/ready` 与登录页均为 200。完整后端套件运行到 12% 仍零失败后因既有长耗时容量/识别用例停止，不能记为完整通过。本轮未登录 node2、未 push、未部署或发布成绩。
 
 2026-08-19 用户授权更新 node2。候选 `c444019` 的 API/Web 镜像、`0053` head 和固定 RapidOCR 清单本地校验通过；服务器先完成 PostgreSQL、MinIO、运行配置、Compose、Nginx 与证书备份并验证 SHA-256，备份为 `/data/shr/ahamark-backups/pre-upgrade-c444019-20260819T120754Z`。候选迁移容器随后在读取既有 Compose 传入的无引号方括号 host allowlist 时被 Pydantic Settings 拒绝，失败发生在连接数据库前；运行配置和业务容器尚未切换，公网 `/`、`/health`、`/ready` 复验仍为 200/available。修复镜像 `e375e55` 上传后，第二次迁移仍在连接数据库前被相同错误阻止；比对镜像源码行号确认部署脚本加载旧 `runtime.env` 时把旧镜像标签导出到 Shell，优先级覆盖候选 env-file，实际再次运行的是旧镜像。第三次脚本清除旧镜像变量并核对 Compose 候选镜像后成功完成 `0049 -> 0053` 事务迁移和 API-A/B、Worker、Web 滚动切换；线上 API/Worker 为 `e375e55`，Web 为 `c444019`，既有 Formula/Qwen 镜像保持 `0594d10`，唯一公网端口仍为 13300。迁移后强制改密标记为 0，六项核心服务健康；独立公网复验 `/`、登录、主动改密、学生错题、教师复核、`/health` 均为 200，`/ready` 为 available、Worker 为 1，文字/公式 OCR 与本地建议 Provider available，评分和公式继续保留 suggestion-only/教师确认边界。未创建账号、未处理真实资料、未发布作业或成绩。代码提交尚未 push。
+
+2026-08-19 改进教师作业整理的降级体验：Codex 页面整理、题目抽取、答案和评分标准生成均明确标记为“可选”，Codex 未连接时不再显示“等待 Codex 完成”，而是提示教师可继续手动核对，并提供“一键进入核对内容”的入口；原有单阶段重试仍保留。该改动不伪装后台任务，也不改变正式题目、答案和评分标准必须由教师确认的边界。生成面板与作业向导专项 `35 passed`，Prettier、TypeScript、ESLint 和 33 页 production build 均通过；Next 构建仍只有既有 SWC lockfile 联网补丁告警。该改动当前仅在本地，尚未部署 node2。
 
 2026-08-18 用户要求由 Codex 全程完成、不接第三方在线 Provider，并授权继续开发。当前工作树已接入两个只在 `local-ai` Compose profile 中启用的内网服务：固定 `PaddlePaddle/PP-FormulaNet_plus-M` 公式模型（revision `712e6e2e4c313b1ea163be5c350127b82662c58d`）和固定 `Qwen/Qwen3-4B-GGUF` 的 `Qwen3-4B-Q4_K_M.gguf`，由官方 llama.cpp CPU server 提供 OpenAI-compatible JSON Schema 接口。两者均不发布宿主端口，运行时不下载模型，模型卷只读；应用只允许显式 host allowlist 的 Compose HTTP，拒绝 IP、metadata host、localhost 和未授权外部端点。评分、Stage 4 AI grading 与作业生成只产出 suggestion，继续要求教师复核，外部 Provider 请求在 node2 Compose 中固定关闭。
 
@@ -178,15 +180,15 @@ AhaMark 已实现教师侧的作业创建、资料整理、题目与区域确认
 
 ## 仓库导航
 
-| 路径 | 内容 | 维护入口 |
-| --- | --- | --- |
-| `apps/` | API、迁移、CLI 与 Web 应用 | [apps/README.md](apps/README.md) |
-| `workers/` | Celery 异步任务 | [workers/README.md](workers/README.md) |
-| `tests/`、`test_support/` | 后端测试、fixture 与数据库隔离保护 | [tests/README.md](tests/README.md) |
-| `scripts/` | 浏览器验收、容量、评测和运维辅助脚本 | [scripts/README.md](scripts/README.md) |
-| `docs/` | 稳定说明与脱敏验收证据 | [docs/README.md](docs/README.md) |
-| `deploy/`、`docker-compose*.yml` | 镜像静态资源和环境编排 | [deploy/README.md](deploy/README.md) |
-| `data/` | 可版本化的公开或合成评测数据 | [data/README.md](data/README.md) |
+| 路径                             | 内容                                 | 维护入口                               |
+| -------------------------------- | ------------------------------------ | -------------------------------------- |
+| `apps/`                          | API、迁移、CLI 与 Web 应用           | [apps/README.md](apps/README.md)       |
+| `workers/`                       | Celery 异步任务                      | [workers/README.md](workers/README.md) |
+| `tests/`、`test_support/`        | 后端测试、fixture 与数据库隔离保护   | [tests/README.md](tests/README.md)     |
+| `scripts/`                       | 浏览器验收、容量、评测和运维辅助脚本 | [scripts/README.md](scripts/README.md) |
+| `docs/`                          | 稳定说明与脱敏验收证据               | [docs/README.md](docs/README.md)       |
+| `deploy/`、`docker-compose*.yml` | 镜像静态资源和环境编排               | [deploy/README.md](deploy/README.md)   |
+| `data/`                          | 可版本化的公开或合成评测数据         | [data/README.md](data/README.md)       |
 
 根目录只保留项目入口、依赖清单、Compose 文件和仓库规则。数据库、模型、日志、缓存、浏览器输出及本地评测构建均为运行产物，不属于源码结构。
 
@@ -357,10 +359,10 @@ node2 使用 `shr` 用户的 Rootless Docker。专用文件：
 
 | 日期       | 提交/状态        | 结论                                                                             |
 | ---------- | ---------------- | -------------------------------------------------------------------------------- |
-| 2026-08-19 | `3142998` 本地    | 管理员批量运维、安全面板、会话撤销与登录失败限流修复完成；未 push、未部署         |
-| 2026-08-19 | `855d9fb` 本地    | 全仓导航、临时产物隔离和结构硬化检查完成；未移动本地资料，未 push、未部署         |
-| 2026-08-19 | `4e0dd57` 本地    | CSV 批量建号、账号审计与 9 场景管理员浏览器验收通过；未 push、未部署             |
-| 2026-08-19 | `9bccb91` 本地    | 三类账号运维及教师复核改进已快进整合至 D 盘当前分支；未 push、未部署             |
+| 2026-08-19 | `3142998` 本地   | 管理员批量运维、安全面板、会话撤销与登录失败限流修复完成；未 push、未部署        |
+| 2026-08-19 | `855d9fb` 本地   | 全仓导航、临时产物隔离和结构硬化检查完成；未移动本地资料，未 push、未部署        |
+| 2026-08-19 | `4e0dd57` 本地   | CSV 批量建号、账号审计与 9 场景管理员浏览器验收通过；未 push、未部署             |
+| 2026-08-19 | `9bccb91` 本地   | 三类账号运维及教师复核改进已快进整合至 D 盘当前分支；未 push、未部署             |
 | 2026-08-19 | `7e88fae`        | 功能分支与最新远端历史正常合并并推送 `master`；代码树相对首父无变化              |
 | 2026-08-18 | `0594d10` 已部署 | `0049`、固定文字/公式 OCR、本地 Qwen 建议服务上线；公网 readiness 全部 available |
 | 2026-08-18 | `789a59d` 未部署 | 固定 RapidOCR bundle 已推送；部署脚本在 image validation 中止并回滚到旧版        |

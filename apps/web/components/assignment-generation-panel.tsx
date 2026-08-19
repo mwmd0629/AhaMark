@@ -40,8 +40,8 @@ const TERMINAL = new Set([
 const STAGES: { key: AssignmentGenerationStage; label: string }[] = [
   { key: "analyzing", label: "分析输入" },
   { key: "processing_pages", label: "检查页面" },
-  { key: "extracting_questions", label: "Codex 页面整理与题目抽取" },
-  { key: "generating_rubrics", label: "Codex 生成答案与评分标准" },
+  { key: "extracting_questions", label: "可选：Codex 整理页面与抽取题目" },
+  { key: "generating_rubrics", label: "可选：Codex 生成答案与评分标准" },
   { key: "validating", label: "结构验证" },
 ];
 const STATUS_LABEL: Record<string, string> = {
@@ -77,6 +77,7 @@ export function AssignmentGenerationPanel({
   onAssignmentChanged,
   onReviewInputsChanged,
   onFieldSuggestionsChanged,
+  onContinueManually,
 }: {
   assignmentId: string;
   assignment?: AssignmentRecord;
@@ -85,6 +86,7 @@ export function AssignmentGenerationPanel({
   onFieldSuggestionsChanged?: (
     suggestions: AssignmentFieldSuggestion[],
   ) => void;
+  onContinueManually?: () => void;
 }) {
   const [jobs, setJobs] = useState<AssignmentGenerationJob[]>([]);
   const [capabilities, setCapabilities] =
@@ -258,6 +260,9 @@ export function AssignmentGenerationPanel({
   const codexQuestionDraftReady =
     latestStages.get("extracting_questions")?.result_payload?.capability ===
     "codex_local";
+  const codexUnavailable = (
+    ["extracting_questions", "generating_rubrics"] as const
+  ).some((stage) => latestStages.get(stage)?.status === "unavailable");
   const codexStageStatus = (
     stage: AssignmentGenerationStage,
     row: AssignmentGenerationJob["stages"][number] | undefined,
@@ -267,7 +272,7 @@ export function AssignmentGenerationPanel({
       ["extracting_questions", "generating_rubrics"].includes(stage) &&
       row.status === "unavailable"
     )
-      return "等待 Codex";
+      return "可跳过（Codex 未连接）";
     return STATUS_LABEL[row.status] ?? row.status;
   };
 
@@ -431,14 +436,8 @@ export function AssignmentGenerationPanel({
             <strong>
               {codexQuestionDraftReady
                 ? "题目已整理，等待核对"
-                : current.status === "partial" &&
-                    current.stages.some(
-                      (row) =>
-                        ["extracting_questions", "generating_rubrics"].includes(
-                          row.stage,
-                        ) && row.status === "unavailable",
-                    )
-                  ? "等待 Codex 完成"
+                : current.status === "partial" && codexUnavailable
+                  ? "可继续手动核对"
                   : (STATUS_LABEL[current.status] ?? current.status)}
             </strong>
             <div
@@ -454,6 +453,19 @@ export function AssignmentGenerationPanel({
               {current.progress}%
             </span>
           </div>
+          {codexUnavailable && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm text-sky-950">
+              <p>
+                Codex
+                是可选辅助，不会阻塞作业编辑。你可以先手动整理题目、答案和评分标准，需要时再回来重试。
+              </p>
+              {onContinueManually && (
+                <Button variant="outline" onClick={onContinueManually}>
+                  不等 Codex，手动核对
+                </Button>
+              )}
+            </div>
+          )}
           <section aria-label="处理详情" className="text-sm">
             <span className="sr-only">
               {STATUS_LABEL[current.status] ?? current.status}
