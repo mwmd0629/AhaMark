@@ -31,7 +31,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 | 应用基线       | 本地产品实现 `3142998`；node2 镜像仍为 `0594d10`；GitHub 主线仍为 `4f4a374`                                   |
 | 远端状态       | 本地包含尚未 push 的账号运维、文档及仓库整理；尚未部署                                                        |
 | 数据库迁移     | Alembic 单 head：`0049_usernames`                                                                            |
-| 最新开发       | 教师“错题与练习”已接入最新正式成绩发布快照并完成本机验证；尚未 push 或部署                                    |
+| 最新开发       | 教师可从正式错题中选择记录并创建无学生身份信息的未发布练习草稿；尚未 push 或部署                              |
 | 本机业务验收   | 隔离合成环境 A–F 已通过并停在成绩发布前；公式不可读/重框专项通过；GradeRelease 为 0                          |
 | node2 在线版本 | API/Web/Worker 为 `0594d10`，schema 为 `0049_usernames`；文字、公式 OCR 与本地建议 Provider available        |
 | node2 入口     | `https://222.195.89.236:13300`；自签名证书；公网可达，无来源白名单                                           |
@@ -58,6 +58,8 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 2026-08-19 审查 `origin/gyh--001` 的 4 个独有提交后开始第一批选择性吸收，没有整分支合并，也没有修改历史迁移。浏览器请求失败现在统一为可识别的 `NETWORK_ERROR`，主动取消仍保留 `AbortError`；Office 检查改为解析关系 XML，并拒绝宏、ActiveX、嵌入对象、可执行内容和外部链接，PDF 额外拒绝脚本、自动动作、表单、附件及多媒体。教师设置页已连接真实账户偏好接口，可更新展示姓名并保存带版本号的工作台偏好，默认班级受租户归属校验，学生账号不能使用教师偏好接口，API 密钥和外部 AI 开关不会传给页面。两个无引用的历史演示文件已删除。后端相关 `40 passed`、前端全量 `42 files / 252 tests`、Ruff、strict mypy、TypeScript 和 ESLint 均通过；测试数据库守卫为 `ahamark.db unchanged`。本轮未登录 node2、未部署、未创建真实账号或发布成绩。
 
 2026-08-19 继续完善教师“错题与练习”：`/practice` 不再展示演示数据，改为只读取当前教师名下每个作业/班级的最新 released `GradeRelease` 及其固定正式快照，满分题自动排除；教师可按班级、作业、错误类型和学生/题目/知识点关键词筛选，并查看学生答案、最终反馈、得分率及原批改入口。接口复用正式成绩校验，题目必须属于发布试卷、答案必须属于对应提交与题目、知识点和学生必须属于当前教师；显式学生或管理员账号均不能访问，历史无角色教师继续兼容。页面不调用外部 AI，也不自动创建练习，教师可从真实错题判断后进入现有新建作业流程。相关后端联动 `32 passed`、前端全量 `43 files / 254 tests`、Ruff、strict mypy `133 source files`、Prettier、TypeScript、ESLint 和 production build 均通过；测试数据库守卫为 `ahamark.db unchanged`。全仓 Ruff 格式检查仍报告 21 个既有 CRLF/历史格式文件，本轮未批量改写无关文件。本轮未登录 node2、未部署、未创建真实账号或发布成绩。
+
+2026-08-19 补齐错题到练习草稿的教师操作闭环：教师可跨筛选和分页选择最多 50 条正式失分记录，页面按原题去重并汇总目标班级；点击后复用现有作业接口创建 `draft`，预填原作业、题号和知识点复习清单，再进入既有上传与编辑步骤。草稿载荷不会从错题记录复制学生姓名、学号、学生答案或个别反馈，也不会复制题目、调用 AI 或自动发布；教师仍需自行设计/上传练习题并完成答案、Rubric 和发布确认。专项前端 `3 passed`、前端全量 `43 files / 255 tests`、错题后端契约 `3 passed` 且测试数据库守卫为 `ahamark.db unchanged`；Prettier、TypeScript、ESLint 和 production build 均通过。本轮未登录 node2、未部署、未创建真实账号或发布成绩。
 
 2026-08-18 用户要求由 Codex 全程完成、不接第三方在线 Provider，并授权继续开发。当前工作树已接入两个只在 `local-ai` Compose profile 中启用的内网服务：固定 `PaddlePaddle/PP-FormulaNet_plus-M` 公式模型（revision `712e6e2e4c313b1ea163be5c350127b82662c58d`）和固定 `Qwen/Qwen3-4B-GGUF` 的 `Qwen3-4B-Q4_K_M.gguf`，由官方 llama.cpp CPU server 提供 OpenAI-compatible JSON Schema 接口。两者均不发布宿主端口，运行时不下载模型，模型卷只读；应用只允许显式 host allowlist 的 Compose HTTP，拒绝 IP、metadata host、localhost 和未授权外部端点。评分、Stage 4 AI grading 与作业生成只产出 suggestion，继续要求教师复核，外部 Provider 请求在 node2 Compose 中固定关闭。
 

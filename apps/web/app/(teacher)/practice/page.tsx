@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   useCallback,
   useEffect,
@@ -21,10 +22,13 @@ import {
 } from "@/components/ui";
 import {
   ApiError,
+  assignmentsApi,
   teacherPracticeApi,
   type TeacherWrongQuestion,
   type TeacherWrongQuestionResponse,
 } from "@/lib/api";
+
+const MAX_SELECTED_WRONG_QUESTIONS = 50;
 
 function formatScore(score: string, maximum: string) {
   return `${Number(score).toLocaleString("zh-CN")} / ${Number(maximum).toLocaleString("zh-CN")}`;
@@ -34,12 +38,30 @@ function formatDateTime(value: string | null) {
   return value ? new Date(value).toLocaleString("zh-CN") : "时间未记录";
 }
 
-function WrongQuestionCard({ item }: { item: TeacherWrongQuestion }) {
+function WrongQuestionCard({
+  item,
+  selected,
+  selectionDisabled,
+  onToggle,
+}: {
+  item: TeacherWrongQuestion;
+  selected: boolean;
+  selectionDisabled: boolean;
+  onToggle: (item: TeacherWrongQuestion, checked: boolean) => void;
+}) {
   return (
     <Card className="p-5">
       <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-start">
         <div>
           <div className="flex flex-wrap items-center gap-2">
+            <input
+              type="checkbox"
+              aria-label={`选择 ${item.student_name} ${item.assignment_title} 第${item.question_number}题`}
+              checked={selected}
+              disabled={selectionDisabled && !selected}
+              onChange={(event) => onToggle(item, event.target.checked)}
+              className="h-4 w-4 rounded border-slate-300"
+            />
             <h2 className="font-bold">
               {item.student_name}（{item.student_number}）
             </h2>
@@ -130,6 +152,7 @@ function WrongQuestionCard({ item }: { item: TeacherWrongQuestion }) {
 }
 
 export default function PracticePage() {
+  const router = useRouter();
   const [data, setData] = useState<TeacherWrongQuestionResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -139,7 +162,17 @@ export default function PracticePage() {
   const [search, setSearch] = useState("");
   const [appliedSearch, setAppliedSearch] = useState("");
   const [page, setPage] = useState(1);
+  const [selectedItems, setSelectedItems] = useState<
+    Record<string, TeacherWrongQuestion>
+  >({});
+  const [creatingDraft, setCreatingDraft] = useState(false);
+  const [draftError, setDraftError] = useState("");
   const requestSequence = useRef(0);
+
+  const selected = Object.values(selectedItems);
+  const uniqueSelectedQuestions = [
+    ...new Map(selected.map((item) => [item.question_id, item])).values(),
+  ];
 
   const load = useCallback(async () => {
     const requestId = ++requestSequence.current;
@@ -187,6 +220,70 @@ export default function PracticePage() {
     setPage(1);
   };
 
+  const toggleSelection = (item: TeacherWrongQuestion, checked: boolean) => {
+    setDraftError("");
+    setSelectedItems((current) => {
+      if (
+        checked &&
+        !current[item.id] &&
+        Object.keys(current).length >= MAX_SELECTED_WRONG_QUESTIONS
+      ) {
+        return current;
+      }
+      const next = { ...current };
+      if (checked) next[item.id] = item;
+      else delete next[item.id];
+      return next;
+    });
+  };
+
+  const selectVisibleItems = () => {
+    setDraftError("");
+    setSelectedItems((current) => {
+      const next = { ...current };
+      for (const item of data?.items || []) {
+        if (Object.keys(next).length >= MAX_SELECTED_WRONG_QUESTIONS) break;
+        next[item.id] = item;
+      }
+      return next;
+    });
+  };
+
+  const createPracticeDraft = async () => {
+    if (!selected.length) return;
+    setCreatingDraft(true);
+    setDraftError("");
+    const classIds = [...new Set(selected.map((item) => item.class_id))].sort();
+    const lines = uniqueSelectedQuestions.map((item, index) => {
+      const points = item.knowledge_points
+        .map((point) => point.name)
+        .join("、");
+      return `${index + 1}. ${item.assignment_title} · 第${item.question_number}题${points ? ` · 知识点：${points}` : ""}`;
+    });
+    const instructions = [
+      "请根据以下正式成绩错题来源重新设计练习题。创建后仍需由教师上传或编辑题目，并完成答案、评分标准和发布确认。",
+      ...lines,
+    ]
+      .join("\n")
+      .slice(0, 4000);
+    try {
+      const draft = await assignmentsApi.create({
+        title: `错题巩固练习 ${new Date().toLocaleDateString("zh-CN")}`,
+        delivery_mode: "class_assignment",
+        class_ids: classIds,
+        description: `由教师从正式成绩错题中创建的未发布草稿；选中 ${selected.length} 条失分记录，按原题去重后 ${uniqueSelectedQuestions.length} 道。`,
+        instructions,
+      });
+      router.push(`/assignments/${draft.id}/edit?step=1`);
+    } catch (reason) {
+      setDraftError(
+        reason instanceof ApiError ? reason.message : "练习草稿创建失败。",
+      );
+    } finally {
+      setCreatingDraft(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -194,7 +291,7 @@ export default function PracticePage() {
         description="依据最新正式成绩版本整理教师确认的失分题，并关联原批改证据。本页不调用 AI，也不会自动发布练习。"
         actions={
           <Link href="/assignments/new">
-            <Button>创建练习作业</Button>
+            <Button variant="outline">新建空白作业</Button>
           </Link>
         }
       />
@@ -290,7 +387,63 @@ export default function PracticePage() {
             </Button>
           </div>
         </form>
+        {data?.items.length ? (
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-[var(--border)] pt-4">
+            <p className="text-sm text-[var(--text-secondary)]">
+              选择可跨筛选和分页保留，创建草稿时会按原题去重。
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={
+                loading || selected.length >= MAX_SELECTED_WRONG_QUESTIONS
+              }
+              onClick={selectVisibleItems}
+            >
+              选择本页
+            </Button>
+          </div>
+        ) : null}
       </Card>
+
+      {selected.length > 0 && (
+        <Card className="border-blue-200 bg-blue-50 p-4">
+          <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-center">
+            <div>
+              <p className="font-bold text-blue-950">
+                已选择 {selected.length} 条失分记录，按原题去重后{" "}
+                {uniqueSelectedQuestions.length} 道
+              </p>
+              <p className="mt-1 text-sm text-blue-800">
+                最多选择 {MAX_SELECTED_WRONG_QUESTIONS}{" "}
+                条。草稿只写入班级、原作业、题号和知识点，不写入学生姓名或答案，也不会自动发布。
+              </p>
+              {draftError && (
+                <p
+                  role="alert"
+                  className="mt-2 text-sm font-semibold text-red-700"
+                >
+                  {draftError}
+                </p>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setSelectedItems({});
+                  setDraftError("");
+                }}
+              >
+                清空选择
+              </Button>
+              <Button loading={creatingDraft} onClick={createPracticeDraft}>
+                创建练习草稿
+              </Button>
+            </div>
+          </div>
+        </Card>
+      )}
 
       {loading ? (
         <div aria-label="正在加载错题" className="grid gap-4">
@@ -302,7 +455,15 @@ export default function PracticePage() {
       ) : data?.items.length ? (
         <section aria-label="教师错题列表" className="grid gap-5">
           {data.items.map((item) => (
-            <WrongQuestionCard key={item.id} item={item} />
+            <WrongQuestionCard
+              key={item.id}
+              item={item}
+              selected={Boolean(selectedItems[item.id])}
+              selectionDisabled={
+                selected.length >= MAX_SELECTED_WRONG_QUESTIONS
+              }
+              onToggle={toggleSelection}
+            />
           ))}
         </section>
       ) : (

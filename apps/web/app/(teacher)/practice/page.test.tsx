@@ -8,14 +8,28 @@ import {
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import PracticePage from "./page";
 import {
+  assignmentsApi,
   teacherPracticeApi,
   type TeacherWrongQuestionResponse,
 } from "@/lib/api";
+
+const mocks = vi.hoisted(() => ({
+  push: vi.fn(),
+  createAssignment: vi.fn(),
+}));
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: mocks.push }),
+}));
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
   return {
     ...actual,
+    assignmentsApi: {
+      ...actual.assignmentsApi,
+      create: mocks.createAssignment,
+    },
     teacherPracticeApi: { wrongQuestions: vi.fn() },
   };
 });
@@ -72,6 +86,7 @@ const response: TeacherWrongQuestionResponse = {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(teacherPracticeApi.wrongQuestions).mockResolvedValue(response);
+  mocks.createAssignment.mockResolvedValue({ id: "practice-draft-1" });
 });
 
 afterEach(cleanup);
@@ -139,4 +154,28 @@ it("explains that only finalized formal snapshots are listed", async () => {
     await screen.findByText("当前筛选下没有已确认错题"),
   ).toBeInTheDocument();
   expect(screen.getByText(/完整正式成绩快照/)).toBeInTheDocument();
+});
+
+it("creates a teacher-owned draft without copying student identity or answers", async () => {
+  render(<PracticePage />);
+  await screen.findByText("学生甲（S001）");
+
+  fireEvent.click(screen.getByRole("button", { name: "选择本页" }));
+  expect(screen.getByText(/已选择 1 条失分记录/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "创建练习草稿" }));
+
+  await waitFor(() => expect(assignmentsApi.create).toHaveBeenCalledTimes(1));
+  const payload = vi.mocked(assignmentsApi.create).mock.calls[0][0];
+  expect(payload.class_ids).toEqual(["class-1"]);
+  expect(payload.delivery_mode).toBe("class_assignment");
+  expect(payload.instructions).toContain("函数单元测验 · 第3题");
+  expect(payload.instructions).toContain("函数单调性");
+  expect(JSON.stringify(payload)).not.toContain("学生甲");
+  expect(JSON.stringify(payload)).not.toContain("S001");
+  expect(JSON.stringify(payload)).not.toContain("只看函数值是否为正");
+  await waitFor(() =>
+    expect(mocks.push).toHaveBeenCalledWith(
+      "/assignments/practice-draft-1/edit?step=1",
+    ),
+  );
 });
