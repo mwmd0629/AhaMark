@@ -7,15 +7,30 @@ describe("API request errors", () => {
     vi.unstubAllGlobals();
   });
 
-  it("replaces browser network jargon with a teacher-readable message", async () => {
+  it("normalizes a fetch rejection into a stable network error", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockRejectedValue(new TypeError("Failed to fetch")),
     );
 
-    await expect(request("/api/test")).rejects.toThrow(
-      "暂时无法连接服务，请稍后重试",
-    );
+    const error = await request("/api/test").catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({
+      status: 0,
+      message: "无法连接服务器，请检查网络或确认后端服务已启动。",
+      body: {
+        code: "NETWORK_ERROR",
+        details: {},
+        request_id: "",
+      },
+    });
+  });
+
+  it("preserves an intentional request abort", async () => {
+    const aborted = new DOMException("Aborted", "AbortError");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(aborted));
+
+    await expect(request("/api/test")).rejects.toBe(aborted);
   });
 
   it("keeps a readable error when the server response is not JSON", async () => {

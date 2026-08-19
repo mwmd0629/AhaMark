@@ -5,12 +5,14 @@ import pytest
 from app.security.files import (
     UnsafeFile,
     inspect_docx,
+    inspect_pptx,
     inspect_upload,
     inspect_xlsx_archive,
     safe_filename,
 )
 from PIL import Image
-from pypdf import PdfWriter
+from pypdf import PdfReader, PdfWriter
+from pypdf.generic import DictionaryObject, NameObject, TextStringObject
 from reportlab.pdfgen import canvas
 
 
@@ -40,11 +42,15 @@ def image_bytes(kind: str = "PNG", size: tuple[int, int] = (4, 4)) -> bytes:
 
 def office_bytes(kind: str, extras: dict[str, bytes] | None = None) -> bytes:
     output = io.BytesIO()
-    required = (
-        {"[Content_Types].xml": b"<Types/>", "word/document.xml": b"<document/>"}
-        if kind == "docx"
-        else {"[Content_Types].xml": b"<Types/>", "xl/workbook.xml": b"<workbook/>"}
-    )
+    required_by_kind = {
+        "docx": {"[Content_Types].xml": b"<Types/>", "word/document.xml": b"<document/>"},
+        "xlsx": {"[Content_Types].xml": b"<Types/>", "xl/workbook.xml": b"<workbook/>"},
+        "pptx": {
+            "[Content_Types].xml": b"<Types/>",
+            "ppt/presentation.xml": b"<presentation/>",
+        },
+    }
+    required = required_by_kind[kind]
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
         for name, value in (required | (extras or {})).items():
             archive.writestr(name, value)
@@ -92,6 +98,30 @@ def test_blank_pdf_page_is_rejected() -> None:
             max_image_pixels=100,
         )
     assert caught.value.code == "PDF_EMPTY"
+
+
+def test_pdf_active_content_is_rejected() -> None:
+    source = PdfReader(io.BytesIO(pdf_bytes()))
+    writer = PdfWriter()
+    writer.clone_document_from_reader(source)
+    writer.root_object[NameObject("/OpenAction")] = DictionaryObject(
+        {
+            NameObject("/S"): NameObject("/JavaScript"),
+            NameObject("/JS"): TextStringObject("app.alert('unsafe')"),
+        }
+    )
+    output = io.BytesIO()
+    writer.write(output)
+
+    with pytest.raises(UnsafeFile) as caught:
+        inspect_upload(
+            "active.pdf",
+            output.getvalue(),
+            "application/pdf",
+            max_pdf_pages=2,
+            max_image_pixels=100,
+        )
+    assert caught.value.code == "PDF_ACTIVE_CONTENT_FORBIDDEN"
 
 
 def test_valid_pdf_and_images_matrix() -> None:
@@ -150,6 +180,20 @@ def test_valid_pdf_and_images_matrix() -> None:
             },
             "OFFICE_EXTERNAL_LINK_FORBIDDEN",
         ),
+        (
+            "docx",
+            {
+                "word/_rels/document.xml.rels": (
+                    b'<Relationships><Relationship targetMode=" external "/></Relationships>'
+                )
+            },
+            "OFFICE_EXTERNAL_LINK_FORBIDDEN",
+        ),
+        (
+            "docx",
+            {"word/embeddings/payload.bin": b"unsafe"},
+            "OFFICE_ACTIVE_CONTENT_FORBIDDEN",
+        ),
         ("xlsx", {"xl/broken.xml": b"<broken"}, "OFFICE_XML_INVALID"),
     ],
 )
@@ -164,6 +208,7 @@ def test_office_fixture_matrix(kind: str, extras: dict[str, bytes], code: str) -
 
 def test_office_missing_core_fake_zip_and_filename_matrix() -> None:
     assert inspect_docx(office_bytes("docx")).kind == "docx"
+    assert inspect_pptx(office_bytes("pptx")).kind == "pptx"
     inspect_xlsx_archive(office_bytes("xlsx"))
     fake = io.BytesIO()
     with zipfile.ZipFile(fake, "w") as archive:

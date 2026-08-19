@@ -411,8 +411,16 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
               ...init?.headers,
             },
     });
-  } catch {
-    throw new Error("暂时无法连接服务，请稍后重试");
+  } catch (reason) {
+    if (reason instanceof DOMException && reason.name === "AbortError") {
+      throw reason;
+    }
+    throw new ApiError(0, {
+      code: "NETWORK_ERROR",
+      message: "无法连接服务器，请检查网络或确认后端服务已启动。",
+      details: {},
+      request_id: "",
+    });
   }
   if (!response.ok) {
     let body: ApiErrorBody;
@@ -445,6 +453,25 @@ export type AuthUser = {
   display_name: string;
   roles: string[];
 };
+export type TeacherPreferences = {
+  profile: {
+    username: string;
+    display_name: string;
+    email: string;
+  };
+  preferences: {
+    default_class_id: string | null;
+    rubric_status_filter: "all" | "draft" | "confirmed" | "retired";
+    rubric_page_size: 10 | 20 | 50;
+    compact_rubric_cards: boolean;
+  };
+  revision: number;
+  updated_at: string | null;
+  server_managed: {
+    external_ai_enabled: boolean;
+    ai_configuration_editable: false;
+  };
+};
 export const authApi = {
   login: (username: string, password: string) =>
     request<AuthUser>("/auth/login", {
@@ -452,6 +479,16 @@ export const authApi = {
       body: JSON.stringify({ username, password }),
     }),
   me: () => request<AuthUser>("/auth/me"),
+  preferences: () => request<TeacherPreferences>("/auth/preferences"),
+  updatePreferences: (data: {
+    expected_revision: number;
+    display_name: string;
+    preferences: TeacherPreferences["preferences"];
+  }) =>
+    request<TeacherPreferences>("/auth/preferences", {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
   logout: () => request<void>("/auth/logout", { method: "POST" }),
 };
 export type AccountType = "teacher" | "student" | "admin";

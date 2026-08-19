@@ -31,7 +31,7 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 | 应用基线       | 本地产品实现 `3142998`；node2 镜像仍为 `0594d10`；GitHub 主线仍为 `4f4a374`                                   |
 | 远端状态       | 本地包含尚未 push 的账号运维、文档及仓库整理；尚未部署                                                        |
 | 数据库迁移     | Alembic 单 head：`0049_usernames`                                                                            |
-| 最新开发       | 管理员批量启停/强制下线/导出与账号安全面板已完成本机开发验证；尚未 push 或部署                                |
+| 最新开发       | 已选择性吸收协作者的网络错误、文件安全和教师设置改进并完成本机验证；尚未 push 或部署                          |
 | 本机业务验收   | 隔离合成环境 A–F 已通过并停在成绩发布前；公式不可读/重框专项通过；GradeRelease 为 0                          |
 | node2 在线版本 | API/Web/Worker 为 `0594d10`，schema 为 `0049_usernames`；文字、公式 OCR 与本地建议 Provider available        |
 | node2 入口     | `https://222.195.89.236:13300`；自签名证书；公网可达，无来源白名单                                           |
@@ -54,6 +54,8 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 2026-08-19 对全仓 595 个已跟踪文件和根目录运行产物完成结构盘点：已跟踪文件没有内容完全重复项，现有 Markdown 相对链接没有断链。为避免破坏 API 导入、脚本默认路径、Compose 和历史证据引用，本轮不做无收益的大规模搬移；改为在 `apps/`、`data/`、`deploy/`、`docs/`、`scripts/`、`tests/`、`workers/` 增加职责与导航 README，并由根 README 提供统一仓库地图。`.gitignore` 和 `.dockerignore` 新增历史 pytest/mypy/ruff、临时验收、公式评测生成目录及本地资料目录规则，Git 状态不再扫描这些不可访问缓存，Docker 构建上下文也不再携带这些本地产物；新增硬化测试保证主要目录导航、Markdown 相对链接和忽略规则持续有效。原有 `.env`、数据库、公式评测结果和“数学分析资料整理”等本地资料均未读取、移动、删除或提交。仓库硬化专项 `9 passed`；仓库硬化、数据库隔离、node2 部署契约和业务浏览器契约联合为 `100 passed, 1 skipped`，两次数据库守卫均为 `ahamark.db unchanged`。Ruff、strict mypy `132 source files`、前端 `41 files / 246 tests`、TypeScript 和 ESLint 通过。全后端收集为 1094 项；一次与前端门禁并发的完整运行早期出现单个未留 traceback 的失败，串行 fail-fast 前段未复现，但因整套包含长耗时容量/恢复测试，本轮没有把中止运行当作全量通过证据。本轮未 push、未部署、未登录 node2。
 
 2026-08-19 完成管理员账号运维第二阶段的本机开发：账号表支持选择当前页的非本人账号并批量启用、停用或强制下线，每次最多 200 个目标；服务端要求显式确认、逐项返回成功与失败，批量停用继续保证至少一个启用管理员，并通过 PostgreSQL 行锁收紧并发停用保护。导出沿用当前搜索/类型/状态筛选，只包含账号状态与登录活动，UTF-8 CSV 对电子表格公式前缀做转义。新增账号安全面板，统计已识别账号 24 小时失败登录、活动会话、多设备、从未登录和 90 天未活动账号，并允许撤销非当前会话；失败登录审计不保存用户名、密码或客户端 IP。开发时同时修复成功登录也消耗失败限流额度的既有缺陷，现只累计失败且成功登录清零。所有批量和会话动作均受管理员会话、CSRF、二次确认语义和审计约束。账号/认证专项 `19 passed` 且 `ahamark.db unchanged`；全后端 Ruff、strict mypy `132 source files`、前端 `41 files / 249 tests`、Prettier、TypeScript、ESLint 和包含 `/admin/accounts` 的 20 页 production build 均通过。Next 构建仍只有既有 SWC lockfile 网络补丁告警，编译和构建成功。本轮未 push、未部署、未登录 node2，也未创建真实账号。
+
+2026-08-19 审查 `origin/gyh--001` 的 4 个独有提交后开始第一批选择性吸收，没有整分支合并，也没有修改历史迁移。浏览器请求失败现在统一为可识别的 `NETWORK_ERROR`，主动取消仍保留 `AbortError`；Office 检查改为解析关系 XML，并拒绝宏、ActiveX、嵌入对象、可执行内容和外部链接，PDF 额外拒绝脚本、自动动作、表单、附件及多媒体。教师设置页已连接真实账户偏好接口，可更新展示姓名并保存带版本号的工作台偏好，默认班级受租户归属校验，学生账号不能使用教师偏好接口，API 密钥和外部 AI 开关不会传给页面。两个无引用的历史演示文件已删除。后端相关 `40 passed`、前端全量 `42 files / 252 tests`、Ruff、strict mypy、TypeScript 和 ESLint 均通过；测试数据库守卫为 `ahamark.db unchanged`。本轮未登录 node2、未部署、未创建真实账号或发布成绩。
 
 2026-08-18 用户要求由 Codex 全程完成、不接第三方在线 Provider，并授权继续开发。当前工作树已接入两个只在 `local-ai` Compose profile 中启用的内网服务：固定 `PaddlePaddle/PP-FormulaNet_plus-M` 公式模型（revision `712e6e2e4c313b1ea163be5c350127b82662c58d`）和固定 `Qwen/Qwen3-4B-GGUF` 的 `Qwen3-4B-Q4_K_M.gguf`，由官方 llama.cpp CPU server 提供 OpenAI-compatible JSON Schema 接口。两者均不发布宿主端口，运行时不下载模型，模型卷只读；应用只允许显式 host allowlist 的 Compose HTTP，拒绝 IP、metadata host、localhost 和未授权外部端点。评分、Stage 4 AI grading 与作业生成只产出 suggestion，继续要求教师复核，外部 Provider 请求在 node2 Compose 中固定关闭。
 
@@ -356,6 +358,6 @@ node2 使用 `shr` 用户的 Rootless Docker。专用文件：
 | 2026-08-15 | `5eda608`        | node2 旧回滚镜像基线；schema 为 0048                                             |
 | 2026-08-07 | `5ae3a78` 及后续 | 选择性实现手动切题和当前 Structured-only 教师流程；没有整分支合并合作者代码      |
 
-GitHub 合并结论：产品代码此前通过 PR #2 进入 `master`；后续离线 Provider、部署账本及两条分支历史已由 `7e88fae` 正常合并，`origin/master` 与当前功能分支一致。Draft PR #1 的 head 已是祖先，不重复合并；`gyh--001` 的旧迁移链、外部 OpenAI 调用、隐私面、依赖漂移和部署改动仍不得整分支合入。
+GitHub 合并结论：产品代码此前通过 PR #2 进入 `master`；后续离线 Provider、部署账本及两条分支历史已由 `7e88fae` 正常合并。Draft PR #1 的 head 已是祖先，不重复合并；`gyh--001` 只按功能选择性吸收，旧迁移链、外部 OpenAI 调用、依赖漂移和降低 CSP 的部署改动仍不得整分支合入。
 
 本次操作未创建账号、未处理私有识别材料、未发布作业或成绩。2026-08-19 最后一次外部独立检查确认 `/`、`/health` 均为 HTTP 200，`/ready` 为 `ready=true`，Worker 为 1，文字 OCR、公式 OCR、主观评分、AI 评分和作业生成 Provider 均 available；后三类为本地 Qwen suggestion-only，公式和评分继续明确要求教师确认。这只是运行状态和合成链路证据，不是识别准确率或自动判卷验收。最终备份及旧 `5eda608 + 0048` 回滚路径均保留；一次疑似 SSH 密码误发后已由用户在可见 `passwd` 终端轮换，账本不记录任何凭据。

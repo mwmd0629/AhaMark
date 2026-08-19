@@ -66,6 +66,61 @@ def _inspect_zip(content: bytes, *, required: set[str], kind: str) -> zipfile.Zi
     return archive
 
 
+def _inspect_office_parts(archive: zipfile.ZipFile) -> None:
+    infos = archive.infolist()
+    names = {item.filename.replace("\\", "/").lower() for item in infos}
+    if any(name.endswith("vbaproject.bin") for name in names):
+        raise UnsafeFile("OFFICE_MACRO_FORBIDDEN", "不接受包含宏的 Office 文件")
+    forbidden_suffixes = (
+        ".bin",
+        ".exe",
+        ".dll",
+        ".js",
+        ".vbs",
+        ".ps1",
+        ".cmd",
+        ".bat",
+        ".scr",
+        ".com",
+        ".jar",
+        ".msi",
+    )
+    if any(
+        "/activex/" in f"/{name}"
+        or "/embeddings/" in f"/{name}"
+        or "/customui/" in f"/{name}"
+        or name.endswith(forbidden_suffixes)
+        for name in names
+    ):
+        raise UnsafeFile(
+            "OFFICE_ACTIVE_CONTENT_FORBIDDEN",
+            "不接受包含宏、ActiveX、嵌入对象或可执行内容的 Office 文件",
+        )
+    for info in infos:
+        lower_name = info.filename.lower()
+        if not (lower_name.endswith(".xml") or lower_name.endswith(".rels")):
+            continue
+        try:
+            root = ElementTree.fromstring(archive.read(info))
+        except ElementTree.ParseError as exc:
+            raise UnsafeFile("OFFICE_XML_INVALID", "Office 文件包含损坏的 XML") from exc
+        if lower_name.endswith(".rels"):
+            for relationship in root.iter():
+                target_mode = next(
+                    (
+                        value
+                        for key, value in relationship.attrib.items()
+                        if key.rsplit("}", 1)[-1].lower() == "targetmode"
+                    ),
+                    "",
+                )
+                if target_mode.strip().lower() == "external":
+                    raise UnsafeFile(
+                        "OFFICE_EXTERNAL_LINK_FORBIDDEN",
+                        "不接受包含外部链接的 Office 文件",
+                    )
+
+
 def inspect_docx(content: bytes) -> FileInspection:
     archive = _inspect_zip(
         content,
@@ -73,28 +128,23 @@ def inspect_docx(content: bytes) -> FileInspection:
         kind="docx",
     )
     try:
-        names = {item.filename.lower() for item in archive.infolist()}
-        if any(name.endswith("vbaproject.bin") for name in names):
-            raise UnsafeFile("OFFICE_MACRO_FORBIDDEN", "不接受包含宏的 Office 文件")
-        for info in archive.infolist():
-            if info.filename.lower().endswith(".xml"):
-                try:
-                    ElementTree.fromstring(archive.read(info))
-                except ElementTree.ParseError as exc:
-                    raise UnsafeFile("OFFICE_XML_INVALID", "Office 文件包含损坏的 XML") from exc
-            if info.filename.lower().endswith(".rels"):
-                data = archive.read(info)
-                try:
-                    ElementTree.fromstring(data)
-                except ElementTree.ParseError as exc:
-                    raise UnsafeFile("OFFICE_XML_INVALID", "Office 文件包含损坏的 XML") from exc
-                if b'TargetMode="External"' in data or b"TargetMode='External'" in data:
-                    raise UnsafeFile(
-                        "OFFICE_EXTERNAL_LINK_FORBIDDEN", "不接受包含外部链接的 Office 文件"
-                    )
+        _inspect_office_parts(archive)
     finally:
         archive.close()
     return FileInspection("docx", 1)
+
+
+def inspect_pptx(content: bytes) -> FileInspection:
+    archive = _inspect_zip(
+        content,
+        required={"[Content_Types].xml", "ppt/presentation.xml"},
+        kind="pptx",
+    )
+    try:
+        _inspect_office_parts(archive)
+    finally:
+        archive.close()
+    return FileInspection("pptx", 1)
 
 
 def inspect_xlsx_archive(content: bytes) -> None:
@@ -104,27 +154,62 @@ def inspect_xlsx_archive(content: bytes) -> None:
         kind="xlsx",
     )
     try:
-        names = {item.filename.lower() for item in archive.infolist()}
-        if any(name.endswith("vbaproject.bin") for name in names):
-            raise UnsafeFile("OFFICE_MACRO_FORBIDDEN", "不接受包含宏的 Office 文件")
-        for info in archive.infolist():
-            if info.filename.lower().endswith(".xml"):
-                try:
-                    ElementTree.fromstring(archive.read(info))
-                except ElementTree.ParseError as exc:
-                    raise UnsafeFile("OFFICE_XML_INVALID", "Office 文件包含损坏的 XML") from exc
-            if info.filename.lower().endswith(".rels"):
-                data = archive.read(info)
-                try:
-                    ElementTree.fromstring(data)
-                except ElementTree.ParseError as exc:
-                    raise UnsafeFile("OFFICE_XML_INVALID", "Office 文件包含损坏的 XML") from exc
-                if b'TargetMode="External"' in data or b"TargetMode='External'" in data:
-                    raise UnsafeFile(
-                        "OFFICE_EXTERNAL_LINK_FORBIDDEN", "不接受包含外部链接的 Office 文件"
-                    )
+        _inspect_office_parts(archive)
     finally:
         archive.close()
+
+
+def _resolved_pdf_object(value: object) -> object:
+    get_object = getattr(value, "get_object", None)
+    return get_object() if callable(get_object) else value
+
+
+def _reject_pdf_active_content(reader: PdfReader) -> None:
+    root = _resolved_pdf_object(reader.trailer.get("/Root"))
+    if not hasattr(root, "get"):
+        raise UnsafeFile("PDF_INVALID", "PDF 缺少有效目录")
+    if any(root.get(key) is not None for key in ("/OpenAction", "/AA", "/AcroForm", "/Collection")):
+        raise UnsafeFile(
+            "PDF_ACTIVE_CONTENT_FORBIDDEN",
+            "不接受包含脚本、自动动作、表单或文件集合的 PDF",
+        )
+    names = _resolved_pdf_object(root.get("/Names"))
+    if hasattr(names, "get") and any(
+        names.get(key) is not None for key in ("/JavaScript", "/EmbeddedFiles")
+    ):
+        raise UnsafeFile(
+            "PDF_ACTIVE_CONTENT_FORBIDDEN",
+            "不接受包含 JavaScript 或嵌入附件的 PDF",
+        )
+    forbidden_annotation_types = {
+        "/FileAttachment",
+        "/RichMedia",
+        "/Screen",
+        "/Movie",
+        "/Sound",
+        "/3D",
+    }
+    for page in reader.pages:
+        if page.get("/AA") is not None:
+            raise UnsafeFile("PDF_ACTIVE_CONTENT_FORBIDDEN", "不接受包含自动动作的 PDF")
+        annotations = _resolved_pdf_object(page.get("/Annots"))
+        if not isinstance(annotations, list):
+            continue
+        for reference in annotations:
+            annotation = _resolved_pdf_object(reference)
+            if not hasattr(annotation, "get"):
+                continue
+            if (
+                annotation.get("/Subtype") in forbidden_annotation_types
+                or annotation.get("/A") is not None
+                or annotation.get("/AA") is not None
+                or annotation.get("/FS") is not None
+                or annotation.get("/RichMediaContent") is not None
+            ):
+                raise UnsafeFile(
+                    "PDF_ACTIVE_CONTENT_FORBIDDEN",
+                    "不接受包含外部动作、附件或多媒体内容的 PDF",
+                )
 
 
 def inspect_upload(
@@ -135,6 +220,7 @@ def inspect_upload(
     max_pdf_pages: int,
     max_image_pixels: int,
     allow_docx: bool = False,
+    allow_pptx: bool = False,
 ) -> FileInspection:
     filename = safe_filename(name)
     ext = PurePath(filename).suffix.lower().lstrip(".")
@@ -146,6 +232,10 @@ def inspect_upload(
     }
     if allow_docx:
         expected["docx"] = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    if allow_pptx:
+        expected["pptx"] = (
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        )
     if ext not in expected or mime != expected[ext]:
         raise UnsafeFile("FILE_TYPE_INVALID", "文件扩展名与 MIME 不匹配或类型不受支持")
     if ext == "pdf":
@@ -155,6 +245,7 @@ def inspect_upload(
             reader = PdfReader(io.BytesIO(content), strict=True)
             if reader.is_encrypted:
                 raise UnsafeFile("PDF_ENCRYPTED", "PDF 已加密，请先解除密码")
+            _reject_pdf_active_content(reader)
             pages = len(reader.pages)
             has_effective_page = any(
                 page.get_contents() is not None
@@ -193,4 +284,6 @@ def inspect_upload(
         except (Image.DecompressionBombError, UnidentifiedImageError, OSError) as exc:
             raise UnsafeFile("IMAGE_INVALID", "图片损坏或无法读取") from exc
         return FileInspection(ext, 1, width, height)
-    return inspect_docx(content)
+    if ext == "docx":
+        return inspect_docx(content)
+    return inspect_pptx(content)
