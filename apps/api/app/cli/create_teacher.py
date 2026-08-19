@@ -1,31 +1,20 @@
 import argparse
 import getpass
 
-from sqlalchemy import select
-
-from app.api.auth import hash_password, normalize_email, normalize_username
+from app.account_management import create_managed_account
 from app.db.session import SessionLocal
-from app.models import Status, User
+from app.models import User
 
 
 def create_teacher(username: str, display_name: str, password: str) -> User:
-    normalized_username = normalize_username(username)
-    email = normalize_email(f"{normalized_username}@ahamark.local")
-    if len(password) < 8:
-        raise ValueError("密码至少需要 8 个字符")
     with SessionLocal() as db:
-        if db.scalar(select(User).where(User.username == normalized_username)):
-            raise ValueError("该用户名已存在")
-        if db.scalar(select(User).where(User.email == email)):
-            raise ValueError("该账号的内部邮箱已存在")
-        user = User(
-            username=normalized_username,
-            email=email,
-            display_name=display_name.strip(),
-            password_hash=hash_password(password),
-            status=Status.active,
+        user = create_managed_account(
+            db,
+            username=username,
+            display_name=display_name,
+            password=password,
+            account_type="teacher",
         )
-        db.add(user)
         db.commit()
         db.refresh(user)
         db.expunge(user)

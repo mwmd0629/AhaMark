@@ -1,43 +1,31 @@
 # 教师核心业务浏览器闭环
 
-验证日期：2026-07-23（Asia/Shanghai）。结果：**A–H 全部通过**。机器证据见 `business-e2e-verification.json`。
+最新验证日期：2026-08-19（Asia/Shanghai）。结果：**本机隔离环境 A–F 全部通过，并在成绩发布前安全停止**。
 
 ## 范围与环境
 
-验证在 Compose project `ahamark-business-e2e` 中进行，使用独立 PostgreSQL、Redis、MinIO 命名卷及 Web/API/MinIO 端口 `3300/8800/9900`。没有复用、覆盖或清理既有开发栈及命名卷。所有业务数据使用本轮唯一 marker `business-e2e-20260722164927325.business-e2e.synthetic.invalid`，教师邮箱使用保留域 `.synthetic.invalid`，学生、图片和成绩均为运行时合成值。
+验证使用 Compose project `ahamark-business-e2e`，以及独立 PostgreSQL、Redis、MinIO v2 命名卷和 Web/API/MinIO 端口 `3300/8800/9900`。旧 v1 卷保留，运行和停止均不得使用 `down -v` 或清理未知卷。
 
-唯一 CLI 前置是幂等创建专用合成教师；其余班级、导入、作业、OCR、批次、评分、发布、报告和分析动作均由无头 Edge 的真实页面完成。浏览器脚本不以 API 调用替代业务步骤。
+所有账号、班级、学生、学号、图片、答案和评分均为运行时合成数据。教师通过用户名 `business-e2e-teacher` 登录；保留域邮箱只作为合成身份标记。脚本只允许 `localhost:3300/8800`，写操作还要求显式设置 `ALLOW_SYNTHETIC_MUTATIONS=1`，不得指向 node2 或生产环境。
 
-## A–H 结果
+本地 Compose 使用 `fake` OCR/公式 Provider 和 Codex-local 合成建议适配器，只验证 UI、接口、状态、持久化、来源标记及安全门禁，不证明真实 OCR、公式、手写或评分准确率。
 
-| 阶段 | 结果 | 浏览器证据 |
-|---|---|---|
-| A 认证 | PASS | 登录表单、受保护工作台、刷新后会话、localStorage 长期凭据检查 |
-| B 班级与学生 | PASS | 创建班级、CSV 预览/确认、3 名合成学生、前导零学号 |
-| C 作业与试卷 | PASS | 六步向导、关联真实新班级、上传运行时 PNG、PaperPage 可见 |
-| D OCR/题目/Rubric | PASS | 启动并轮询纸卷 OCR、查看/修正/确认候选；一主观一客观题、正分值、题区、知识点、两题 Rubric、完整性检查及发布 |
-| E 学生作业 | PASS | 创建批次、上传 4 张合成页、按文件名自动匹配两名学生、Submission OCR、StudentAnswer 与页面顺序保存 |
-| F 复核/finalize | PASS | 客观题 `objective-rule` 初批并接受；主观题显示 `unavailable`，教师通过 UI 分别手工给 4/3 分；4 项强制复核后 finalize |
-| G 发布/报告 | PASS | readiness 为 2 可发布、1 未完成；创建固定 Release；XLSX 与中文个人 PDF Job 完成；页面请求新的 15 分钟签名地址 |
-| H Analytics | PASS | 固定 Release 指标、分布、学生详情、知识点下钻、趋势；规则型建议编辑并确认 |
+## A–F 结果
 
-## 成绩与发布对账
+| 阶段             | 结果 | 主要证据                                                                                                                                                        |
+| ---------------- | ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A 认证           | PASS | 用户名登录、受保护工作台、刷新后会话、localStorage 长期凭据检查                                                                                                 |
+| B 班级与学生     | PASS | 创建大学课程班级、CSV 预览/确认、3 名合成学生与前导零学号                                                                                                       |
+| C 作业与试卷     | PASS | 当前三步向导、关联新班级、上传运行时 PNG、PaperPage 可见                                                                                                        |
+| D 题目与发布门禁 | PASS | 低质量图片阻止自动确认；教师启用手动切题、确认文件用途、创建客观/主观题及 Structured Rubric；发布检查允许非阻断警告且硬阻断为零                                 |
+| E 学生提交与识别 | PASS | 两名学生、四张合成页；处理版本 v3；教师在页面明确框选每题区域，区域来源为 `teacher_explicit`；答案识别证据来源为 `system_auto`                                  |
+| F 建议与教师复核 | PASS | Codex-local 只产生建议；缺分建议进入唯一“手动评分”入口，正常建议进入“修改分数”；评分表单自动聚焦并即时校验分项合计；4/4 复核完成；complete ScoreSnapshot 已对账 |
 
-- 两份最新 `complete` ScoreSnapshot：`32cfff83-75f5-40e0-a7f5-223ea549add7`（9 分）、`b8a01797-790a-49d8-b1f3-d70f2d6f2295`（8 分）。
-- GradeRelease：`c68f7259-3f6a-44dc-8f59-df6833b1e67f`，固定的 Snapshot ID 与上列完全一致。
-- XLSX Job `74566c96-098e-47d3-aaa3-14bd797ee022`、中文个人 PDF Job `4f009a35-62b9-4fc5-806b-d45682d72c80` 均为 `completed`，来源为同一 GradeRelease。
-- AnalyticsSnapshot `a27a7854-a040-41d3-97b5-6937775573bd` 读取同一 GradeRelease；参与人数 2、平均分 8.5。第三名未完成学生不进入分母，也没有被记为 0 分。
-- 正式成绩来自 finalized Submission 的最新 complete Snapshot；GradingResult 和临时 TeacherReview 仅作为复核输入。
+主业务证据的 `result` 为 `passed_through_F`，`completed_through` 为 `F`，`grade_release_write_attempted` 为 `false`，作业下 GradeRelease 查询计数为 `0`。G（发布/报告）与 H（分析）刻意不运行。
 
-## OCR 与主观题边界
+## 公式不可读专项
 
-本闭环使用 `fake` OCR，且只在 `APP_ENV=test` 的独立 Compose 中启用。页面明确显示其为“非生产工作流测试适配器”。该证据只证明浏览器 UI、任务状态、持久化与业务编排闭环，不证明 RapidOCR 准确率、手写数学、公式 OCR 或 LaTeX 可靠性。
-
-主观题正式 Provider 保持 `unavailable`，production 仍禁止测试 FakeGradingProvider。两份主观题最终分均由教师在三栏复核 UI 中手动输入；没有由 Fake Provider 生成主观题最终分。TeachingInsight 为固定 AnalyticsSnapshot 上的规则型建议，不是大模型深度分析。
-
-## 未覆盖项
-
-本轮不覆盖异常业务矩阵、完整跨教师资源权限矩阵、拆分/合并页面、批量 PDF ZIP、签名 URL 实际过期等待、OCR/报告并发容量、故障恢复、真实 OCR 准确率、学生端或成绩通知。GradeRelease 的 `released` 仅表示教师确认一组固定成绩，不表示已经送达学生。
+`scripts/formula_unreadable_browser_acceptance.mjs` 另行通过以下浏览器闭环：合成教师登录、创建作业和 PNG 上传、公式质量阻断、教师选择不可读原因并确认、重新框选后恢复为人工待确认。脚本不会把不可读候选自动确认为公式。
 
 ## 复现
 
@@ -45,8 +33,15 @@
 
 ```powershell
 docker compose -p ahamark-business-e2e -f docker-compose.business-e2e.yml up --build -d
-docker compose -p ahamark-business-e2e -f docker-compose.business-e2e.yml exec api python -m app.cli.seed_business_e2e_teacher
+docker compose -p ahamark-business-e2e -f docker-compose.business-e2e.yml exec -T api python -m app.cli.seed_business_e2e_teacher
+$env:ALLOW_SYNTHETIC_MUTATIONS = "1"
 node scripts/business_browser_e2e.mjs
+$env:FORMULA_ACCEPTANCE_EVIDENCE_DIR = "<仓库外证据目录>"
+node scripts/formula_unreadable_browser_acceptance.mjs
 ```
 
-脚本成功时打印 `BUSINESS_BROWSER_E2E_PASSED ... stages=8` 并覆写脱敏机器证据。运行数据默认保留；不要执行 `docker compose down -v`。
+主脚本成功时打印 `BUSINESS_BROWSER_E2E_STOPPED ... stages=6 completed_through=F`。运行结束使用 `docker compose ... stop`；保留独立卷供审计和复查。
+
+## 未覆盖项
+
+本机验收不覆盖 node2 登录与公网链路、真实 Provider 准确率、真实学生资料、移动 Safari、自签名证书体验、生产容量/恢复、成绩发布、通知、报告或学情分析。上述事项需要单独授权和生产安全门禁，不能由本机 fake 结果外推。

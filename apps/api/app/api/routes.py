@@ -3,6 +3,7 @@ import uuid
 from typing import Annotated
 
 from app.api.actor import Actor
+from app.api.admin_accounts import router as admin_accounts_router
 from app.api.ai_grading import router as ai_grading_router
 from app.api.answer_recognition import router as answer_recognition_router
 from app.api.assignment_answer_rubric import router as assignment_answer_rubric_router
@@ -40,6 +41,7 @@ from sqlalchemy.orm import Session
 
 router = APIRouter()
 router.include_router(auth_router)
+router.include_router(admin_accounts_router)
 router.include_router(codex_local_router)
 router.include_router(class_resources_router)
 router.include_router(domain_router)

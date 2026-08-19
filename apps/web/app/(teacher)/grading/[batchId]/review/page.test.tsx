@@ -510,8 +510,9 @@ it("uses an inline teacher scoring form and validates criterion totals", async (
   fireEvent.change(screen.getByLabelText("评分项 2 得分"), {
     target: { value: "5" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "保存最终评分" }));
-  expect(await screen.findByRole("status")).toHaveTextContent(
+  const save = screen.getByRole("button", { name: "保存最终评分" });
+  expect(save).toBeDisabled();
+  expect(screen.getByTestId("scoring-validation")).toHaveTextContent(
     "分项合计 9 分，必须等于最终分 10 分",
   );
   expect(mocks.review).not.toHaveBeenCalled();
@@ -522,7 +523,11 @@ it("uses an inline teacher scoring form and validates criterion totals", async (
   fireEvent.change(screen.getByLabelText("教师反馈"), {
     target: { value: "过程正确，最后一步有误" },
   });
-  fireEvent.click(screen.getByRole("button", { name: "保存最终评分" }));
+  expect(screen.getByTestId("scoring-validation")).toHaveTextContent(
+    "分数与评分项已核对，可以保存。",
+  );
+  expect(save).toBeEnabled();
+  fireEvent.click(save);
 
   await waitFor(() =>
     expect(mocks.review).toHaveBeenCalledWith("ans-1", {
@@ -533,6 +538,42 @@ it("uses an inline teacher scoring form and validates criterion totals", async (
         "criterion-1": "4",
         "criterion-2": "5",
       },
+      reason: "教师手动评分",
+    }),
+  );
+});
+
+it("uses one focused manual-scoring entry when the suggestion has no score", async () => {
+  mockReadiness(false);
+  const data = workspace({ reviewed: 0 });
+  const answer = data.items[0].answers[0];
+  answer.status = "review_required";
+  answer.requires_review = true;
+  answer.review = undefined;
+  answer.result.score = null;
+  answer.criteria = [];
+  mocks.reviewWorkspace.mockResolvedValue(data);
+  mocks.review.mockResolvedValue({});
+  render(<ReviewPage />);
+
+  const manual = await screen.findByRole("button", { name: "手动评分" });
+  expect(screen.getAllByRole("button", { name: "手动评分" })).toHaveLength(1);
+  fireEvent.click(manual);
+
+  const scoreInput = await screen.findByLabelText("教师最终分数");
+  await waitFor(() => expect(scoreInput).toHaveFocus());
+  expect(
+    screen.queryByRole("button", { name: "手动评分" }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "保存最终评分" })).toBeDisabled();
+
+  fireEvent.change(scoreInput, { target: { value: "7" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存最终评分" }));
+  await waitFor(() =>
+    expect(mocks.review).toHaveBeenCalledWith("ans-1", {
+      decision: "manual_scored",
+      final_score: "7",
+      final_feedback: "",
       reason: "教师手动评分",
     }),
   );
@@ -1100,7 +1141,7 @@ it("ignores review shortcuts inside inputs and accepts from the page shortcut", 
   render(<ReviewPage />);
 
   fireEvent.click(await screen.findByRole("button", { name: "修改分数" }));
-  const scoreInput = screen.getByLabelText("教师最终分数");
+  const scoreInput = await screen.findByLabelText("教师最终分数");
   fireEvent.keyDown(scoreInput, { key: "a" });
   expect(mocks.review).not.toHaveBeenCalled();
 

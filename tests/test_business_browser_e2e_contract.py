@@ -12,6 +12,12 @@ ASSIGNMENT_GENERATION_SCRIPT = (
 SYNTHETIC_GUARD_PATH = ROOT / "scripts" / "synthetic_browser_guard.mjs"
 SYNTHETIC_GUARD_SCRIPT = SYNTHETIC_GUARD_PATH.read_text(encoding="utf-8")
 COMPOSE = (ROOT / "docker-compose.business-e2e.yml").read_text(encoding="utf-8")
+SEED_TEACHER = (ROOT / "apps" / "api" / "app" / "cli" / "seed_business_e2e_teacher.py").read_text(
+    encoding="utf-8"
+)
+FORMULA_BROWSER = (ROOT / "scripts" / "formula_unreadable_browser_acceptance.mjs").read_text(
+    encoding="utf-8"
+)
 WEB_API = (ROOT / "apps" / "web" / "lib" / "api.ts").read_text(encoding="utf-8")
 REVIEW_PAGE = (
     ROOT / "apps" / "web" / "app" / "(teacher)" / "grading" / "[batchId]" / "review" / "page.tsx"
@@ -1416,7 +1422,25 @@ def test_compose_keeps_only_explicit_synthetic_providers_fake() -> None:
     assert "AI_GRADING_PROVIDER: unavailable" in COMPOSE
     assert "GRADING_PROVIDER: unavailable" in COMPOSE
     assert "RECOGNITION_PROVIDER: fake" in COMPOSE
+    assert "FORMULA_RECOGNITION_PROVIDER: fake" in COMPOSE
     assert "ASSIGNMENT_GENERATION_PROVIDER: fake" in COMPOSE
+
+
+def test_compose_uses_fresh_versioned_synthetic_volumes() -> None:
+    for service in ("postgres", "redis", "minio"):
+        assert f"name: ahamark-business-e2e-{service}-v2" in COMPOSE
+
+
+def test_synthetic_browser_entrypoints_follow_username_login_contract() -> None:
+    assert "BUSINESS_E2E_TEACHER_USERNAME: business-e2e-teacher" in COMPOSE
+    assert 'DEFAULT_USERNAME = "business-e2e-teacher"' in SEED_TEACHER
+    assert "username=username" in SEED_TEACHER
+    assert "user.username = username" in SEED_TEACHER
+    for script in (SCRIPT, FORMULA_BROWSER):
+        assert 'getByLabel("用户名").fill(username)' in script
+        assert 'getByLabel("邮箱")' not in script
+        assert 'getByLabel("大学课程")' in script
+        assert 'getByLabel("学科")' not in script
 
 
 def test_file_analysis_wait_requires_materialization_and_durable_confirmation() -> None:
@@ -1427,27 +1451,25 @@ def test_file_analysis_wait_requires_materialization_and_durable_confirmation() 
     assert "if (files.length === 0)" in helper
     assert 'done: false, state: "analyses not materialized"' in helper
     assert '!["suggested", "confirmed"].includes(item.analysis_status)' in helper
-    assert 'item.analysis_status !== "suggested"' in helper
-    assert "roleIsAutomatic" in helper
-    assert "sourceIsAutomatic" in helper
-    assert 'warnings.includes("FILE_ROLE_CONFLICT_REVIEW_REQUIRED")' in helper
-    assert "return !(roleIsAutomatic && sourceIsAutomatic)" in helper
+    assert 'item.analysis_status === "suggested"' in helper
+    assert "roleIsAutomatic" not in helper
+    assert "sourceIsAutomatic" not in helper
     assert "adoption:" in helper
-    assert '"system_auto"' in helper
+    assert 'adoption: "teacher"' in helper
     assert "teacher_confirmed_role" in helper
     assert "teacher_confirmed_answer_source" in helper
     assert "file analysis write-after-GET" in helper
     assert "if (before === 0) return" not in helper
     pending = helper.index("const pending = files.filter")
     expand = helper.index('"file analysis details expanded"', pending)
-    button = helper.index('name: "确认文件分析"', expand)
+    button = helper.index('name: "保存文件用途"', expand)
     assert pending < expand < button
     assert '"details#generation-file-analysis"' in helper
     assert "node instanceof HTMLDetailsElement" in helper
     assert 'fileAnalysisRegion.locator("summary").first()' in helper
     assert "await summary.click()" in helper
     assert "fileAnalysisRegion.getByRole" in helper
-    assert 'page.getByRole("button", { name: "确认文件分析" })' not in helper
+    assert 'page.getByRole("button", { name: "保存文件用途" })' not in helper
     assert 'method: "PATCH"' not in helper
 
 
@@ -1571,6 +1593,27 @@ def test_assignment_generation_browser_e2e_uses_structured_publication_only() ->
 def test_business_browser_e2e_uses_explicit_context_and_one_click_publication() -> None:
     assert '"--context"' in SCRIPT
     assert "dockerContext" in SCRIPT
+
+
+def test_business_browser_e2e_uses_current_three_step_assignment_wizard() -> None:
+    assert "getByText(/第 1 步 · 准备作业/)" in SCRIPT
+    assert "getByText(/第 2 步 · 核对内容/)" in SCRIPT
+    assert 'getByRole("heading", { name: "已上传到此作业" })' in SCRIPT
+    assert 'getByRole("button", { name: /步骤 2.*核对内容/ })' in SCRIPT
+    assert "getByText(/整理页面（1 页）/)" in SCRIPT
+    assert 'getByRole("heading", { name: /整理页面/ })' not in SCRIPT
+    assert 'getByRole("heading", { name: "上传试卷" })' not in SCRIPT
+    assert "name: /步骤 3/" not in SCRIPT
+    assert "name: /步骤 4/" not in SCRIPT
+    assert "name: /步骤 5/" not in SCRIPT
+    assert "?step=6" not in SCRIPT
+    assert 'getByRole("button", { name: "开始手动切题" })' in SCRIPT
+    assert 'getByLabel("题目框选画布")' in SCRIPT
+    assert 'getByRole("button", { name: "保存框选区域" })' in SCRIPT
+    assert 'getByRole("button", { name: "保存区域" })' not in SCRIPT
+    assert "name: /^(?:开始整理|重新整理)$/" in SCRIPT
+    assert 'getByLabel("草稿生成进度")' in SCRIPT
+    assert 'name: "生成完整草稿"' not in SCRIPT
     assert "BUSINESS_E2E_COMPOSE_FILE" in SCRIPT
     assert 'name: "确认并发布"' in SCRIPT
     assert "confirm_and_publish_enabled" in SCRIPT
@@ -1630,9 +1673,9 @@ def test_publication_has_api_and_ui_hard_preconditions() -> None:
     assert "publicationSession.session.structured_rubric_set_id" in block
     assert "publicationStructuredSet.body.id" in block
     assert "publicationSession.session.counts.blocking, 0" in block
-    assert "publicationSession.session.counts.warning, 0" in block
+    assert "publicationSession.session.counts.warning, 0" not in block
     assert "missing.length === 0" in block
-    assert '"✓ 已满足发布条件"' in block
+    assert '"✓ 可以发布"' in block
     assert "publishButton.isEnabled()" in block
     assert "publicationReady.publishEnabled, true" in block
 
@@ -1764,7 +1807,7 @@ def test_region_draw_readiness_contract_rejects_missing_image_or_stability_check
 def test_region_draw_pointer_safety_contract_rejects_unscrolled_or_unclipped_drag() -> None:
     helper = extract_js_function(SCRIPT, "drawSyntheticRegionThroughUi")
 
-    unscrolled = helper.replace("await canvas.scrollIntoViewIfNeeded()", "", 1)
+    unscrolled = helper.replace("await canvas.scrollIntoViewIfNeeded()", "")
     assert "scroll-into-view-must-precede-mouse" in draw_pointer_safety_violations(unscrolled)
 
     unbounded = helper.replace(
@@ -1805,7 +1848,10 @@ def test_stage_e_records_processing_regions_and_current_evidence_metadata() -> N
     assert "/processing-pages" in helper
     assert "/region-candidates" in helper
     assert "/segmentation-incomplete" in helper
-    assert "processing_start: responseMetadata" in helper
+    assert "processing_start:" in helper
+    assert "status: startResponse.status" in helper
+    assert "request_id: startResponse.request_id" in helper
+    assert "error_code: startResponse.error_code" in helper
     assert "processing_read:" in helper
     assert "pages_read:" in helper
     assert "initial_regions:" in helper
@@ -1827,8 +1873,10 @@ def test_stage_e_records_processing_regions_and_current_evidence_metadata() -> N
             .split("if (singleContinueProof) {", 1)[1]
             .split("\n  } else {\n    const beforePreparationResponse", 1)[0]
         )
-        assert "automaticConfirmations" in single_branch
-        assert "automaticConfirmationOrigins" in single_branch
+        assert "confirmationEvidence" in single_branch
+        assert "confirmationOrigins" in single_branch
+        assert 'item.confirmation_origin === "teacher_explicit"' in single_branch
+        assert 'item.confirmation_origin === "system_auto"' in single_branch
         assert "manual_region_confirmation_count: 0" in single_branch
         assert "manual_recognition_confirmation_count: 0" in single_branch
         assert 'run.status === "awaiting_teacher_review"' in single_branch

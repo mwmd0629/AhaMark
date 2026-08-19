@@ -229,6 +229,8 @@ export default function ReviewPage() {
     until: number;
   }>();
   const [draftOwnerAnswerId, setDraftOwnerAnswerId] = useState<string>();
+  const scoringFormRef = useRef<HTMLElement>(null);
+  const scoreInputRef = useRef<HTMLInputElement>(null);
   const keyboardActionRef = useRef<(key: string) => void>(() => undefined);
   const fetchWorkspace = () =>
     jointQuestionId
@@ -376,6 +378,30 @@ export default function ReviewPage() {
     (answer.regions ?? []).length > 0 &&
     !hasManualOrIncompleteCriteria(answer),
   );
+  const needsManualScoring = Boolean(
+    answer &&
+    (!answer.result ||
+      answer.result.score == null ||
+      hasManualOrIncompleteCriteria(answer)),
+  );
+  const scoreIsInvalid =
+    scoreDraft.trim() === "" ||
+    Number.isNaN(Number(scoreDraft)) ||
+    Number(scoreDraft) < 0 ||
+    Number(scoreDraft) > maxScore;
+  const criterionTotalMismatch = Boolean(
+    answer?.criteria.length &&
+    !scoreIsInvalid &&
+    !hasInvalidCriterion &&
+    Math.abs(criterionTotal - Number(scoreDraft)) > 0.0001,
+  );
+  const scoringValidationMessage = scoreIsInvalid
+    ? `最终分数必须在 0–${maxScore} 范围内`
+    : hasInvalidCriterion
+      ? "请填写全部评分项，并确保每项分值不超过该项满分"
+      : criterionTotalMismatch
+        ? `分项合计 ${criterionTotal} 分，必须等于最终分 ${Number(scoreDraft)} 分`
+        : "";
   const draftDirty = Boolean(
     answer &&
     scoringDecision &&
@@ -516,6 +542,19 @@ export default function ReviewPage() {
     const index = targets.findIndex((target) => target.answerId === answer.id);
     const target = targets[index + offset];
     if (target) selectTarget(target);
+  }
+
+  function beginScoring(decision: "modified" | "manual_scored") {
+    setScoringDecision(decision);
+    setMessage("");
+    window.requestAnimationFrame(() => {
+      scoringFormRef.current?.scrollIntoView?.({
+        behavior: "smooth",
+        block: "nearest",
+      });
+      scoreInputRef.current?.focus({ preventScroll: true });
+      scoreInputRef.current?.select();
+    });
   }
 
   async function submitReview(decision: Decision) {
@@ -856,7 +895,7 @@ export default function ReviewPage() {
     if (key === "a" && canAcceptSuggestion && answer && !isCompleted(answer)) {
       void submitReview("accepted");
     } else if (key === "e" && answer && !answer.review) {
-      setScoringDecision(answer.result ? "modified" : "manual_scored");
+      beginScoring(needsManualScoring ? "manual_scored" : "modified");
     } else if (key === "ArrowLeft") {
       moveReviewTarget(-1);
     } else if (key === "ArrowRight") {
@@ -910,7 +949,7 @@ export default function ReviewPage() {
         </div>
       </header>
       <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-100 px-3 py-2 text-xs text-slate-600">
-        <span>快捷键：A 确认建议 · E 修改分数 · ← 上一题 · → 下一题</span>
+        <span>快捷键：A 确认建议 · E 打开评分 · ← 上一题 · → 下一题</span>
         {lastAccepted && Date.now() <= lastAccepted.until && (
           <button
             className="rounded border bg-white px-3 py-1 font-medium text-slate-900"
@@ -1335,7 +1374,7 @@ export default function ReviewPage() {
                   </p>
                 </div>
               )}
-              {!isCompleted(answer) && (
+              {!isCompleted(answer) && !scoringDecision && (
                 <div className="grid gap-2 sm:grid-cols-2">
                   {canAcceptSuggestion && (
                     <Action
@@ -1346,10 +1385,10 @@ export default function ReviewPage() {
                     />
                   )}
                   <Action
-                    label={answer.result ? "修改分数" : "手动评分"}
+                    label={needsManualScoring ? "手动评分" : "修改分数"}
                     onClick={() =>
-                      setScoringDecision(
-                        answer.result ? "modified" : "manual_scored",
+                      beginScoring(
+                        needsManualScoring ? "manual_scored" : "modified",
                       )
                     }
                     disabled={saving}
@@ -1373,9 +1412,9 @@ export default function ReviewPage() {
                     </Link>
                     <button
                       className="rounded border bg-white px-3 py-1"
-                      onClick={() => setScoringDecision("modified")}
+                      onClick={() => beginScoring("modified")}
                     >
-                      修改分数
+                      处理评分差异
                     </button>
                   </div>
                 </div>
@@ -1397,9 +1436,9 @@ export default function ReviewPage() {
                     </Link>
                     <button
                       className="rounded border bg-white px-3 py-1"
-                      onClick={() => setScoringDecision("modified")}
+                      onClick={() => beginScoring("modified")}
                     >
-                      修改分数
+                      处理评分差异
                     </button>
                   </div>
                 </div>
@@ -1497,14 +1536,9 @@ export default function ReviewPage() {
                   role="alert"
                   className="rounded border border-amber-300 bg-amber-50 p-3 text-sm"
                 >
-                  <p>建议分缺失或包含需要教师判断的评分项。</p>
-                  <button
-                    className="mt-2 rounded border bg-white px-3 py-1"
-                    disabled={saving}
-                    onClick={() => setScoringDecision("manual_scored")}
-                  >
-                    手动评分
-                  </button>
+                  <p>
+                    建议分缺失或包含需要教师判断的评分项，请由教师手动评分。
+                  </p>
                 </div>
               )}
               <details className="rounded border p-3 text-sm">
@@ -1616,7 +1650,9 @@ export default function ReviewPage() {
               )}
               {scoringDecision && (
                 <section
+                  ref={scoringFormRef}
                   aria-label="教师评分表单"
+                  data-testid="teacher-scoring-form"
                   className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-4"
                 >
                   <div className="flex flex-wrap items-start justify-between gap-2">
@@ -1626,15 +1662,35 @@ export default function ReviewPage() {
                         请确认或修改分数。
                       </p>
                     </div>
-                    <span className="text-sm font-medium">
+                    <span
+                      className={`rounded-full px-3 py-1 text-sm font-medium ${
+                        scoringValidationMessage
+                          ? "bg-amber-100 text-amber-900"
+                          : "bg-emerald-100 text-emerald-900"
+                      }`}
+                    >
                       分项合计 {criterionTotal} · 最终分 {scoreDraft || "—"} ·
                       满分 {maxScore || "—"}
                     </span>
                   </div>
+                  <p
+                    aria-live="polite"
+                    className={`mt-3 rounded border px-3 py-2 text-sm ${
+                      scoringValidationMessage
+                        ? "border-amber-300 bg-amber-50 text-amber-900"
+                        : "border-emerald-200 bg-emerald-50 text-emerald-800"
+                    }`}
+                    data-testid="scoring-validation"
+                  >
+                    {scoringValidationMessage ||
+                      "分数与评分项已核对，可以保存。"}
+                  </p>
                   <label className="mt-3 block text-sm">
                     最终分数
                     <input
+                      ref={scoreInputRef}
                       aria-label="教师最终分数"
+                      aria-invalid={scoreIsInvalid}
                       type="number"
                       min="0"
                       max={maxScore || undefined}
@@ -1652,6 +1708,14 @@ export default function ReviewPage() {
                           {criterion.max_points}）
                           <input
                             aria-label={`${criterion.title || `评分项 ${index + 1}`} 得分`}
+                            aria-invalid={
+                              (criterionDrafts[criterion.criterion_id] ??
+                                "") === "" ||
+                              Number(criterionDrafts[criterion.criterion_id]) <
+                                0 ||
+                              Number(criterionDrafts[criterion.criterion_id]) >
+                                Number(criterion.max_points)
+                            }
                             type="number"
                             min="0"
                             max={criterion.max_points}
@@ -1684,7 +1748,7 @@ export default function ReviewPage() {
                     <Action
                       label="保存最终评分"
                       primary
-                      disabled={saving}
+                      disabled={saving || Boolean(scoringValidationMessage)}
                       onClick={() => void submitReview(scoringDecision)}
                     />
                     <Action
@@ -1710,13 +1774,6 @@ export default function ReviewPage() {
                     onClick={() => void regradeCurrentAnswer()}
                     disabled={saving}
                   />
-                  {canAcceptSuggestion && !isCompleted(answer) && (
-                    <Action
-                      label="手动评分"
-                      onClick={() => setScoringDecision("manual_scored")}
-                      disabled={saving}
-                    />
-                  )}
                 </div>
               </details>
               {message && (

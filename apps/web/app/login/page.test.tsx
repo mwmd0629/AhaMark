@@ -1,5 +1,11 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, expect, it, vi } from "vitest";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import LoginPage from "./page";
 
 const mocks = vi.hoisted(() => ({
@@ -23,6 +29,7 @@ beforeEach(() => {
   mocks.login.mockReset();
   mocks.replace.mockReset();
 });
+afterEach(cleanup);
 
 it("logs in with an administrator-issued username instead of an email", async () => {
   mocks.login.mockResolvedValue({
@@ -51,4 +58,27 @@ it("logs in with an administrator-issued username instead of an email", async ()
     expect(mocks.login).toHaveBeenCalledWith("teacher01", "secure-pass-123"),
   );
   expect(mocks.replace).toHaveBeenCalledWith("/dashboard");
+});
+
+it("routes administrators to the account operations center", async () => {
+  mocks.login.mockResolvedValue({
+    id: "admin-1",
+    username: "root-admin",
+    email: "root-admin@ahamark.local",
+    display_name: "平台主管",
+    roles: ["admin"],
+  });
+  render(<LoginPage />);
+  fireEvent.change(screen.getByLabelText("用户名"), {
+    target: { value: "root-admin" },
+  });
+  fireEvent.change(screen.getByLabelText("密码"), {
+    target: { value: "secure-pass-123" },
+  });
+  fireEvent.submit(
+    screen.getByRole("button", { name: "登录" }).closest("form")!,
+  );
+  await waitFor(() =>
+    expect(mocks.replace).toHaveBeenCalledWith("/admin/accounts"),
+  );
 });

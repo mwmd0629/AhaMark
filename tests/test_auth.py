@@ -87,6 +87,12 @@ def test_admin_can_initialize_teacher_without_storing_plaintext() -> None:
     assert user.email == "new-teacher@ahamark.local"
     assert user.password_hash != "not-plain-password"
     assert user.password_hash.startswith("scrypt$")
+    login = TestClient(app).post(
+        "/auth/login",
+        json={"username": "new-teacher", "password": "not-plain-password"},
+    )
+    assert login.status_code == 200
+    assert login.json()["roles"] == ["teacher"]
 
 
 def test_admin_can_issue_student_username_and_public_registration_is_absent() -> None:

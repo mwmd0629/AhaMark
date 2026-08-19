@@ -20,9 +20,11 @@ export default function LoginPage() {
       );
       const roles = user.roles ?? [];
       router.replace(
-        roles.includes("student") && !roles.includes("teacher")
-          ? "/student"
-          : "/dashboard",
+        roles.includes("admin")
+          ? "/admin/accounts"
+          : roles.includes("student") && !roles.includes("teacher")
+            ? "/student"
+            : "/dashboard",
       );
     } catch (reason) {
       setError(

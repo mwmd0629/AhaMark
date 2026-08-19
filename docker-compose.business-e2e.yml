@@ -19,12 +19,14 @@ x-app-env: &app-env
   DEMO_ACTOR_ENABLED: "false"
   AUTH_COOKIE_SECURE: "false"
   RECOGNITION_PROVIDER: fake
+  FORMULA_RECOGNITION_PROVIDER: fake
   GRADING_PROVIDER: unavailable
   AI_GRADING_PROVIDER: unavailable
   ASSIGNMENT_GENERATION_PROVIDER: fake
   CODEX_LOCAL_ENABLED: "true"
   CODEX_LOCAL_INTERNAL_TOKEN: ${BUSINESS_E2E_CODEX_LOCAL_INTERNAL_TOKEN:-phase3-business-e2e-codex-local-token-2026-only}
   BUSINESS_E2E_TEACHER_PASSWORD: Synthetic-Business-E2E-Only!
+  BUSINESS_E2E_TEACHER_USERNAME: business-e2e-teacher
 
 services:
   postgres:
@@ -63,28 +65,38 @@ services:
       timeout: 3s
       retries: 20
   api:
-    build: {context: ., dockerfile: apps/api/Dockerfile}
+    build: { context: ., dockerfile: apps/api/Dockerfile }
     environment: *app-env
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     ports: ["8800:8000"]
     depends_on:
-      postgres: {condition: service_healthy}
-      redis: {condition: service_healthy}
-      minio: {condition: service_healthy}
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio: { condition: service_healthy }
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+        ]
       interval: 5s
       timeout: 3s
       retries: 20
   worker:
-    build: {context: ., dockerfile: apps/api/Dockerfile}
+    build: { context: ., dockerfile: apps/api/Dockerfile }
     environment: *app-env
     command: celery -A workers.celery_app:celery_app worker --loglevel=INFO
     depends_on:
-      redis: {condition: service_healthy}
-      api: {condition: service_healthy}
+      redis: { condition: service_healthy }
+      api: { condition: service_healthy }
     healthcheck:
-      test: ["CMD-SHELL", "celery -A workers.celery_app:celery_app inspect ping -d celery@$${HOSTNAME}"]
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A workers.celery_app:celery_app inspect ping -d celery@$${HOSTNAME}",
+        ]
       interval: 10s
       timeout: 8s
       retries: 10
@@ -92,12 +104,12 @@ services:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
-      args: {NEXT_PUBLIC_API_URL: "http://localhost:8800"}
+      args: { NEXT_PUBLIC_API_URL: "http://localhost:8800" }
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:8800
       HOSTNAME: 0.0.0.0
     ports: ["3300:3000"]
-    depends_on: {api: {condition: service_healthy}}
+    depends_on: { api: { condition: service_healthy } }
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000"]
       interval: 5s
@@ -105,6 +117,9 @@ services:
       retries: 20
 
 volumes:
-  postgres_data: {}
-  redis_data: {}
-  minio_data: {}
+  postgres_data:
+    name: ahamark-business-e2e-postgres-v2
+  redis_data:
+    name: ahamark-business-e2e-redis-v2
+  minio_data:
+    name: ahamark-business-e2e-minio-v2

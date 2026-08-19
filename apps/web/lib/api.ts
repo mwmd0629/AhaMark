@@ -454,6 +454,64 @@ export const authApi = {
   me: () => request<AuthUser>("/auth/me"),
   logout: () => request<void>("/auth/logout", { method: "POST" }),
 };
+export type AccountType = "teacher" | "student" | "admin";
+export type ManagedAccount = {
+  id: string;
+  username: string;
+  display_name: string;
+  account_type: AccountType;
+  status: "active" | "inactive";
+  active_session_count: number;
+  last_seen_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+export type AccountList = {
+  items: ManagedAccount[];
+  total: number;
+  limit: number;
+  offset: number;
+  summary: Record<AccountType, { total: number; active: number }>;
+};
+export const adminAccountsApi = {
+  list: (filters?: {
+    query?: string;
+    account_type?: AccountType | "";
+    status?: "active" | "inactive" | "";
+    offset?: number;
+  }) => {
+    const params = new URLSearchParams();
+    if (filters?.query) params.set("query", filters.query);
+    if (filters?.account_type) params.set("account_type", filters.account_type);
+    if (filters?.status) params.set("status", filters.status);
+    if (filters?.offset) params.set("offset", String(filters.offset));
+    const suffix = params.size ? `?${params}` : "";
+    return request<AccountList>(`/admin/accounts${suffix}`);
+  },
+  create: (input: {
+    username: string;
+    display_name: string;
+    password: string;
+    account_type: AccountType;
+  }) =>
+    request<ManagedAccount>("/admin/accounts", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  update: (
+    id: string,
+    input: { display_name?: string; status?: "active" | "inactive" },
+  ) =>
+    request<ManagedAccount>(`/admin/accounts/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  resetPassword: (id: string, password: string) =>
+    request<{ ok: boolean; sessions_revoked: number }>(
+      `/admin/accounts/${id}/reset-password`,
+      { method: "POST", body: JSON.stringify({ password }) },
+    ),
+};
 export async function getHealth(signal?: AbortSignal): Promise<Health> {
   return request<Health>("/health", { signal });
 }

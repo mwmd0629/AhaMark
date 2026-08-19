@@ -21,7 +21,7 @@ export function AuthGate({
   audience = "teacher",
 }: {
   children: ReactNode;
-  audience?: "teacher" | "student";
+  audience?: "teacher" | "student" | "admin";
 }) {
   const router = useRouter();
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -30,14 +30,19 @@ export function AuthGate({
       .me()
       .then((nextUser) => {
         const roles = nextUser.roles ?? [];
-        const studentOnly =
-          roles.includes("student") && !roles.includes("teacher");
+        const isAdmin = roles.includes("admin");
+        const isStudent = roles.includes("student");
+        const isTeacher = roles.includes("teacher") || roles.length === 0;
         if (audience === "student" && !roles.includes("student")) {
-          router.replace("/dashboard");
+          router.replace(isAdmin ? "/admin/accounts" : "/dashboard");
           return;
         }
-        if (audience === "teacher" && studentOnly) {
-          router.replace("/student");
+        if (audience === "admin" && !isAdmin) {
+          router.replace(isStudent ? "/student" : "/dashboard");
+          return;
+        }
+        if (audience === "teacher" && !isTeacher) {
+          router.replace(isAdmin ? "/admin/accounts" : "/student");
           return;
         }
         setUser(nextUser);

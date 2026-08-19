@@ -9,12 +9,17 @@ const webUrl =
 const email =
   process.env.BUSINESS_E2E_TEACHER_EMAIL ??
   "teacher@business-e2e.synthetic.invalid";
+const username =
+  process.env.BUSINESS_E2E_TEACHER_USERNAME ?? "business-e2e-teacher";
 const password =
   process.env.BUSINESS_E2E_TEACHER_PASSWORD ?? "Synthetic-Business-E2E-Only!";
 const evidenceDir = process.env.FORMULA_ACCEPTANCE_EVIDENCE_DIR;
 
 if (!email.endsWith(".synthetic.invalid")) {
   throw new Error("formula acceptance requires a synthetic.invalid teacher");
+}
+if (!/^[a-z0-9][a-z0-9._-]{2,63}$/.test(username)) {
+  throw new Error("formula acceptance requires a valid synthetic username");
 }
 if (!/^http:\/\/(localhost|127\.0\.0\.1):3300$/.test(webUrl)) {
   throw new Error("formula acceptance only permits the local isolated preview");
@@ -80,6 +85,38 @@ function syntheticPage() {
   ]);
 }
 
+async function dragWithinVisibleCanvas(page, canvas, startRatio, endRatio) {
+  await canvas.scrollIntoViewIfNeeded();
+  const [box, viewport] = await Promise.all([
+    canvas.boundingBox(),
+    Promise.resolve(page.viewportSize()),
+  ]);
+  assert.ok(box, "formula canvas must have a bounding box");
+  assert.ok(viewport, "formula acceptance requires a browser viewport");
+  const visible = {
+    x: Math.max(box.x, 0),
+    y: Math.max(box.y, 0),
+    right: Math.min(box.x + box.width, viewport.width),
+    bottom: Math.min(box.y + box.height, viewport.height),
+  };
+  visible.width = visible.right - visible.x;
+  visible.height = visible.bottom - visible.y;
+  assert.ok(
+    visible.width >= 120 && visible.height >= 80,
+    `formula canvas visible area is too small: ${JSON.stringify({ box, viewport, visible })}`,
+  );
+  const point = (ratio) => ({
+    x: visible.x + visible.width * ratio.x,
+    y: visible.y + visible.height * ratio.y,
+  });
+  const start = point(startRatio);
+  const end = point(endRatio);
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(end.x, end.y);
+  await page.mouse.up();
+}
+
 const runId = `formula-ui-${Date.now()}`;
 const imagePath = path.join(evidenceDir, `${runId}.png`);
 fs.writeFileSync(imagePath, syntheticPage());
@@ -97,7 +134,7 @@ const result = {
 
 try {
   await page.goto(`${webUrl}/login`);
-  await page.getByLabel("邮箱").fill(email);
+  await page.getByLabel("用户名").fill(username);
   await page.getByLabel("密码").fill(password);
   await page.getByRole("button", { name: "登录" }).click();
   await page.waitForURL("**/dashboard");
@@ -108,7 +145,7 @@ try {
   const className = `公式验收合成班级 ${runId}`;
   await page.getByLabel("班级名称").fill(className);
   await page.getByLabel("年级").fill("合成大学一年级");
-  await page.getByLabel("学科").fill("合成数学分析");
+  await page.getByLabel("大学课程").fill("合成数学分析");
   await page.getByRole("button", { name: "保存班级" }).click();
   await page.getByText(className, { exact: true }).waitFor();
   const close = page.getByRole("button", { name: "关闭对话框" });
@@ -126,9 +163,9 @@ try {
   await page.getByRole("button", { name: "保存并继续" }).click();
   await page.getByLabel("选择试卷文件").setInputFiles(imagePath);
   await page
-    .getByText("上传成功", { exact: true })
+    .getByRole("heading", { name: "已上传到此作业" })
     .waitFor({ timeout: 60_000 });
-  await page.getByRole("button", { name: "进入内容核对" }).click();
+  await page.getByRole("button", { name: /步骤 2.*核对内容/ }).click();
   await page.getByText(/第 2 步 · 核对内容/).waitFor();
   result.checks.push("synthetic_assignment_and_png_upload");
 
@@ -140,13 +177,13 @@ try {
   await workspace.getByAltText("处理后页面").waitFor({ timeout: 60_000 });
 
   const canvas = workspace.getByAltText("处理后页面").locator("..");
-  const box = await canvas.boundingBox();
-  assert.ok(box);
   await workspace.getByRole("button", { name: "框选公式" }).click();
-  await page.mouse.move(box.x + box.width * 0.65, box.y + box.height * 0.68);
-  await page.mouse.down();
-  await page.mouse.move(box.x + box.width * 0.92, box.y + box.height * 0.9);
-  await page.mouse.up();
+  await dragWithinVisibleCanvas(
+    page,
+    canvas,
+    { x: 0.65, y: 0.55 },
+    { x: 0.92, y: 0.88 },
+  );
   await workspace.getByRole("button", { name: "识别公式" }).click();
   await workspace
     .getByRole("alert")
@@ -168,18 +205,12 @@ try {
 
   await workspace.getByRole("button", { name: "重新框选" }).click();
   await workspace.getByText(/重新框选这条公式/).waitFor();
-  const redrawBox = await canvas.boundingBox();
-  assert.ok(redrawBox);
-  await page.mouse.move(
-    redrawBox.x + redrawBox.width * 0.12,
-    redrawBox.y + redrawBox.height * 0.15,
+  await dragWithinVisibleCanvas(
+    page,
+    canvas,
+    { x: 0.12, y: 0.15 },
+    { x: 0.72, y: 0.38 },
   );
-  await page.mouse.down();
-  await page.mouse.move(
-    redrawBox.x + redrawBox.width * 0.72,
-    redrawBox.y + redrawBox.height * 0.38,
-  );
-  await page.mouse.up();
   await workspace.getByRole("button", { name: "识别公式" }).waitFor();
   assert.equal(
     await workspace
