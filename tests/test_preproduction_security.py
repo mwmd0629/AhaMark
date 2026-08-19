@@ -1,7 +1,7 @@
 from unittest.mock import Mock, patch
 
 import pytest
-from app.api.auth import check_rate_limit, rate_limit_key
+from app.api.auth import check_rate_limit, rate_limit_key, record_login_failure
 from app.core.config import Settings
 from fastapi import HTTPException
 from pydantic import ValidationError
@@ -58,6 +58,22 @@ def test_production_configuration_accepts_explicit_safe_values() -> None:
     assert Settings(**production_settings()).app_env == "production"
 
 
+def test_compose_bracket_host_allowlists_are_parsed_before_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FORMULA_RECOGNITION_ALLOWED_HOSTS", "[formula-ocr]")
+    monkeypatch.setenv("GRADING_ALLOWED_LOCAL_HOSTS", "[local-llm]")
+    monkeypatch.setenv("AI_GRADING_ALLOWED_LOCAL_HOSTS", '["local-llm"]')
+    monkeypatch.setenv("ASSIGNMENT_GENERATION_ALLOWED_LOCAL_HOSTS", "local-llm")
+
+    configured = Settings(_env_file=None)
+
+    assert configured.formula_recognition_allowed_hosts == ["formula-ocr"]
+    assert configured.grading_allowed_local_hosts == ["local-llm"]
+    assert configured.ai_grading_allowed_local_hosts == ["local-llm"]
+    assert configured.assignment_generation_allowed_local_hosts == ["local-llm"]
+
+
 def test_production_formula_http_provider_requires_strong_token_and_host_allowlist() -> None:
     with pytest.raises(ValidationError, match="FORMULA_RECOGNITION_API_KEY"):
         Settings(
@@ -88,14 +104,17 @@ def test_rate_limit_key_is_namespaced_hmac_without_plaintext() -> None:
 def test_shared_rate_limit_uses_redis_and_rejects_across_calls() -> None:
     settings = Settings(**production_settings(auth_login_max_attempts=2))
     client = Mock()
-    client.incr.side_effect = [1, 2, 3]
+    client.get.side_effect = [None, 1, 2]
+    client.incr.side_effect = [1, 2]
     with (
         patch("app.api.auth.get_settings", return_value=settings),
         patch("app.api.auth.redis.Redis.from_url", return_value=client),
     ):
         expected_key = rate_limit_key("shared")
         check_rate_limit("shared")
+        record_login_failure("shared")
         check_rate_limit("shared")
+        record_login_failure("shared")
         with pytest.raises(HTTPException) as rejected:
             check_rate_limit("shared")
     assert rejected.value.status_code == 429

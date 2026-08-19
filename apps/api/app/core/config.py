@@ -1,9 +1,11 @@
+import json
 import os
 import re
 from functools import lru_cache
+from typing import Annotated
 
 from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -16,9 +18,9 @@ class Settings(BaseSettings):
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
     celery_visibility_timeout: int = 3600
-    cors_origins: list[str] = ["http://localhost:3000"]
-    trusted_hosts: list[str] = ["localhost", "127.0.0.1", "testserver"]
-    csrf_trusted_origins: list[str] = []
+    cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:3000"]
+    trusted_hosts: Annotated[list[str], NoDecode] = ["localhost", "127.0.0.1", "testserver"]
+    csrf_trusted_origins: Annotated[list[str], NoDecode] = []
     minio_endpoint: str = "localhost:9000"
     minio_public_endpoint: str | None = None
     minio_access_key: str = "ahamark-local"
@@ -28,7 +30,11 @@ class Settings(BaseSettings):
     minio_secure: bool = False
     minio_public_secure: bool = False
     max_upload_bytes: int = 10 * 1024 * 1024
-    allowed_upload_types: list[str] = ["application/pdf", "image/jpeg", "image/png"]
+    allowed_upload_types: Annotated[list[str], NoDecode] = [
+        "application/pdf",
+        "image/jpeg",
+        "image/png",
+    ]
     signed_url_expiry_seconds: int = 900
     demo_actor_enabled: bool = True
     demo_actor_email: str = "demo-teacher@ahamark.local"
@@ -70,7 +76,7 @@ class Settings(BaseSettings):
     formula_recognition_provider: str = "unavailable"
     formula_recognition_base_url: str | None = None
     formula_recognition_api_key: SecretStr | None = None
-    formula_recognition_allowed_hosts: list[str] = []
+    formula_recognition_allowed_hosts: Annotated[list[str], NoDecode] = []
     formula_recognition_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
     formula_recognition_max_image_bytes: int = Field(
         default=5 * 1024 * 1024, ge=1024, le=20 * 1024 * 1024
@@ -92,7 +98,7 @@ class Settings(BaseSettings):
     grading_provider: str = "unavailable"
     grading_allow_external_provider_requests: bool = False
     grading_allow_local_provider_requests: bool = False
-    grading_allowed_local_hosts: list[str] = []
+    grading_allowed_local_hosts: Annotated[list[str], NoDecode] = []
     grading_base_url: str | None = None
     grading_api_key: str | None = None
     grading_model: str | None = None
@@ -104,12 +110,12 @@ class Settings(BaseSettings):
     ai_grading_provider: str = "unavailable"
     ai_grading_allow_external_provider_requests: bool = False
     ai_grading_allow_local_provider_requests: bool = False
-    ai_grading_allowed_local_hosts: list[str] = []
+    ai_grading_allowed_local_hosts: Annotated[list[str], NoDecode] = []
     assignment_generation_enabled: bool = True
     assignment_generation_provider: str = "unavailable"
     assignment_generation_allow_external_provider_requests: bool = False
     assignment_generation_allow_local_provider_requests: bool = False
-    assignment_generation_allowed_local_hosts: list[str] = []
+    assignment_generation_allowed_local_hosts: Annotated[list[str], NoDecode] = []
     assignment_generation_allow_teacher_start: bool = True
     assignment_generation_suggestion_only: bool = True
     assignment_generation_real_provider_quality_passed: bool = False
@@ -168,11 +174,25 @@ class Settings(BaseSettings):
         "csrf_trusted_origins",
         "allowed_upload_types",
         "formula_recognition_allowed_hosts",
+        "grading_allowed_local_hosts",
+        "ai_grading_allowed_local_hosts",
+        "assignment_generation_allowed_local_hosts",
         mode="before",
     )
     @classmethod
     def split_csv(cls, v: object) -> object:
-        return [x.strip() for x in v.split(",")] if isinstance(v, str) else v
+        if not isinstance(v, str):
+            return v
+        text = v.strip()
+        if not text:
+            return []
+        try:
+            decoded = json.loads(text)
+        except json.JSONDecodeError:
+            if text.startswith("[") and text.endswith("]"):
+                text = text[1:-1]
+            return [item.strip().strip("'\"") for item in text.split(",") if item.strip()]
+        return decoded
 
     @model_validator(mode="after")
     def production_guard(self) -> "Settings":
