@@ -280,7 +280,7 @@ export function AssignmentGenerationPanel({
       ["extracting_questions", "generating_rubrics"].includes(stage) &&
       row.status === "unavailable"
     )
-      return "可跳过（AI 辅助暂不可用）";
+      return providerChanged ? "旧任务未启用 AI" : "可跳过（AI 辅助暂不可用）";
     return STATUS_LABEL[row.status] ?? row.status;
   };
 

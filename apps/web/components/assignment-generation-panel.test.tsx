@@ -389,6 +389,10 @@ it("Provider 已恢复时引导旧任务使用本地 AI 重新整理", async () 
   expect(
     screen.getByText(/当前记录来自旧配置，请重新整理/),
   ).toBeInTheDocument();
+  expect(screen.getByText("旧任务未启用 AI")).toBeInTheDocument();
+  expect(
+    screen.queryByText("可跳过（AI 辅助暂不可用）"),
+  ).not.toBeInTheDocument();
   expect(
     screen.queryByRole("button", { name: "重试此阶段" }),
   ).not.toBeInTheDocument();
