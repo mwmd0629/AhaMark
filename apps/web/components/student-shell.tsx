@@ -109,6 +109,20 @@ export function StudentShell({ children }: { children: ReactNode }) {
                 </span>
               }
             >
+              <Link
+                href="/verify-email"
+                role="menuitem"
+                className="block w-full rounded-lg px-3 py-2 text-left text-sm text-amber-800 hover:bg-amber-50"
+              >
+                安全邮箱设置
+                <span className="ml-2 text-xs font-normal text-slate-500">
+                  {student?.email
+                    ? student.recovery_email_verified
+                      ? "已验证"
+                      : "未验证"
+                    : "未设置"}
+                </span>
+              </Link>
               <button
                 type="button"
                 role="menuitem"

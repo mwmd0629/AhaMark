@@ -464,6 +464,9 @@ export function Dialog({
   useEffect(() => {
     if (!open) return;
     closeRef.current?.focus();
+  }, [open]);
+  useEffect(() => {
+    if (!open) return;
     const onKey = (e: KeyboardEvent) => {
       if (dismissible && e.key === "Escape") {
         if (controlledOpen === undefined) setInternalOpen(false);

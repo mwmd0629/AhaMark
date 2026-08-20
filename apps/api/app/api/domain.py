@@ -20,8 +20,10 @@ from app.models import (
     MembershipStatus,
     SchoolClass,
     Student,
+    StudentAccountLink,
     StudentGroup,
     StudentGroupMember,
+    User,
     now_utc,
 )
 from app.security.files import UnsafeFile, inspect_xlsx_archive, safe_filename
@@ -259,6 +261,9 @@ def student_json(
     student: Student,
     membership: ClassStudent | None = None,
     groups: list[dict[str, str]] | None = None,
+    account_link_data: dict[str, Any] | None = None,
+    *,
+    account_link_prefetched: bool = False,
 ) -> dict[str, Any]:
     if groups is None:
         group_rows = db.execute(
@@ -270,6 +275,25 @@ def student_json(
             )
         ).all()
         groups = [{"id": str(group.id), "name": group.name} for group in group_rows]
+    if not account_link_prefetched:
+        account_link = db.scalar(
+            select(StudentAccountLink).where(StudentAccountLink.student_id == student.id)
+        )
+        account_user = db.get(User, account_link.user_id) if account_link is not None else None
+        account_link_data = (
+            {
+                "status": account_link.status,
+                "login_name": account_user.login_name if account_user else None,
+                "recovery_email": account_user.email if account_user else None,
+                "recovery_email_verified": bool(
+                    account_user
+                    and account_user.email is not None
+                    and account_user.email_verified_at is not None
+                ),
+            }
+            if account_link is not None
+            else None
+        )
     return {
         "id": str(student.id),
         "name": student.name,
@@ -281,6 +305,7 @@ def student_json(
         "membership_status": membership.status if membership else None,
         "joined_at": membership.joined_at if membership else None,
         "groups": groups,
+        "account_link": account_link_data,
         "assignment_history": [],
     }
 
@@ -329,6 +354,7 @@ def list_students(
     groups_by_student: dict[uuid.UUID, list[dict[str, str]]] = {
         student_id: [] for student_id in student_ids
     }
+    accounts_by_student: dict[uuid.UUID, dict[str, Any]] = {}
     if student_ids:
         group_rows = db.execute(
             select(StudentGroupMember.student_id, StudentGroup.id, StudentGroup.name)
@@ -340,9 +366,32 @@ def list_students(
         ).all()
         for student_id, group_id, group_name in group_rows:
             groups_by_student[student_id].append({"id": str(group_id), "name": group_name})
+        account_rows = db.execute(
+            select(StudentAccountLink, User)
+            .join(User, User.id == StudentAccountLink.user_id)
+            .where(StudentAccountLink.student_id.in_(student_ids))
+        ).all()
+        accounts_by_student = {
+            link.student_id: {
+                "status": link.status,
+                "login_name": user.login_name,
+                "recovery_email": user.email,
+                "recovery_email_verified": bool(
+                    user.email is not None and user.email_verified_at is not None
+                ),
+            }
+            for link, user in account_rows
+        }
     return {
         "items": [
-            student_json(db, student, membership, groups_by_student[student.id])
+            student_json(
+                db,
+                student,
+                membership,
+                groups_by_student[student.id],
+                accounts_by_student.get(student.id),
+                account_link_prefetched=True,
+            )
             for student, membership in rows
         ],
         "page": page,
@@ -414,8 +463,18 @@ def get_student(student_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]:
 def edit_student(student_id: uuid.UUID, data: StudentPatch, db: Db, actor: Actor) -> dict[str, Any]:
     item = owned_student(db, actor.id, student_id)
     changes = data.model_dump(exclude_unset=True)
+    account_link = db.scalar(
+        select(StudentAccountLink).where(StudentAccountLink.student_id == item.id)
+    )
     if "student_number" in changes:
         changes["student_number"] = changes["student_number"].strip()
+        if account_link is not None and changes["student_number"] != item.student_number:
+            raise ApiProblem(
+                409,
+                "STUDENT_NUMBER_LOCKED_BY_ACCOUNT",
+                "该学生已开通账号，学号同时是登录账号，不能直接修改",
+                {"field": "student_number"},
+            )
         if db.scalar(
             select(Student.id).where(
                 Student.owner_id == actor.id,

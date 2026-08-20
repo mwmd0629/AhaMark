@@ -93,9 +93,13 @@ def scoring_job() -> tuple[Any, AIScoringJob]:
 
 def test_migration_head_matches_strict_audit_models() -> None:
     script = ScriptDirectory.from_config(Config("alembic.ini"))
+    recovery_revision = script.get_revision("0027_student_login_recovery")
+    optional_email_revision = script.get_revision("0028_optional_student_recovery_email")
     portal_revision = script.get_revision("0026_student_portal")
     audit_revision = script.get_revision("0025_ai_grading_audit_contract")
-    assert script.get_current_head() == portal_revision.revision
+    assert script.get_current_head() == optional_email_revision.revision
+    assert optional_email_revision.down_revision == recovery_revision.revision
+    assert recovery_revision.down_revision == portal_revision.revision
     assert portal_revision.down_revision == audit_revision.revision
     assert audit_revision.down_revision == "0024_nullable_publish_readiness_due_at"
     assert {"validation_refs", "error_codes", "requires_review"} <= set(

@@ -429,9 +429,24 @@ export default function ClassDetailPage({
                   </td>
                   <td>
                     <div className="flex flex-wrap gap-1">
-                      {student.membership_status === "active" && (
-                        <StudentAccountDialog student={student} />
-                      )}
+                      {student.membership_status === "active" &&
+                        (student.account_link ? (
+                          <span className="rounded-lg bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-600">
+                            <strong className="block text-slate-800">
+                              {student.account_link.status === "active"
+                                ? "账号已开通"
+                                : "账号已停用"}
+                            </strong>
+                            学号 {student.account_link.login_name || "待处理"} ·
+                            {!student.account_link.recovery_email
+                              ? "安全邮箱未设置"
+                              : student.account_link.recovery_email_verified
+                                ? "安全邮箱已验证"
+                                : "安全邮箱待验证"}
+                          </span>
+                        ) : (
+                          <StudentAccountDialog student={student} />
+                        ))}
                       <Button
                         variant="ghost"
                         onClick={() => void remove(student)}

@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 @dataclass(frozen=True)
 class CurrentActor:
     id: uuid.UUID
-    email: str
+    email: str | None
 
 
 def digest(value: str) -> str:

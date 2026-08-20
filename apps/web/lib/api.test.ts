@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { ApiError, request } from "@/lib/api";
+import { ApiError, authApi, request } from "@/lib/api";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -77,4 +77,72 @@ it("preserves an intentional request abort", async () => {
   vi.stubGlobal("fetch", vi.fn().mockRejectedValue(aborted));
 
   await expect(request("/api/test")).rejects.toBe(aborted);
+});
+
+it("uses login identifiers and recovery-email payloads", async () => {
+  const fetchMock = vi
+    .fn()
+    .mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          id: "student-user",
+          email: "student@example.com",
+          login_name: "20260001",
+          recovery_email_verified: false,
+          display_name: "学生甲",
+          must_change_password: false,
+          roles: ["student"],
+          active_student_link: true,
+          landing_surface: "student",
+        }),
+        { status: 200 },
+      ),
+    )
+    .mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          challenge_id: "challenge-1",
+          message: "若账号与安全邮箱匹配，验证码将发送到该邮箱",
+          expires_in_seconds: 600,
+          development_code: null,
+        }),
+        { status: 202 },
+      ),
+    )
+    .mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          id: "student-user",
+          email: "new@example.com",
+          login_name: "20260001",
+          recovery_email_verified: false,
+          display_name: "学生甲",
+          must_change_password: false,
+          roles: ["student"],
+          active_student_link: true,
+          landing_surface: "student",
+        }),
+        { status: 200 },
+      ),
+    );
+  vi.stubGlobal("fetch", fetchMock);
+
+  await authApi.login("20260001", "password123");
+  await authApi.requestPasswordReset("20260001", "student@example.com");
+  await authApi.updateRecoveryEmail("new@example.com", "password123");
+
+  expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+    identifier: "20260001",
+    password: "password123",
+  });
+  expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({
+    identifier: "20260001",
+    recovery_email: "student@example.com",
+  });
+  expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toEqual({
+    recovery_email: "new@example.com",
+    current_password: "password123",
+  });
+  expect(fetchMock.mock.calls[2][0]).toContain("/auth/recovery-email");
+  expect(fetchMock.mock.calls[2][1]?.method).toBe("PUT");
 });

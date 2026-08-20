@@ -9,7 +9,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any, Literal
 
 from app.api.actor import Actor
-from app.api.auth import hash_password, normalize_email
+from app.api.auth import hash_password
 from app.api.domain import ApiProblem, audit
 from app.core.config import get_settings
 from app.db.session import get_db
@@ -47,11 +47,23 @@ from app.models import (
     now_utc,
 )
 from app.security.files import UnsafeFile, inspect_upload, safe_filename
+from app.security.identity import (
+    normalize_email,
+    normalize_login_name,
+    normalize_recovery_email,
+)
 from app.storage.base import ObjectStorage
 from app.storage.dependencies import get_storage
 from app.student_learning.jobs import student_learning_source_hash
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -119,14 +131,30 @@ def _owned_student(db: Session, teacher_id: uuid.UUID, student_id: uuid.UUID) ->
 
 
 class StudentAccountInput(BaseModel):
-    email: str = Field(min_length=3, max_length=320)
+    model_config = ConfigDict(populate_by_name=True)
+
+    recovery_email: str | None = Field(
+        None,
+        max_length=320,
+        validation_alias=AliasChoices("recovery_email", "email"),
+    )
     display_name: str | None = Field(None, min_length=1, max_length=120)
     temporary_password: str | None = Field(None, min_length=8, max_length=256)
 
-    @field_validator("email")
+    @field_validator("recovery_email", mode="before")
     @classmethod
-    def valid_email(cls, value: str) -> str:
-        return normalize_email(value)
+    def valid_email(cls, value: object) -> str | None:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        if not isinstance(value, str):
+            raise ValueError("安全邮箱格式无效")
+        return normalize_recovery_email(value)
+
+    @property
+    def email(self) -> str | None:
+        """Compatibility accessor for older internal callers."""
+
+        return self.recovery_email
 
 
 @router.post("/students/{student_id}/account-link", status_code=201, tags=["student-admin"])
@@ -134,18 +162,34 @@ def create_student_account_link(
     student_id: uuid.UUID, data: StudentAccountInput, db: Db, actor: Actor
 ) -> dict[str, Any]:
     student = _owned_student(db, actor.id, student_id)
-    if student.email and student.email.lower().strip() != data.email:
+    try:
+        login_name = normalize_login_name(student.student_number)
+    except ValueError as exc:
+        raise ApiProblem(422, "STUDENT_LOGIN_ID_INVALID", str(exc)) from exc
+    login_name_owner = db.scalar(select(User).where(User.login_name == login_name))
+    if (
+        student.email
+        and data.recovery_email is not None
+        and normalize_email(student.email) != data.recovery_email
+    ):
         raise ApiProblem(
             409,
             "STUDENT_EMAIL_MISMATCH",
-            "绑定邮箱必须与学生档案邮箱一致；请先由教师确认并更新档案",
+            "安全邮箱必须与学生档案邮箱一致；请先由教师确认并更新档案",
         )
     existing_link = db.scalar(
         select(StudentAccountLink).where(StudentAccountLink.student_id == student.id)
     )
     if existing_link is not None:
         linked_user = db.get(User, existing_link.user_id)
-        if linked_user is not None and linked_user.email == data.email:
+        if linked_user is not None and linked_user.email == data.recovery_email:
+            if login_name_owner is not None and login_name_owner.id != linked_user.id:
+                raise ApiProblem(
+                    409,
+                    "STUDENT_LOGIN_ID_CONFLICT",
+                    "该学号已被其他学生账号使用，请先核对或修改学号",
+                )
+            linked_user.login_name = login_name
             if existing_link.status != "active":
                 existing_link.status, existing_link.revoked_at = "active", None
                 audit(
@@ -156,17 +200,28 @@ def create_student_account_link(
                     student.id,
                     {"user_id": str(linked_user.id)},
                 )
-                db.commit()
+            db.commit()
             return _account_link_view(db, existing_link, created_user=False)
         raise ApiProblem(409, "STUDENT_ALREADY_LINKED", "该学生档案已绑定其他账号")
 
-    user = db.scalar(select(User).where(User.email == data.email))
+    if login_name_owner is not None:
+        raise ApiProblem(
+            409,
+            "STUDENT_LOGIN_ID_CONFLICT",
+            "该学号已被其他学生账号使用，请先核对或修改学号",
+        )
+    user = (
+        db.scalar(select(User).where(User.email == data.recovery_email))
+        if data.recovery_email is not None
+        else None
+    )
     created_user = user is None
     if user is None:
         if data.temporary_password is None:
             raise ApiProblem(422, "TEMPORARY_PASSWORD_REQUIRED", "创建新学生账号必须设置临时密码")
         user = User(
-            email=data.email,
+            email=data.recovery_email,
+            login_name=login_name,
             display_name=(data.display_name or student.name).strip(),
             password_hash=hash_password(data.temporary_password),
             must_change_password=True,
@@ -208,6 +263,9 @@ def create_student_account_link(
         )
         if other_link is not None:
             raise ApiProblem(409, "USER_ALREADY_LINKED", "该账号已绑定其他学生档案")
+        if user.login_name is not None and user.login_name != login_name:
+            raise ApiProblem(409, "USER_LOGIN_ID_IMMUTABLE", "该预置账号已使用其他登录账号")
+        user.login_name = login_name
 
     student_role = db.scalar(select(Role).where(Role.name == "student"))
     if student_role is None:
@@ -218,8 +276,6 @@ def create_student_account_link(
         db.add(UserRole(user_id=user.id, role_id=student_role.id))
     link = StudentAccountLink(user_id=user.id, student_id=student.id, linked_by=actor.id)
     db.add(link)
-    if not student.email:
-        student.email = data.email
     db.flush()
     audit(db, actor.id, "student_account.link", "student", student.id, {"user_id": str(user.id)})
     db.commit()
@@ -236,6 +292,11 @@ def _account_link_view(
         "user_id": str(link.user_id),
         "student_id": str(link.student_id),
         "email": user.email if user else None,
+        "recovery_email": user.email if user else None,
+        "login_name": user.login_name if user else None,
+        "recovery_email_verified": bool(
+            user and user.email is not None and user.email_verified_at is not None
+        ),
         "student_name": student.name if student else None,
         "status": link.status,
         "created_user": created_user,
@@ -693,9 +754,15 @@ def student_me(db: Db, actor: Actor) -> dict[str, Any]:
     profiles = _active_profiles(db, actor.id)
     if not profiles:
         raise ApiProblem(403, "STUDENT_ACCOUNT_NOT_LINKED", "账号尚未绑定学生档案")
+    user = db.get(User, actor.id)
     return {
         "user_id": str(actor.id),
-        "email": actor.email,
+        "email": user.email if user else None,
+        "recovery_email": user.email if user else None,
+        "login_name": user.login_name if user else None,
+        "recovery_email_verified": bool(
+            user and user.email is not None and user.email_verified_at is not None
+        ),
         "profiles": [
             {
                 "student_id": str(student.id),

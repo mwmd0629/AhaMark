@@ -24,6 +24,14 @@ export default function ChangePasswordPage() {
     setError("");
     try {
       const user = await authApi.changePassword(currentPassword, newPassword);
+      if (
+        user.landing_surface === "student" &&
+        user.email &&
+        !user.recovery_email_verified
+      ) {
+        router.replace("/verify-email");
+        return;
+      }
       const destination = landingPath(user.landing_surface);
       if (destination) {
         router.replace(destination);

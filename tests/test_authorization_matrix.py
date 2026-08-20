@@ -121,7 +121,13 @@ def test_matrix_declares_every_resource_operation_and_identity() -> None:
 
 
 def test_every_business_route_uses_the_shared_session_and_csrf_boundary() -> None:
-    public = {"/health", "/ready", "/auth/login"}
+    public = {
+        "/health",
+        "/ready",
+        "/auth/login",
+        "/auth/password-reset/request",
+        "/auth/password-reset/confirm",
+    }
 
     def has_actor(dependant: object) -> bool:
         dependencies = getattr(dependant, "dependencies", [])

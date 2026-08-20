@@ -28,6 +28,8 @@ vi.mock("@/lib/student-api", async () => {
 const studentUser: AuthUser = {
   id: "user-1",
   email: "student@example.com",
+  login_name: "S001",
+  recovery_email_verified: false,
   display_name: "学生甲",
   must_change_password: false,
   roles: ["student"],
@@ -52,6 +54,7 @@ it("loads a student profile only after the auth surface confirms student access"
     name: "学生甲",
     student_number: "S001",
     email: "student@example.com",
+    recovery_email_verified: false,
     profiles: [
       {
         student_id: "student-1",

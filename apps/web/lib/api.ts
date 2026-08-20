@@ -247,13 +247,21 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 export type AuthUser = {
   id: string;
-  email: string;
+  email: string | null;
+  login_name: string | null;
+  recovery_email_verified: boolean;
   display_name: string;
   must_change_password: boolean;
   roles: string[];
   active_student_link: boolean;
   landing_surface:
     "teacher" | "student" | "change_password" | "account_unavailable";
+};
+export type AuthChallenge = {
+  challenge_id: string;
+  message: string;
+  expires_in_seconds: number;
+  development_code?: string | null;
 };
 export type TeacherPreferences = {
   profile: { display_name: string; email: string };
@@ -271,10 +279,10 @@ export type TeacherPreferences = {
   };
 };
 export const authApi = {
-  login: (email: string, password: string) =>
+  login: (identifier: string, password: string) =>
     request<AuthUser>("/auth/login", {
       method: "POST",
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ identifier, password }),
     }),
   me: () => request<AuthUser>("/auth/me"),
   changePassword: (currentPassword: string, newPassword: string) =>
@@ -283,6 +291,47 @@ export const authApi = {
       body: JSON.stringify({
         current_password: currentPassword,
         new_password: newPassword,
+      }),
+    }),
+  requestPasswordReset: (identifier: string, recoveryEmail: string) =>
+    request<AuthChallenge>("/auth/password-reset/request", {
+      method: "POST",
+      body: JSON.stringify({
+        identifier,
+        recovery_email: recoveryEmail,
+      }),
+    }),
+  confirmPasswordReset: (
+    challengeId: string,
+    code: string,
+    newPassword: string,
+  ) =>
+    request<{ message: string }>("/auth/password-reset/confirm", {
+      method: "POST",
+      body: JSON.stringify({
+        challenge_id: challengeId,
+        code,
+        new_password: newPassword,
+      }),
+    }),
+  requestEmailVerification: () =>
+    request<AuthChallenge>("/auth/email-verification/request", {
+      method: "POST",
+    }),
+  confirmEmailVerification: (challengeId: string, code: string) =>
+    request<AuthUser>("/auth/email-verification/confirm", {
+      method: "POST",
+      body: JSON.stringify({ challenge_id: challengeId, code }),
+    }),
+  updateRecoveryEmail: (
+    recoveryEmail: string | null,
+    currentPassword: string,
+  ) =>
+    request<AuthUser>("/auth/recovery-email", {
+      method: "PUT",
+      body: JSON.stringify({
+        recovery_email: recoveryEmail,
+        current_password: currentPassword,
       }),
     }),
   preferences: () => request<TeacherPreferences>("/auth/preferences"),
@@ -367,6 +416,12 @@ export type Student = {
   joined_at: string;
   groups: Group[];
   assignment_history: [];
+  account_link?: {
+    status: string;
+    login_name: string | null;
+    recovery_email: string | null;
+    recovery_email_verified: boolean;
+  } | null;
 };
 export const studentsApi = {
   list: (classId: string, query = "") =>

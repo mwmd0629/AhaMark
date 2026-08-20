@@ -12,7 +12,8 @@ export type StudentProfile = {
   name: string;
   display_name?: string;
   student_number?: string;
-  email?: string;
+  email?: string | null;
+  recovery_email_verified: boolean;
   classes?: Array<{ id: string; name: string }>;
   profiles?: Array<{
     student_id: string;
@@ -298,7 +299,8 @@ export const studentApi = {
   me: async () => {
     const response = await request<{
       user_id: string;
-      email: string;
+      email: string | null;
+      recovery_email_verified: boolean;
       profiles: Array<{
         student_id: string;
         student_number: string;
@@ -312,6 +314,7 @@ export const studentApi = {
       name: primary?.name ?? "同学",
       student_number: primary?.student_number,
       email: response.email,
+      recovery_email_verified: response.recovery_email_verified === true,
       profiles: response.profiles,
     } satisfies StudentProfile;
   },
@@ -574,7 +577,9 @@ export type StudentAccountLink = {
   id: string;
   user_id: string;
   student_id: string;
-  email: string;
+  login_name: string;
+  recovery_email: string | null;
+  recovery_email_verified: boolean;
   student_name: string;
   status: string;
   created_at: string;
@@ -586,7 +591,7 @@ export const studentAccountsApi = {
   link: (
     studentId: string,
     input: {
-      email: string;
+      recovery_email: string | null;
       display_name?: string;
       temporary_password?: string;
     },

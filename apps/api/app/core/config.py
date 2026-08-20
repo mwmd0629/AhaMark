@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import SecretStr, field_validator, model_validator
+from pydantic import EmailStr, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -37,6 +37,19 @@ class Settings(BaseSettings):
     auth_login_max_attempts: int = 5
     auth_login_window_seconds: int = 300
     auth_rate_limit_fail_closed: bool = True
+    smtp_host: str | None = None
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_username: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_from_email: EmailStr | None = None
+    smtp_starttls: bool = True
+    smtp_ssl: bool = False
+    smtp_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    auth_email_code_ttl_seconds: int = Field(default=600, ge=60, le=3600)
+    auth_email_code_max_attempts: int = Field(default=5, ge=1, le=20)
+    auth_password_reset_max_requests: int = Field(default=5, ge=1, le=100)
+    auth_password_reset_window_seconds: int = Field(default=3600, ge=60, le=86400)
+    auth_recovery_hmac_secret: SecretStr | None = None
     import_max_bytes: int = 5 * 1024 * 1024
     import_max_rows: int = 2000
     import_expiry_hours: int = 24
@@ -212,6 +225,24 @@ class Settings(BaseSettings):
             errors.append("AUTH_COOKIE_SECURE must be true")
         if not self.auth_rate_limit_fail_closed:
             errors.append("AUTH_RATE_LIMIT_FAIL_CLOSED must be true")
+        if not (self.smtp_host or "").strip():
+            errors.append("SMTP_HOST is required")
+        if self.smtp_from_email is None:
+            errors.append("SMTP_FROM_EMAIL is required")
+        if not self.smtp_starttls and not self.smtp_ssl:
+            errors.append("SMTP_STARTTLS or SMTP_SSL must be enabled")
+        if self.smtp_starttls and self.smtp_ssl:
+            errors.append("SMTP_STARTTLS and SMTP_SSL cannot both be enabled")
+        recovery_secret = (
+            self.auth_recovery_hmac_secret.get_secret_value().strip()
+            if self.auth_recovery_hmac_secret is not None
+            else ""
+        )
+        if len(recovery_secret) < 32 or recovery_secret == self.session_hmac_secret:
+            errors.append(
+                "AUTH_RECOVERY_HMAC_SECRET must be at least 32 characters and distinct "
+                "from SESSION_HMAC_SECRET"
+            )
         if not self.minio_public_endpoint:
             errors.append("MINIO_PUBLIC_ENDPOINT is required for browser downloads")
         if not self.minio_public_secure:

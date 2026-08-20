@@ -28,6 +28,8 @@ beforeEach(() => {
   vi.mocked(authApi.login).mockResolvedValue({
     id: "user-1",
     email: "student@example.com",
+    login_name: "S001",
+    recovery_email_verified: false,
     display_name: "学生甲",
     must_change_password: false,
     roles: ["student"],
@@ -39,9 +41,9 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-function submitLogin() {
-  fireEvent.change(screen.getByLabelText("邮箱"), {
-    target: { value: "student@example.com" },
+function submitLogin(identifier = "S001") {
+  fireEvent.change(screen.getByLabelText("账号（教师邮箱或学生学号）"), {
+    target: { value: identifier },
   });
   fireEvent.change(screen.getByLabelText("密码"), {
     target: { value: "password123" },
@@ -54,12 +56,19 @@ it("routes a linked student account to the student portal", async () => {
   expect(screen.getByRole("heading", { name: "师生登录" })).toBeInTheDocument();
   submitLogin();
   await waitFor(() => expect(replace).toHaveBeenCalledWith("/student"));
+  expect(authApi.login).toHaveBeenCalledWith("S001", "password123");
+  expect(screen.getByRole("link", { name: "忘记密码？" })).toHaveAttribute(
+    "href",
+    "/forgot-password",
+  );
 });
 
 it("routes a temporary-password account to mandatory password change", async () => {
   vi.mocked(authApi.login).mockResolvedValue({
     id: "user-1",
     email: "student@example.com",
+    login_name: "S001",
+    recovery_email_verified: false,
     display_name: "学生甲",
     must_change_password: true,
     roles: ["student"],
@@ -75,6 +84,8 @@ it("routes a non-student authenticated account to the teacher dashboard", async 
   vi.mocked(authApi.login).mockResolvedValue({
     id: "teacher-1",
     email: "teacher@example.com",
+    login_name: "teacher@example.com",
+    recovery_email_verified: true,
     display_name: "教师甲",
     must_change_password: false,
     roles: ["teacher"],
@@ -82,14 +93,20 @@ it("routes a non-student authenticated account to the teacher dashboard", async 
     landing_surface: "teacher",
   });
   render(<LoginPage />);
-  submitLogin();
+  submitLogin("teacher@example.com");
   await waitFor(() => expect(replace).toHaveBeenCalledWith("/dashboard"));
+  expect(authApi.login).toHaveBeenCalledWith(
+    "teacher@example.com",
+    "password123",
+  );
 });
 
 it("ends an unavailable account session instead of routing it to the teacher shell", async () => {
   vi.mocked(authApi.login).mockResolvedValue({
     id: "student-1",
     email: "student@example.com",
+    login_name: "S001",
+    recovery_email_verified: false,
     display_name: "学生甲",
     must_change_password: false,
     roles: ["student"],
@@ -126,12 +143,12 @@ it("keeps the backend authentication message for invalid credentials", async () 
   vi.mocked(authApi.login).mockRejectedValueOnce(
     new ApiError(401, {
       code: "HTTP_401",
-      message: "邮箱或密码错误",
+      message: "账号或密码错误",
       details: {},
       request_id: "request-1",
     }),
   );
   render(<LoginPage />);
   submitLogin();
-  expect(await screen.findByRole("alert")).toHaveTextContent("邮箱或密码错误");
+  expect(await screen.findByRole("alert")).toHaveTextContent("账号或密码错误");
 });

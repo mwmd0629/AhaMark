@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ApiError, authApi } from "@/lib/api";
@@ -16,7 +17,7 @@ export default function LoginPage() {
     const data = new FormData(event.currentTarget);
     try {
       const user = await authApi.login(
-        String(data.get("email")),
+        String(data.get("identifier")),
         String(data.get("password")),
       );
       const destination = landingPath(user.landing_surface);
@@ -50,26 +51,36 @@ export default function LoginPage() {
           </p>
         </div>
         <label className="mb-4 block text-sm font-medium">
-          邮箱
+          账号（教师邮箱或学生学号）
           <input
-            name="email"
-            type="email"
+            name="identifier"
+            type="text"
             autoComplete="username"
             required
             className="mt-1.5 w-full rounded-lg border px-3 py-2.5"
           />
         </label>
-        <label className="mb-4 block text-sm font-medium">
-          密码
-          <input
-            name="password"
-            type="password"
-            autoComplete="current-password"
-            minLength={8}
-            required
-            className="mt-1.5 w-full rounded-lg border px-3 py-2.5"
-          />
-        </label>
+        <div className="mb-4">
+          <label className="block text-sm font-medium">
+            密码
+            <input
+              name="password"
+              type="password"
+              autoComplete="current-password"
+              minLength={8}
+              required
+              className="mt-1.5 w-full rounded-lg border px-3 py-2.5"
+            />
+          </label>
+          <div className="mt-2 text-right text-sm">
+            <Link
+              href="/forgot-password"
+              className="font-normal text-[var(--brand-700)] hover:underline"
+            >
+              忘记密码？
+            </Link>
+          </div>
+        </div>
         {error && (
           <p
             role="alert"

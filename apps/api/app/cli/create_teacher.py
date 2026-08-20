@@ -3,9 +3,10 @@ import getpass
 
 from sqlalchemy import select
 
-from app.api.auth import hash_password, normalize_email
+from app.api.auth import hash_password
 from app.db.session import SessionLocal
 from app.models import Status, User
+from app.security.identity import normalize_email
 
 
 def create_teacher(email: str, display_name: str, password: str) -> User:

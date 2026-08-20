@@ -17,6 +17,8 @@ vi.mock("@/lib/api", async () => {
 const teacher: AuthUser = {
   id: "teacher-1",
   email: "teacher@example.com",
+  login_name: "teacher@example.com",
+  recovery_email_verified: true,
   display_name: "教师甲",
   must_change_password: false,
   roles: ["teacher"],

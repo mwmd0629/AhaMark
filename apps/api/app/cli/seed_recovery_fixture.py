@@ -142,7 +142,9 @@ def assert_database_is_synthetic(db: Session, run_id: str) -> None:
     """Refuse a mixed or previously used database before adding fixture rows."""
 
     users = list(db.scalars(select(User)))
-    if any(not user.email.endswith(SYNTHETIC_DOMAIN_SUFFIX) for user in users):
+    if any(
+        user.email is None or not user.email.endswith(SYNTHETIC_DOMAIN_SUFFIX) for user in users
+    ):
         raise RecoveryGuardError("database contains a non-synthetic user")
     students = list(db.scalars(select(Student)))
     if any(not student.name.startswith("Synthetic ") for student in students):
@@ -178,7 +180,7 @@ def main() -> None:
         release = db.get(GradeRelease, uid("release-s1"))
         if teacher is None or release is None:
             raise RuntimeError("run seed_capacity_demo and seed_capacity_results first")
-        if not teacher.email.endswith(SYNTHETIC_DOMAIN_SUFFIX):
+        if teacher.email is None or not teacher.email.endswith(SYNTHETIC_DOMAIN_SUFFIX):
             raise RecoveryGuardError("capacity teacher is not synthetic")
         if release.idempotency_key != "performance-capacity.synthetic.invalid:release:s1":
             raise RecoveryGuardError("capacity release marker is inconsistent")

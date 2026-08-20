@@ -20,6 +20,11 @@ def production_settings(**overrides: object) -> dict[str, object]:
         "minio_public_endpoint": "files.example.invalid",
         "minio_public_secure": True,
         "session_hmac_secret": "a" * 48,
+        "smtp_host": "smtp.example.invalid",
+        "smtp_from_email": "no-reply@example.com",
+        "smtp_starttls": True,
+        "smtp_ssl": False,
+        "auth_recovery_hmac_secret": "b" * 48,
         "demo_actor_enabled": False,
         "auth_cookie_secure": True,
         "recognition_provider": "unavailable",
@@ -45,6 +50,13 @@ def production_settings(**overrides: object) -> dict[str, object]:
         ("trusted_hosts", ["*"]),
         ("debug", True),
         ("auth_cookie_secure", False),
+        ("smtp_host", None),
+        ("smtp_from_email", None),
+        ("smtp_starttls", False),
+        ("smtp_ssl", True),
+        ("auth_recovery_hmac_secret", None),
+        ("auth_recovery_hmac_secret", "short"),
+        ("auth_recovery_hmac_secret", "a" * 48),
         ("minio_public_endpoint", None),
         ("minio_public_secure", False),
     ],
@@ -58,6 +70,11 @@ def test_production_configuration_rejects_unsafe_values(field: str, value: objec
 
 def test_production_configuration_accepts_explicit_safe_values() -> None:
     assert Settings(**production_settings()).app_env == "production"
+
+
+def test_production_configuration_accepts_implicit_tls_smtp() -> None:
+    settings = Settings(**production_settings(smtp_starttls=False, smtp_ssl=True))
+    assert settings.smtp_ssl is True
 
 
 def test_rate_limit_key_is_namespaced_hmac_without_plaintext() -> None:
