@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, request } from "./api";
+import { adminAccountsApi, ApiError, request } from "./api";
 
 describe("API request errors", () => {
   afterEach(() => {
@@ -47,5 +47,20 @@ describe("API request errors", () => {
     const error = await request("/api/test").catch((reason: unknown) => reason);
     expect(error).toBeInstanceOf(ApiError);
     expect((error as ApiError).message).toBe("请求失败（500），请稍后重试");
+  });
+
+  it("keeps administrator APIs under the proxied /api namespace", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({}),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await adminAccountsApi.security();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/api/admin/accounts/security",
+      expect.objectContaining({ credentials: "include" }),
+    );
   });
 });

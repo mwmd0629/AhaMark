@@ -17,6 +17,7 @@ from app.models import (
     PaperPage,
     Question,
     QuestionRegion,
+    QuestionStatus,
     RecognitionBlock,
 )
 from app.recognition.text_integrity import ensure_text_fields_integrity
@@ -254,7 +255,8 @@ def materialize(
     next_display_order = (
         db.scalar(
             select(func.max(Question.display_order)).where(
-                Question.paper_version_id == candidate.paper_version_id
+                Question.paper_version_id == candidate.paper_version_id,
+                Question.status == QuestionStatus.active,
             )
         )
         or 0

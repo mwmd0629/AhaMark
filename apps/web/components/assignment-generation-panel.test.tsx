@@ -70,6 +70,8 @@ function job(
     progress: status === "queued" ? 0 : 100,
     source_snapshot_hash: "a".repeat(64),
     provider_mode: "unavailable",
+    attempt: 1,
+    max_attempts: 3,
     retryable: true,
     created_at: "2026-07-26T00:00:00Z",
     updated_at: "2026-07-26T00:00:00Z",
@@ -331,10 +333,12 @@ it("AI 必经阶段不可用时阻止跳过并允许单阶段重试", async () =
   await screen.findByLabelText("处理详情");
   expect(screen.getByLabelText("处理详情").tagName).toBe("SECTION");
   const restartButton = screen.getByRole("button", { name: "重新整理" });
-  expect(restartButton.parentElement).toHaveClass("justify-between");
-  expect(restartButton.parentElement).toContainElement(
-    screen.getByRole("heading", { name: "整理试卷" }),
-  );
+  expect(
+    restartButton.closest(".flex.flex-wrap.items-center.justify-between"),
+  ).toBeInTheDocument();
+  expect(
+    restartButton.closest(".flex.flex-wrap.items-center.justify-between"),
+  ).toContainElement(screen.getByRole("heading", { name: "整理试卷" }));
   expect(
     screen.getByLabelText("处理详情").firstElementChild?.nextElementSibling,
   ).toHaveClass("border-[var(--neutral-300)]");
@@ -347,7 +351,7 @@ it("AI 必经阶段不可用时阻止跳过并允许单阶段重试", async () =
   expect(screen.queryByText("阻断 2")).not.toBeInTheDocument();
   expect(screen.queryByText(/需要处理的问题/)).not.toBeInTheDocument();
   expect(screen.queryByText("真实 Provider 不可用")).not.toBeInTheDocument();
-  expect(screen.getByText("历史记录（1）")).toBeInTheDocument();
+  expect(screen.queryByText("历史记录（1）")).not.toBeInTheDocument();
   expect(
     screen.queryByText(/一次生成题目、参考答案和评分标准草稿/),
   ).not.toBeInTheDocument();
@@ -356,7 +360,9 @@ it("AI 必经阶段不可用时阻止跳过并允许单阶段重试", async () =
   expect(
     screen.queryByRole("button", { name: "不等 AI，手动核对" }),
   ).not.toBeInTheDocument();
-  expect(onRequiredFlowReadyChange).toHaveBeenLastCalledWith(false);
+  await waitFor(() =>
+    expect(onRequiredFlowReadyChange).toHaveBeenLastCalledWith(false),
+  );
 
   fireEvent.click(screen.getByRole("button", { name: "重试此阶段" }));
   await waitFor(() =>
@@ -712,6 +718,28 @@ it("活动任务会轮询且可停止整理", async () => {
   expect(mocks.listJobs.mock.calls.length).toBeGreaterThan(1);
 });
 
+it("长时间模型阶段显示耗时、尝试次数和有界失败提示", async () => {
+  const now = vi
+    .spyOn(Date, "now")
+    .mockReturnValue(new Date("2026-07-26T00:12:00Z").getTime());
+  const running = job("extracting_questions");
+  running.progress = 55;
+  running.stages[2] = {
+    ...running.stages[2],
+    status: "running",
+    started_at: "2026-07-26T00:00:00Z",
+  };
+  mocks.listJobs.mockResolvedValue([running]);
+
+  render(<AssignmentGenerationPanel assignmentId="assignment-1" />);
+
+  const warning = await screen.findByText(/当前阶段“正在生成题目”已运行/);
+  expect(warning).toHaveTextContent("已运行12 分钟");
+  expect(warning).toHaveTextContent("任务尝试 1/3");
+  expect(warning).toHaveTextContent("不会无限重试");
+  now.mockRestore();
+});
+
 it("不会把已过期文件误报为待确认 0 即已完成", async () => {
   mocks.listFileAnalyses.mockResolvedValue([
     {
@@ -810,7 +838,8 @@ it("展示服务器能力开关并在教师启动被禁用时关闭启动按钮"
   render(<AssignmentGenerationPanel assignmentId="assignment-1" />);
   await waitFor(() => expect(mocks.capabilities).toHaveBeenCalled());
   expect(screen.queryByText(/当前草稿生成方式/)).not.toBeInTheDocument();
-  expect(screen.queryByText(/Provider/)).not.toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("AI 辅助暂不可用");
+  expect(screen.getByRole("alert")).toHaveTextContent("PROVIDER_UNAVAILABLE");
   expect(screen.getByRole("button", { name: "开始整理" })).toBeDisabled();
 });
 

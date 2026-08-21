@@ -278,6 +278,17 @@ it("三步向导把基本信息和上传集中在准备作业", async () => {
   expect(screen.queryByText("添加题目")).not.toBeInTheDocument();
 });
 
+it("题目列表只保留整理试卷面板的唯一入口", async () => {
+  render(<AssignmentWizard assignmentId="assignment-1" initialStep={2} />);
+
+  expect(
+    await screen.findByRole("heading", { name: "整理试卷" }),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "新增题目" }),
+  ).not.toBeInTheDocument();
+});
+
 it("显示并保存练习草稿的作答要求或复习范围", async () => {
   const current = await assignmentsApi.get("assignment-1");
   vi.mocked(assignmentsApi.get).mockResolvedValueOnce({
@@ -377,7 +388,7 @@ it("发布班级默认收起并支持搜索、全选当前结果和清空", asyn
   expect(screen.getByText("尚未选择发布班级")).toBeInTheDocument();
 });
 
-it("核对内容回填所选题目的题号、分值、知识点和内容并可保存", async () => {
+it.skip("旧题目编辑器已移除：核对内容统一由整理试卷面板提供", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" initialStep={2} />);
 
   expect(await screen.findByDisplayValue("1")).toBeInTheDocument();
@@ -403,7 +414,7 @@ it("核对内容回填所选题目的题号、分值、知识点和内容并可�
   );
 });
 
-it("整理页面默认折叠且不再显示手工坐标输入", async () => {
+it.skip("整理页面默认折叠且不再显示手工坐标输入（页面核对已移除）", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" initialStep={2} />);
 
   const organizer = await screen.findByText("整理页面（3 页）");
@@ -417,7 +428,7 @@ it("整理页面默认折叠且不再显示手工坐标输入", async () => {
   ).not.toBeInTheDocument();
 });
 
-it("刷新题目数据时保留当前选择和未保存编辑", async () => {
+it.skip("旧题目编辑器已移除：刷新题目数据不再在向导中单独编辑", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" initialStep={2} />);
 
   fireEvent.click(await screen.findByRole("button", { name: /第 2 题/ }));
@@ -434,7 +445,7 @@ it("刷新题目数据时保留当前选择和未保存编辑", async () => {
   expect(screen.getByText("编辑第 2 题")).toBeInTheDocument();
 });
 
-it("脏编辑对应题目被后台移除时阻止误写其他题目", async () => {
+it.skip("旧题目编辑器已移除：不再从向导直接写题目", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" initialStep={2} />);
 
   fireEvent.click(await screen.findByRole("button", { name: /第 2 题/ }));
@@ -467,7 +478,7 @@ it("脏编辑对应题目被后台移除时阻止误写其他题目", async () =
   expect(assignmentsApi.updateQuestion).not.toHaveBeenCalled();
 });
 
-it("题目提交期间禁用按钮并阻止重复创建", async () => {
+it.skip("旧题目编辑器已移除：不再从向导直接创建题目", async () => {
   vi.mocked(assignmentsApi.question).mockImplementationOnce(
     () => new Promise(() => undefined),
   );
@@ -613,7 +624,7 @@ it("拒绝非法格式并允许重新选择", async () => {
   expect(screen.getByRole("button", { name: "重新上传" })).toBeInTheDocument();
 });
 
-it("切换缩略图时同步当前页面高亮和大图", async () => {
+ it.skip("切换缩略图时同步当前页面高亮和大图（页面核对已移除）", async () => {
   render(<AssignmentWizard assignmentId="assignment-1" />);
   await screen.findByRole("heading", { name: "线代期末" });
   fireEvent.click(screen.getByRole("button", { name: /核对内容/ }));
@@ -700,6 +711,8 @@ it("AI 必经流程未完成时不能直接进入核对内容", async () => {
       progress: 60,
       source_snapshot_hash: "b".repeat(64),
       provider_mode: "local_openai_compatible",
+      attempt: 1,
+      max_attempts: 3,
       retryable: true,
       created_at: "2026-07-25T02:00:00Z",
       updated_at: "2026-07-25T02:00:00Z",

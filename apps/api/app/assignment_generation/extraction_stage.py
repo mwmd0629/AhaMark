@@ -20,8 +20,10 @@ from app.models import (
     PageProcessingResult,
     PaperPage,
     PaperPageOrganizationSuggestion,
+    Question,
     QuestionCandidate,
     QuestionCandidateRegion,
+    QuestionStatus,
     RecognitionBlock,
     RecognitionJob,
     RecognitionStatus,
@@ -646,11 +648,54 @@ def materialize_draft_questions(
             )
         ).all()
     )
+    if not rows:
+        return 0
+
+    paper_version_ids = {row.paper_version_id for row in rows}
+    prior_rows = list(
+        db.scalars(
+            select(AssignmentQuestionExtractionCandidate).where(
+                AssignmentQuestionExtractionCandidate.assignment_id == job.assignment_id,
+                AssignmentQuestionExtractionCandidate.paper_version_id.in_(paper_version_ids),
+                AssignmentQuestionExtractionCandidate.generation_job_id != job.id,
+                AssignmentQuestionExtractionCandidate.materialized_question_id.is_not(None),
+                AssignmentQuestionExtractionCandidate.reviewed_by.is_(None),
+            )
+        ).all()
+    )
+    for prior in prior_rows:
+        prior_question = db.get(Question, prior.materialized_question_id)
+        if (
+            prior_question is not None
+            and prior_question.status == QuestionStatus.active
+            and prior_question.source == "ai_draft"
+        ):
+            prior_question.status = QuestionStatus.removed
+            prior.status = "superseded"
+
+    db.flush()
+    active_numbers = set(
+        db.scalars(
+            select(Question.question_number).where(
+                Question.paper_version_id.in_(paper_version_ids),
+                Question.status == QuestionStatus.active,
+            )
+        ).all()
+    )
+    number_counts = Counter(row.question_number for row in rows if row.question_number)
     created = 0
     pending = list(rows)
     while pending:
         progressed = False
         for row in list(pending):
+            if row.question_number and (
+                number_counts[row.question_number] > 1 or row.question_number in active_numbers
+            ):
+                row.warning_codes = sorted(set(row.warning_codes) | {"QUESTION_NUMBER_CONFLICT"})
+                row.manual_required = True
+                pending.remove(row)
+                progressed = True
+                continue
             parent = (
                 db.get(AssignmentQuestionExtractionCandidate, row.parent_candidate_id)
                 if row.parent_candidate_id
@@ -668,6 +713,8 @@ def materialize_draft_questions(
             question = materialize(db, row, regions)
             if parent is not None:
                 question.parent_question_id = parent.materialized_question_id
+            if question.question_number:
+                active_numbers.add(question.question_number)
             created += 1
             pending.remove(row)
             progressed = True

@@ -105,6 +105,14 @@ services:
     depends_on:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
+  generation-worker:
+    profiles: ["local-ai"]
+    build: {context: ., dockerfile: apps/api/Dockerfile}
+    environment: *app-env
+    command: celery -A workers.celery_app:celery_app worker --loglevel=INFO --queues=${ASSIGNMENT_GENERATION_TASK_QUEUE:-celery} --concurrency=${ASSIGNMENT_GENERATION_WORKER_CONCURRENCY:-1}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
   web:
     build:
       context: .

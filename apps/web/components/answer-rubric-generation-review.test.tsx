@@ -328,9 +328,7 @@ describe("AnswerRubricGenerationReview Bundle lifecycle", () => {
     render(<AnswerRubricGenerationReview {...props} />);
     expect(await screen.findByText("当前确认答案")).toBeInTheDocument();
     expect(screen.getByText("较新待确认答案")).toBeInTheDocument();
-    expect(
-      screen.getByText("查看历史参考答案").closest("details"),
-    ).not.toHaveAttribute("open");
+    expect(screen.queryByText("查看历史参考答案")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "确认这份参考答案" }),
     ).not.toBeInTheDocument();
@@ -382,9 +380,7 @@ describe("AnswerRubricGenerationReview Bundle lifecycle", () => {
         }),
       ),
     );
-    expect(
-      screen.getByText("查看历史评分标准").closest("details"),
-    ).not.toHaveAttribute("open");
+    expect(screen.queryByText("查看历史评分标准")).not.toBeInTheDocument();
   });
 
   it("confirms the complete displayed bundle with one atomic request", async () => {

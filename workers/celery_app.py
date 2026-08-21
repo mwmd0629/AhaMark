@@ -29,4 +29,9 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     result_expires=3600,
     broker_transport_options={"visibility_timeout": s.celery_visibility_timeout},
+    task_routes={
+        "ahamark.assignment_generation.*": {
+            "queue": s.assignment_generation_task_queue,
+        }
+    },
 )

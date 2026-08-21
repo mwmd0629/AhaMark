@@ -822,6 +822,9 @@ def test_teacher_disposition_materializes_drafts_and_keeps_confirmed_immutable(
                 class_id=school_class.id,
             )
         )
+        # Central review is intentionally unavailable while a regeneration job is queued.
+        # Simulate the worker completing the required AI stages before opening review.
+        job.status = "review_required"
         db.commit()
         assignment_id = job.assignment_id
     review = client.post(f"/api/assignments/{assignment_id}/review-sessions")
@@ -1382,6 +1385,8 @@ def test_teacher_confirms_current_candidate_bundle_with_one_atomic_request(
         revision = db.get(AssignmentDraftRevision, revision_id)
         assert job is not None and revision is not None
         generate_candidates(db, job, revision, provider_available=True)
+        # The review bundle only exposes a completed required-generation run.
+        job.status = "review_required"
         db.commit()
         assignment_id = job.assignment_id
         revision_edit_version = revision.teacher_edit_version

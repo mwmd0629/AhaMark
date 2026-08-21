@@ -858,22 +858,28 @@ export function AnswerRubricGenerationReview({
                   </p>
                 </div>
               )}
-              {bundleQuestion?.answer.history.some(
-                (entry) => entry.status === "retired",
-              ) && (
-                <details className="rounded-lg border p-3 text-sm">
-                  <summary className="cursor-pointer">查看历史参考答案</summary>
-                  <ul className="mt-2 space-y-2">
-                    {bundleQuestion?.answer.history
-                      .filter((entry) => entry.status === "retired")
-                      .map((entry) => (
-                        <li key={entry.id} className="rounded bg-slate-50 p-2">
-                          {entry.content}
-                        </li>
-                      ))}
-                  </ul>
-                </details>
-              )}
+              {false &&
+                bundleQuestion?.answer.history.some(
+                  (entry) => entry.status === "retired",
+                ) && (
+                  <details className="rounded-lg border p-3 text-sm">
+                    <summary className="cursor-pointer">
+                      查看历史参考答案
+                    </summary>
+                    <ul className="mt-2 space-y-2">
+                      {bundleQuestion?.answer.history
+                        .filter((entry) => entry.status === "retired")
+                        .map((entry) => (
+                          <li
+                            key={entry.id}
+                            className="rounded bg-slate-50 p-2"
+                          >
+                            {entry.content}
+                          </li>
+                        ))}
+                    </ul>
+                  </details>
+                )}
               {answerSuggestion && (
                 <details className="rounded-lg border p-3 text-sm">
                   <summary className="cursor-pointer">
@@ -970,7 +976,7 @@ export function AnswerRubricGenerationReview({
                   }}
                 />
               </label>
-              <details>
+              <details className="hidden" aria-hidden="true">
                 <summary>历史生成依据</summary>
                 <p className="mt-2 text-xs text-slate-500">
                   仅用于追溯当时如何生成，不代表当前代码检查已经通过。
@@ -1104,12 +1110,10 @@ export function AnswerRubricGenerationReview({
                     className="rounded-lg border p-3 text-sm"
                   >
                     <strong>
-                      {criterion.key} · {criterion.title}
+                      {criterion.key} · {criterion.title}（{criterion.points}{" "}
+                      分，
+                      {criterion.required ? "必要" : "可选"}）
                     </strong>
-                    <p>
-                      分值 {criterion.points} · {criterion.criterion_type} ·{" "}
-                      {criterion.required ? "必要" : "可选"}
-                    </p>
                     {criterion.description && (
                       <p className="mt-1 whitespace-pre-wrap text-slate-700">
                         {criterion.description}
@@ -1140,22 +1144,28 @@ export function AnswerRubricGenerationReview({
                   </p>
                 </div>
               )}
-              {bundleQuestion?.rubric.history.some(
-                (entry) => entry.status === "retired",
-              ) && (
-                <details className="rounded-lg border p-3 text-sm">
-                  <summary className="cursor-pointer">查看历史评分标准</summary>
-                  <ul className="mt-2 space-y-2">
-                    {bundleQuestion?.rubric.history
-                      .filter((entry) => entry.status === "retired")
-                      .map((entry) => (
-                        <li key={entry.id} className="rounded bg-slate-50 p-2">
-                          {entry.title}
-                        </li>
-                      ))}
-                  </ul>
-                </details>
-              )}
+              {false &&
+                bundleQuestion?.rubric.history.some(
+                  (entry) => entry.status === "retired",
+                ) && (
+                  <details className="rounded-lg border p-3 text-sm">
+                    <summary className="cursor-pointer">
+                      查看历史评分标准
+                    </summary>
+                    <ul className="mt-2 space-y-2">
+                      {bundleQuestion?.rubric.history
+                        .filter((entry) => entry.status === "retired")
+                        .map((entry) => (
+                          <li
+                            key={entry.id}
+                            className="rounded bg-slate-50 p-2"
+                          >
+                            {entry.title}
+                          </li>
+                        ))}
+                    </ul>
+                  </details>
+                )}
               {rubricSuggestion && (
                 <details className="rounded-lg border p-3 text-sm">
                   <summary className="cursor-pointer">
@@ -1241,11 +1251,10 @@ export function AnswerRubricGenerationReview({
                     key={criterion.id}
                     className="rounded-lg border p-3 text-sm"
                   >
-                    <strong>{criterion.title}</strong>
-                    <p>
-                      {criterion.points ?? "未设置"} 分 ·{" "}
-                      {criterion.required ? "必要" : "可选"}
-                    </p>
+                    <strong>
+                      {criterion.title}（{criterion.points ?? "未设置"} 分，
+                      {criterion.required ? "必要" : "可选"}）
+                    </strong>
                     {criterion.feedback_template && (
                       <p>{criterion.feedback_template}</p>
                     )}
@@ -1315,7 +1324,7 @@ export function AnswerRubricGenerationReview({
                   </div>
                 </div>
               </details>
-              <details>
+              <details className="hidden" aria-hidden="true">
                 <summary>历史生成依据</summary>
                 <p className="mt-2 text-xs text-slate-500">
                   这里是生成时保存的证据和提示，不等同于当前代码检查结果。

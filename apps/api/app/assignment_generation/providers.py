@@ -567,11 +567,18 @@ class OpenAICompatibleAssignmentGenerationProvider:
         estimated_input_tokens = max(1, (len(serialized.encode("utf-8")) + 3) // 4)
         if estimated_input_tokens > self.s.assignment_generation_max_input_tokens:
             return self._reject("input_token_limit_exceeded")
+        local_mode = self.s.assignment_generation_provider == "local_openai_compatible"
+        max_output_tokens = self.s.assignment_generation_max_output_tokens
+        if local_mode and stage == "question_extraction":
+            max_output_tokens = self.s.assignment_generation_local_extraction_max_output_tokens
+        elif local_mode and stage in {"answer_generation", "rubric_generation"}:
+            max_output_tokens = (
+                self.s.assignment_generation_local_answer_rubric_max_output_tokens
+            )
         max_cost = self.s.assignment_generation_max_estimated_cost
         preflight_cost = (
             estimated_input_tokens * self.s.assignment_generation_input_cost_per_million
-            + self.s.assignment_generation_max_output_tokens
-            * self.s.assignment_generation_output_cost_per_million
+            + max_output_tokens * self.s.assignment_generation_output_cost_per_million
         ) / 1_000_000
         if max_cost >= 0 and preflight_cost > max_cost:
             return self._reject("estimated_cost_limit_exceeded")
@@ -588,7 +595,6 @@ class OpenAICompatibleAssignmentGenerationProvider:
             for image in images
         )
         model_class = STAGE_MODELS[stage]
-        local_mode = self.s.assignment_generation_provider == "local_openai_compatible"
         response_model_class: type[BaseModel] = model_class
         system_prompt = SYSTEM_PROMPT
         if local_mode and stage == "question_extraction":
@@ -625,7 +631,7 @@ class OpenAICompatibleAssignmentGenerationProvider:
                     {"role": "user", "content": content[0]["text"]},
                 ],
                 "response_format": {"type": "json_object"},
-                "max_tokens": self.s.assignment_generation_max_output_tokens,
+                "max_tokens": max_output_tokens,
             }
             endpoint = base_url + "/chat/completions"
         else:
@@ -641,7 +647,7 @@ class OpenAICompatibleAssignmentGenerationProvider:
                         "schema": model_class.model_json_schema(),
                     }
                 },
-                "max_output_tokens": self.s.assignment_generation_max_output_tokens,
+                "max_output_tokens": max_output_tokens,
                 "store": False,
             }
             endpoint = base_url + "/responses"
@@ -655,7 +661,12 @@ class OpenAICompatibleAssignmentGenerationProvider:
             },
             method="POST",
         )
-        max_attempts = max(1, self.s.assignment_generation_max_retries + 1)
+        configured_retries = (
+            self.s.assignment_generation_local_max_retries
+            if local_mode
+            else self.s.assignment_generation_max_retries
+        )
+        max_attempts = max(1, configured_retries + 1)
         for attempt in range(1, max_attempts + 1):
             try:
                 timeout = (

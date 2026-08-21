@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml .
 RUN mkdir -p /app/app /app/workers
-RUN pip install --no-cache-dir ".[ocr]"
+RUN pip install --default-timeout=300 --no-cache-dir ".[ocr]"
 COPY apps/api/app /app/app
 COPY apps/api/assets /app/assets
 COPY workers /app/workers

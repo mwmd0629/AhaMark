@@ -34,3 +34,18 @@ def test_node2_public_origin_is_consistent_and_logs_exclude_query_strings() -> N
     ).read_text(encoding="utf-8")
     assert '"$request_method $uri $server_protocol"' in nginx
     assert '"$request"' not in nginx
+
+
+def test_node2_bounds_shared_cpu_and_serializes_assignment_generation() -> None:
+    node2 = (ROOT / "docker-compose.node2.yml").read_text(encoding="utf-8")
+    base = (ROOT / "docker-compose.preproduction.yml").read_text(encoding="utf-8")
+
+    assert "--concurrency=${CELERY_WORKER_CONCURRENCY:-4}" in node2
+    assert "ASSIGNMENT_GENERATION_TASK_QUEUE" in node2
+    assert "--queues=${ASSIGNMENT_GENERATION_TASK_QUEUE:-celery}" in base
+    assert "--queues=${ASSIGNMENT_GENERATION_TASK_QUEUE:-assignment_generation}" in node2
+    assert "--concurrency=${ASSIGNMENT_GENERATION_WORKER_CONCURRENCY:-1}" in node2
+    assert "${LOCAL_LLM_THREADS:-32}" in node2
+    assert "${LOCAL_LLM_THREADS_BATCH:-32}" in node2
+    assert "cpus: !reset null" in node2
+    assert "ASSIGNMENT_GENERATION_LOCAL_MAX_RETRIES" in node2

@@ -31,6 +31,11 @@ x-node2-app-env: &node2-app-env
   ASSIGNMENT_GENERATION_BASE_URL: ${ASSIGNMENT_GENERATION_BASE_URL:-}
   ASSIGNMENT_GENERATION_API_KEY: ${ASSIGNMENT_GENERATION_API_KEY:-}
   ASSIGNMENT_GENERATION_MODEL: ${ASSIGNMENT_GENERATION_MODEL:-}
+  ASSIGNMENT_GENERATION_LOCAL_TIMEOUT_SECONDS: ${ASSIGNMENT_GENERATION_LOCAL_TIMEOUT_SECONDS:-600}
+  ASSIGNMENT_GENERATION_LOCAL_MAX_RETRIES: ${ASSIGNMENT_GENERATION_LOCAL_MAX_RETRIES:-0}
+  ASSIGNMENT_GENERATION_LOCAL_EXTRACTION_MAX_OUTPUT_TOKENS: ${ASSIGNMENT_GENERATION_LOCAL_EXTRACTION_MAX_OUTPUT_TOKENS:-1200}
+  ASSIGNMENT_GENERATION_LOCAL_ANSWER_RUBRIC_MAX_OUTPUT_TOKENS: ${ASSIGNMENT_GENERATION_LOCAL_ANSWER_RUBRIC_MAX_OUTPUT_TOKENS:-800}
+  ASSIGNMENT_GENERATION_TASK_QUEUE: ${ASSIGNMENT_GENERATION_TASK_QUEUE:-assignment_generation}
   RECOGNITION_RAPIDOCR_RUNTIME_ENABLED: ${RECOGNITION_RAPIDOCR_RUNTIME_ENABLED:-false}
   RECOGNITION_RAPIDOCR_MODEL_DOWNLOAD_ALLOWED: "false"
   RECOGNITION_RAPIDOCR_ARTIFACT_ROOT: ${RECOGNITION_RAPIDOCR_ARTIFACT_ROOT:-}
@@ -61,6 +66,12 @@ services:
     image: ${AHAMARK_API_IMAGE:?set AHAMARK_API_IMAGE}
     build: !reset null
     environment: *node2-app-env
+    command: celery -A workers.celery_app:celery_app worker --loglevel=INFO --concurrency=${CELERY_WORKER_CONCURRENCY:-4}
+  generation-worker:
+    image: ${AHAMARK_API_IMAGE:?set AHAMARK_API_IMAGE}
+    build: !reset null
+    environment: *node2-app-env
+    command: celery -A workers.celery_app:celery_app worker --loglevel=INFO --queues=${ASSIGNMENT_GENERATION_TASK_QUEUE:-assignment_generation} --concurrency=${ASSIGNMENT_GENERATION_WORKER_CONCURRENCY:-1}
   web:
     image: ${AHAMARK_WEB_IMAGE:?set AHAMARK_WEB_IMAGE}
     build: !reset null
@@ -100,7 +111,14 @@ services:
       - ${LOCAL_LLM_CONTEXT_SIZE:-8192}
       - --parallel
       - "1"
+      - --threads
+      - ${LOCAL_LLM_THREADS:-32}
+      - --threads-batch
+      - ${LOCAL_LLM_THREADS_BATCH:-32}
       - --jinja
+    # node2 uses rootless Docker without the kernel CFS controller; enforce
+    # the effective bound with llama.cpp thread limits instead of cpus.
+    cpus: !reset null
     expose: ["8080"]
     volumes:
       - local_llm_models:/models:ro

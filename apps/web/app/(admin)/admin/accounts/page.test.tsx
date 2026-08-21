@@ -136,7 +136,7 @@ beforeEach(() => {
   });
   mocks.revokeSession.mockResolvedValue({ ok: true });
   mocks.exportUrl.mockReturnValue(
-    "http://localhost:8000/admin/accounts/export.csv",
+    "http://localhost:8000/api/admin/accounts/export.csv",
   );
   mocks.audit.mockResolvedValue({
     items: [

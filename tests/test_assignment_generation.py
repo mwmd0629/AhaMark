@@ -10,7 +10,10 @@ from app.api.assignment_generation import (
     disposition_question_extraction,
 )
 from app.api.domain import ApiProblem
-from app.assignment_generation.extraction_stage import build_fake_candidates
+from app.assignment_generation.extraction_stage import (
+    build_fake_candidates,
+    materialize_draft_questions,
+)
 from app.assignment_generation.materializers import ProviderSemanticError, materialize_questions
 from app.assignment_generation.providers import select_provider
 from app.assignment_generation.question_extraction import ExtractionOutput
@@ -41,6 +44,7 @@ from app.models import (
     Question,
     QuestionCandidate,
     QuestionCandidateRegion,
+    QuestionStatus,
     RecognitionBlock,
     RecognitionJob,
     RecognitionStatus,
@@ -53,7 +57,11 @@ from app.models import (
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from workers.tasks.assignment_generation import _guarded_run, _run
+from workers.tasks.assignment_generation import (
+    _guarded_run,
+    _provider_failure_should_abort,
+    _run,
+)
 
 client = TestClient(app)
 
@@ -533,6 +541,115 @@ def test_materialize_questions_corrupt_batch_is_zero_write_and_preserves_old_can
     assert len(latest) == 2
     assert all(item["quality_stats"]["character_count"] > 0 for item in latest)
     assert all(item["quality_stats"]["suspicious_character_count"] == 0 for item in latest)
+
+
+def test_new_generation_replaces_unreviewed_ai_drafts_without_duplicates() -> None:
+    actor, assignment = actor_and_assignment()
+    with SessionLocal() as db:
+        paper = PaperVersion(
+            assignment_id=assignment.id,
+            version=1,
+            status="draft",
+            source_type="manual",
+            created_by=actor.id,
+        )
+        db.add(paper)
+        db.flush()
+        assignment_row = db.get(Assignment, assignment.id)
+        assert assignment_row is not None
+        assignment_row.active_paper_version_id = paper.id
+        db.flush()
+
+        first_job, first_revision, _ = create_job(
+            db,
+            actor.id,
+            assignment.id,
+            f"replace-drafts-first-{uuid.uuid4()}",
+            "unavailable",
+            None,
+        )
+
+        def draft_candidate(
+            job: AssignmentGenerationJob,
+            revision: AssignmentDraftRevision,
+            number: str,
+        ) -> AssignmentQuestionExtractionCandidate:
+            return AssignmentQuestionExtractionCandidate(
+                owner_id=actor.id,
+                assignment_id=assignment.id,
+                generation_job_id=job.id,
+                draft_revision_id=revision.id,
+                paper_version_id=paper.id,
+                candidate_version=1,
+                question_number=number,
+                question_type="calculation",
+                content_text=f"第 {number} 题",
+                max_score=5,
+                field_confidences={},
+                overall_confidence=1,
+                extraction_method="test",
+                evidence={},
+                warning_codes=[],
+                status="suggested",
+                manual_required=False,
+                source_snapshot_hash=job.source_snapshot_hash,
+            )
+
+        first_rows = [
+            draft_candidate(first_job, first_revision, number) for number in ("1", "2")
+        ]
+        db.add_all(first_rows)
+        db.flush()
+        assert materialize_draft_questions(db, first_job, first_revision) == 2
+        reviewed_question_id = first_rows[0].materialized_question_id
+        replaced_question_id = first_rows[1].materialized_question_id
+        assert reviewed_question_id is not None
+        assert replaced_question_id is not None
+        first_rows[0].status = "accepted"
+        first_rows[0].reviewed_by = actor.id
+        first_job.status = "partial"
+        first_job.progress = 100
+        db.flush()
+
+        second_job, second_revision, _ = create_job(
+            db,
+            actor.id,
+            assignment.id,
+            f"replace-drafts-second-{uuid.uuid4()}",
+            "unavailable",
+            None,
+        )
+        second_rows = [
+            draft_candidate(second_job, second_revision, number) for number in ("1", "2")
+        ]
+        db.add_all(second_rows)
+        db.flush()
+
+        assert materialize_draft_questions(db, second_job, second_revision) == 1
+        db.flush()
+
+        assert db.get(Question, reviewed_question_id).status == QuestionStatus.active
+        assert db.get(Question, replaced_question_id).status == QuestionStatus.removed
+        assert first_rows[0].status == "accepted"
+        assert first_rows[1].status == "superseded"
+        assert second_rows[0].materialized_question_id is None
+        assert second_rows[0].manual_required is True
+        assert "QUESTION_NUMBER_CONFLICT" in second_rows[0].warning_codes
+        assert second_rows[1].materialized_question_id is not None
+        active = list(
+            db.scalars(
+                select(Question)
+                .where(
+                    Question.paper_version_id == paper.id,
+                    Question.status == QuestionStatus.active,
+                )
+                .order_by(Question.display_order)
+            )
+        )
+        assert [(row.question_number, row.display_order) for row in active] == [
+            ("1", 1),
+            ("2", 2),
+        ]
 
 
 def test_create_idempotency_concurrency_and_new_generation(monkeypatch):
@@ -1659,6 +1776,21 @@ def test_production_fake_degrades_to_unavailable():
     assert provider.error_code == "FAKE_PROVIDER_DISABLED_IN_PRODUCTION"
 
 
+@pytest.mark.parametrize(
+    "error_code,should_abort",
+    [
+        ("PROVIDER_UNAVAILABLE", True),
+        ("PROVIDER_NETWORK_ERROR", True),
+        ("PROVIDER_TIMEOUT", True),
+        ("PROVIDER_SERVER_ERROR", True),
+        ("PROVIDER_SCHEMA_INVALID", False),
+        (None, False),
+    ],
+)
+def test_shared_provider_failure_aborts_remaining_questions(error_code, should_abort):
+    assert _provider_failure_should_abort(error_code) is should_abort
+
+
 def test_capabilities_are_server_owned_and_reflect_configured_provider(monkeypatch):
     settings = get_settings().model_copy(
         update={
@@ -1671,6 +1803,7 @@ def test_capabilities_are_server_owned_and_reflect_configured_provider(monkeypat
         }
     )
     monkeypatch.setattr("app.api.assignment_generation.get_settings", lambda: settings)
+    monkeypatch.setattr("app.api.assignment_generation._local_model_available", lambda **_: True)
     response = client.get("/api/assignment-generation-capabilities")
     assert response.status_code == 200
     assert response.json() == {
@@ -1900,8 +2033,13 @@ def test_activate_is_draft_only_and_audited(monkeypatch):
         )
 
 
-def test_running_cancel_is_observed_before_worker_write(monkeypatch):
+def test_running_cancel_is_durable_and_revokes_worker_before_late_write(monkeypatch):
     monkeypatch.setattr("app.api.assignment_generation.dispatch_job", lambda *_args: None)
+    revoked = []
+    monkeypatch.setattr(
+        "workers.celery_app.celery_app.control.revoke",
+        lambda task_id, **options: revoked.append((task_id, options)),
+    )
     _actor, assignment = actor_and_assignment()
     created = start(assignment.id).json()
     with SessionLocal() as db:
@@ -1910,11 +2048,16 @@ def test_running_cancel_is_observed_before_worker_write(monkeypatch):
         job.status = "analyzing"
         job.current_stage = "analyzing"
         job.progress = 10
+        job.celery_task_id = "synthetic-running-task"
         db.commit()
     response = client.post(f"/api/assignment-generation-jobs/{created['id']}/cancel")
     assert response.status_code == 200
     assert response.json()["cancel_requested_at"] is not None
-    assert _run(created["id"], None)["status"] == "cancel_requested"
+    assert response.json()["status"] == "cancelled"
+    assert revoked == [
+        ("synthetic-running-task", {"terminate": True, "signal": "SIGTERM"})
+    ]
+    assert _run(created["id"], None)["status"] == "discarded_late"
     final = client.get(f"/api/assignment-generation-jobs/{created['id']}").json()
     assert final["status"] == "cancelled"
     assert final["stages"] == []

@@ -45,6 +45,10 @@ from sqlalchemy.orm import Session
 
 router = APIRouter()
 router.include_router(auth_router)
+# Public deployments reserve /admin/* for Next.js pages. Expose account
+# operations under /api/admin/* while retaining the direct route for local
+# clients and backwards compatibility.
+router.include_router(admin_accounts_router, prefix="/api")
 router.include_router(admin_accounts_router)
 router.include_router(codex_local_router)
 router.include_router(class_resources_router)

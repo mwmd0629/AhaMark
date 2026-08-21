@@ -20,6 +20,13 @@ def login(client: TestClient, username: str, password: str = PASSWORD) -> str:
     return csrf
 
 
+def test_admin_account_api_is_available_under_production_proxy_namespace() -> None:
+    client = TestClient(app)
+    assert client.get("/api/admin/accounts").status_code == 401
+    assert client.get("/api/admin/accounts/security").status_code == 401
+    assert client.get("/api/admin/accounts/audit").status_code == 401
+
+
 def test_admin_lists_and_creates_all_three_account_types() -> None:
     admin = create_admin_account("root-admin", "平台主管", PASSWORD)
     client = TestClient(app)

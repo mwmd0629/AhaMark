@@ -492,7 +492,7 @@ export function QuestionExtractionReview({
       )}
       <div>
         <div className="flex items-center justify-between">
-          <h3 className="font-semibold">题目核对</h3>
+          <h3 className="font-semibold">题目列表</h3>
           {currentQuestions.some((x) => x.server_eligible) && (
             <Button
               disabled={busy}

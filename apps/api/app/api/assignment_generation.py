@@ -5,6 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal, cast
 
+import structlog
 from app.api.actor import Actor
 from app.api.domain import ApiProblem, audit
 from app.assignment_generation.metadata_analysis import plain_text
@@ -38,6 +39,7 @@ from app.assignment_generation.textbook_sources import (
     find_textbook_source_matches,
 )
 from app.core.config import get_settings
+from app.core.readiness import _local_model_available
 from app.db.session import get_db
 from app.models import (
     Assignment,
@@ -82,6 +84,7 @@ from sqlalchemy.orm import Session
 
 router = APIRouter(tags=["assignment-generation"])
 Db = Annotated[Session, Depends(get_db)]
+log = structlog.get_logger()
 
 
 class CreateGenerationInput(BaseModel):
@@ -241,11 +244,22 @@ class AcceptEligibleInput(BaseModel):
 def assignment_generation_capabilities(_actor: Actor) -> dict[str, Any]:
     settings = get_settings()
     provider = select_provider(settings)
+    provider_available = provider.available
+    provider_error_code = provider.error_code
+    if provider.name == "local_openai_compatible" and provider.available:
+        provider_available = _local_model_available(
+            base_url=settings.assignment_generation_base_url,
+            api_key=settings.assignment_generation_api_key,
+            allow_local=settings.assignment_generation_allow_local_provider_requests,
+            allowed_hosts=settings.assignment_generation_allowed_local_hosts,
+        )
+        if not provider_available:
+            provider_error_code = "PROVIDER_UNAVAILABLE"
     return {
         "enabled": settings.assignment_generation_enabled,
         "provider": provider.name,
-        "provider_status": "available" if provider.available else "unavailable",
-        "provider_error_code": provider.error_code,
+        "provider_status": "available" if provider_available else "unavailable",
+        "provider_error_code": provider_error_code,
         "external_provider_requests": (
             settings.assignment_generation_allow_external_provider_requests
         ),
@@ -460,10 +474,24 @@ def cancel_generation(job_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]
         return job_json(db, job)
     if job.status not in ACTIVE_STATUSES and job.status not in {"partial", "failed"}:
         raise ApiProblem(409, "GENERATION_NOT_CANCELLABLE", "当前生成任务不可取消")
-    if job.status in {"queued", "partial", "failed"}:
-        transition(job, "cancelled")
-    else:
-        job.cancel_requested_at = now_utc()
+    task_id = job.celery_task_id
+    job.cancel_requested_at = now_utc()
+    if job.status in ACTIVE_STATUSES:
+        running_stage = db.scalar(
+            select(GenerationStageResult)
+            .where(
+                GenerationStageResult.job_id == job.id,
+                GenerationStageResult.status.in_({"queued", "running"}),
+            )
+            .order_by(GenerationStageResult.stage_generation.desc())
+            .with_for_update()
+        )
+        if running_stage is not None:
+            running_stage.status = "discarded"
+            running_stage.error_code = "GENERATION_CANCELLED"
+            running_stage.error_message = "教师已停止整理，本阶段结果不会写入草稿"
+            running_stage.completed_at = now_utc()
+    transition(job, "cancelled")
     audit(
         db,
         actor.id,
@@ -472,7 +500,23 @@ def cancel_generation(job_id: uuid.UUID, db: Db, actor: Actor) -> dict[str, Any]
         job.id,
     )
     db.commit()
-    return job_json(db, job)
+    result = job_json(db, job)
+    if task_id:
+        try:
+            from workers.celery_app import celery_app
+
+            celery_app.control.revoke(task_id, terminate=True, signal="SIGTERM")
+        except Exception as exc:
+            # Cancellation is already durable in PostgreSQL. A late or
+            # redelivered worker observes the terminal state and discards its
+            # output, so broker/control-plane failures must not undo it.
+            log.warning(
+                "assignment_generation_revoke_failed",
+                job_id=str(job.id),
+                task_id=task_id,
+                exception_type=type(exc).__name__,
+            )
+    return result
 
 
 @router.post("/api/assignment-generation-jobs/{job_id}/retry-stage")

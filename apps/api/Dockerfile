@@ -7,7 +7,7 @@ COPY pyproject.toml .
 COPY apps/api/app /app/app
 COPY apps/api/assets /app/assets
 COPY workers /app/workers
-RUN pip install --no-cache-dir "."
+RUN pip install --default-timeout=300 --no-cache-dir "."
 COPY scripts /app/scripts
 COPY alembic.ini /app/
 COPY apps/api/alembic /app/apps/api/alembic

@@ -165,6 +165,9 @@ describe("QuestionExtractionReview", () => {
       expect(screen.getByText(/页面核对/)).toBeInTheDocument(),
     );
     expect(
+      screen.getByRole("heading", { name: "题目列表" }),
+    ).toBeInTheDocument();
+    expect(
       screen.queryByText(/AI 不会自动排除或删除页面/),
     ).not.toBeInTheDocument();
     expect(

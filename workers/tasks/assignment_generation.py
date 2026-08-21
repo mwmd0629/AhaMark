@@ -98,6 +98,16 @@ def _stable_provider_error(response: AssignmentProviderResponse) -> str | None:
     return PROVIDER_ERROR_CODES.get(response.error, response.error.upper())
 
 
+def _provider_failure_should_abort(error_code: str | None) -> bool:
+    """Stop a batch when the shared Provider is unavailable for every question."""
+    return error_code in {
+        "PROVIDER_UNAVAILABLE",
+        "PROVIDER_NETWORK_ERROR",
+        "PROVIDER_TIMEOUT",
+        "PROVIDER_SERVER_ERROR",
+    }
+
+
 def _record_invocation(
     db: Any,
     job: AssignmentGenerationJob,
@@ -635,6 +645,8 @@ def _execute_stage(db: Any, job_id: uuid.UUID, stage: str, *, retry: bool = Fals
                             or rubric_invocation.error_code
                             or "PROVIDER_UNAVAILABLE"
                         )
+                        if _provider_failure_should_abort(error_code):
+                            break
                         continue
                     answer_rubric_outputs.append(
                         (

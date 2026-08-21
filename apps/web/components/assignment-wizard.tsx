@@ -1,6 +1,4 @@
 "use client";
-/* eslint-disable @next/next/no-img-element */
-
 import Link from "next/link";
 import {
   useCallback,
@@ -21,20 +19,20 @@ import {
   useToast,
 } from "@/components/ui";
 import { AssignmentGenerationPanel } from "@/components/assignment-generation-panel";
+import { AssignmentFilePurposeReview } from "@/components/assignment-file-purpose-review";
 import { AnswerRubricGenerationReview } from "@/components/answer-rubric-generation-review";
 import { AssignmentCentralReview } from "@/components/assignment-central-review";
 import { JointExamTeamPanel } from "@/components/joint-exam-team-panel";
-import { QuestionPageCutter } from "@/components/question-page-cutter";
 import {
   ApiError,
   assignmentsApi,
+  assignmentGenerationApi,
   classesApi,
   type AssignmentFieldSuggestion,
   type AssignmentRecord,
   type ClassResource,
   type ClassRecord,
 } from "@/lib/api";
-import { formatQuestionScore } from "@/lib/question-score";
 
 const steps = ["准备作业", "核对内容", "确认发布"];
 
@@ -98,73 +96,28 @@ export function AssignmentWizard({
   const [uploadError, setUploadError] = useState("");
   const [dragging, setDragging] = useState(false);
   const [deletingFileId, setDeletingFileId] = useState("");
-  const [selectedPageId, setSelectedPageId] = useState("");
-  const [pagePreviewUrls, setPagePreviewUrls] = useState<
-    Record<string, string>
-  >({});
-  const [previewErrors, setPreviewErrors] = useState<Record<string, boolean>>(
-    {},
-  );
-  const pagePreviewRequests = useRef(new Set<string>());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const initializedRef = useRef(false);
-  const [question, setQuestion] = useState({
-    number: "",
-    type: "calculation",
-    score: "",
-    text: "",
-    difficulty: "medium",
-    knowledge: "",
-  });
-  const [selectedQuestion, setSelectedQuestion] = useState("");
-  const [questionDirty, setQuestionDirty] = useState(false);
-  const [questionSubmitting, setQuestionSubmitting] = useState(false);
-  const [questionConflict, setQuestionConflict] = useState(false);
-  const questionDirtyRef = useRef(false);
-  const load = useCallback(
-    async (preferredQuestionId?: string) => {
-      try {
-        const [assignment, active] = await Promise.all([
-          assignmentsApi.get(assignmentId),
-          classesApi.list("status=active&page_size=100"),
-        ]);
-        setItem(assignment);
-        setClasses(active.items);
-        const initializing = !initializedRef.current;
-        if (initializing) {
-          setStep(
-            initialStep ??
-              wizardStepForCompleteness(assignment.completeness.next_step ?? 1),
-          );
-          initializedRef.current = true;
-        }
-        setSelectedQuestion((current) => {
-          const questions = assignment.paper_version?.questions ?? [];
-          if (
-            preferredQuestionId &&
-            questions.some((entry) => entry.id === preferredQuestionId)
-          ) {
-            setQuestionConflict(false);
-            return preferredQuestionId;
-          }
-          if (!initializing && current === "") return current;
-          if (questions.some((entry) => entry.id === current)) {
-            setQuestionConflict(false);
-            return current;
-          }
-          if (current && questionDirtyRef.current) {
-            setQuestionConflict(true);
-            return current;
-          }
-          setQuestionConflict(false);
-          return questions[0]?.id ?? "";
-        });
-      } catch (e) {
-        setError(e instanceof ApiError ? e.message : "无法加载草稿");
+  const load = useCallback(async () => {
+    try {
+      const [assignment, active] = await Promise.all([
+        assignmentsApi.get(assignmentId),
+        classesApi.list("status=active&page_size=100"),
+      ]);
+      setItem(assignment);
+      setClasses(active.items);
+      const initializing = !initializedRef.current;
+      if (initializing) {
+        setStep(
+          initialStep ??
+            wizardStepForCompleteness(assignment.completeness.next_step ?? 1),
+        );
+        initializedRef.current = true;
       }
-    },
-    [assignmentId, initialStep],
-  );
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "无法加载草稿");
+    }
+  }, [assignmentId, initialStep]);
   const refreshReviewInputs = useCallback(async () => {
     setReviewInputsRevision((current) => current + 1);
     await load();
@@ -225,40 +178,12 @@ export function AssignmentWizard({
     );
   }, [item?.id, item?.title, item?.subject, item?.total_score]);
   useEffect(() => {
-    const pages = item?.paper_version?.pages ?? [];
-    if (!pages.length) {
-      setSelectedPageId("");
-      return;
-    }
-    if (!pages.some((page) => page.id === selectedPageId)) {
-      setSelectedPageId(pages[0].id);
-    }
-  }, [item?.paper_version?.pages, selectedPageId]);
-  useEffect(() => {
-    questionDirtyRef.current = questionDirty;
-  }, [questionDirty]);
-  useEffect(() => {
     const warn = (e: BeforeUnloadEvent) => {
-      if (busy || questionDirty || questionSubmitting) e.preventDefault();
+      if (busy) e.preventDefault();
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [busy, questionDirty, questionSubmitting]);
-  const selected = useMemo(
-    () => item?.paper_version?.questions.find((x) => x.id === selectedQuestion),
-    [item, selectedQuestion],
-  );
-  useEffect(() => {
-    if (!selected || questionDirty) return;
-    setQuestion({
-      number: selected.question_number,
-      type: selected.question_type,
-      score: selected.max_score ?? "",
-      text: selected.content_text ?? "",
-      difficulty: selected.difficulty ?? "medium",
-      knowledge: selected.knowledge_points.map((point) => point.name).join(","),
-    });
-  }, [questionDirty, selected]);
+  }, [busy]);
   const uploadedFiles = useMemo(() => {
     const files = new Map<
       string,
@@ -278,39 +203,6 @@ export function AssignmentWizard({
     }
     return [...files.values()];
   }, [item?.paper_version?.pages]);
-  const loadPagePreview = useCallback(
-    async (pageId: string) => {
-      if (pagePreviewRequests.current.has(pageId)) return;
-      pagePreviewRequests.current.add(pageId);
-      try {
-        const result = await assignmentsApi.pagePreview(assignmentId, pageId);
-        setPagePreviewUrls((current) => ({
-          ...current,
-          [pageId]: result.url,
-        }));
-        setPreviewErrors((current) => ({ ...current, [pageId]: false }));
-      } catch {
-        setPreviewErrors((current) => ({ ...current, [pageId]: true }));
-      } finally {
-        pagePreviewRequests.current.delete(pageId);
-      }
-    },
-    [assignmentId],
-  );
-  useEffect(() => {
-    if (step !== 2) return;
-    (item?.paper_version?.pages ?? []).forEach((page) => {
-      if (!pagePreviewUrls[page.id] && !previewErrors[page.id]) {
-        void loadPagePreview(page.id);
-      }
-    });
-  }, [
-    item?.paper_version?.pages,
-    loadPagePreview,
-    pagePreviewUrls,
-    previewErrors,
-    step,
-  ]);
   if (error) return <ErrorState description={error} retry={load} />;
   if (!item) return <Card className="p-8">正在恢复后端草稿…</Card>;
 
@@ -463,6 +355,9 @@ export function AssignmentWizard({
       }
       setUploadState("processing");
       await load();
+      await assignmentGenerationApi.start(assignmentId, {
+        idempotency_key: `upload-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      });
       setUploadState("success");
     } catch (err) {
       setUploadState("error");
@@ -510,8 +405,6 @@ export function AssignmentWizard({
     setDeletingFileId(file.id);
     try {
       await assignmentsApi.removeFile(item.id, file.id);
-      setPagePreviewUrls({});
-      setPreviewErrors({});
       await load();
       toast("文件已删除");
     } catch (err) {
@@ -529,12 +422,6 @@ export function AssignmentWizard({
     chooseUpload(Array.from(event.dataTransfer.files));
   };
 
-  const selectedPage = item.paper_version?.pages.find(
-    (page) => page.id === selectedPageId,
-  );
-  const selectedPreviewUrl = selectedPage
-    ? pagePreviewUrls[selectedPage.id]
-    : undefined;
   const selectedClasses = classes.filter((entry) =>
     selectedClassIds.includes(entry.id),
   );
@@ -613,6 +500,18 @@ export function AssignmentWizard({
               : "完成检查后由你确认发布"}
         </span>
       </div>
+
+      <AssignmentGenerationPanel
+        assignmentId={item.id}
+        assignment={item}
+        onAssignmentChanged={load}
+        onReviewInputsChanged={refreshReviewInputs}
+        onFieldSuggestionsChanged={setFieldSuggestions}
+        onRequiredFlowReadyChange={(ready) => {
+          setRequiredGenerationKnown(true);
+          setRequiredGenerationReady(ready);
+        }}
+      />
 
       {visibleStep === 1 && (
         <Card id="assignment-basics" className="scroll-mt-4 p-6">
@@ -1011,7 +910,7 @@ export function AssignmentWizard({
               className="rounded-xl border border-emerald-200 bg-emerald-50 p-4"
             >
               <h3 className="font-semibold text-emerald-900">已上传到此作业</h3>
-              <ul className="mt-2 space-y-2 text-sm text-emerald-950">
+              <ul className="sr-only">
                 {uploadedFiles.map((file, index) => (
                   <li
                     key={file.id}
@@ -1033,6 +932,13 @@ export function AssignmentWizard({
                   </li>
                 ))}
               </ul>
+              <AssignmentFilePurposeReview
+                assignmentId={assignmentId}
+                uploadedFiles={uploadedFiles}
+                onDeleteFile={deleteUploadedFile}
+                deletingFileId={deletingFileId}
+                busy={busy}
+              />
             </section>
           )}
           <div
@@ -1109,221 +1015,7 @@ export function AssignmentWizard({
         </Card>
       )}
 
-      <AssignmentGenerationPanel
-        assignmentId={item.id}
-        assignment={item}
-        onAssignmentChanged={load}
-        onReviewInputsChanged={refreshReviewInputs}
-        onFieldSuggestionsChanged={setFieldSuggestions}
-        onRequiredFlowReadyChange={(ready) => {
-          setRequiredGenerationKnown(true);
-          setRequiredGenerationReady(ready);
-        }}
-      />
-
-      {visibleStep === 2 && (
-        <Card id="assignment-pages" className="scroll-mt-4 space-y-4 p-6">
-          <details>
-            <summary className="cursor-pointer rounded-lg px-3 py-2 font-bold hover:bg-[var(--neutral-50)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--brand-600)]">
-              整理页面（{item.paper_version?.pages.length ?? 0} 页）
-            </summary>
-            <div className="mt-4 space-y-4">
-              <div
-                className="flex gap-2 overflow-x-auto rounded-xl border bg-slate-50 p-2"
-                aria-label="试卷页面缩略图"
-                data-testid="assignment-page-thumbnails"
-              >
-                {item.paper_version?.pages.map((page) => {
-                  const url = pagePreviewUrls[page.id];
-                  return (
-                    <button
-                      type="button"
-                      key={page.id}
-                      onClick={() => setSelectedPageId(page.id)}
-                      className={`w-36 shrink-0 rounded-xl border-2 bg-white p-2 text-left ${
-                        selectedPageId === page.id
-                          ? "border-[var(--brand-600)] shadow-sm"
-                          : "border-transparent"
-                      }`}
-                      aria-current={
-                        selectedPageId === page.id ? "page" : undefined
-                      }
-                    >
-                      <div className="grid h-24 place-items-center overflow-hidden rounded bg-slate-100">
-                        {url && !previewErrors[page.id] ? (
-                          <img
-                            src={url}
-                            alt={`第 ${page.page_number} 页缩略图`}
-                            title={`第 ${page.page_number} 页缩略图`}
-                            className="h-full w-full object-contain"
-                            loading="lazy"
-                            onError={() =>
-                              setPreviewErrors((current) => ({
-                                ...current,
-                                [page.id]: true,
-                              }))
-                            }
-                          />
-                        ) : (
-                          <span className="text-xs text-slate-500">
-                            页面预览
-                          </span>
-                        )}
-                      </div>
-                      <strong className="mt-2 block text-sm">
-                        第 {page.page_number} 页
-                      </strong>
-                      <span className="text-xs text-slate-500">
-                        {page.rotation}° ·{" "}
-                        {page.status === "ready" ? "处理完成" : page.status}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-              {selectedPage ? (
-                <div className="min-w-0 space-y-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <h3 className="font-semibold">
-                        第 {selectedPage.page_number} 页
-                      </h3>
-                      <p className="text-sm text-slate-500">
-                        旋转 {selectedPage.rotation}° · 状态：
-                        {selectedPage.status === "ready"
-                          ? "处理完成"
-                          : selectedPage.status}
-                      </p>
-                    </div>
-                    {selectedPage.status !== "ready" && (
-                      <span className="rounded-full bg-amber-100 px-3 py-1 text-xs text-amber-800">
-                        {selectedPage.status === "excluded"
-                          ? "已排除"
-                          : selectedPage.status === "pending_conversion"
-                            ? "等待转换"
-                            : "需要检查"}
-                      </span>
-                    )}
-                  </div>
-                  <div className="grid min-h-[400px] place-items-center overflow-hidden rounded-xl border bg-slate-100 p-4">
-                    {selectedPreviewUrl && !previewErrors[selectedPage.id] ? (
-                      <img
-                        src={selectedPreviewUrl}
-                        alt={`第 ${selectedPage.page_number} 页大图预览`}
-                        title={`第 ${selectedPage.page_number} 页大图预览`}
-                        className="max-h-[560px] max-w-full object-contain"
-                        onError={() =>
-                          setPreviewErrors((current) => ({
-                            ...current,
-                            [selectedPage.id]: true,
-                          }))
-                        }
-                      />
-                    ) : previewErrors[selectedPage.id] ? (
-                      <div className="text-center">
-                        <p className="font-semibold">页面预览加载失败</p>
-                        <p className="mt-1 text-sm text-slate-500">
-                          文件可能暂时不可用，请重试。
-                        </p>
-                        <Button
-                          className="mt-3"
-                          variant="outline"
-                          onClick={() => void loadPagePreview(selectedPage.id)}
-                        >
-                          重试预览
-                        </Button>
-                      </div>
-                    ) : (
-                      <p className="text-sm text-slate-500">
-                        正在加载页面预览…
-                      </p>
-                    )}
-                  </div>
-                  <div className="flex gap-2">
-                    <Button
-                      loading={busy}
-                      variant="outline"
-                      onClick={async () => {
-                        setBusy(true);
-                        try {
-                          await assignmentsApi.page(item.id, selectedPage.id, {
-                            rotation: (selectedPage.rotation + 90) % 360,
-                          });
-                          await load();
-                          toast("页面已旋转");
-                        } catch (error) {
-                          toast(
-                            error instanceof ApiError
-                              ? error.message
-                              : "页面旋转失败",
-                            "error",
-                          );
-                        } finally {
-                          setBusy(false);
-                        }
-                      }}
-                    >
-                      旋转 90°
-                    </Button>
-                    <Button
-                      disabled={busy}
-                      variant="danger"
-                      onClick={async () => {
-                        if (!confirm("确认排除此页？")) return;
-                        setBusy(true);
-                        try {
-                          await assignmentsApi.page(item.id, selectedPage.id, {
-                            status: "excluded",
-                          });
-                          await load();
-                          toast("页面已排除");
-                        } catch (error) {
-                          toast(
-                            error instanceof ApiError
-                              ? error.message
-                              : "页面排除失败",
-                            "error",
-                          );
-                        } finally {
-                          setBusy(false);
-                        }
-                      }}
-                    >
-                      排除此页
-                    </Button>
-                  </div>
-                  <QuestionPageCutter
-                    assignmentId={item.id}
-                    page={selectedPage}
-                    questions={item.paper_version?.questions ?? []}
-                    selectedQuestionId={selectedQuestion}
-                    onSaved={async (savedQuestion) => {
-                      await load(savedQuestion.id);
-                      setSelectedQuestion(savedQuestion.id);
-                      toast("题目区域已保存");
-                    }}
-                  />
-                </div>
-              ) : (
-                <p className="grid place-items-center text-sm text-slate-500">
-                  暂无可预览页面
-                </p>
-              )}
-            </div>
-            <Button
-              className="mt-4"
-              onClick={() =>
-                document
-                  .getElementById("assignment-questions")
-                  ?.scrollIntoView({ behavior: "smooth", block: "start" })
-              }
-            >
-              继续核对题目
-            </Button>
-          </details>
-        </Card>
-      )}
-
+      {/*
       {visibleStep === 2 && (
         <div
           id="assignment-questions"
@@ -1566,6 +1258,7 @@ export function AssignmentWizard({
           </Card>
         </div>
       )}
+      */}
 
       {visibleStep === 2 && (
         <Card id="assignment-rubrics" className="scroll-mt-4 space-y-4 p-6">

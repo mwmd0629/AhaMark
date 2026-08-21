@@ -562,6 +562,8 @@ def job_json(db: Session, job: AssignmentGenerationJob) -> dict[str, Any]:
         "progress": job.progress,
         "source_snapshot_hash": job.source_snapshot_hash,
         "provider_mode": job.provider_mode,
+        "attempt": job.attempt,
+        "max_attempts": job.max_attempts,
         "retryable": job.retryable,
         "error_code": job.error_code,
         "error_message": job.error_message,

@@ -128,8 +128,18 @@ class Settings(BaseSettings):
     assignment_generation_model: str | None = None
     assignment_generation_model_snapshot: str | None = None
     assignment_generation_timeout_seconds: float = 45.0
-    assignment_generation_local_timeout_seconds: float = 900.0
+    assignment_generation_local_timeout_seconds: float = Field(default=600.0, ge=1, le=1800)
     assignment_generation_max_retries: int = 2
+    assignment_generation_local_max_retries: int = Field(default=0, ge=0, le=2)
+    assignment_generation_local_extraction_max_output_tokens: int = Field(
+        default=1200, ge=64, le=4000
+    )
+    assignment_generation_local_answer_rubric_max_output_tokens: int = Field(
+        default=800, ge=64, le=4000
+    )
+    assignment_generation_task_queue: str = Field(
+        default="celery", pattern=r"^[A-Za-z0-9_.-]+$"
+    )
     assignment_generation_max_input_tokens: int = 16000
     assignment_generation_max_output_tokens: int = 4000
     assignment_generation_max_images: int = 8

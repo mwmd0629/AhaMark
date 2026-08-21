@@ -629,7 +629,7 @@ export const adminAccountsApi = {
     if (filters?.status) params.set("status", filters.status);
     if (filters?.offset) params.set("offset", String(filters.offset));
     const suffix = params.size ? `?${params}` : "";
-    return request<AccountList>(`/admin/accounts${suffix}`);
+    return request<AccountList>(`/api/admin/accounts${suffix}`);
   },
   create: (input: {
     username: string;
@@ -637,7 +637,7 @@ export const adminAccountsApi = {
     password: string;
     account_type: AccountType;
   }) =>
-    request<ManagedAccount>("/admin/accounts", {
+    request<ManagedAccount>("/api/admin/accounts", {
       method: "POST",
       body: JSON.stringify(input),
     }),
@@ -645,13 +645,13 @@ export const adminAccountsApi = {
     id: string,
     input: { display_name?: string; status?: "active" | "inactive" },
   ) =>
-    request<ManagedAccount>(`/admin/accounts/${id}`, {
+    request<ManagedAccount>(`/api/admin/accounts/${id}`, {
       method: "PATCH",
       body: JSON.stringify(input),
     }),
   resetPassword: (id: string, password: string) =>
     request<{ ok: boolean; sessions_revoked: number }>(
-      `/admin/accounts/${id}/reset-password`,
+      `/api/admin/accounts/${id}/reset-password`,
       { method: "POST", body: JSON.stringify({ password }) },
     ),
   bulkCreate: (
@@ -666,14 +666,14 @@ export const adminAccountsApi = {
       created: ManagedAccount[];
       errors: Array<{ row_number: number; username: string; message: string }>;
       requested_count: number;
-    }>("/admin/accounts/bulk", {
+    }>("/api/admin/accounts/bulk", {
       method: "POST",
       body: JSON.stringify({ rows }),
     }),
   audit: (offset = 0) =>
-    request<AccountAuditList>(`/admin/accounts/audit?offset=${offset}`),
+    request<AccountAuditList>(`/api/admin/accounts/audit?offset=${offset}`),
   bulkAction: (accountIds: string[], action: BulkAccountAction) =>
-    request<BulkAccountActionResult>("/admin/accounts/bulk-actions", {
+    request<BulkAccountActionResult>("/api/admin/accounts/bulk-actions", {
       method: "POST",
       body: JSON.stringify({
         account_ids: accountIds,
@@ -681,10 +681,11 @@ export const adminAccountsApi = {
         confirmed: true,
       }),
     }),
-  security: () => request<AccountSecurityOverview>("/admin/accounts/security"),
+  security: () =>
+    request<AccountSecurityOverview>("/api/admin/accounts/security"),
   revokeSession: (sessionId: string) =>
     request<{ ok: boolean; session_id: string; username: string }>(
-      `/admin/accounts/sessions/${sessionId}/revoke`,
+      `/api/admin/accounts/sessions/${sessionId}/revoke`,
       { method: "POST" },
     ),
   exportUrl: (filters?: {
@@ -697,7 +698,7 @@ export const adminAccountsApi = {
     if (filters?.account_type) params.set("account_type", filters.account_type);
     if (filters?.status) params.set("status", filters.status);
     const suffix = params.size ? `?${params}` : "";
-    return `${API_URL}/admin/accounts/export.csv${suffix}`;
+    return `${API_URL}/api/admin/accounts/export.csv${suffix}`;
   },
 };
 export async function getHealth(signal?: AbortSignal): Promise<Health> {
@@ -3176,6 +3177,8 @@ export type AssignmentGenerationJob = {
     | "openai_compatible"
     | "local_openai_compatible"
     | "codex_local";
+  attempt: number;
+  max_attempts: number;
   retryable: boolean;
   error_code?: string | null;
   error_message?: string | null;

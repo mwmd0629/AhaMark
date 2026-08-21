@@ -113,9 +113,39 @@ def test_local_provider_uses_compact_json_mode_and_longer_timeout(monkeypatch) -
 
     assert result.output is not None
     assert captured["url"] == "http://local-llm:8080/v1/chat/completions"
-    assert captured["timeout"] == 900.0
+    assert captured["timeout"] == 600.0
     assert captured["body"]["response_format"] == {"type": "json_object"}
+    assert captured["body"]["max_tokens"] == 1200
     assert "JSON CONTRACT" in captured["body"]["messages"][0]["content"]
+
+
+def test_local_provider_uses_stage_output_limits_and_does_not_hide_retries(monkeypatch) -> None:
+    attempts = 0
+
+    def fail(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise TimeoutError("synthetic timeout")
+
+    monkeypatch.setattr("urllib.request.urlopen", fail)
+    monkeypatch.setattr("time.sleep", lambda *_a: pytest.fail("local provider must not retry"))
+    settings = configured(
+        assignment_generation_provider="local_openai_compatible",
+        assignment_generation_allow_external_provider_requests=False,
+        assignment_generation_allow_local_provider_requests=True,
+        assignment_generation_allowed_local_hosts=["local-llm"],
+        assignment_generation_base_url="http://local-llm:8080/v1",
+        assignment_generation_max_retries=2,
+        assignment_generation_local_max_retries=0,
+    )
+
+    result = OpenAICompatibleAssignmentGenerationProvider(settings).generate(
+        "answer_generation", {}
+    )
+
+    assert attempts == 1
+    assert result.error == "provider_timeout"
+    assert result.attempts == 1
 
 
 @pytest.mark.parametrize(
