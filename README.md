@@ -24,22 +24,24 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 ### 30 秒摘要
 
-| 项目           | 当前事实（2026-08-19）                                                                                       |
+| 项目           | 当前事实（2026-08-22）                                                                                       |
 | -------------- | ------------------------------------------------------------------------------------------------------------ |
 | 正确工作区     | `D:\OpenAIData\Workspaces\AhaMark`                                                                           |
-| 工作分支       | `codex/grading-confirm-results`；账号运维第二阶段提交为 `3142998`                                            |
-| 应用基线       | 本地修复提交 `e375e55`；node2 API/Worker 为 `e375e55`、Web 为 `c444019`；GitHub 主线仍为 `4f4a374`           |
-| 远端状态       | 本地功能提交尚未 push；node2 已完成受保护部署并通过独立公网复验                                              |
+| 工作分支       | `codex/grading-confirm-results`；当前提交 `c2c7b12` 已推送 `origin/codex/grading-confirm-results`             |
+| 应用基线       | 本地与 node2 API/Worker 为 `c2c7b12`，Web 为 `c2c7b12`；Formula/Qwen 为 `0594d10`                         |
+| 远端状态       | node2 已完成 `c2c7b12` 受保护部署并通过独立公网复验                                                         |
 | 数据库迁移     | 本地与 node2 均为 Alembic 单 head：`0053_disable_forced_password_change`                                     |
-| 最新开发       | 本机作业生成已接通固定 Qwen 本地模型；旧任务可一键重新整理，AI 仍只生成待教师确认的建议                      |
+| 最新开发       | 整理试卷 UI 与 Provider 失败短路修复已上线；AI 仍只生成待教师确认的建议                                      |
 | 本机业务验收   | 隔离合成环境 A–F 已通过并停在成绩发布前；公式不可读/重框专项通过；GradeRelease 为 0                          |
-| node2 在线版本 | API/Worker `e375e55`、Web `c444019`、schema `0053`；文字、公式 OCR 与本地建议 Provider available             |
+| node2 在线版本 | API/Worker/Web `c2c7b12`、Formula/Qwen `0594d10`、schema `0053`；文字、公式 OCR 与本地建议 Provider available |
 | node2 入口     | `https://222.195.89.236:13300`；自签名证书；公网可达，无来源白名单                                           |
 | 部署范围       | 只发布 Nginx `0.0.0.0:13300 -> 8443`；数据库、Redis、MinIO、API、Web、Worker、Docker socket 均无宿主发布端口 |
 | 私有识别工作   | 暂停；不得继续处理、上传或提交私有 OCR/Gold、图片、正文或来源映射，除非用户再次明确授权                      |
 | 主线合并       | `7e88fae` 仅汇合历史，相对已验证代码树无文件差异；未强推，远端主线与功能分支一致                             |
 
 ### 当前开发事实
+
+2026-08-22 用户授权完成 `c2c7b12` node2 受保护部署。部署前只读门禁确认活动整理任务为 0、迁移为 `0053_disable_forced_password_change (head)`、原线上 API/Worker `12fbad6`、Web `12fbad6`，公网 `health=200`、`ready=200`、`login=200`。本地构建并校验 API `ahamark/api:c2c7b12`（镜像 ID `sha256:ebc159bb1d37c8d58df6932dbe60db1763663d14ab6e06dd96a7ae1623bdccd2`）与 Web `ahamark/web:c2c7b12`（镜像 ID `sha256:47f295a894597f5bc6f8f58148e0c519eb8e3b4c06832b4e9c33b04b3ec83701`）；Web 显式使用空 `NEXT_PUBLIC_API_URL`，镜像内不含 `http://localhost:8000`，API 镜像 head 为 `0053`。候选归档及 Compose/Nginx/脚本逐文件 SHA-256 校验通过；部署创建并验证完整备份 `/data/shr/ahamark-backups/pre-upgrade-c2c7b12-20260822T081913Z`，轮换本地 LLM 内网密钥，未执行数据库迁移、降级或真实账号/作业/成绩写入。滚动更新 API-A/B、普通 Worker、专用 generation-worker、Web 和 Nginx；Formula/Qwen、PostgreSQL、Redis、MinIO 保持原版本。脚本报告 `DEPLOY_OK`、`migration=none`；独立公网复验 `health=200`、`ready=200`、`login=200`、`/api/admin/accounts/security=401`，十一个容器运行且 generation-worker 为 `ahamark/api:c2c7b12`。失败回滚路径为备份 runtime/Compose/Nginx 与 API/Web/Worker `12fbad6`，数据库保持 `0053` 不变。下一步强制刷新浏览器后，用合成或用户明确授权的测试试卷验证整理试卷全流程；不得把本地模型 available 当作真实准确率证据。
 
 2026-08-21 “AhaMark 助手17”完成 node2 整理试卷长耗时只读诊断和本地正式修复开发，尚未部署。线上任务停在 `extracting_questions | 55` 的直接原因不是前端或数据库：本地 Qwen 日志显示生成仅约 `0.32 token/s`，第一次请求在代码既有 900 秒上限处生成约 277 token 后被取消并立即进入隐藏重试；容器一度约 `16095% CPU`、393 个 PID/线程，宿主 192 个逻辑 CPU 的 load average 达 228，且同时存在其他用户高 CPU 计算，确认是 llama.cpp 默认过量线程、共享宿主争用、Celery 默认按 192 核扩张和 900 秒多次重试叠加。数据库时间为 UTC，首次诊断时任务实际约运行 17 分钟，不是 8 小时。现有“停止整理”仅写取消请求、不能立即断开模型调用，也纳入修复范围。诊断输出曾显示本地 LLM 内网密钥，账本不记录该值；下次受保护部署前必须轮换。
 
@@ -202,9 +204,9 @@ AhaMark 是面向教师的作业整理、主观题批改与成绩分析系统。
 
 ### 下一步顺序
 
-本轮本地 UI 调整（未上传 node2）：整理试卷面板已移到向导顶部并支持整体收起；隐藏生成/答案/Rubric 历史记录展示；隐藏旧的整理页面核对卡和独立题目列表入口；评分项改为“步骤（分值，必要/可选）”紧凑显示；首次整理文案明确为“先分析文件用途建议→教师确认用途→继续生成”，避免把用途确认与生成顺序混为一谈。相关前端组件测试已更新，待用户确认视觉和流程后再决定是否上传。
+本轮 UI 与生成稳定性修复已部署 node2：整理试卷面板位于向导顶部并支持整体收起；隐藏生成/答案/Rubric 历史记录展示；隐藏旧的整理页面核对卡和独立题目列表入口；评分项改为“步骤（分值，必要/可选）”紧凑显示；文件用途确认已并入上传卡片并固定教师提供的答案来源；Provider 不可用时实时显示不可用并停止剩余生成。相关前端与后端测试、生产构建和 node2 独立公网复验均通过。
 
-下一步保持 node2 当前已验收版本不变，补充三类账号新页面的带登录浏览器自动化闭环，并在方便长时间运行时完成剩余后端全量。后续部署仍必须先备份；本地学习助手保持默认关闭，评分、生成和公式结果继续要求教师确认。
+下一步强制刷新浏览器后，用合成或用户明确授权的测试试卷验证线上整理试卷全流程，并补充三类账号新页面的带登录浏览器自动化闭环；本地学习助手保持默认关闭，评分、生成和公式结果继续要求教师确认。
 
 ## 产品能力与边界
 
